@@ -13,6 +13,7 @@ mod git;
 mod highlight;
 mod inline_assist;
 mod key_prompt;
+mod languages;
 mod lsp;
 mod lsp_store;
 mod markdown;

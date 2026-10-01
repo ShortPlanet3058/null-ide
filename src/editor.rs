@@ -11,6 +11,7 @@ use crate::element::EditorElement;
 use crate::find_bar::{CloseFind, DeployFind, DeployReplace, FindBar, FindNext, FindPrevious};
 use crate::fonts::Fonts;
 use crate::highlight::{Highlighter, Span};
+use crate::languages;
 use crate::lsp_store::LspStore;
 use crate::search::SearchQuery;
 use crate::settings::Settings;
@@ -310,8 +311,7 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(buffer: Buffer, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
-        let highlighter =
-            path.as_deref().and_then(Path::extension).is_some_and(|ext| ext == "rs").then(Highlighter::rust);
+        let highlighter = path.as_deref().and_then(languages::for_path).and_then(Highlighter::new);
         let mut editor = Self {
             focus_handle: cx.focus_handle(),
             buffer,
@@ -403,7 +403,7 @@ impl Editor {
     /// Gives the buffer a new file (after a rename, or the first save of an untitled file).
     pub fn set_path(&mut self, path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) {
         self.release_lsp(cx);
-        self.highlighter = (path.extension().is_some_and(|ext| ext == "rs")).then(Highlighter::rust);
+        self.highlighter = languages::for_path(&path).and_then(Highlighter::new);
         self.spans.clear();
         self.path = Some(path);
         self.rehighlight();
@@ -426,8 +426,12 @@ impl Editor {
         self.path.as_deref()
     }
 
+    pub fn language(&self) -> Option<&'static languages::Language> {
+        languages::for_path(self.path.as_ref()?)
+    }
+
     pub fn language_name(&self) -> &'static str {
-        if self.highlighter.is_some() { "Rust" } else { "Plain text" }
+        self.language().map_or("Plain Text", |l| l.name)
     }
 
     /// Zero-based line and column of the caret.
