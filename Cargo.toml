@@ -1,0 +1,20 @@
+[package]
+name = "null-ide"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A calm, fast code editor where nothing gets in your way."
+repository = "https://github.com/ShortPlanet3058/null-ide"
+
+[[bin]]
+name = "null"
+path = "src/main.rs"
+
+[dependencies]
+# Shaders are compiled when the app starts, so building doesn't need Xcode's
+# separate Metal Toolchain download. Release builds can switch to precompiled shaders.
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+ropey = "1.6"
+tree-sitter = "0.25"
+tree-sitter-highlight = "0.25"
+tree-sitter-rust = "0.24"
