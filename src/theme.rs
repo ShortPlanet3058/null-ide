@@ -26,6 +26,10 @@ pub struct Theme {
     pub faint: Hsla,
     pub caret: Hsla,
     pub accent_soft: Hsla,
+    /// Floating layers like the command palette.
+    pub raised: Hsla,
+    /// Dims what is behind a floating layer.
+    pub scrim: Hsla,
     pub selection: Hsla,
     pub current_line: Hsla,
     keyword: Hsla,
@@ -54,6 +58,8 @@ impl Theme {
             faint: rgb(0x46464e).into(),
             caret: rgb(0xf2b35b).into(),
             accent_soft: rgba(0xf2b35b1f).into(),
+            raised: rgb(0x141418).into(),
+            scrim: rgba(0x00000073).into(),
             selection: rgba(0xf2b35b38).into(),
             current_line: rgb(0x0b0b0e).into(),
             keyword: rgb(0xc6a6f6).into(),

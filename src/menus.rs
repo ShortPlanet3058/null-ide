@@ -1,5 +1,5 @@
 use crate::editor::{Copy, Cut, DecreaseFontSize, IncreaseFontSize, Paste, Redo, ResetFontSize, Save, SelectAll, Undo};
-use crate::workspace::{CloseTab, NextTab, Open, PreviousTab, ToggleSidebar};
+use crate::workspace::{CloseTab, NextTab, Open, PreviousTab, TogglePalette, ToggleSidebar};
 use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
 
 actions!(null, [Quit, ToggleFadeWhileTyping]);
@@ -41,6 +41,8 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
         Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action("Command Palette…", TogglePalette),
+                MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Previous Tab", PreviousTab),

@@ -3,8 +3,11 @@ mod buffer;
 mod editor;
 mod element;
 mod file_tree;
+mod fuzzy;
 mod highlight;
 mod menus;
+mod palette;
+mod text_input;
 mod theme;
 mod workspace;
 
@@ -37,6 +40,8 @@ fn main() {
         theme::init(cx);
         editor::bind_keys(cx);
         workspace::bind_keys(cx);
+        palette::bind_keys(cx);
+        text_input::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         menus::set(cx, false);
