@@ -79,7 +79,7 @@ impl Editor {
         }
     }
 
-    fn lsp_position(&self, offset: usize) -> Position {
+    pub(super) fn lsp_position(&self, offset: usize) -> Position {
         let (line, column) = self.buffer.point(offset);
         Position { line: line as u32, character: self.buffer.column_to_utf16(line, column) as u32 }
     }

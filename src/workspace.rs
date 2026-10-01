@@ -34,6 +34,7 @@ actions!(
         UsePaperTheme,
         SearchProject,
         ShowFiles,
+        ToggleAutocomplete,
     ]
 );
 
@@ -396,6 +397,10 @@ impl Workspace {
             ("Smaller Text".into(), Box::new(DecreaseFontSize)),
             ("Actual Size".into(), Box::new(ResetFontSize)),
             ("Open Settings File".into(), Box::new(OpenSettings)),
+            (
+                if settings.autocomplete { "Turn Off Autocomplete" } else { "Turn On Autocomplete" }.into(),
+                Box::new(ToggleAutocomplete),
+            ),
         ];
         if self.active.is_some() {
             commands.extend([
@@ -543,6 +548,10 @@ impl Workspace {
 
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
+    }
+
+    fn toggle_autocomplete(&mut self, _: &ToggleAutocomplete, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.autocomplete = !s.autocomplete);
     }
 
     fn increase_font_size(&mut self, _: &IncreaseFontSize, _: &mut Window, cx: &mut Context<Self>) {
@@ -833,6 +842,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
+            .on_action(cx.listener(Self::toggle_autocomplete))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))

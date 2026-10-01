@@ -1,5 +1,7 @@
+mod completion;
 mod intel;
 
+pub use completion::CompletionMenu;
 pub use intel::HoverCard;
 
 use crate::buffer::Buffer;
@@ -12,10 +14,10 @@ use crate::search::SearchQuery;
 use crate::settings::Settings;
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, KeyBinding, KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, ShapedLine, Subscription, Task,
-    UTF16Selection, Window, actions, anchored, deferred, div, point, prelude::*, px, size,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, HighlightStyle, KeyBinding, KeyContext, KeyDownEvent, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, ShapedLine, StyledText,
+    Subscription, Task, UTF16Selection, Window, actions, anchored, deferred, div, point, prelude::*, px, size,
 };
 use regex::Regex;
 use ropey::Rope;
@@ -64,6 +66,11 @@ actions!(
         Save,
         GoToDefinition,
         ShowInfo,
+        ShowCompletions,
+        CompletionNext,
+        CompletionPrevious,
+        ConfirmCompletion,
+        CancelCompletion,
     ]
 );
 
@@ -103,6 +110,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-s", Save, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("secondary-shift-i", ShowInfo, ctx),
+        KeyBinding::new("ctrl-space", ShowCompletions, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -137,6 +145,17 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("ctrl-y", Redo, ctx),
         ]);
     }
+    // While the suggestion list is open these win over the editor's own keys.
+    let menu = Some("Editor && showing_completions");
+    keys.extend([
+        KeyBinding::new("up", CompletionPrevious, menu),
+        KeyBinding::new("down", CompletionNext, menu),
+        KeyBinding::new("ctrl-p", CompletionPrevious, menu),
+        KeyBinding::new("ctrl-n", CompletionNext, menu),
+        KeyBinding::new("enter", ConfirmCompletion, menu),
+        KeyBinding::new("tab", ConfirmCompletion, menu),
+        KeyBinding::new("escape", CancelCompletion, menu),
+    ]);
     cx.bind_keys(keys);
 }
 
@@ -268,6 +287,8 @@ pub struct Editor {
     pub link_word: Option<Range<usize>>,
     mouse_position: Option<Point<Pixels>>,
     definition_task: Option<Task<()>>,
+    pub completion: Option<CompletionMenu>,
+    completion_task: Option<Task<()>>,
 }
 
 impl Editor {
@@ -318,6 +339,8 @@ impl Editor {
             link_word: None,
             mouse_position: None,
             definition_task: None,
+            completion: None,
+            completion_task: None,
         };
         editor.rehighlight();
         editor
@@ -569,6 +592,7 @@ impl Editor {
     // ---------- selection & movement ----------
 
     fn move_head(&mut self, offset: usize, select: bool, cx: &mut Context<Self>) {
+        self.close_completion(cx);
         let offset = offset.min(self.buffer.len_chars());
         if select {
             self.selection.head = offset;
@@ -655,6 +679,7 @@ impl Editor {
     }
 
     fn move_vertically(&mut self, lines: isize, select: bool, cx: &mut Context<Self>) {
+        self.close_completion(cx);
         let (line, col) = self.buffer.point(self.selection.head);
         if !select && !self.selection.is_empty() && lines.abs() == 1 {
             let edge = if lines < 0 { self.selection.range().start } else { self.selection.range().end };
@@ -803,6 +828,9 @@ impl Editor {
     }
 
     fn edit(&mut self, range: Range<usize>, text: &str, kind: EditKind, cx: &mut Context<Self>) {
+        if kind == EditKind::Other {
+            self.close_completion(cx);
+        }
         self.record_undo(kind);
         let end = self.buffer.replace(range, text);
         self.selection = Selection::caret(end);
@@ -817,6 +845,7 @@ impl Editor {
         let range = if self.selection.is_empty() { range(self) } else { self.selection.range() };
         if !range.is_empty() {
             self.edit(range, "", EditKind::Deleting, cx);
+            self.completion_after_delete(cx);
         }
     }
 
@@ -959,6 +988,73 @@ impl Editor {
         }
     }
 
+    fn render_completions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.completion.as_ref()?;
+        let bounds = self.caret_bounds(self.selection.head)?;
+        let theme = cx.global::<Theme>();
+        let code_font = cx.global::<Fonts>().code.clone();
+        let rows = (0..menu.shown.len()).map(|ix| {
+            let suggestion = menu.suggestion(ix);
+            let selected = ix == menu.selected;
+            let (badge, color) = completion_badge(suggestion.kind, theme);
+            let highlight = HighlightStyle { color: Some(theme.caret), ..Default::default() };
+            let label =
+                StyledText::new(suggestion.label.clone()).with_highlights(menu.shown[ix].1.iter().filter_map(|&b| {
+                    let len = suggestion.label.get(b..)?.chars().next()?.len_utf8();
+                    Some((b..b + len, highlight))
+                }));
+            div()
+                .id(ix)
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .rounded(px(6.))
+                .when(selected, |row| row.bg(theme.accent_soft))
+                .child(div().w(px(14.)).flex_none().text_color(color).text_size(px(11.)).child(badge))
+                .child(div().flex_none().text_color(theme.foreground).child(label))
+                .children(suggestion.detail.clone().map(|detail| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_right()
+                        .text_size(px(11.5))
+                        .text_color(theme.faint)
+                        .child(detail)
+                }))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.accept_completion(ix, cx)))
+        });
+        let list = div()
+            .id("completions")
+            .occlude()
+            .track_scroll(&menu.scroll)
+            .overflow_y_scroll()
+            .min_w(px(260.))
+            .max_w(px(520.))
+            .max_h(px(26. * 8. + 10.))
+            .p(px(4.))
+            .rounded(px(9.))
+            .bg(theme.raised)
+            .border_1()
+            .border_color(theme.hairline)
+            .shadow_lg()
+            .font_family(code_font)
+            .text_size(px(13.))
+            .children(rows);
+        Some(
+            deferred(
+                anchored()
+                    .position(point(bounds.left() - px(30.), bounds.bottom() + px(4.)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(list),
+            )
+            .into_any_element(),
+        )
+    }
+
     fn render_hover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let card = self.hover.as_ref()?;
         let bounds = self.caret_bounds(card.range.start)?;
@@ -1057,6 +1153,7 @@ impl Editor {
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
         self.close_hover(cx);
+        self.close_completion(cx);
         let offset = self.offset_at(event.position);
         let unit = match event.click_count {
             2 => DragUnit::Word(self.word_at(offset)),
@@ -1131,6 +1228,27 @@ impl Editor {
         self.show_info_at_caret(cx);
     }
 
+    fn show_completions(&mut self, _: &ShowCompletions, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_completions_now(cx);
+    }
+
+    fn completion_next(&mut self, _: &CompletionNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_completion(1, cx);
+    }
+
+    fn completion_previous(&mut self, _: &CompletionPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_completion(-1, cx);
+    }
+
+    fn confirm_completion(&mut self, _: &ConfirmCompletion, _: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.completion.as_ref().map_or(0, |m| m.selected);
+        self.accept_completion(selected, cx);
+    }
+
+    fn cancel_completion(&mut self, _: &CancelCompletion, _: &mut Window, cx: &mut Context<Self>) {
+        self.close_completion(cx);
+    }
+
     fn go_to_definition(&mut self, _: &GoToDefinition, _: &mut Window, cx: &mut Context<Self>) {
         self.go_to_definition_at(self.selection.head, cx);
     }
@@ -1176,6 +1294,25 @@ enum DragUnit {
     Char,
     Word(Range<usize>),
     Line(Range<usize>),
+}
+
+/// A one-letter hint of what a suggestion is, in the color code uses for it.
+fn completion_badge(kind: Option<lsp_types::CompletionItemKind>, theme: &Theme) -> (&'static str, gpui::Hsla) {
+    use crate::theme::Syntax;
+    use lsp_types::CompletionItemKind as K;
+    match kind {
+        Some(K::FUNCTION | K::METHOD | K::CONSTRUCTOR) => ("ƒ", theme.syntax(Syntax::Function)),
+        Some(K::STRUCT | K::CLASS | K::TYPE_PARAMETER) => ("S", theme.syntax(Syntax::Type)),
+        Some(K::ENUM | K::ENUM_MEMBER) => ("E", theme.syntax(Syntax::Type)),
+        Some(K::INTERFACE) => ("T", theme.syntax(Syntax::Type)),
+        Some(K::FIELD | K::PROPERTY) => ("·", theme.syntax(Syntax::Property)),
+        Some(K::VARIABLE) => ("v", theme.syntax(Syntax::Plain)),
+        Some(K::CONSTANT) => ("c", theme.syntax(Syntax::Number)),
+        Some(K::MODULE) => ("m", theme.syntax(Syntax::Keyword)),
+        Some(K::KEYWORD) => ("k", theme.syntax(Syntax::Keyword)),
+        Some(K::SNIPPET) => ("…", theme.muted),
+        _ => ("·", theme.muted),
+    }
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -1246,6 +1383,7 @@ impl EntityInputHandler for Editor {
             .or(self.marked.clone())
             .unwrap_or(self.selection.range());
         self.edit(range, text, EditKind::Typing, cx);
+        self.completion_after_typing(text, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -1307,8 +1445,13 @@ impl Render for Editor {
         // The find bar sits beside the text, not inside the "Editor" key context,
         // so typing in it never triggers editor shortcuts.
         let find_bar = self.find_bar.clone();
+        let mut key_context = KeyContext::new_with_defaults();
+        key_context.add("Editor");
+        if self.completion.is_some() {
+            key_context.add("showing_completions");
+        }
         let text = div()
-            .key_context("Editor")
+            .key_context(key_context)
             .track_focus(&self.focus_handle)
             .size_full()
             .cursor(if self.link_word.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
@@ -1355,6 +1498,11 @@ impl Render for Editor {
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::show_info))
+            .on_action(cx.listener(Self::show_completions))
+            .on_action(cx.listener(Self::completion_next))
+            .on_action(cx.listener(Self::completion_previous))
+            .on_action(cx.listener(Self::confirm_completion))
+            .on_action(cx.listener(Self::cancel_completion))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -1364,11 +1512,13 @@ impl Render for Editor {
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(EditorElement::new(cx.entity()));
         let hover = self.render_hover(cx);
+        let completions = self.render_completions(cx);
         div()
             .relative()
             .size_full()
             .child(text)
             .when_some(find_bar, |editor, bar| editor.child(div().absolute().top(px(8.)).right(px(16.)).child(bar)))
             .children(hover)
+            .children(completions)
     }
 }
