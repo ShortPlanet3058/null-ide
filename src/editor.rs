@@ -63,6 +63,7 @@ actions!(
         Redo,
         Save,
         GoToDefinition,
+        ShowInfo,
     ]
 );
 
@@ -101,6 +102,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-z", Redo, ctx),
         KeyBinding::new("secondary-s", Save, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
+        KeyBinding::new("secondary-shift-i", ShowInfo, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -253,6 +255,10 @@ pub struct Editor {
     pub hover: Option<HoverCard>,
     hover_word: Option<Range<usize>>,
     hover_task: Option<Task<()>>,
+    hover_close_task: Option<Task<()>>,
+    mouse_in_card: bool,
+    /// Opened from the keyboard (or as a notice): the mouse doesn't close it.
+    hover_from_keyboard: bool,
     /// Typing with Alt held (e.g. Alt+arrows) hides the card until Alt is released.
     hover_suppressed: bool,
     alt_held: bool,
@@ -303,6 +309,9 @@ impl Editor {
             hover: None,
             hover_word: None,
             hover_task: None,
+            hover_close_task: None,
+            mouse_in_card: false,
+            hover_from_keyboard: false,
             hover_suppressed: false,
             alt_held: false,
             secondary_held: false,
@@ -353,8 +362,7 @@ impl Editor {
     fn text_changed(&mut self, cx: &mut Context<Self>) {
         self.rehighlight();
         self.sync_lsp(cx);
-        self.hover = None;
-        self.hover_word = None;
+        self.close_hover(cx);
     }
 
     /// Brings everything derived from the text up to date after it changes.
@@ -528,7 +536,9 @@ impl Editor {
 
     /// Escape: closes the find bar or clears search highlights, otherwise collapses the selection.
     fn escape(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_bar.is_some() || self.search.is_some() {
+        if self.hover.is_some() {
+            self.close_hover(cx);
+        } else if self.find_bar.is_some() || self.search.is_some() {
             self.close_find(window, cx);
         } else if !self.selection.is_empty() {
             self.selection = Selection::caret(self.selection.head);
@@ -540,6 +550,9 @@ impl Editor {
 
     /// Marks the caret as just used: it stops blinking and the view follows it.
     fn touch(&mut self, cx: &mut Context<Self>) {
+        if self.hover_from_keyboard {
+            self.close_hover(cx);
+        }
         self.last_activity = Instant::now();
         self.autoscroll = true;
         cx.notify();
@@ -979,6 +992,7 @@ impl Editor {
         let card = div()
             .id("hover-card")
             .occlude()
+            .on_hover(cx.listener(|this, inside: &bool, _, cx| this.set_mouse_in_card(*inside, cx)))
             .max_w(px(560.))
             .max_h(px(340.))
             .overflow_y_scroll()
@@ -1042,6 +1056,7 @@ impl Editor {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
+        self.close_hover(cx);
         let offset = self.offset_at(event.position);
         let unit = match event.click_count {
             2 => DragUnit::Word(self.word_at(offset)),
@@ -1108,8 +1123,12 @@ impl Editor {
     fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.alt_held && !self.hover_suppressed {
             self.hover_suppressed = true;
-            self.update_hover(cx);
+            self.close_hover(cx);
         }
+    }
+
+    fn show_info(&mut self, _: &ShowInfo, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_info_at_caret(cx);
     }
 
     fn go_to_definition(&mut self, _: &GoToDefinition, _: &mut Window, cx: &mut Context<Self>) {
@@ -1335,6 +1354,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::go_to_definition))
+            .on_action(cx.listener(Self::show_info))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))

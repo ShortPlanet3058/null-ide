@@ -11,8 +11,12 @@ use std::ops::Range;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-/// Holding Alt over a word this long shows its card.
+/// Alt over a word this long shows its card.
 const HOVER_DELAY: Duration = Duration::from_millis(80);
+/// With a card open, the mouse has to rest on another word this long to switch to it.
+const HOVER_SWITCH_DELAY: Duration = Duration::from_millis(350);
+/// How long the mouse can be away from the word and the card before the card closes.
+const HOVER_GRACE: Duration = Duration::from_millis(450);
 /// Cards show the signature and the start of the docs, not whole READMEs.
 const MAX_HOVER_LINES: usize = 14;
 
@@ -132,10 +136,8 @@ impl Editor {
         self.hover_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(3)).await;
             this.update(cx, |this, cx| {
-                if this.hover_word.as_ref() == Some(&word) && !this.alt_held {
-                    this.hover = None;
-                    this.hover_word = None;
-                    cx.notify();
+                if this.hover_word.as_ref() == Some(&word) && !this.mouse_in_card {
+                    this.close_hover(cx);
                 }
             })
             .ok();
@@ -156,22 +158,99 @@ impl Editor {
         }
     }
 
+    /// Keeps the hover card in step with the mouse and the Alt key.
+    ///
+    /// Alt opens a card for the word under the mouse; releasing Alt doesn't close
+    /// it, so the mouse can move into the card to scroll or select. It closes once
+    /// the mouse has been away from both the word and the card for a moment.
     pub(super) fn update_hover(&mut self, cx: &mut Context<Self>) {
         self.update_link(cx);
-        let target = self.hover_target();
-        let Some(offset) = target else {
-            if self.hover.is_some() || self.hover_word.is_some() {
-                self.hover = None;
-                self.hover_word = None;
-                self.hover_task = None;
-                cx.notify();
+        let under = self.text_under_mouse();
+
+        if self.hover.is_some() && !self.hover_from_keyboard {
+            if self.mouse_in_card || self.is_on_hovered_word(under) {
+                self.hover_close_task = None;
+            } else if self.hover_close_task.is_none() {
+                self.hover_close_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(HOVER_GRACE).await;
+                    this.update(cx, |this, cx| {
+                        if !this.mouse_in_card && !this.is_on_hovered_word(this.text_under_mouse()) {
+                            this.close_hover(cx);
+                        }
+                    })
+                    .ok();
+                }));
             }
-            return;
-        };
-        self.request_hover(offset, cx);
+        }
+
+        if self.alt_held && !self.hover_suppressed && !self.mouse_in_card {
+            match under {
+                Some(offset) => {
+                    // Switching to another word waits a little, so crossing words on the
+                    // way to the card doesn't replace it.
+                    let delay = if self.hover.is_some() { HOVER_SWITCH_DELAY } else { HOVER_DELAY };
+                    self.hover_from_keyboard = false;
+                    self.request_hover(offset, delay, cx);
+                }
+                // Over blank space: forget a pending switch, keep what's shown.
+                None => {
+                    if self.hover_word != self.hover.as_ref().map(|h| h.range.clone()) {
+                        self.hover_task = None;
+                        self.hover_word = self.hover.as_ref().map(|h| h.range.clone());
+                    }
+                }
+            }
+        }
     }
 
-    fn request_hover(&mut self, offset: usize, cx: &mut Context<Self>) {
+    fn is_on_hovered_word(&self, under: Option<usize>) -> bool {
+        match (&self.hover, under) {
+            (Some(card), Some(offset)) => {
+                card.range.start <= offset && offset < card.range.end.max(card.range.start + 1)
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn close_hover(&mut self, cx: &mut Context<Self>) {
+        if self.hover.is_some() || self.hover_word.is_some() {
+            self.hover = None;
+            self.hover_word = None;
+            self.hover_task = None;
+            self.hover_close_task = None;
+            self.hover_from_keyboard = false;
+            self.mouse_in_card = false;
+            cx.notify();
+        }
+    }
+
+    /// Called as the mouse enters or leaves the card.
+    pub(super) fn set_mouse_in_card(&mut self, inside: bool, cx: &mut Context<Self>) {
+        self.mouse_in_card = inside;
+        if inside {
+            // Reaching the card cancels a pending switch to a word crossed on the way.
+            self.hover_task = None;
+            self.hover_word = self.hover.as_ref().map(|h| h.range.clone());
+            self.hover_close_task = None;
+        } else {
+            self.update_hover(cx);
+        }
+    }
+
+    /// Shows the card for the word at the caret, without the mouse.
+    pub(super) fn show_info_at_caret(&mut self, cx: &mut Context<Self>) {
+        let offset = self.selection.head;
+        let offset = if self.buffer.char_at(offset).is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            offset
+        } else {
+            offset.saturating_sub(1)
+        };
+        self.hover_word = None;
+        self.hover_from_keyboard = true;
+        self.request_hover(offset, Duration::ZERO, cx);
+    }
+
+    fn request_hover(&mut self, offset: usize, delay: Duration, cx: &mut Context<Self>) {
         let word = self.word_at(offset);
         if self.hover_word.as_ref() == Some(&word) {
             return;
@@ -183,43 +262,42 @@ impl Editor {
             .filter(|p| p.range.start <= offset && offset <= p.range.end.max(p.range.start + 1))
             .map(|p| (p.severity, p.message))
             .collect();
-        if let Some(message) = self.not_ready_message(cx) {
+        let not_ready = self.not_ready_message(cx);
+        let request = if not_ready.is_some() {
+            None
+        } else {
+            self.lsp
+                .as_ref()
+                .zip(self.path.as_ref())
+                .map(|(lsp, path)| lsp.read(cx).hover(path, self.lsp_position(offset)))
+        };
+        if let Some(message) = not_ready {
             diagnostics.push((DiagnosticSeverity::HINT, message));
-            self.hover = Some(HoverCard { range: word, diagnostics, blocks: Vec::new() });
-            self.hover_task = None;
-            cx.notify();
-            return;
         }
-        let request = self
-            .lsp
-            .as_ref()
-            .zip(self.path.as_ref())
-            .map(|(lsp, path)| lsp.read(cx).hover(path, self.lsp_position(offset)));
         self.hover_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(HOVER_DELAY).await;
+            cx.background_executor().timer(delay).await;
             let hover = match request {
                 Some(request) => request.await,
                 None => None,
             };
             this.update(cx, |this, cx| {
+                // The mouse may have moved on while the server answered.
+                if this.hover_word.as_ref() != Some(&word) {
+                    return;
+                }
                 let blocks = hover.map(|h| hover_blocks(h.contents)).unwrap_or_default();
-                this.hover = (!blocks.is_empty() || !diagnostics.is_empty()).then_some(HoverCard {
-                    range: word,
-                    diagnostics,
-                    blocks,
-                });
+                if blocks.is_empty() && diagnostics.is_empty() {
+                    if this.hover.is_none() {
+                        this.hover_word = None;
+                    }
+                    return;
+                }
+                this.hover = Some(HoverCard { range: word, diagnostics, blocks });
+                this.hover_close_task = None;
                 cx.notify();
             })
             .ok();
         }));
-    }
-
-    /// The char under the mouse, while Alt is held and the mouse is over text.
-    fn hover_target(&self) -> Option<usize> {
-        if !self.alt_held || self.hover_suppressed {
-            return None;
-        }
-        self.text_under_mouse()
     }
 
     /// The char under the mouse, if the mouse is over text (not blank space).

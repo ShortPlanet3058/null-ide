@@ -1,4 +1,4 @@
-use crate::editor::{Copy, Cut, GoToDefinition, Paste, Redo, Save, SelectAll, Undo};
+use crate::editor::{Copy, Cut, GoToDefinition, Paste, Redo, Save, SelectAll, ShowInfo, Undo};
 use crate::find_bar::{DeployFind, DeployReplace, FindNext, FindPrevious};
 use crate::workspace::{
     CloseTab, DecreaseFontSize, IncreaseFontSize, NextTab, Open, OpenSettings, PreviousTab, ResetFontSize,
@@ -50,6 +50,7 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                 MenuItem::action("Search in Project…", SearchProject),
                 MenuItem::separator(),
                 MenuItem::action("Go to Definition", GoToDefinition),
+                MenuItem::action("Show Info at Cursor", ShowInfo),
             ],
         },
         Menu {

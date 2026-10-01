@@ -1,4 +1,4 @@
-use crate::editor::{Editor, EditorEvent, GoToDefinition, Redo, Save, SelectAll, Undo};
+use crate::editor::{Editor, EditorEvent, GoToDefinition, Redo, Save, SelectAll, ShowInfo, Undo};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::find_bar::{DeployFind, DeployReplace};
 use crate::fonts::Fonts;
@@ -408,6 +408,7 @@ impl Workspace {
                 ("Select All".into(), Box::new(SelectAll)),
                 ("Find…".into(), Box::new(DeployFind)),
                 ("Go to Definition".into(), Box::new(GoToDefinition)),
+                ("Show Info at Cursor".into(), Box::new(ShowInfo)),
                 ("Replace…".into(), Box::new(DeployReplace)),
             ]);
         }
