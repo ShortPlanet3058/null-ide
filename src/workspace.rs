@@ -41,6 +41,11 @@ actions!(
         ShowFiles,
         ToggleAutocomplete,
         ToggleTerminal,
+        NewUntitled,
+        SaveAs,
+        ReopenClosedTab,
+        CloseAllTabs,
+        CloseOtherTabs,
         UseNvidia,
         UseOllama,
         UseOpenAiCompatible,
@@ -67,6 +72,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-f", SearchProject, ctx),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
+        KeyBinding::new("secondary-n", NewUntitled, ctx),
+        KeyBinding::new("secondary-shift-s", SaveAs, ctx),
+        KeyBinding::new("secondary-shift-t", ReopenClosedTab, ctx),
         KeyBinding::new("secondary-=", IncreaseFontSize, ctx),
         KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
         KeyBinding::new("secondary--", DecreaseFontSize, ctx),
@@ -84,7 +92,7 @@ const FADE_OUT: Duration = Duration::from_millis(700);
 const FADE_IN: Duration = Duration::from_millis(180);
 /// Mouse movement smaller than this (trackpad jitter) doesn't bring the chrome back.
 const WAKE_DISTANCE: f32 = 6.;
-const SIDEBAR_WIDTH: f32 = 240.;
+const SIDEBAR_WIDTH: f32 = crate::file_tree::TREE_WIDTH;
 /// Search results need more room than file names.
 const SEARCH_SIDEBAR_WIDTH: f32 = 340.;
 const SIDEBAR_SLIDE: Duration = Duration::from_millis(260);
@@ -145,6 +153,11 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// Files whose tabs were closed, most recent last, for Cmd+Shift+T.
+    recently_closed: Vec<PathBuf>,
+    /// Watches the project folder so the tree and open files follow changes made elsewhere.
+    _watcher: Option<notify::RecommendedWatcher>,
+    watch_task: Option<Task<()>>,
     /// The AI answer panel, while open.
     ask: Option<(Entity<AskPanel>, Subscription)>,
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
@@ -168,10 +181,13 @@ impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
         let lsp = cx.new(|_| LspStore::new(root.clone()));
-        let tree = cx.new(|_| FileTree::new(root));
+        let tree = cx.new(|cx| FileTree::new(root, cx));
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
-                FileTreeEvent::Open(path) => this.open_file(path.clone(), window, cx),
+                FileTreeEvent::Open(path) | FileTreeEvent::Created(path) => this.open_file(path.clone(), window, cx),
+                FileTreeEvent::Renamed { from, to } => this.paths_renamed(from, to, cx),
+                FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
+                FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
             cx.observe(&lsp, |_, _, cx| cx.notify()),
@@ -213,6 +229,9 @@ impl Workspace {
             branch_task: None,
             terminal: None,
             terminal_open: Transition::new(false),
+            recently_closed: Vec::new(),
+            _watcher: None,
+            watch_task: None,
             ask: None,
             key_prompt: None,
             notice: None,
@@ -221,7 +240,62 @@ impl Workspace {
             _subscriptions: subscriptions,
         };
         workspace.refresh_git(cx);
+        workspace.watch(workspace.tree.read(cx).root().to_path_buf(), cx);
         workspace
+    }
+
+    /// Watches the project folder; changes made elsewhere (terminal, git, other apps)
+    /// show up in the tree and in open files.
+    fn watch(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        use notify::Watcher;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+        let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+            if let Ok(event) = result
+                && !matches!(event.kind, notify::EventKind::Access(_))
+            {
+                tx.unbounded_send(event.paths).ok();
+            }
+        });
+        let Ok(mut watcher) = watcher else { return };
+        if watcher.watch(&root, notify::RecursiveMode::Recursive).is_err() {
+            return;
+        }
+        self._watcher = Some(watcher);
+        self.watch_task = Some(cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(first) = rx.next().await {
+                // Changes come in bursts (a build, a checkout): wait for it to settle.
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                let mut paths = first;
+                while let Ok(more) = rx.try_recv() {
+                    paths.extend(more);
+                }
+                paths.sort();
+                paths.dedup();
+                if this.update(cx, |this, cx| this.files_changed(paths, cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn files_changed(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let git_changed = paths.iter().any(|p| {
+            p.components().any(|c| c.as_os_str() == ".git")
+                && p.file_name().is_some_and(|n| n == "HEAD" || n == "index" || n == "ORIG_HEAD")
+        });
+        let visible: Vec<PathBuf> =
+            paths.into_iter().filter(|p| !p.components().any(|c| c.as_os_str() == ".git")).collect();
+        self.tree.update(cx, |tree, cx| tree.refresh(&visible, cx));
+        for tab in &self.tabs {
+            let changed = tab.editor.read(cx).path().is_some_and(|p| visible.iter().any(|v| v == p));
+            if changed {
+                tab.editor.update(cx, |editor, cx| editor.reload_from_disk(cx));
+            }
+        }
+        if git_changed {
+            self.refresh_git(cx);
+        }
     }
 
     /// Re-reads the branch and every open file's committed version.
@@ -240,6 +314,35 @@ impl Workspace {
         }
     }
 
+    /// Points open tabs at their new location after a file or folder was renamed.
+    fn paths_renamed(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            let moved = tab.editor.read(cx).path().and_then(|p| p.strip_prefix(from).ok()).map(|rest| to.join(rest));
+            if let Some(new_path) = moved {
+                let lsp = self.lsp.clone();
+                tab.editor.update(cx, |editor, cx| editor.set_path(new_path, Some(lsp), cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Closes tabs whose file went to the Trash, unless they have unsaved edits.
+    fn path_trashed(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let gone: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                let editor = t.editor.read(cx);
+                editor.path().is_some_and(|p| p.starts_with(path)) && !editor.buffer.is_dirty()
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for ix in gone.into_iter().rev() {
+            self.remove_tab(ix, window, cx);
+        }
+    }
+
     fn active_editor(&self) -> Option<&Entity<Editor>> {
         self.active.and_then(|ix| self.tabs.get(ix)).map(|tab| &tab.editor)
     }
@@ -252,6 +355,10 @@ impl Workspace {
         }
         let lsp = self.lsp.clone();
         let editor = cx.new(|cx| Editor::open(path, Some(lsp), cx));
+        self.add_tab(editor, window, cx);
+    }
+
+    fn add_tab(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         let subscriptions = [
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
@@ -265,6 +372,12 @@ impl Workspace {
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
                     }
+                    cx.notify();
+                }
+                EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
+                EditorEvent::ChangedOnDisk => {
+                    let name = editor.read(cx).file_name();
+                    this.show_notice(format!("{name} changed on disk. Your unsaved edits were kept."), cx);
                 }
                 EditorEvent::GoTo { path, range } => {
                     let range = *range;
@@ -294,6 +407,7 @@ impl Workspace {
                 tab.editor.update(cx, |editor, cx| editor.reattach_lsp(cx));
             }
             self.refresh_git(cx);
+            self.watch(path.clone(), cx);
             self.tree.update(cx, |tree, cx| tree.set_root(path, cx));
             let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
             self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
@@ -314,6 +428,9 @@ impl Workspace {
 
     fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let tab = self.tabs.remove(ix);
+        if let Some(path) = tab.editor.read(cx).path() {
+            self.recently_closed.push(path.to_path_buf());
+        }
         tab.editor.update(cx, |editor, cx| editor.release_lsp(cx));
         if self.tabs.is_empty() {
             self.active = None;
@@ -360,9 +477,13 @@ impl Workspace {
     /// Asks before discarding unsaved changes. Returns true when `action` can go ahead
     /// right away; otherwise it runs after the person answers.
     fn confirm_unsaved(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let dirty: Vec<Entity<Editor>> =
-            self.tabs.iter().map(|tab| tab.editor.clone()).filter(|e| e.read(cx).buffer.is_dirty()).collect();
+        let scope: Vec<Entity<Editor>> = match &action {
+            CloseAction::CloseTabs(editors) => editors.clone(),
+            _ => self.tabs.iter().map(|tab| tab.editor.clone()).collect(),
+        };
+        let dirty: Vec<Entity<Editor>> = scope.iter().filter(|e| e.read(cx).buffer.is_dirty()).cloned().collect();
         if dirty.is_empty() {
+            self.finish_close(action, window, cx);
             return true;
         }
         let message = match dirty.as_slice() {
@@ -376,9 +497,9 @@ impl Workspace {
             &["Save", "Don't Save", "Cancel"],
             cx,
         );
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(choice) = answer.await else { return };
-            cx.update(|window, cx| {
+            this.update_in(cx, |this, window, cx| {
                 if choice == 2 {
                     return;
                 }
@@ -388,15 +509,84 @@ impl Workspace {
                         return;
                     }
                 }
-                match action {
-                    CloseAction::Quit => cx.quit(),
-                    CloseAction::CloseWindow => window.remove_window(),
-                }
+                this.finish_close(action, window, cx);
             })
             .ok();
         })
         .detach();
         false
+    }
+
+    fn finish_close(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            CloseAction::Quit => cx.quit(),
+            CloseAction::CloseWindow => window.remove_window(),
+            CloseAction::CloseTabs(editors) => {
+                for editor in editors {
+                    if let Some(ix) = self.tabs.iter().position(|t| t.editor == editor) {
+                        self.remove_tab(ix, window, cx);
+                    }
+                }
+            }
+        }
+    }
+
+    fn close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
+        let editors = self.tabs.iter().map(|t| t.editor.clone()).collect();
+        self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
+    }
+
+    fn close_other_tabs(&mut self, _: &CloseOtherTabs, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.active_editor().cloned();
+        let editors = self.tabs.iter().map(|t| t.editor.clone()).filter(|e| Some(e) != active.as_ref()).collect();
+        self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
+    }
+
+    fn reopen_closed_tab(&mut self, _: &ReopenClosedTab, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(path) = self.recently_closed.pop() {
+            if path.exists() {
+                return self.open_file(path, window, cx);
+            }
+        }
+    }
+
+    /// Cmd+N: an empty file with no name yet; saving asks where to put it.
+    fn new_untitled(&mut self, _: &NewUntitled, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = cx.new(|cx| Editor::new(Default::default(), None, cx));
+        self.add_tab(editor, window, cx);
+    }
+
+    fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor().cloned() {
+            self.ask_where_to_save(editor, window, cx);
+        }
+    }
+
+    /// Asks for a location, then saves the editor there.
+    fn ask_where_to_save(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
+        let current = editor.read(cx).path().map(Path::to_path_buf);
+        let dir = current
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.tree.read(cx).root().to_path_buf());
+        let name = current.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+        let answer = cx.prompt_for_new_path(&dir, name.as_deref());
+        let lsp = self.lsp.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.set_path(path.clone(), Some(lsp), cx);
+                    editor.save_to_disk(cx);
+                });
+                if let Some(ix) = this.tabs.iter().position(|t| t.editor == editor) {
+                    this.activate(ix, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
@@ -452,7 +642,11 @@ impl Workspace {
             format!("Theme: {}{current}", name.label())
         };
         let mut commands: Vec<(String, Box<dyn Action>)> = vec![
+            ("New File".into(), Box::new(NewUntitled)),
+            ("New File in Project…".into(), Box::new(crate::file_tree::NewFile)),
+            ("New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
             ("Open File or Folder…".into(), Box::new(Open)),
+            ("Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
             ("Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             ("Search in Project".into(), Box::new(SearchProject)),
             ("Show Files".into(), Box::new(ShowFiles)),
@@ -481,7 +675,10 @@ impl Workspace {
         if self.active.is_some() {
             commands.extend([
                 ("Save".into(), Box::new(Save) as Box<dyn Action>),
+                ("Save As…".into(), Box::new(SaveAs)),
                 ("Close Tab".into(), Box::new(CloseTab)),
+                ("Close All Tabs".into(), Box::new(CloseAllTabs)),
+                ("Close Other Tabs".into(), Box::new(CloseOtherTabs)),
                 ("Next Tab".into(), Box::new(NextTab)),
                 ("Previous Tab".into(), Box::new(PreviousTab)),
                 ("Undo".into(), Box::new(Undo)),
@@ -978,10 +1175,11 @@ impl Workspace {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum CloseAction {
     Quit,
     CloseWindow,
+    CloseTabs(Vec<Entity<Editor>>),
 }
 
 impl Focusable for Workspace {
@@ -1144,6 +1342,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_fade_while_typing))
             .on_action(cx.listener(Self::toggle_autocomplete))
             .on_action(cx.listener(Self::toggle_terminal))
+            .on_action(cx.listener(Self::new_untitled))
+            .on_action(cx.listener(Self::save_as))
+            .on_action(cx.listener(Self::reopen_closed_tab))
+            .on_action(cx.listener(Self::close_all_tabs))
+            .on_action(cx.listener(Self::close_other_tabs))
             .on_action(cx.listener(Self::use_nvidia))
             .on_action(cx.listener(Self::use_ollama))
             .on_action(cx.listener(Self::use_openai_compatible))

@@ -198,6 +198,10 @@ struct Snapshot {
 pub enum EditorEvent {
     Edited,
     Saved,
+    /// Save was asked for, but the buffer has no file yet.
+    NeedsPath,
+    /// The file changed on disk while there were unsaved edits here.
+    ChangedOnDisk,
     /// Go to definition landed in another file.
     GoTo {
         path: PathBuf,
@@ -371,6 +375,41 @@ impl Editor {
             editor.attach_lsp(lsp, cx);
         }
         editor
+    }
+
+    /// Picks up a change made to the file outside Null. Unsaved edits are never
+    /// overwritten; the reload itself can be undone.
+    pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = &self.path else { return };
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        if text == self.buffer.to_string() {
+            return;
+        }
+        if self.buffer.is_dirty() {
+            cx.emit(EditorEvent::ChangedOnDisk);
+            return;
+        }
+        let (line, column) = self.caret_point();
+        self.record_undo(EditKind::Other);
+        self.buffer.replace(0..self.buffer.len_chars(), &text);
+        self.buffer.mark_saved();
+        self.selection = Selection::caret(self.buffer.offset(line, column));
+        self.text_changed(cx);
+        cx.notify();
+    }
+
+    /// Gives the buffer a new file (after a rename, or the first save of an untitled file).
+    pub fn set_path(&mut self, path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) {
+        self.release_lsp(cx);
+        self.highlighter = (path.extension().is_some_and(|ext| ext == "rs")).then(Highlighter::rust);
+        self.spans.clear();
+        self.path = Some(path);
+        self.rehighlight();
+        if let Some(lsp) = lsp {
+            self.attach_lsp(lsp, cx);
+        }
+        self.reload_git_base(cx);
+        cx.notify();
     }
 
     pub fn file_name(&self) -> String {
@@ -982,7 +1021,10 @@ impl Editor {
 
     /// Writes the buffer to its file. Returns false if there's no file or writing failed.
     pub fn save_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(path) = &self.path else { return false };
+        let Some(path) = &self.path else {
+            cx.emit(EditorEvent::NeedsPath);
+            return false;
+        };
         match std::fs::write(path, self.buffer.to_string()) {
             Ok(()) => {
                 self.buffer.mark_saved();

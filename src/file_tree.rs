@@ -1,22 +1,94 @@
+use crate::fs_ops;
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
 use gpui::{
-    ClickEvent, Context, EventEmitter, SharedString, Transformation, Window, div, prelude::*, px, radians, svg,
-    uniform_list,
+    App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, KeyContext,
+    MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy, SharedString, Subscription, Transformation,
+    UniformListScrollHandle, Window, actions, anchored, deferred, div, prelude::*, px, radians, svg, uniform_list,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+actions!(
+    file_tree,
+    [
+        NewFile,
+        NewFolder,
+        Rename,
+        Duplicate,
+        Trash,
+        CopyPath,
+        CopyRelativePath,
+        Reveal,
+        CollapseAll,
+        SelectNext,
+        SelectPrevious,
+        ExpandOrOpen,
+        Collapse,
+        Activate,
+        CommitEdit,
+        CancelEdit,
+        MenuNext,
+        MenuPrevious,
+        MenuConfirm,
+        MenuClose,
+    ]
+);
+
+pub fn bind_keys(cx: &mut App) {
+    let tree = Some("FileTree");
+    let menu = Some("FileTree && menu_open");
+    let edit = Some("TreeEdit");
+    let mut keys = vec![
+        KeyBinding::new("down", SelectNext, tree),
+        KeyBinding::new("up", SelectPrevious, tree),
+        KeyBinding::new("right", ExpandOrOpen, tree),
+        KeyBinding::new("left", Collapse, tree),
+        KeyBinding::new("enter", Activate, tree),
+        KeyBinding::new("f2", Rename, tree),
+        KeyBinding::new("down", MenuNext, menu),
+        KeyBinding::new("up", MenuPrevious, menu),
+        KeyBinding::new("enter", MenuConfirm, menu),
+        KeyBinding::new("escape", MenuClose, menu),
+        KeyBinding::new("enter", CommitEdit, edit),
+        KeyBinding::new("escape", CancelEdit, edit),
+    ];
+    if cfg!(target_os = "macos") {
+        keys.push(KeyBinding::new("cmd-backspace", Trash, tree));
+    } else {
+        keys.push(KeyBinding::new("delete", Trash, tree));
+    }
+    cx.bind_keys(keys);
+}
+
 pub const ROW_HEIGHT: f32 = 26.;
+/// Width of the sidebar the tree is drawn in.
+pub const TREE_WIDTH: f32 = 240.;
 const INDENT: f32 = 14.;
 const CHEVRON: &str = "icons/chevron-right.svg";
 /// How long a folder's arrow takes to turn when it opens or closes.
 const TURN: Duration = Duration::from_millis(160);
 /// Never worth showing in a project tree.
 const ALWAYS_HIDDEN: &[&str] = &[".git", ".DS_Store"];
+const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
+    "Reveal in Finder"
+} else if cfg!(target_os = "windows") {
+    "Reveal in File Explorer"
+} else {
+    "Open Containing Folder"
+};
 
 pub enum FileTreeEvent {
     Open(PathBuf),
+    Created(PathBuf),
+    Renamed {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Trashed(PathBuf),
+    /// Something to tell the person, like a failed operation.
+    Notice(String),
 }
 
 #[derive(Clone)]
@@ -29,34 +101,120 @@ struct Entry {
     ignored: bool,
 }
 
+enum RowKind {
+    Entry(Entry),
+    /// Where the name of a new file or folder is typed.
+    NewItem {
+        is_dir: bool,
+    },
+}
+
 struct Row {
-    entry: Entry,
+    kind: RowKind,
     depth: usize,
     expanded: bool,
 }
 
+#[derive(Clone, PartialEq)]
+enum EditKind {
+    NewFile { dir: PathBuf },
+    NewFolder { dir: PathBuf },
+    Rename { path: PathBuf },
+}
+
+struct Edit {
+    kind: EditKind,
+    input: Entity<TextInput>,
+    error: Option<String>,
+    _subscription: Subscription,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MenuItem {
+    Open,
+    NewFile,
+    NewFolder,
+    Rename,
+    Duplicate,
+    CopyPath,
+    CopyRelativePath,
+    Reveal,
+    CollapseAll,
+    Trash,
+}
+
+impl MenuItem {
+    fn label(self) -> &'static str {
+        match self {
+            MenuItem::Open => "Open",
+            MenuItem::NewFile => "New File…",
+            MenuItem::NewFolder => "New Folder…",
+            MenuItem::Rename => "Rename…",
+            MenuItem::Duplicate => "Duplicate",
+            MenuItem::CopyPath => "Copy Path",
+            MenuItem::CopyRelativePath => "Copy Relative Path",
+            MenuItem::Reveal => REVEAL_LABEL,
+            MenuItem::CollapseAll => "Collapse All Folders",
+            MenuItem::Trash => "Move to Trash",
+        }
+    }
+
+    fn keys(self) -> Option<&'static str> {
+        match self {
+            MenuItem::Rename => Some("F2"),
+            MenuItem::Trash => Some(if cfg!(target_os = "macos") { "⌘⌫" } else { "Del" }),
+            _ => None,
+        }
+    }
+
+    /// A line is drawn above these, to group the menu.
+    fn starts_group(self) -> bool {
+        matches!(self, MenuItem::Rename | MenuItem::CopyPath | MenuItem::Trash)
+    }
+}
+
+struct Menu {
+    /// What was right-clicked. None for the empty space below the files (the project root).
+    target: Option<Entry>,
+    position: Point<Pixels>,
+    items: Vec<MenuItem>,
+    selected: Option<usize>,
+}
+
 /// The project's files, folders first. Folders are read when first expanded.
 pub struct FileTree {
+    focus_handle: FocusHandle,
     root: PathBuf,
     expanded: HashSet<PathBuf>,
     /// When each folder was last opened or closed, to animate its arrow.
     toggled_at: HashMap<PathBuf, Instant>,
     children: HashMap<PathBuf, Vec<Entry>>,
     rows: Vec<Row>,
+    /// The open file, highlighted.
     active: Option<PathBuf>,
+    /// What keyboard actions and the menu apply to.
+    selected: Option<PathBuf>,
+    edit: Option<Edit>,
+    menu: Option<Menu>,
+    scroll: UniformListScrollHandle,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
 
 impl FileTree {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut tree = Self {
+            focus_handle: cx.focus_handle(),
             expanded: HashSet::from([root.clone()]),
             toggled_at: HashMap::new(),
             root,
             children: HashMap::new(),
             rows: Vec::new(),
             active: None,
+            selected: None,
+            edit: None,
+            menu: None,
+            scroll: UniformListScrollHandle::new(),
         };
         tree.rebuild();
         tree
@@ -67,24 +225,50 @@ impl FileTree {
     }
 
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        *self = Self::new(root);
+        self.expanded = HashSet::from([root.clone()]);
+        self.root = root;
+        self.children.clear();
+        self.active = None;
+        self.selected = None;
+        self.edit = None;
+        self.menu = None;
+        self.rebuild();
         cx.notify();
     }
 
     /// Highlights `path` and expands its folders so it's visible.
     pub fn set_active(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
-        if let Some(path) = &path
-            && let Ok(relative) = path.strip_prefix(&self.root)
-        {
+        if let Some(path) = &path {
+            self.expand_to(path);
+            self.selected = Some(path.clone());
+        }
+        self.active = path;
+        self.rebuild();
+        cx.notify();
+    }
+
+    fn expand_to(&mut self, path: &Path) {
+        if let Ok(relative) = path.strip_prefix(&self.root) {
             let mut dir = self.root.clone();
             for part in relative.parent().into_iter().flat_map(Path::components) {
                 dir.push(part);
                 self.expanded.insert(dir.clone());
             }
         }
-        self.active = path;
-        self.rebuild();
-        cx.notify();
+    }
+
+    /// Re-reads the folders affected by changes on disk (from the file watcher).
+    pub fn refresh(&mut self, changed: &[PathBuf], cx: &mut Context<Self>) {
+        let mut stale = false;
+        for path in changed {
+            for dir in [Some(path.as_path()), path.parent()].into_iter().flatten() {
+                stale |= self.children.remove(dir).is_some();
+            }
+        }
+        if stale {
+            self.rebuild();
+            cx.notify();
+        }
     }
 
     fn read_dir(dir: &Path) -> Vec<Entry> {
@@ -117,7 +301,20 @@ impl FileTree {
     fn rebuild(&mut self) {
         self.rows.clear();
         let root = self.root.clone();
+        self.push_new_item_row(&root, 0);
         self.push_children(&root, 0);
+    }
+
+    fn push_new_item_row(&mut self, dir: &Path, depth: usize) {
+        match self.edit.as_ref().map(|e| &e.kind) {
+            Some(EditKind::NewFile { dir: d }) if d == dir => {
+                self.rows.push(Row { kind: RowKind::NewItem { is_dir: false }, depth, expanded: false })
+            }
+            Some(EditKind::NewFolder { dir: d }) if d == dir => {
+                self.rows.push(Row { kind: RowKind::NewItem { is_dir: true }, depth, expanded: false })
+            }
+            _ => {}
+        }
     }
 
     fn push_children(&mut self, dir: &Path, depth: usize) {
@@ -125,118 +322,636 @@ impl FileTree {
         for entry in entries {
             let expanded = entry.is_dir && self.expanded.contains(&entry.path);
             let path = entry.path.clone();
-            self.rows.push(Row { entry, depth, expanded });
+            self.rows.push(Row { kind: RowKind::Entry(entry), depth, expanded });
             if expanded {
+                self.push_new_item_row(&path, depth + 1);
                 self.push_children(&path, depth + 1);
             }
         }
     }
 
+    fn entry_at(&self, ix: usize) -> Option<&Entry> {
+        match &self.rows.get(ix)?.kind {
+            RowKind::Entry(entry) => Some(entry),
+            RowKind::NewItem { .. } => None,
+        }
+    }
+
+    fn selected_ix(&self) -> Option<usize> {
+        let selected = self.selected.as_ref()?;
+        self.rows.iter().position(|r| matches!(&r.kind, RowKind::Entry(e) if &e.path == selected))
+    }
+
+    fn selected_entry(&self) -> Option<Entry> {
+        self.selected_ix().and_then(|ix| self.entry_at(ix)).cloned()
+    }
+
     /// How far a folder's arrow has turned: 0 points right (closed), 1 points down (open).
     /// Also says whether it's still turning.
-    fn chevron_turn(&self, row: &Row) -> (f32, bool) {
-        let target = if row.expanded { 1. } else { 0. };
-        let Some(at) = self.toggled_at.get(&row.entry.path) else { return (target, false) };
+    fn chevron_turn(&self, path: &Path, expanded: bool) -> (f32, bool) {
+        let target = if expanded { 1. } else { 0. };
+        let Some(at) = self.toggled_at.get(path) else { return (target, false) };
         let t = (at.elapsed().as_secs_f32() / TURN.as_secs_f32()).min(1.);
         let eased = 1. - (1. - t).powi(3);
         (1. - target + (2. * target - 1.) * eased, t < 1.)
     }
 
-    fn click(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(row) = self.rows.get(ix) else { return };
-        let path = row.entry.path.clone();
-        if row.entry.is_dir {
-            if !self.expanded.remove(&path) {
-                self.expanded.insert(path.clone());
-            }
-            self.toggled_at.insert(path, Instant::now());
-            self.rebuild();
-            cx.notify();
-        } else {
-            cx.emit(FileTreeEvent::Open(path));
+    fn toggle(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if !self.expanded.remove(path) {
+            self.expanded.insert(path.to_path_buf());
         }
+        self.toggled_at.insert(path.to_path_buf(), Instant::now());
+        self.rebuild();
+        cx.notify();
+    }
+
+    fn click(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.entry_at(ix).cloned() else { return };
+        self.selected = Some(entry.path.clone());
+        self.menu = None;
+        if entry.is_dir {
+            window.focus(&self.focus_handle);
+            self.toggle(&entry.path, cx);
+        } else {
+            cx.emit(FileTreeEvent::Open(entry.path));
+            cx.notify();
+        }
+    }
+
+    // ---------- keyboard ----------
+
+    fn select_offset(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let entries: Vec<usize> = (0..self.rows.len()).filter(|&i| self.entry_at(i).is_some()).collect();
+        if entries.is_empty() {
+            return;
+        }
+        let current = self.selected_ix().and_then(|ix| entries.iter().position(|&i| i == ix));
+        let next = match current {
+            Some(i) => (i as isize + delta).clamp(0, entries.len() as isize - 1) as usize,
+            None => 0,
+        };
+        let ix = entries[next];
+        self.selected = self.entry_at(ix).map(|e| e.path.clone());
+        self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_offset(1, cx);
+    }
+
+    fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_offset(-1, cx);
+    }
+
+    fn expand_or_open(&mut self, _: &ExpandOrOpen, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else { return };
+        if entry.is_dir {
+            if !self.expanded.contains(&entry.path) {
+                self.toggle(&entry.path, cx);
+            }
+        } else {
+            cx.emit(FileTreeEvent::Open(entry.path));
+        }
+    }
+
+    fn collapse(&mut self, _: &Collapse, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else { return };
+        if entry.is_dir && self.expanded.contains(&entry.path) {
+            self.toggle(&entry.path, cx);
+        } else if let Some(parent) = entry.path.parent().filter(|p| *p != self.root) {
+            // On a file or closed folder, Left goes up to the parent folder.
+            self.selected = Some(parent.to_path_buf());
+            cx.notify();
+        }
+    }
+
+    fn activate(&mut self, _: &Activate, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else { return };
+        if entry.is_dir {
+            self.toggle(&entry.path, cx);
+        } else {
+            cx.emit(FileTreeEvent::Open(entry.path));
+        }
+    }
+
+    // ---------- creating and renaming ----------
+
+    /// The folder new items go into for a target: itself if it's a folder, else its folder.
+    fn dir_for(&self, target: Option<&Entry>) -> PathBuf {
+        match target {
+            Some(e) if e.is_dir => e.path.clone(),
+            Some(e) => e.path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.root.clone()),
+            None => self.root.clone(),
+        }
+    }
+
+    fn start_edit(&mut self, kind: EditKind, initial: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new("Name", cx);
+            input.set_text(initial, cx);
+            // For a rename, select the name without its extension, like Finder does.
+            if let Some(dot) = initial.rfind('.').filter(|&i| i > 0) {
+                input.select_range(0..dot, cx);
+            }
+            input
+        });
+        let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| {
+            if let Some(edit) = &mut this.edit {
+                edit.error = None;
+                cx.notify();
+            }
+        });
+        if let EditKind::NewFile { dir } | EditKind::NewFolder { dir } = &kind
+            && *dir != self.root
+        {
+            self.expanded.insert(dir.clone());
+        }
+        self.edit = Some(Edit { kind, input: input.clone(), error: None, _subscription: subscription });
+        self.rebuild();
+        if let Some(ix) =
+            self.rows.iter().position(|r| matches!(r.kind, RowKind::NewItem { .. })).or(self.selected_ix())
+        {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        }
+        window.focus(&input.focus_handle(cx));
+        cx.notify();
+    }
+
+    pub fn new_file(&mut self, _: &NewFile, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.dir_for(self.selected_entry().as_ref());
+        self.start_edit(EditKind::NewFile { dir }, "", window, cx);
+    }
+
+    pub fn new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.dir_for(self.selected_entry().as_ref());
+        self.start_edit(EditKind::NewFolder { dir }, "", window, cx);
+    }
+
+    fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = self.selected_entry() {
+            self.start_edit(EditKind::Rename { path: entry.path }, &entry.name, window, cx);
+        }
+    }
+
+    fn commit_edit(&mut self, _: &CommitEdit, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &self.edit else { return };
+        let name = edit.input.read(cx).text().to_string();
+        let result = match &edit.kind {
+            EditKind::NewFile { dir } => fs_ops::create_file(dir, &name).map(|p| (None, p)),
+            EditKind::NewFolder { dir } => fs_ops::create_dir(dir, &name).map(|p| (None, p)),
+            EditKind::Rename { path } => fs_ops::rename(path, &name).map(|p| (Some(path.clone()), p)),
+        };
+        match result {
+            Ok((from, path)) => {
+                let is_file = path.is_file();
+                self.edit = None;
+                self.children.clear();
+                self.expand_to(&path);
+                self.selected = Some(path.clone());
+                self.rebuild();
+                window.focus(&self.focus_handle);
+                match from {
+                    Some(from) if from != path => cx.emit(FileTreeEvent::Renamed { from, to: path }),
+                    Some(_) => {}
+                    None if is_file => cx.emit(FileTreeEvent::Created(path)),
+                    None => {}
+                }
+            }
+            Err(error) => {
+                if let Some(edit) = &mut self.edit {
+                    edit.error = Some(error);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, _: &CancelEdit, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit = None;
+        self.rebuild();
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    // ---------- other operations ----------
+
+    fn duplicate(&mut self, _: &Duplicate, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else { return };
+        match fs_ops::duplicate(&entry.path) {
+            Ok(copy) => {
+                self.children.clear();
+                self.selected = Some(copy);
+                self.rebuild();
+                cx.notify();
+            }
+            Err(message) => cx.emit(FileTreeEvent::Notice(message)),
+        }
+    }
+
+    fn trash(&mut self, _: &Trash, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else { return };
+        // Select a neighbour so the keyboard keeps a place in the tree.
+        let ix = self.selected_ix().unwrap_or(0);
+        match fs_ops::move_to_trash(&entry.path) {
+            Ok(()) => {
+                self.children.clear();
+                self.rebuild();
+                let next = ix.min(self.rows.len().saturating_sub(1));
+                self.selected = self.entry_at(next).map(|e| e.path.clone());
+                cx.emit(FileTreeEvent::Trashed(entry.path.clone()));
+                cx.emit(FileTreeEvent::Notice(format!("Moved {} to the Trash", entry.name)));
+                cx.notify();
+            }
+            Err(message) => cx.emit(FileTreeEvent::Notice(message)),
+        }
+    }
+
+    fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
+        let path = self.selected_entry().map(|e| e.path).unwrap_or_else(|| self.root.clone());
+        cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+    }
+
+    fn copy_relative_path(&mut self, _: &CopyRelativePath, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else { return };
+        let relative = entry.path.strip_prefix(&self.root).unwrap_or(&entry.path).display().to_string();
+        cx.write_to_clipboard(ClipboardItem::new_string(relative));
+    }
+
+    fn reveal(&mut self, _: &Reveal, _: &mut Window, cx: &mut Context<Self>) {
+        let path = self.selected_entry().map(|e| e.path).unwrap_or_else(|| self.root.clone());
+        cx.reveal_path(&path);
+    }
+
+    fn collapse_all(&mut self, _: &CollapseAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.expanded = HashSet::from([self.root.clone()]);
+        self.rebuild();
+        cx.notify();
+    }
+
+    // ---------- context menu ----------
+
+    fn open_menu(
+        &mut self,
+        target: Option<Entry>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use MenuItem::*;
+        let items = match &target {
+            Some(e) if e.is_dir => {
+                vec![NewFile, NewFolder, Rename, Duplicate, CopyPath, CopyRelativePath, Reveal, Trash]
+            }
+            Some(_) => vec![Open, NewFile, NewFolder, Rename, Duplicate, CopyPath, CopyRelativePath, Reveal, Trash],
+            None => vec![NewFile, NewFolder, CopyPath, Reveal, CollapseAll],
+        };
+        self.selected = target.as_ref().map(|e| e.path.clone());
+        self.menu = Some(Menu { target, position, items, selected: None });
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn run_menu_item(&mut self, item: MenuItem, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.menu.take().and_then(|m| m.target);
+        self.selected = target.as_ref().map(|e| e.path.clone());
+        match item {
+            MenuItem::Open => {
+                if let Some(entry) = target {
+                    cx.emit(FileTreeEvent::Open(entry.path));
+                }
+            }
+            MenuItem::NewFile => {
+                let dir = self.dir_for(target.as_ref());
+                self.start_edit(EditKind::NewFile { dir }, "", window, cx);
+            }
+            MenuItem::NewFolder => {
+                let dir = self.dir_for(target.as_ref());
+                self.start_edit(EditKind::NewFolder { dir }, "", window, cx);
+            }
+            MenuItem::Rename => self.rename(&Rename, window, cx),
+            MenuItem::Duplicate => self.duplicate(&Duplicate, window, cx),
+            MenuItem::CopyPath => self.copy_path(&CopyPath, window, cx),
+            MenuItem::CopyRelativePath => self.copy_relative_path(&CopyRelativePath, window, cx),
+            MenuItem::Reveal => self.reveal(&Reveal, window, cx),
+            MenuItem::CollapseAll => self.collapse_all(&CollapseAll, window, cx),
+            MenuItem::Trash => self.trash(&Trash, window, cx),
+        }
+        cx.notify();
+    }
+
+    fn menu_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.menu {
+            let len = menu.items.len() as isize;
+            let next =
+                menu.selected.map_or(if delta > 0 { 0 } else { len - 1 }, |s| (s as isize + delta).rem_euclid(len));
+            menu.selected = Some(next as usize);
+            cx.notify();
+        }
+    }
+
+    fn menu_next(&mut self, _: &MenuNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.menu_step(1, cx);
+    }
+
+    fn menu_previous(&mut self, _: &MenuPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.menu_step(-1, cx);
+    }
+
+    fn menu_confirm(&mut self, _: &MenuConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        let item = self.menu.as_ref().and_then(|m| m.items.get(m.selected?).copied());
+        if let Some(item) = item {
+            self.run_menu_item(item, window, cx);
+        }
+    }
+
+    fn menu_close(&mut self, _: &MenuClose, _: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        cx.notify();
+    }
+
+    // ---------- drawing ----------
+
+    fn render_row(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.global::<Theme>();
+        let row = &self.rows[ix];
+        let indent = px(16. + row.depth as f32 * INDENT);
+        let marker = |is_dir: bool, turn: f32, color: gpui::Hsla, dot: gpui::Hsla| {
+            if is_dir {
+                div().size(px(14.)).flex().items_center().justify_center().child(
+                    svg()
+                        .path(CHEVRON)
+                        .size(px(12.))
+                        .text_color(color)
+                        .with_transformation(Transformation::rotate(radians(turn * std::f32::consts::FRAC_PI_2))),
+                )
+            } else {
+                div()
+                    .size(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().size(px(5.)).rounded(px(2.)).bg(dot))
+            }
+        };
+        // The error (like "already exists") sits at the end of the field, in red.
+        // Rows in the list don't stretch, so the field gets an explicit width:
+        // the sidebar minus the indent, the marker and the padding.
+        let field_width = (TREE_WIDTH - 16. - row.depth as f32 * INDENT - 14. - 8. - 12.).max(80.);
+        let name_field =
+            |edit: &Edit| {
+                div()
+                    .w(px(field_width))
+                    .flex_none()
+                    .h(px(22.))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(5.))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(if edit.error.is_some() { theme.error } else { theme.caret })
+                    .line_height(px(18.))
+                    .child(div().flex_1().min_w(px(40.)).overflow_hidden().child(edit.input.clone()))
+                    .children(edit.error.clone().map(|e| {
+                        div().flex_none().text_size(px(11.)).text_color(theme.error).whitespace_nowrap().child(e)
+                    }))
+            };
+
+        let editing_this = |path: &Path| matches!(self.edit.as_ref().map(|e| &e.kind), Some(EditKind::Rename { path: p }) if p == path);
+        let base =
+            div().id(ix).h(px(ROW_HEIGHT)).flex().items_center().gap(px(8.)).pl(indent).pr(px(12.)).text_size(px(13.));
+        match &row.kind {
+            RowKind::NewItem { is_dir } => {
+                let edit = self.edit.as_ref().expect("a new-item row exists only while editing");
+                base.key_context("TreeEdit")
+                    .child(marker(*is_dir, 0., theme.muted, theme.faint))
+                    .child(name_field(edit))
+                    .into_any_element()
+            }
+            RowKind::Entry(entry) => {
+                let active = self.active.as_ref() == Some(&entry.path);
+                let selected =
+                    self.selected.as_ref() == Some(&entry.path) && self.focus_handle.contains_focused(window, cx);
+                let (turn, turning) = self.chevron_turn(&entry.path, row.expanded);
+                if turning {
+                    window.request_animation_frame();
+                }
+                let color = if active || selected {
+                    theme.foreground
+                } else if entry.ignored {
+                    theme.faint
+                } else {
+                    theme.muted
+                };
+                let dot = if active { theme.caret } else { theme.faint };
+                let path = entry.path.clone();
+                let menu_entry = entry.clone();
+                let row_el = base
+                    .text_color(color)
+                    .when(active, |r| r.bg(theme.accent_soft))
+                    .when(selected && !active, |r| r.bg(theme.hairline))
+                    .when(!active && !selected, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                    .child(marker(entry.is_dir, turn, if active { theme.foreground } else { theme.muted }, dot));
+                if editing_this(&path) {
+                    let edit = self.edit.as_ref().unwrap();
+                    row_el.key_context("TreeEdit").child(name_field(edit)).into_any_element()
+                } else {
+                    row_el
+                        .child(div().overflow_hidden().whitespace_nowrap().child(entry.name.clone()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.click(ix, window, cx)))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.open_menu(Some(menu_entry.clone()), event.position, window, cx)
+                            }),
+                        )
+                        .into_any_element()
+                }
+            }
+        }
+    }
+
+    fn render_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.menu.as_ref()?;
+        let theme = cx.global::<Theme>();
+        let items = menu.items.iter().enumerate().map(|(i, &item)| {
+            let selected = menu.selected == Some(i);
+            let destructive = item == MenuItem::Trash;
+            div()
+                .when(item.starts_group() && i > 0, |d| {
+                    d.mt(px(4.)).pt(px(4.)).border_t_1().border_color(theme.hairline)
+                })
+                .child(
+                    div()
+                        .id(("tree-menu", i))
+                        .h(px(26.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .gap(px(16.))
+                        .rounded(px(6.))
+                        .text_color(if destructive { theme.error } else { theme.foreground })
+                        .when(selected, |d| d.bg(theme.accent_soft))
+                        .hover(|s| s.bg(theme.accent_soft))
+                        .child(div().flex_1().child(item.label()))
+                        .children(item.keys().map(|k| div().text_size(px(11.5)).text_color(theme.faint).child(k)))
+                        .on_click(
+                            cx.listener(move |this, _: &ClickEvent, window, cx| this.run_menu_item(item, window, cx)),
+                        ),
+                )
+        });
+        Some(
+            deferred(
+                anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(
+                    div()
+                        .occlude()
+                        .min_w(px(220.))
+                        .p(px(4.))
+                        .rounded(px(9.))
+                        .bg(theme.raised)
+                        .border_1()
+                        .border_color(theme.hairline)
+                        .shadow_lg()
+                        .text_size(px(13.))
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.menu = None;
+                            cx.notify();
+                        }))
+                        .children(items),
+                ),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+}
+
+impl Focusable for FileTree {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
 impl Render for FileTree {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let menu = self.render_menu(cx);
         let theme = cx.global::<Theme>();
         let title = self.root.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default();
+        let header_button = |id: &'static str, icon: &'static str| {
+            div()
+                .id(id)
+                .size(px(20.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .text_color(theme.faint)
+                .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
+                .child(svg().path(icon).size(px(14.)).text_color(theme.muted))
+        };
+        let mut key_context = KeyContext::new_with_defaults();
+        key_context.add("FileTree");
+        if self.menu.is_some() {
+            key_context.add("menu_open");
+        }
         div()
+            .key_context(key_context)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::new_file))
+            .on_action(cx.listener(Self::new_folder))
+            .on_action(cx.listener(Self::rename))
+            .on_action(cx.listener(Self::duplicate))
+            .on_action(cx.listener(Self::trash))
+            .on_action(cx.listener(Self::copy_path))
+            .on_action(cx.listener(Self::copy_relative_path))
+            .on_action(cx.listener(Self::reveal))
+            .on_action(cx.listener(Self::collapse_all))
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::expand_or_open))
+            .on_action(cx.listener(Self::collapse))
+            .on_action(cx.listener(Self::activate))
+            .on_action(cx.listener(Self::commit_edit))
+            .on_action(cx.listener(Self::cancel_edit))
+            .on_action(cx.listener(Self::menu_next))
+            .on_action(cx.listener(Self::menu_previous))
+            .on_action(cx.listener(Self::menu_confirm))
+            .on_action(cx.listener(Self::menu_close))
             .size_full()
             .flex()
             .flex_col()
-            .pt(px(12.))
+            .pt(px(10.))
             .child(
                 div()
-                    .px(px(16.))
-                    .pb(px(8.))
-                    .text_size(px(11.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.faint)
-                    .child(title),
+                    .group("tree-header")
+                    .h(px(24.))
+                    .pl(px(16.))
+                    .pr(px(10.))
+                    .mb(px(4.))
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.faint)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(2.))
+                            .invisible()
+                            .group_hover("tree-header", |s| s.visible())
+                            .child(header_button("tree-new-file", "icons/file-plus.svg").on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| {
+                                    this.selected = None;
+                                    this.new_file(&NewFile, window, cx)
+                                },
+                            )))
+                            .child(header_button("tree-new-folder", "icons/folder-plus.svg").on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| {
+                                    this.selected = None;
+                                    this.new_folder(&NewFolder, window, cx)
+                                },
+                            )))
+                            .child(header_button("tree-collapse", "icons/collapse.svg").on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| this.collapse_all(&CollapseAll, window, cx),
+                            ))),
+                    ),
             )
             .child(
-                uniform_list(
-                    "file-tree",
-                    self.rows.len(),
-                    cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
-                        let theme = cx.global::<Theme>();
-                        range
-                            .map(|ix| {
-                                let row = &this.rows[ix];
-                                let active = this.active.as_ref() == Some(&row.entry.path);
-                                let color = if active {
-                                    theme.foreground
-                                } else if row.entry.ignored {
-                                    theme.faint
-                                } else {
-                                    theme.muted
-                                };
-                                let marker = if row.entry.is_dir {
-                                    let (turn, turning) = this.chevron_turn(row);
-                                    if turning {
-                                        window.request_animation_frame();
-                                    }
-                                    div().size(px(14.)).flex().items_center().justify_center().child(
-                                        svg()
-                                            .path(CHEVRON)
-                                            .size(px(12.))
-                                            .text_color(if active { theme.foreground } else { theme.muted })
-                                            .with_transformation(Transformation::rotate(radians(
-                                                turn * std::f32::consts::FRAC_PI_2,
-                                            ))),
-                                    )
-                                } else {
-                                    div().size(px(14.)).flex().items_center().justify_center().child(
-                                        div().size(px(5.)).rounded(px(2.)).bg(if active {
-                                            theme.caret
-                                        } else {
-                                            theme.faint
-                                        }),
-                                    )
-                                };
-                                div()
-                                    .id(ix)
-                                    .h(px(ROW_HEIGHT))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .pl(px(16. + row.depth as f32 * INDENT))
-                                    .pr(px(12.))
-                                    .text_size(px(13.))
-                                    .text_color(color)
-                                    .when(active, |row| row.bg(theme.accent_soft))
-                                    .when(!active, |row| row.hover(|s| s.bg(theme.hairline)))
-                                    .child(marker)
-                                    .child(div().overflow_hidden().whitespace_nowrap().child(row.entry.name.clone()))
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.click(ix, cx)))
-                            })
-                            .collect()
-                    }),
-                )
-                .flex_1(),
+                div()
+                    .id("tree-body")
+                    .flex_1()
+                    .min_h_0()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.open_menu(None, event.position, window, cx)
+                        }),
+                    )
+                    .child(
+                        uniform_list(
+                            "file-tree",
+                            self.rows.len(),
+                            cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
+                                range.map(|ix| this.render_row(ix, window, cx)).collect()
+                            }),
+                        )
+                        .track_scroll(self.scroll.clone())
+                        .size_full(),
+                    ),
             )
+            .children(menu)
     }
 }
 

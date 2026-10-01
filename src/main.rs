@@ -7,6 +7,7 @@ mod element;
 mod file_tree;
 mod find_bar;
 mod fonts;
+mod fs_ops;
 mod fuzzy;
 mod git;
 mod highlight;
@@ -54,6 +55,7 @@ fn main() {
         settings::init(cx);
         editor::bind_keys(cx);
         workspace::bind_keys(cx);
+        file_tree::bind_keys(cx);
         palette::bind_keys(cx);
         find_bar::bind_keys(cx);
         terminal::bind_keys(cx);
