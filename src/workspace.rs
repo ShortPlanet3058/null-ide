@@ -1,5 +1,6 @@
 use crate::editor::{Editor, EditorEvent, Redo, Save, SelectAll, Undo};
 use crate::file_tree::{FileTree, FileTreeEvent};
+use crate::fonts::Fonts;
 use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
@@ -633,7 +634,7 @@ impl Render for Workspace {
             .flex_col()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .font_family(".SystemUIFont")
+            .font_family(cx.global::<Fonts>().ui.clone())
             .relative()
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open))

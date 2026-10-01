@@ -56,6 +56,13 @@ doesn't need Xcode's separate Metal Toolchain download.
 - Feature branches — branch off `dev`, named `feature/<topic>`, `fix/<topic>`, etc.,
   and open a pull request back into `dev`.
 
+## Fonts
+
+Null ships with [Geist Mono](https://github.com/vercel/geist-font) for code and
+[Instrument Sans](https://github.com/Instrument/instrument-sans) for the interface, both under
+the SIL Open Font License 1.1 (see `assets/fonts/*/OFL.txt`). Any installed font can be used
+instead through `code_font` and `ui_font` in the settings file.
+
 ## License
 
 Licensed under either of

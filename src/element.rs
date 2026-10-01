@@ -1,4 +1,5 @@
 use crate::editor::{Editor, Layout};
+use crate::fonts::Fonts;
 use crate::highlight::{Span, spans_in};
 use crate::theme::{Syntax, Theme};
 use gpui::{
@@ -15,13 +16,6 @@ const BLINK_DELAY: Duration = Duration::from_millis(500);
 const TOP_PADDING: f32 = 8.;
 const TEXT_PADDING: f32 = 8.;
 const GUTTER_PADDING: f32 = 16.;
-
-#[cfg(target_os = "macos")]
-const CODE_FONT: &str = "Menlo";
-#[cfg(target_os = "windows")]
-const CODE_FONT: &str = "Consolas";
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const CODE_FONT: &str = "DejaVu Sans Mono";
 
 /// Draws an [`Editor`]: gutter, current line, selection, text and caret.
 pub struct EditorElement {
@@ -126,13 +120,14 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let theme = cx.global::<Theme>().clone();
+        let code_font = cx.global::<Fonts>().code.clone();
         self.editor.update(cx, |editor, cx| {
             let now = Instant::now();
             let focused = editor.focus_handle(cx).is_focused(window) && window.is_window_active();
             let font_size = editor.font_size;
             let line_height = editor.line_height();
             let lh = f32::from(line_height);
-            let font = font(CODE_FONT);
+            let font = font(code_font.clone());
             let text_system = window.text_system().clone();
             let shape = |text: String, runs: &[TextRun]| text_system.shape_line(text.into(), font_size, runs, None);
 
