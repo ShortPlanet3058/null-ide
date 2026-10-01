@@ -22,6 +22,8 @@ pub struct Settings {
     pub sidebar_visible: bool,
     /// Dim the title bar, sidebar and status bar while typing.
     pub fade_bars_while_typing: bool,
+    /// Show suggestions while typing. Ctrl+Space asks for them either way.
+    pub autocomplete: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +35,7 @@ impl Default for Settings {
             font_size: DEFAULT_FONT_SIZE,
             sidebar_visible: true,
             fade_bars_while_typing: false,
+            autocomplete: true,
         }
     }
 }

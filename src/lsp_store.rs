@@ -4,14 +4,15 @@ use gpui::{Context, EventEmitter, Task};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit, Initialized,
 };
-use lsp_types::request::{GotoDefinition, HoverRequest, Initialize, Shutdown};
+use lsp_types::request::{Completion, GotoDefinition, HoverRequest, Initialize, Shutdown};
 use lsp_types::{
-    ClientCapabilities, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverClientCapabilities,
-    HoverParams, InitializeParams, InitializedParams, MarkupKind, Position, PublishDiagnosticsClientCapabilities,
-    PublishDiagnosticsParams, TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, VersionedTextDocumentIdentifier, WindowClientCapabilities,
-    WorkspaceFolder,
+    ClientCapabilities, CompletionClientCapabilities, CompletionContext, CompletionItem, CompletionItemCapability,
+    CompletionParams, CompletionResponse, CompletionTriggerKind, Diagnostic, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverClientCapabilities, HoverParams, InitializeParams, InitializedParams,
+    MarkupKind, Position, PublishDiagnosticsClientCapabilities, PublishDiagnosticsParams,
+    TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, VersionedTextDocumentIdentifier, WindowClientCapabilities, WorkspaceFolder,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -236,6 +237,16 @@ impl LspStore {
                         ..Default::default()
                     }),
                     publish_diagnostics: Some(PublishDiagnosticsClientCapabilities::default()),
+                    completion: Some(CompletionClientCapabilities {
+                        // Plain text only: Null doesn't do snippet placeholders yet.
+                        completion_item: Some(CompletionItemCapability {
+                            snippet_support: Some(false),
+                            label_details_support: Some(true),
+                            ..Default::default()
+                        }),
+                        context_support: Some(true),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 window: Some(WindowClientCapabilities { work_done_progress: Some(true), ..Default::default() }),
@@ -408,6 +419,39 @@ impl LspStore {
                     .into_iter()
                     .map(|l| lsp_types::Location { uri: l.target_uri, range: l.target_selection_range })
                     .collect(),
+                None => Vec::new(),
+            }
+        }
+    }
+
+    /// Suggestions at `position`. `trigger` is the character just typed if it was
+    /// one the server asked for (like `.`), otherwise the request counts as invoked.
+    pub fn completion(
+        &self,
+        path: &Path,
+        position: Position,
+        trigger: Option<char>,
+    ) -> impl Future<Output = Vec<CompletionItem>> + use<> {
+        let request = self.server_for(path).zip(Self::position_params(path, position)).map(|(server, params)| {
+            server.request::<Completion>(CompletionParams {
+                text_document_position: params,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: Some(CompletionContext {
+                    trigger_kind: if trigger.is_some() {
+                        CompletionTriggerKind::TRIGGER_CHARACTER
+                    } else {
+                        CompletionTriggerKind::INVOKED
+                    },
+                    trigger_character: trigger.map(String::from),
+                }),
+            })
+        });
+        async move {
+            let Some(request) = request else { return Vec::new() };
+            match request.await.ok().flatten() {
+                Some(CompletionResponse::Array(items)) => items,
+                Some(CompletionResponse::List(list)) => list.items,
                 None => Vec::new(),
             }
         }

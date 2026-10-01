@@ -256,6 +256,25 @@ mod rust_analyzer_tests {
                 .expect("hover over greet()");
             let text = format!("{:?}", hover.contents);
             assert!(text.contains("fn greet") && text.contains("Says hi"), "{text}");
+
+            let completions = server
+                .request::<lsp_types::request::Completion>(CompletionParams {
+                    text_document_position: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri_for(&file).unwrap() },
+                        position: Position { line: 6, character: 6 },
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: None,
+                })
+                .await
+                .unwrap()
+                .expect("completions after `gr`");
+            let items = match completions {
+                CompletionResponse::Array(items) => items,
+                CompletionResponse::List(list) => list.items,
+            };
+            assert!(items.iter().any(|i| i.label.starts_with("greet")), "no `greet` in completions");
         });
         std::fs::remove_dir_all(&dir).ok();
     }
