@@ -1,10 +1,31 @@
 use crate::editor::{Editor, EditorEvent};
-use crate::menus::{self, ToggleFadeWhileTyping};
+use crate::file_tree::{FileTree, FileTreeEvent};
+use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::theme::Theme;
 use gpui::{
-    Context, Entity, MouseMoveEvent, Pixels, Point, Subscription, Window, WindowControlArea, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseMoveEvent,
+    PathPromptOptions, Pixels, Point, PromptLevel, Subscription, Window, WindowControlArea, actions, div, prelude::*,
+    px,
 };
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+actions!(workspace, [Open, CloseTab, ToggleSidebar, NextTab, PreviousTab]);
+
+pub fn bind_keys(cx: &mut App) {
+    let ctx = Some("Workspace");
+    let mut keys = vec![
+        KeyBinding::new("secondary-o", Open, ctx),
+        KeyBinding::new("secondary-w", CloseTab, ctx),
+        KeyBinding::new("secondary-b", ToggleSidebar, ctx),
+        KeyBinding::new("ctrl-tab", NextTab, ctx),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, ctx),
+    ];
+    if cfg!(target_os = "macos") {
+        keys.extend([KeyBinding::new("cmd-shift-]", NextTab, ctx), KeyBinding::new("cmd-shift-[", PreviousTab, ctx)]);
+    }
+    cx.bind_keys(keys);
+}
 
 /// Chrome dims to this while you type.
 const DIMMED: f32 = 0.12;
@@ -12,67 +33,267 @@ const FADE_OUT: Duration = Duration::from_millis(700);
 const FADE_IN: Duration = Duration::from_millis(180);
 /// Mouse movement smaller than this (trackpad jitter) doesn't bring the chrome back.
 const WAKE_DISTANCE: f32 = 6.;
+const SIDEBAR_WIDTH: f32 = 240.;
+const SIDEBAR_SLIDE: Duration = Duration::from_millis(260);
+/// Room for the window buttons at the left of the title bar.
+const TITLEBAR_INSET: f32 = if cfg!(target_os = "macos") { 84. } else { 12. };
+const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
 
-/// Opacity of the title and status bars. When fading is on, they recede while
-/// you type and come back as soon as you reach for the mouse.
-struct ChromeFade {
-    visible: bool,
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0., 1.);
+    t * t * (3. - 2. * t)
+}
+
+/// A value that eases toward 0 or 1 when switched.
+struct Transition {
+    on: bool,
     from: f32,
     changed_at: Instant,
 }
 
-impl ChromeFade {
-    fn opacity(&self, now: Instant) -> (f32, bool) {
-        let (target, duration) = if self.visible { (1., FADE_IN) } else { (DIMMED, FADE_OUT) };
-        let t = ((now - self.changed_at).as_secs_f32() / duration.as_secs_f32()).min(1.);
-        let eased = t * t * (3. - 2. * t);
-        (self.from + (target - self.from) * eased, t < 1.)
+impl Transition {
+    fn new(on: bool) -> Self {
+        Self { on, from: if on { 1. } else { 0. }, changed_at: Instant::now() - Duration::from_secs(1) }
     }
 
-    fn set_visible(&mut self, visible: bool) {
-        if visible != self.visible {
-            let now = Instant::now();
-            self.from = self.opacity(now).0;
-            self.visible = visible;
-            self.changed_at = now;
+    /// Current value and whether it's still moving.
+    fn value(&self, on_duration: Duration, off_duration: Duration) -> (f32, bool) {
+        let (target, duration) = if self.on { (1., on_duration) } else { (0., off_duration) };
+        let t = (Instant::now() - self.changed_at).as_secs_f32() / duration.as_secs_f32();
+        (self.from + (target - self.from) * smoothstep(t), t < 1.)
+    }
+
+    fn set(&mut self, on: bool, on_duration: Duration, off_duration: Duration) {
+        if on != self.on {
+            self.from = self.value(on_duration, off_duration).0;
+            self.on = on;
+            self.changed_at = Instant::now();
         }
     }
 }
 
-pub struct Workspace {
+struct Tab {
     editor: Entity<Editor>,
+    _subscriptions: [Subscription; 2],
+}
+
+pub struct Workspace {
+    focus_handle: FocusHandle,
+    tree: Entity<FileTree>,
+    tabs: Vec<Tab>,
+    active: Option<usize>,
+    sidebar: Transition,
     /// Off by default: some people want the file name and caret position visible at all times.
     fade_while_typing: bool,
-    chrome: ChromeFade,
+    chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
-    pub fn new(editor: Entity<Editor>, cx: &mut Context<Self>) -> Self {
-        let subscriptions = vec![
-            cx.observe(&editor, |_, _, cx| cx.notify()),
-            cx.subscribe(&editor, |this, _, event, cx| match event {
-                EditorEvent::Edited if this.fade_while_typing => {
-                    this.chrome.set_visible(false);
-                    cx.notify();
-                }
-                EditorEvent::Edited => {}
-            }),
-        ];
+    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let tree = cx.new(|_| FileTree::new(root));
+        let subscriptions = vec![cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
+            FileTreeEvent::Open(path) => this.open_file(path.clone(), window, cx),
+        })];
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |this, cx| this.confirm_unsaved(CloseAction::CloseWindow, window, cx)).unwrap_or(true)
+        });
         Self {
-            editor,
+            focus_handle: cx.focus_handle(),
+            tree,
+            tabs: Vec::new(),
+            active: None,
+            sidebar: Transition::new(true),
             fade_while_typing: false,
-            chrome: ChromeFade { visible: true, from: 1., changed_at: Instant::now() },
+            chrome: Transition::new(true),
             last_mouse: None,
             _subscriptions: subscriptions,
         }
     }
 
+    fn active_editor(&self) -> Option<&Entity<Editor>> {
+        self.active.and_then(|ix| self.tabs.get(ix)).map(|tab| &tab.editor)
+    }
+
+    /// Opens a file in a tab, or switches to it if it's already open.
+    pub fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tabs.iter().position(|tab| tab.editor.read(cx).path() == Some(path.as_path())) {
+            self.activate(ix, window, cx);
+            return;
+        }
+        let editor = cx.new(|cx| Editor::open(path, cx));
+        let subscriptions = [
+            cx.observe(&editor, |_, _, cx| cx.notify()),
+            cx.subscribe(&editor, |this, _, event, cx| match event {
+                EditorEvent::Edited if this.fade_while_typing => {
+                    this.chrome.set(false, FADE_IN, FADE_OUT);
+                    cx.notify();
+                }
+                EditorEvent::Edited => {}
+            }),
+        ];
+        let ix = self.active.map_or(self.tabs.len(), |ix| ix + 1);
+        self.tabs.insert(ix, Tab { editor, _subscriptions: subscriptions });
+        self.activate(ix, window, cx);
+    }
+
+    /// Opens a folder as the project, or a file in a tab.
+    fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if path.is_dir() {
+            self.tree.update(cx, |tree, cx| tree.set_root(path, cx));
+            let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+            self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
+        } else {
+            self.open_file(path, window, cx);
+        }
+    }
+
+    fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.active = Some(ix);
+        let editor = self.tabs[ix].editor.read(cx);
+        let path = editor.path().map(Path::to_path_buf);
+        window.set_window_title(&editor.file_name());
+        window.focus(&editor.focus_handle(cx));
+        self.tree.update(cx, |tree, cx| tree.set_active(path, cx));
+        cx.notify();
+    }
+
+    fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs.remove(ix);
+        if self.tabs.is_empty() {
+            self.active = None;
+            window.set_window_title("Null");
+            window.focus(&self.focus_handle);
+            self.tree.update(cx, |tree, cx| tree.set_active(None, cx));
+            cx.notify();
+        } else {
+            let active = self.active.unwrap_or(0);
+            let next = if active > ix || active == self.tabs.len() { active - 1 } else { active };
+            self.activate(next.min(self.tabs.len() - 1), window, cx);
+        }
+    }
+
+    fn close_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.tabs[ix].editor.clone();
+        if !editor.read(cx).buffer.is_dirty() {
+            self.remove_tab(ix, window, cx);
+            return;
+        }
+        let message = format!("Save changes to {}?", editor.read(cx).file_name());
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some("Your changes will be lost if you don't save them."),
+            &["Save", "Don't Save", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                if choice == 2 || (choice == 0 && !editor.update(cx, |editor, cx| editor.save_to_disk(cx))) {
+                    return;
+                }
+                if let Some(ix) = this.tabs.iter().position(|tab| tab.editor == editor) {
+                    this.remove_tab(ix, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks before discarding unsaved changes. Returns true when `action` can go ahead
+    /// right away; otherwise it runs after the person answers.
+    fn confirm_unsaved(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let dirty: Vec<Entity<Editor>> =
+            self.tabs.iter().map(|tab| tab.editor.clone()).filter(|e| e.read(cx).buffer.is_dirty()).collect();
+        if dirty.is_empty() {
+            return true;
+        }
+        let message = match dirty.as_slice() {
+            [one] => format!("Save changes to {}?", one.read(cx).file_name()),
+            many => format!("Save changes to {} files?", many.len()),
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some("Your changes will be lost if you don't save them."),
+            &["Save", "Don't Save", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(choice) = answer.await else { return };
+            cx.update(|window, cx| {
+                if choice == 2 {
+                    return;
+                }
+                if choice == 0 {
+                    let saved = dirty.iter().all(|editor| editor.update(cx, |editor, cx| editor.save_to_disk(cx)));
+                    if !saved {
+                        return;
+                    }
+                }
+                match action {
+                    CloseAction::Quit => cx.quit(),
+                    CloseAction::CloseWindow => window.remove_window(),
+                }
+            })
+            .ok();
+        })
+        .detach();
+        false
+    }
+
+    fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_unsaved(CloseAction::Quit, window, cx) {
+            cx.quit();
+        }
+    }
+
+    fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            this.update_in(cx, |this, window, cx| this.open_path(path, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.active {
+            self.close_tab_at(ix, window, cx);
+        }
+    }
+
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.active {
+            self.activate((ix + 1) % self.tabs.len(), window, cx);
+        }
+    }
+
+    fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.active {
+            self.activate((ix + self.tabs.len() - 1) % self.tabs.len(), window, cx);
+        }
+    }
+
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar.set(!self.sidebar.on, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        cx.notify();
+    }
+
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
         self.fade_while_typing = !self.fade_while_typing;
         if !self.fade_while_typing {
-            self.chrome.set_visible(true);
+            self.chrome.set(true, FADE_IN, FADE_OUT);
         }
         menus::set(cx, self.fade_while_typing);
         cx.notify();
@@ -85,43 +306,155 @@ impl Workspace {
         });
         if moved {
             self.last_mouse = Some(event.position);
-            if !self.chrome.visible {
-                self.chrome.set_visible(true);
+            if !self.chrome.on {
+                self.chrome.set(true, FADE_IN, FADE_OUT);
                 cx.notify();
             }
         }
+    }
+
+    fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.global::<Theme>();
+        div()
+            .id("tabs")
+            .flex()
+            .gap(px(2.))
+            .min_w_0()
+            .overflow_x_scroll()
+            .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
+                let editor = tab.editor.read(cx);
+                let active = self.active == Some(ix);
+                let dirty = editor.buffer.is_dirty();
+                let group = format!("tab-{ix}");
+                let close = div()
+                    .id(("close", ix))
+                    .size(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .text_size(px(14.))
+                    .text_color(if active || dirty { theme.muted } else { gpui::transparent_black() })
+                    .group_hover(group.clone(), |s| s.text_color(theme.muted))
+                    .hover(|s| s.bg(theme.faint.opacity(0.4)).text_color(theme.foreground))
+                    .child(if dirty { "●" } else { "×" })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab_at(ix, window, cx);
+                    }));
+                div()
+                    .id(("tab", ix))
+                    .group(group)
+                    .h(px(28.))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(8.))
+                    .pl(px(12.))
+                    .pr(px(6.))
+                    .rounded(px(7.))
+                    .text_size(px(12.5))
+                    .text_color(if active { theme.foreground } else { theme.muted })
+                    .when(active, |tab| tab.bg(theme.hairline))
+                    .when(!active, |tab| tab.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                    .child(editor.file_name())
+                    .child(close)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(ix, window, cx)))
+            }))
+            .into_any_element()
+    }
+
+    fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.global::<Theme>();
+        let hint = |keys: String, label: &'static str| {
+            div()
+                .flex()
+                .gap(px(12.))
+                .child(div().w(px(56.)).text_right().text_color(theme.muted).child(keys))
+                .child(div().text_color(theme.faint).child(label))
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(10.))
+            .text_size(px(13.))
+            .child(hint(format!("{MOD}O"), "Open a file or folder"))
+            .child(hint(format!("{MOD}B"), "Show or hide the files"))
+            .into_any_element()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CloseAction {
+    Quit,
+    CloseWindow,
+}
+
+impl Focusable for Workspace {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<Theme>();
-        let (opacity, fading) = self.chrome.opacity(Instant::now());
-        if fading {
+        let (chrome, fading) = self.chrome.value(FADE_IN, FADE_OUT);
+        let (sidebar, sliding) = self.sidebar.value(SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        if fading || sliding {
             window.request_animation_frame();
         }
+        let opacity = DIMMED + (1. - DIMMED) * chrome;
+        let sidebar_width = SIDEBAR_WIDTH * sidebar;
 
-        let editor = self.editor.read(cx);
-        let (line, col) = editor.caret_point();
-        let title = format!("{}{}", editor.file_name(), if editor.buffer.is_dirty() { "  •" } else { "" });
-        let path = editor.path().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into());
-        let language = editor.language_name();
+        let root = self.tree.read(cx).root().to_path_buf();
+        let status_items: Vec<String> = match self.active_editor().map(|e| e.read(cx)) {
+            Some(editor) => {
+                let (line, col) = editor.caret_point();
+                let path = editor.path().map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string());
+                vec![
+                    path.unwrap_or_else(|| "untitled".into()),
+                    format!("Ln {}, Col {}", line + 1, col + 1),
+                    "Spaces: 4".into(),
+                    editor.language_name().into(),
+                ]
+            }
+            None => vec![root.display().to_string()],
+        };
+        let tabs = self.render_tabs(cx);
+        let body = match self.active_editor() {
+            Some(editor) => div().size_full().child(editor.clone()),
+            None => div().size_full().child(self.render_empty(cx)),
+        };
+        let theme = cx.global::<Theme>();
 
         let titlebar = div()
             .h(px(40.))
             .flex_none()
             .flex()
             .items_center()
-            .justify_center()
+            .pl(px(TITLEBAR_INSET))
+            .pr(px(12.))
             .border_b_1()
             .border_color(theme.hairline)
             .bg(theme.surface)
-            .text_size(px(12.))
-            .text_color(theme.muted)
             .opacity(opacity)
             .window_control_area(WindowControlArea::Drag)
-            .child(title);
+            .child(tabs);
 
+        let sidebar_panel = div()
+            .flex_none()
+            .w(px(sidebar_width))
+            .h_full()
+            .overflow_hidden()
+            .bg(theme.surface)
+            .when(sidebar_width > 0.5, |panel| panel.border_r_1().border_color(theme.hairline))
+            .opacity(opacity)
+            .child(div().w(px(SIDEBAR_WIDTH)).h_full().child(self.tree.clone()));
+
+        let mut items = status_items.into_iter();
         let status = div()
             .h(px(28.))
             .flex_none()
@@ -135,22 +468,28 @@ impl Render for Workspace {
             .text_size(px(12.))
             .text_color(theme.muted)
             .opacity(opacity)
-            .child(div().flex_1().overflow_hidden().child(path))
-            .child(format!("Ln {}, Col {}", line + 1, col + 1))
-            .child("Spaces: 4")
-            .child(language);
+            .child(div().flex_1().overflow_hidden().whitespace_nowrap().children(items.next()))
+            .children(items);
 
         div()
+            .key_context("Workspace")
+            .track_focus(&self.focus_handle)
             .size_full()
             .flex()
             .flex_col()
             .bg(theme.background)
             .text_color(theme.foreground)
             .font_family(".SystemUIFont")
+            .on_action(cx.listener(Self::open))
+            .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
+            .on_action(cx.listener(Self::quit))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(titlebar)
-            .child(div().flex_1().min_h_0().child(self.editor.clone()))
+            .child(div().flex_1().min_h_0().flex().child(sidebar_panel).child(div().flex_1().min_w_0().child(body)))
             .child(status)
     }
 }
