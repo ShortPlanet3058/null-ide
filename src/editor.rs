@@ -1,3 +1,4 @@
+mod changes;
 mod completion;
 mod intel;
 
@@ -289,6 +290,11 @@ pub struct Editor {
     definition_task: Option<Task<()>>,
     pub completion: Option<CompletionMenu>,
     completion_task: Option<Task<()>>,
+    /// The file as last committed, to mark changed lines in the gutter.
+    git_base: Option<std::sync::Arc<str>>,
+    pub git_hunks: Vec<crate::git::Hunk>,
+    git_base_task: Option<Task<()>>,
+    git_diff_task: Option<Task<()>>,
 }
 
 impl Editor {
@@ -341,6 +347,10 @@ impl Editor {
             definition_task: None,
             completion: None,
             completion_task: None,
+            git_base: None,
+            git_hunks: Vec::new(),
+            git_base_task: None,
+            git_diff_task: None,
         };
         editor.rehighlight();
         editor
@@ -350,6 +360,7 @@ impl Editor {
     pub fn open(path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) -> Self {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let mut editor = Self::new(Buffer::from_text(&text), Some(path), cx);
+        editor.reload_git_base(cx);
         if let Some(lsp) = lsp {
             editor.attach_lsp(lsp, cx);
         }
@@ -385,6 +396,7 @@ impl Editor {
     fn text_changed(&mut self, cx: &mut Context<Self>) {
         self.rehighlight();
         self.sync_lsp(cx);
+        self.text_changed_for_git(cx);
         self.close_hover(cx);
     }
 

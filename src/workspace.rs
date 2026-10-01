@@ -2,6 +2,7 @@ use crate::editor::{Editor, EditorEvent, GoToDefinition, Redo, Save, SelectAll, 
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::find_bar::{DeployFind, DeployReplace};
 use crate::fonts::Fonts;
+use crate::git;
 use crate::lsp_store::{LspStore, Readiness};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
@@ -10,8 +11,8 @@ use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::theme::{Theme, ThemeName};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
-    MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Subscription, Window,
-    WindowControlArea, actions, div, prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Subscription, Task, Window,
+    WindowControlArea, actions, div, prelude::*, px, svg,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -128,6 +129,9 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// The current git branch of the project, if it's a repository.
+    branch: Option<String>,
+    branch_task: Option<Task<()>>,
     /// When language support first became ready this session, to show a short tip once.
     ready_since: Option<Instant>,
     /// Where focus goes back to when the palette closes.
@@ -157,10 +161,17 @@ impl Workspace {
             }),
         ];
         let this = cx.entity().downgrade();
+        // Coming back to the window: files may have been committed or the branch switched meanwhile.
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.refresh_git(cx);
+            }
+        })
+        .detach();
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |this, cx| this.confirm_unsaved(CloseAction::CloseWindow, window, cx)).unwrap_or(true)
         });
-        Self {
+        let mut workspace = Self {
             focus_handle: cx.focus_handle(),
             tree,
             lsp,
@@ -173,8 +184,28 @@ impl Workspace {
             last_mouse: None,
             palette: None,
             ready_since: None,
+            branch: None,
+            branch_task: None,
             focus_before_palette: None,
             _subscriptions: subscriptions,
+        };
+        workspace.refresh_git(cx);
+        workspace
+    }
+
+    /// Re-reads the branch and every open file's committed version.
+    fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        self.branch_task = Some(cx.spawn(async move |this, cx| {
+            let branch = cx.background_executor().spawn(async move { git::current_branch(&root) }).await;
+            this.update(cx, |this, cx| {
+                this.branch = branch;
+                cx.notify();
+            })
+            .ok();
+        }));
+        for tab in &self.tabs {
+            tab.editor.update(cx, |editor, cx| editor.reload_git_base(cx));
         }
     }
 
@@ -231,6 +262,7 @@ impl Workspace {
             for tab in &self.tabs {
                 tab.editor.update(cx, |editor, cx| editor.reattach_lsp(cx));
             }
+            self.refresh_git(cx);
             self.tree.update(cx, |tree, cx| tree.set_root(path, cx));
             let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
             self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
@@ -808,6 +840,15 @@ impl Render for Workspace {
             .text_size(px(12.))
             .text_color(theme.muted)
             .opacity(opacity)
+            .children(self.branch.clone().map(|branch| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
+                    .child(branch)
+            }))
             .child(div().flex_1().overflow_hidden().whitespace_nowrap().children(items.next()))
             .children(lsp_status)
             .when(problems != (0, 0), |bar| {

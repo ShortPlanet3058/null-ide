@@ -39,6 +39,7 @@ pub struct Prepaint {
     selection: Vec<Bounds<Pixels>>,
     matches: Vec<(Bounds<Pixels>, bool)>,
     link: Vec<Bounds<Pixels>>,
+    git_marks: Vec<(Bounds<Pixels>, Hsla)>,
     marked: Vec<Bounds<Pixels>>,
     caret: Option<(Bounds<Pixels>, f32)>,
 }
@@ -307,6 +308,34 @@ impl Element for EditorElement {
                 .collect();
 
             // Search matches on screen; the current one is drawn with an outline.
+            // Changes since the last commit: a bar beside the line numbers, or a small
+            // notch between lines where something was deleted.
+            let marker_x = bounds.left() + gutter_width - px(9.);
+            let git_marks: Vec<(Bounds<Pixels>, Hsla)> = editor
+                .git_hunks
+                .iter()
+                .filter(|h| h.lines.end >= visible.start && h.lines.start <= visible.end)
+                .map(|h| match h.change {
+                    crate::git::Change::Deleted => (
+                        Bounds::new(point(marker_x - px(2.), row_top(h.lines.start) - px(1.5)), size(px(7.), px(3.))),
+                        theme.git_deleted,
+                    ),
+                    change => {
+                        let color =
+                            if change == crate::git::Change::Added { theme.git_added } else { theme.git_modified };
+                        let top = row_top(h.lines.start.max(visible.start));
+                        let bottom = row_top(h.lines.end.min(visible.end));
+                        (
+                            Bounds::from_corners(
+                                point(marker_x, top + px(2.)),
+                                point(marker_x + px(3.), bottom - px(2.)),
+                            ),
+                            color,
+                        )
+                    }
+                })
+                .collect();
+
             let mut matches = Vec::new();
             if let Some(search) = &editor.search {
                 let first_char = editor.buffer.line_to_char(visible.start);
@@ -410,7 +439,19 @@ impl Element for EditorElement {
                 shaped,
             });
 
-            Prepaint { text_bounds, line_height, current_line, numbers, lines, selection, matches, link, marked, caret }
+            Prepaint {
+                text_bounds,
+                line_height,
+                current_line,
+                numbers,
+                lines,
+                selection,
+                matches,
+                link,
+                git_marks,
+                marked,
+                caret,
+            }
         })
     }
 
@@ -432,6 +473,9 @@ impl Element for EditorElement {
         window.paint_quad(fill(bounds, theme.background));
         if let Some(row) = prepaint.current_line {
             window.paint_quad(fill(row, theme.current_line));
+        }
+        for (rect, color) in &prepaint.git_marks {
+            window.paint_quad(fill(*rect, *color).corner_radii(px(1.5)));
         }
         for (number, origin) in &prepaint.numbers {
             number.paint(*origin, line_height, window, cx).ok();
