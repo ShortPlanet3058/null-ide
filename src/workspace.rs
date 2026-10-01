@@ -185,6 +185,10 @@ impl Workspace {
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) | FileTreeEvent::Created(path) => this.open_file(path.clone(), window, cx),
+                FileTreeEvent::Preview(path) => {
+                    this.open_file(path.clone(), window, cx);
+                    window.focus(&this.tree.focus_handle(cx));
+                }
                 FileTreeEvent::Renamed { from, to } => this.paths_renamed(from, to, cx),
                 FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
                 FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),

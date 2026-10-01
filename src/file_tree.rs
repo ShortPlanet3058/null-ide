@@ -45,7 +45,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", SelectPrevious, tree),
         KeyBinding::new("right", ExpandOrOpen, tree),
         KeyBinding::new("left", Collapse, tree),
-        KeyBinding::new("enter", Activate, tree),
         KeyBinding::new("f2", Rename, tree),
         KeyBinding::new("down", MenuNext, menu),
         KeyBinding::new("up", MenuPrevious, menu),
@@ -55,9 +54,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CancelEdit, edit),
     ];
     if cfg!(target_os = "macos") {
-        keys.push(KeyBinding::new("cmd-backspace", Trash, tree));
+        // As in Finder: Return renames, Cmd+Down opens, Cmd+Backspace moves to the Trash.
+        keys.extend([
+            KeyBinding::new("enter", Rename, tree),
+            KeyBinding::new("cmd-down", Activate, tree),
+            KeyBinding::new("cmd-backspace", Trash, tree),
+            KeyBinding::new("delete", Trash, tree),
+        ]);
     } else {
-        keys.push(KeyBinding::new("delete", Trash, tree));
+        keys.extend([KeyBinding::new("enter", Activate, tree), KeyBinding::new("delete", Trash, tree)]);
     }
     cx.bind_keys(keys);
 }
@@ -80,7 +85,11 @@ const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
 };
 
 pub enum FileTreeEvent {
+    /// Open and move to the file (double-click, Enter).
     Open(PathBuf),
+    /// Show the file but keep the keyboard in the tree (single click, arrows),
+    /// so shortcuts like rename and delete act on the tree.
+    Preview(PathBuf),
     Created(PathBuf),
     Renamed {
         from: PathBuf,
@@ -161,7 +170,7 @@ impl MenuItem {
 
     fn keys(self) -> Option<&'static str> {
         match self {
-            MenuItem::Rename => Some("F2"),
+            MenuItem::Rename => Some(if cfg!(target_os = "macos") { "↵" } else { "F2" }),
             MenuItem::Trash => Some(if cfg!(target_os = "macos") { "⌘⌫" } else { "Del" }),
             _ => None,
         }
@@ -365,17 +374,21 @@ impl FileTree {
         cx.notify();
     }
 
-    fn click(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn click(&mut self, ix: usize, click_count: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.entry_at(ix).cloned() else { return };
         self.selected = Some(entry.path.clone());
         self.menu = None;
+        window.focus(&self.focus_handle);
         if entry.is_dir {
-            window.focus(&self.focus_handle);
-            self.toggle(&entry.path, cx);
-        } else {
+            if click_count == 1 {
+                self.toggle(&entry.path, cx);
+            }
+        } else if click_count >= 2 {
             cx.emit(FileTreeEvent::Open(entry.path));
-            cx.notify();
+        } else {
+            cx.emit(FileTreeEvent::Preview(entry.path));
         }
+        cx.notify();
     }
 
     // ---------- keyboard ----------
@@ -411,7 +424,7 @@ impl FileTree {
                 self.toggle(&entry.path, cx);
             }
         } else {
-            cx.emit(FileTreeEvent::Open(entry.path));
+            cx.emit(FileTreeEvent::Preview(entry.path));
         }
     }
 
@@ -550,16 +563,38 @@ impl FileTree {
         }
     }
 
-    fn trash(&mut self, _: &Trash, _: &mut Window, cx: &mut Context<Self>) {
+    fn trash(&mut self, _: &Trash, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.selected_entry() else { return };
-        // Select a neighbour so the keyboard keeps a place in the tree.
-        let ix = self.selected_ix().unwrap_or(0);
+        let what = if entry.is_dir { "folder" } else { "file" };
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &format!("Move the {what} “{}” to the Trash?", entry.name),
+            Some("You can restore it from the Trash."),
+            &["Move to Trash", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| this.trash_now(&entry, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn trash_now(&mut self, entry: &Entry, window: &mut Window, cx: &mut Context<Self>) {
+        // Keep a place in the tree for the keyboard: the row that takes its spot.
+        let ix =
+            self.rows.iter().position(|r| matches!(&r.kind, RowKind::Entry(e) if e.path == entry.path)).unwrap_or(0);
         match fs_ops::move_to_trash(&entry.path) {
             Ok(()) => {
-                self.children.clear();
+                if let Some(parent) = entry.path.parent() {
+                    self.children.remove(parent);
+                }
                 self.rebuild();
                 let next = ix.min(self.rows.len().saturating_sub(1));
                 self.selected = self.entry_at(next).map(|e| e.path.clone());
+                window.focus(&self.focus_handle);
                 cx.emit(FileTreeEvent::Trashed(entry.path.clone()));
                 cx.emit(FileTreeEvent::Notice(format!("Moved {} to the Trash", entry.name)));
                 cx.notify();
@@ -761,7 +796,9 @@ impl FileTree {
                 } else {
                     row_el
                         .child(div().overflow_hidden().whitespace_nowrap().child(entry.name.clone()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.click(ix, window, cx)))
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            this.click(ix, event.click_count(), window, cx)
+                        }))
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |this, event: &MouseDownEvent, window, cx| {

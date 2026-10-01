@@ -91,7 +91,16 @@ fn copy_recursively(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Moves to the Trash (or the platform's recycle bin): never deletes outright.
 pub fn move_to_trash(path: &Path) -> Result<(), String> {
-    trash::delete(path).map_err(|e| format!("Couldn't move to the Trash: {e}"))
+    #[allow(unused_mut)]
+    let mut context = trash::TrashContext::default();
+    // On macOS, ask the system directly instead of scripting Finder: faster, and no
+    // "Null wants to control Finder" permission prompt.
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        context.set_delete_method(DeleteMethod::NsFileManager);
+    }
+    context.delete(path).map_err(|e| format!("Couldn't move to the Trash: {e}"))
 }
 
 #[cfg(test)]
