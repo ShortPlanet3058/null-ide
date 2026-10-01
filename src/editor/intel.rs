@@ -3,7 +3,7 @@
 
 use super::{Editor, EditorEvent, Selection};
 use crate::lsp::path_for;
-use crate::lsp_store::LspStore;
+use crate::lsp_store::{LspStore, Readiness};
 use gpui::{App, Context, Entity};
 use lsp_types::{DiagnosticSeverity, HoverContents, MarkedString, Position};
 use regex::Regex;
@@ -13,7 +13,8 @@ use std::time::Duration;
 
 /// Holding Alt over a word this long shows its card.
 const HOVER_DELAY: Duration = Duration::from_millis(80);
-const MAX_HOVER_LINES: usize = 30;
+/// Cards show the signature and the start of the docs, not whole READMEs.
+const MAX_HOVER_LINES: usize = 14;
 
 pub struct HoverCard {
     pub range: Range<usize>,
@@ -99,7 +100,64 @@ impl Editor {
     }
 
     /// Shows, moves or hides the hover card to match the mouse and the Alt key.
+    pub fn readiness(&self, cx: &App) -> Option<Readiness> {
+        self.lsp.as_ref()?.read(cx).readiness(self.path.as_ref()?)
+    }
+
+    /// Why hover and go to definition can't answer yet, in words.
+    fn not_ready_message(&self, cx: &App) -> Option<String> {
+        let label = LspStore::language_label(self.path.as_ref()?).unwrap_or("Code");
+        match self.readiness(cx)? {
+            Readiness::Ready { .. } => None,
+            Readiness::Starting => Some(format!("Starting {label} support…")),
+            Readiness::Indexing { percent } => {
+                let percent = percent.map(|p| format!(" ({p}%)")).unwrap_or_default();
+                Some(format!(
+                    "{label} support is still reading this project{percent}. Info shows up here once it's done."
+                ))
+            }
+            Readiness::Unavailable { program } => Some(format!("Install {program} to get info here.")),
+        }
+    }
+
+    /// Shows a short message in the hover card spot for a few seconds.
+    fn show_notice(&mut self, offset: usize, message: String, cx: &mut Context<Self>) {
+        let word = self.word_at(offset);
+        self.hover_word = Some(word.clone());
+        self.hover = Some(HoverCard {
+            range: word.clone(),
+            diagnostics: Vec::new(),
+            blocks: vec![HoverBlock { code: false, text: message }],
+        });
+        self.hover_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            this.update(cx, |this, cx| {
+                if this.hover_word.as_ref() == Some(&word) && !this.alt_held {
+                    this.hover = None;
+                    this.hover_word = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Underlines the word under the mouse while Cmd/Ctrl is held, to show it can be clicked.
+    fn update_link(&mut self, cx: &mut Context<Self>) {
+        let link = (self.secondary_held && self.lsp.is_some())
+            .then(|| self.text_under_mouse())
+            .flatten()
+            .map(|offset| self.word_at(offset))
+            .filter(|word| self.buffer.char_at(word.start).is_some_and(|c| c.is_alphanumeric() || c == '_'));
+        if link != self.link_word {
+            self.link_word = link;
+            cx.notify();
+        }
+    }
+
     pub(super) fn update_hover(&mut self, cx: &mut Context<Self>) {
+        self.update_link(cx);
         let target = self.hover_target();
         let Some(offset) = target else {
             if self.hover.is_some() || self.hover_word.is_some() {
@@ -110,17 +168,28 @@ impl Editor {
             }
             return;
         };
+        self.request_hover(offset, cx);
+    }
+
+    fn request_hover(&mut self, offset: usize, cx: &mut Context<Self>) {
         let word = self.word_at(offset);
         if self.hover_word.as_ref() == Some(&word) {
             return;
         }
         self.hover_word = Some(word.clone());
-        let diagnostics: Vec<(DiagnosticSeverity, String)> = self
+        let mut diagnostics: Vec<(DiagnosticSeverity, String)> = self
             .problems(cx)
             .into_iter()
             .filter(|p| p.range.start <= offset && offset <= p.range.end.max(p.range.start + 1))
             .map(|p| (p.severity, p.message))
             .collect();
+        if let Some(message) = self.not_ready_message(cx) {
+            diagnostics.push((DiagnosticSeverity::HINT, message));
+            self.hover = Some(HoverCard { range: word, diagnostics, blocks: Vec::new() });
+            self.hover_task = None;
+            cx.notify();
+            return;
+        }
         let request = self
             .lsp
             .as_ref()
@@ -150,6 +219,11 @@ impl Editor {
         if !self.alt_held || self.hover_suppressed {
             return None;
         }
+        self.text_under_mouse()
+    }
+
+    /// The char under the mouse, if the mouse is over text (not blank space).
+    fn text_under_mouse(&self) -> Option<usize> {
         let position = self.mouse_position?;
         if !self.layout.as_ref()?.text_bounds.contains(&position) {
             return None;
@@ -162,10 +236,17 @@ impl Editor {
     }
 
     pub fn go_to_definition_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if let Some(message) = self.not_ready_message(cx) {
+            self.show_notice(offset, message, cx);
+            return;
+        }
         let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return };
         let request = lsp.read(cx).definition(path, self.lsp_position(offset));
         self.definition_task = Some(cx.spawn(async move |this, cx| {
-            let Some(location) = request.await.into_iter().next() else { return };
+            let Some(location) = request.await.into_iter().next() else {
+                this.update(cx, |this, cx| this.show_notice(offset, "No definition found here.".into(), cx)).ok();
+                return;
+            };
             let Some(target) = path_for(&location.uri) else { return };
             this.update(cx, |this, cx| {
                 if this.path.as_deref() == Some(target.as_path()) {
@@ -206,7 +287,7 @@ pub fn hover_blocks(contents: HoverContents) -> Vec<HoverBlock> {
     let flush = |lines: &mut Vec<&str>, code: bool, blocks: &mut Vec<HoverBlock>| {
         let text = lines.join("\n");
         lines.clear();
-        let text = if code { text.trim_end().to_string() } else { clean_markdown(text.trim()) };
+        let text = if code { text.trim_end().to_string() } else { clean_markdown(&text) };
         if !text.trim().is_empty() {
             blocks.push(HoverBlock { code, text });
         }
@@ -239,8 +320,28 @@ pub fn hover_blocks(contents: HoverContents) -> Vec<HoverBlock> {
         .collect()
 }
 
+/// Turns markdown into readable plain text: no heading marks, links or emphasis.
 fn clean_markdown(text: &str) -> String {
-    LINK.replace_all(text, "$1").replace("**", "").replace("__", "").replace('`', "")
+    let text = LINK.replace_all(text, "$1").replace("**", "").replace("__", "").replace('`', "");
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let line = if let Some(rest) = trimmed.strip_prefix('#') {
+            rest.trim_start_matches('#').trim().to_string()
+        } else if let Some(rest) = trimmed.strip_prefix("* ").or_else(|| trimmed.strip_prefix("- ")) {
+            format!("• {rest}")
+        } else if let Some(rest) = trimmed.strip_prefix('>') {
+            rest.trim().to_string()
+        } else {
+            line.to_string()
+        };
+        // Collapse runs of blank lines.
+        if line.trim().is_empty() && out.last().is_none_or(|l| l.trim().is_empty()) {
+            continue;
+        }
+        out.push(line);
+    }
+    out.join("\n").trim().to_string()
 }
 
 #[cfg(test)]
@@ -258,5 +359,10 @@ mod tests {
             texts,
             vec![(true, "null_ide::buffer"), (true, "pub struct Buffer"), (false, "Text storage, see ropey.")]
         );
+    }
+
+    #[test]
+    fn cleans_headings_lists_and_quotes() {
+        assert_eq!(clean_markdown("# Title\n\n\n* one\n> note"), "Title\n\n• one\nnote");
     }
 }

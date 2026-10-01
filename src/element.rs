@@ -38,6 +38,7 @@ pub struct Prepaint {
     lines: Vec<(ShapedLine, Point<Pixels>)>,
     selection: Vec<Bounds<Pixels>>,
     matches: Vec<(Bounds<Pixels>, bool)>,
+    link: Vec<Bounds<Pixels>>,
     marked: Vec<Bounds<Pixels>>,
     caret: Option<(Bounds<Pixels>, f32)>,
 }
@@ -295,6 +296,15 @@ impl Element for EditorElement {
                 rects
             };
             let selection = range_rects(selection_range.clone());
+            // A thin underline under the word that Cmd/Ctrl+click would follow.
+            let link: Vec<Bounds<Pixels>> = editor
+                .link_word
+                .clone()
+                .map(range_rects)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| Bounds::new(point(r.left(), r.bottom() - line_height * 0.18), size(r.size.width, px(1.))))
+                .collect();
 
             // Search matches on screen; the current one is drawn with an outline.
             let mut matches = Vec::new();
@@ -400,7 +410,7 @@ impl Element for EditorElement {
                 shaped,
             });
 
-            Prepaint { text_bounds, line_height, current_line, numbers, lines, selection, matches, marked, caret }
+            Prepaint { text_bounds, line_height, current_line, numbers, lines, selection, matches, link, marked, caret }
         })
     }
 
@@ -436,6 +446,9 @@ impl Element for EditorElement {
             }
             for (line, origin) in &prepaint.lines {
                 line.paint(*origin, line_height, window, cx).ok();
+            }
+            for rect in &prepaint.link {
+                window.paint_quad(fill(*rect, theme.foreground));
             }
             for rect in &prepaint.marked {
                 window.paint_quad(fill(*rect, theme.foreground));

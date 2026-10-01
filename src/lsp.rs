@@ -19,6 +19,21 @@ pub enum ServerMessage {
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
+/// With `NULL_LSP_LOG=/some/file` set, every message to and from language
+/// servers is appended there. For figuring out why a server misbehaves.
+fn trace(direction: &str, message: &str) {
+    static LOG: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let log = LOG.get_or_init(|| {
+        let path = std::env::var_os("NULL_LSP_LOG")?;
+        std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(Mutex::new)
+    });
+    if let Some(file) = log {
+        let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let short: String = message.chars().take(600).collect();
+        let _ = writeln!(file.lock().unwrap(), "{:.3} {direction} {short}", time.as_secs_f64());
+    }
+}
+
 pub struct LanguageServer {
     stdin: Mutex<ChildStdin>,
     child: Mutex<Child>,
@@ -83,6 +98,7 @@ impl LanguageServer {
 
     fn send(&self, message: Value) {
         let body = message.to_string();
+        trace("->", &body);
         let mut stdin = self.stdin.lock().unwrap();
         let _ = write!(stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).and_then(|()| stdin.flush());
     }
@@ -134,7 +150,8 @@ fn read_message(reader: &mut impl BufRead) -> Option<Value> {
         let Some(length) = length else { continue };
         let mut body = vec![0; length];
         reader.read_exact(&mut body).ok()?;
-        if let Ok(value) = serde_json::from_slice(&body) {
+        if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+            trace("<-", &value.to_string());
             return Some(value);
         }
     }
@@ -186,7 +203,8 @@ mod rust_analyzer_tests {
         let dir = std::env::temp_dir().join(format!("null-ra-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+            .unwrap();
         let source = "mod missing;\n\n/// Says hi.\nfn greet() {}\n\nfn main() {\n    greet();\n}\n";
         std::fs::write(dir.join("src/main.rs"), source).unwrap();
         let file = dir.join("src/main.rs");
@@ -213,7 +231,9 @@ mod rust_analyzer_tests {
             while !found && Instant::now() < deadline {
                 match messages.next().await {
                     Some(ServerMessage::Request { id, .. }) => server.respond(id, Value::Null),
-                    Some(ServerMessage::Notification { method, params }) if method == "textDocument/publishDiagnostics" => {
+                    Some(ServerMessage::Notification { method, params })
+                        if method == "textDocument/publishDiagnostics" =>
+                    {
                         let params: PublishDiagnosticsParams = serde_json::from_value(params).unwrap();
                         found = params.diagnostics.iter().any(|d| d.range.start.line == 0);
                     }

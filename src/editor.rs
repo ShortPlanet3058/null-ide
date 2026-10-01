@@ -256,6 +256,10 @@ pub struct Editor {
     /// Typing with Alt held (e.g. Alt+arrows) hides the card until Alt is released.
     hover_suppressed: bool,
     alt_held: bool,
+    /// Cmd on macOS, Ctrl elsewhere: held to make words clickable for go to definition.
+    secondary_held: bool,
+    /// The word underlined as a link while Cmd/Ctrl is held.
+    pub link_word: Option<Range<usize>>,
     mouse_position: Option<Point<Pixels>>,
     definition_task: Option<Task<()>>,
 }
@@ -301,6 +305,8 @@ impl Editor {
             hover_task: None,
             hover_suppressed: false,
             alt_held: false,
+            secondary_held: false,
+            link_word: None,
             mouse_position: None,
             definition_task: None,
         };
@@ -971,8 +977,11 @@ impl Editor {
             }
         });
         let card = div()
+            .id("hover-card")
             .occlude()
             .max_w(px(560.))
+            .max_h(px(340.))
+            .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -1057,7 +1066,7 @@ impl Editor {
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.mouse_position = Some(event.position);
-        if self.alt_held {
+        if self.alt_held || self.secondary_held || self.link_word.is_some() {
             self.update_hover(cx);
         }
         if event.pressed_button != Some(MouseButton::Left) {
@@ -1089,6 +1098,7 @@ impl Editor {
 
     fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.alt_held = event.modifiers.alt;
+        self.secondary_held = event.modifiers.secondary();
         if !self.alt_held {
             self.hover_suppressed = false;
         }
@@ -1282,7 +1292,7 @@ impl Render for Editor {
             .key_context("Editor")
             .track_focus(&self.focus_handle)
             .size_full()
-            .cursor(CursorStyle::IBeam)
+            .cursor(if self.link_word.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
             .on_action(cx.listener(Self::move_left))
             .on_action(cx.listener(Self::move_right))
             .on_action(cx.listener(Self::move_up))

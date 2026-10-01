@@ -21,17 +21,23 @@ use std::sync::Arc;
 /// How to start the server for one language.
 struct ServerConfig {
     name: &'static str,
+    /// The language, as people call it.
+    label: &'static str,
     language_id: &'static str,
     program: &'static str,
     args: &'static [&'static str],
 }
 
 const SERVERS: &[(&[&str], ServerConfig)] = &[
-    (&["rs"], ServerConfig { name: "rust-analyzer", language_id: "rust", program: "rust-analyzer", args: &[] }),
+    (
+        &["rs"],
+        ServerConfig { name: "rust-analyzer", label: "Rust", language_id: "rust", program: "rust-analyzer", args: &[] },
+    ),
     (
         &["ts", "tsx", "js", "jsx", "mjs", "cjs"],
         ServerConfig {
             name: "typescript-language-server",
+            label: "TypeScript",
             language_id: "typescript",
             program: "typescript-language-server",
             args: &["--stdio"],
@@ -39,9 +45,15 @@ const SERVERS: &[(&[&str], ServerConfig)] = &[
     ),
     (
         &["py"],
-        ServerConfig { name: "pyright", language_id: "python", program: "pyright-langserver", args: &["--stdio"] },
+        ServerConfig {
+            name: "pyright",
+            label: "Python",
+            language_id: "python",
+            program: "pyright-langserver",
+            args: &["--stdio"],
+        },
     ),
-    (&["go"], ServerConfig { name: "gopls", language_id: "go", program: "gopls", args: &[] }),
+    (&["go"], ServerConfig { name: "gopls", label: "Go", language_id: "go", program: "gopls", args: &[] }),
 ];
 
 fn config_for(path: &Path) -> Option<&'static ServerConfig> {
@@ -83,6 +95,30 @@ enum ServerState {
     Unavailable,
 }
 
+/// Whether code intelligence is usable for a file yet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Readiness {
+    /// The server isn't installed or failed to start.
+    Unavailable {
+        program: &'static str,
+    },
+    Starting,
+    /// Reading the project. Hover and go to definition don't answer yet.
+    Indexing {
+        percent: Option<u64>,
+    },
+    /// Ready. `checking` while the server compiles to find errors.
+    Ready {
+        checking: bool,
+    },
+}
+
+struct Progress {
+    server: &'static str,
+    title: String,
+    percent: Option<u64>,
+}
+
 pub enum LspEvent {
     DiagnosticsChanged,
 }
@@ -92,8 +128,8 @@ pub struct LspStore {
     root: PathBuf,
     servers: HashMap<&'static str, ServerState>,
     diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
-    /// What a server is busy with, like "Indexing 40%".
-    progress: HashMap<String, String>,
+    /// Work servers report, by progress token.
+    progress: HashMap<String, Progress>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -114,9 +150,24 @@ impl LspStore {
         self.diagnostics.get(path).map_or(&[], Vec::as_slice)
     }
 
-    /// A short line for the status bar while a server is working.
-    pub fn status(&self) -> Option<String> {
-        self.progress.values().next().cloned()
+    pub fn language_label(path: &Path) -> Option<&'static str> {
+        config_for(path).map(|c| c.label)
+    }
+
+    pub fn readiness(&self, path: &Path) -> Option<Readiness> {
+        let config = config_for(path)?;
+        Some(match self.servers.get(config.name) {
+            None | Some(ServerState::Starting { .. }) => Readiness::Starting,
+            Some(ServerState::Unavailable) => Readiness::Unavailable { program: config.program },
+            Some(ServerState::Running { .. }) => {
+                let work: Vec<&Progress> = self.progress.values().filter(|p| p.server == config.name).collect();
+                let is_check = |p: &&Progress| p.title.to_lowercase().contains("check");
+                match work.iter().find(|p| !is_check(p)) {
+                    Some(indexing) => Readiness::Indexing { percent: indexing.percent },
+                    None => Readiness::Ready { checking: work.iter().any(is_check) },
+                }
+            }
+        })
     }
 
     pub fn has_server_for(&self, path: &Path) -> bool {
@@ -230,13 +281,14 @@ impl LspStore {
                     let token = params["token"].to_string();
                     let value = &params["value"];
                     match value["kind"].as_str() {
-                        Some("begin") | Some("report") => {
-                            let title = value["title"].as_str().map(str::to_owned).or_else(|| {
-                                self.progress.get(&token).map(|t| t.split(" · ").nth(1).unwrap_or(t).to_owned())
-                            });
-                            let percent = value["percentage"].as_u64().map(|p| format!(" {p}%")).unwrap_or_default();
-                            if let Some(title) = title {
-                                self.progress.insert(token, format!("{} · {title}{percent}", config.name));
+                        Some("begin") => {
+                            let title = value["title"].as_str().unwrap_or_default().to_string();
+                            let percent = value["percentage"].as_u64();
+                            self.progress.insert(token, Progress { server: config.name, title, percent });
+                        }
+                        Some("report") => {
+                            if let Some(progress) = self.progress.get_mut(&token) {
+                                progress.percent = value["percentage"].as_u64().or(progress.percent);
                             }
                         }
                         _ => {
