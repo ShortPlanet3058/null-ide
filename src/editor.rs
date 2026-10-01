@@ -215,7 +215,7 @@ pub struct Editor {
     wake_task: Option<Task<()>>,
     pub layout: Option<Layout>,
     pub autoscroll: bool,
-    selecting: bool,
+    dragging: Option<DragUnit>,
     pub font_size: Pixels,
 }
 
@@ -247,7 +247,7 @@ impl Editor {
             wake_task: None,
             layout: None,
             autoscroll: false,
-            selecting: false,
+            dragging: None,
             font_size: px(DEFAULT_FONT_SIZE),
         };
         editor.rehighlight();
@@ -367,13 +367,22 @@ impl Editor {
     }
 
     fn word_at(&self, offset: usize) -> Range<usize> {
-        let class = self.buffer.char_at(offset).map(char_class);
+        let class_at = |i: usize| self.buffer.char_at(i).map(char_class);
+        // Clicking just after a word (on its right edge) selects that word.
+        let offset =
+            if class_at(offset) != Some(CharClass::Word) && offset > 0 && class_at(offset - 1) == Some(CharClass::Word)
+            {
+                offset - 1
+            } else {
+                offset
+            };
+        let class = class_at(offset);
         let mut start = offset;
         let mut end = offset;
-        while start > 0 && self.buffer.char_at(start - 1).map(char_class) == class {
+        while start > 0 && class_at(start - 1) == class {
             start -= 1;
         }
-        while end < self.buffer.len_chars() && self.buffer.char_at(end).map(char_class) == class {
+        while end < self.buffer.len_chars() && class_at(end) == class {
             end += 1;
         }
         start..end
@@ -713,40 +722,62 @@ impl Editor {
         self.buffer.offset(line, col)
     }
 
+    fn line_range(&self, offset: usize) -> Range<usize> {
+        let (line, _) = self.buffer.point(offset);
+        let end = if line + 1 < self.buffer.len_lines() {
+            self.buffer.line_to_char(line + 1)
+        } else {
+            self.buffer.len_chars()
+        };
+        self.buffer.line_to_char(line)..end
+    }
+
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
         let offset = self.offset_at(event.position);
-        match event.click_count {
-            2 => {
-                let word = self.word_at(offset);
-                self.selection = Selection { anchor: word.start, head: word.end };
+        let unit = match event.click_count {
+            2 => DragUnit::Word(self.word_at(offset)),
+            3 => DragUnit::Line(self.line_range(offset)),
+            _ => DragUnit::Char,
+        };
+        match &unit {
+            DragUnit::Word(range) | DragUnit::Line(range) => {
+                self.selection = Selection { anchor: range.start, head: range.end }
             }
-            3 => {
-                let (line, _) = self.buffer.point(offset);
-                let end = if line + 1 < self.buffer.len_lines() {
-                    self.buffer.line_to_char(line + 1)
-                } else {
-                    self.buffer.len_chars()
-                };
-                self.selection = Selection { anchor: self.buffer.line_to_char(line), head: end };
-            }
-            _ if event.modifiers.shift => self.selection.head = offset,
-            _ => self.selection = Selection::caret(offset),
+            DragUnit::Char if event.modifiers.shift => self.selection.head = offset,
+            DragUnit::Char => self.selection = Selection::caret(offset),
         }
         self.goal_column = None;
-        self.selecting = true;
+        self.dragging = Some(unit);
         self.touch(cx);
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selecting && event.pressed_button == Some(MouseButton::Left) {
-            self.selection.head = self.offset_at(event.position);
-            self.touch(cx);
+        if event.pressed_button != Some(MouseButton::Left) {
+            return;
         }
+        let offset = self.offset_at(event.position);
+        let (origin, target) = match &self.dragging {
+            None => return,
+            Some(DragUnit::Char) => {
+                self.selection.head = offset;
+                self.touch(cx);
+                return;
+            }
+            Some(DragUnit::Word(origin)) => (origin.clone(), self.word_at(offset)),
+            Some(DragUnit::Line(origin)) => (origin.clone(), self.line_range(offset)),
+        };
+        // Grow by whole words or lines, keeping the one first clicked selected.
+        self.selection = if target.start < origin.start {
+            Selection { anchor: origin.end, head: target.start }
+        } else {
+            Selection { anchor: origin.start, head: target.end.max(origin.end) }
+        };
+        self.touch(cx);
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.selecting = false;
+        self.dragging = None;
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -783,6 +814,13 @@ impl Editor {
             size(px(2.), layout.line_height),
         ))
     }
+}
+
+/// What a mouse drag selects by, set by the click that started it.
+enum DragUnit {
+    Char,
+    Word(Range<usize>),
+    Line(Range<usize>),
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]

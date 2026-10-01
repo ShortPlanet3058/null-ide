@@ -2,18 +2,18 @@ mod buffer;
 mod editor;
 mod element;
 mod highlight;
+mod menus;
 mod theme;
 mod workspace;
 
 use editor::Editor;
 use gpui::{
-    App, Application, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, point,
-    prelude::*, px, size,
+    App, Application, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*,
+    px, size,
 };
+use menus::Quit;
 use std::path::PathBuf;
 use workspace::Workspace;
-
-actions!(null, [Quit]);
 
 fn main() {
     let path = std::env::args().nth(1).map(PathBuf::from);
@@ -23,6 +23,7 @@ fn main() {
         editor::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        menus::set(cx, false);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();

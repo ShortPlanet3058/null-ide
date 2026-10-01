@@ -1,4 +1,5 @@
 use crate::editor::{Editor, EditorEvent};
+use crate::menus::{self, ToggleFadeWhileTyping};
 use crate::theme::Theme;
 use gpui::{
     Context, Entity, MouseMoveEvent, Pixels, Point, Subscription, Window, WindowControlArea, div, prelude::*, px,
@@ -12,8 +13,8 @@ const FADE_IN: Duration = Duration::from_millis(180);
 /// Mouse movement smaller than this (trackpad jitter) doesn't bring the chrome back.
 const WAKE_DISTANCE: f32 = 6.;
 
-/// Opacity of the title and status bars. They recede while you type and
-/// come back as soon as you reach for the mouse.
+/// Opacity of the title and status bars. When fading is on, they recede while
+/// you type and come back as soon as you reach for the mouse.
 struct ChromeFade {
     visible: bool,
     from: f32,
@@ -40,6 +41,8 @@ impl ChromeFade {
 
 pub struct Workspace {
     editor: Entity<Editor>,
+    /// Off by default: some people want the file name and caret position visible at all times.
+    fade_while_typing: bool,
     chrome: ChromeFade,
     last_mouse: Option<Point<Pixels>>,
     _subscriptions: Vec<Subscription>,
@@ -50,18 +53,29 @@ impl Workspace {
         let subscriptions = vec![
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe(&editor, |this, _, event, cx| match event {
-                EditorEvent::Edited => {
+                EditorEvent::Edited if this.fade_while_typing => {
                     this.chrome.set_visible(false);
                     cx.notify();
                 }
+                EditorEvent::Edited => {}
             }),
         ];
         Self {
             editor,
+            fade_while_typing: false,
             chrome: ChromeFade { visible: true, from: 1., changed_at: Instant::now() },
             last_mouse: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
+        self.fade_while_typing = !self.fade_while_typing;
+        if !self.fade_while_typing {
+            self.chrome.set_visible(true);
+        }
+        menus::set(cx, self.fade_while_typing);
+        cx.notify();
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -133,6 +147,7 @@ impl Render for Workspace {
             .bg(theme.background)
             .text_color(theme.foreground)
             .font_family(".SystemUIFont")
+            .on_action(cx.listener(Self::toggle_fade_while_typing))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(titlebar)
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
