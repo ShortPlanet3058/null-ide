@@ -3320,6 +3320,8 @@ dependencies = [
  "gpui",
  "ignore",
  "ropey",
+ "serde",
+ "serde_json",
  "tree-sitter",
  "tree-sitter-highlight",
  "tree-sitter-rust",

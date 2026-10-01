@@ -1,10 +1,9 @@
-use crate::editor::{
-    DecreaseFontSize, Editor, EditorEvent, IncreaseFontSize, Redo, ResetFontSize, Save, SelectAll, Undo,
-};
+use crate::editor::{Editor, EditorEvent, Redo, Save, SelectAll, Undo};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
-use crate::theme::Theme;
+use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
+use crate::theme::{Theme, ThemeName};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
     MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Subscription, Window,
@@ -13,7 +12,24 @@ use gpui::{
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-actions!(workspace, [Open, CloseTab, ToggleSidebar, NextTab, PreviousTab, TogglePalette]);
+actions!(
+    workspace,
+    [
+        Open,
+        CloseTab,
+        ToggleSidebar,
+        NextTab,
+        PreviousTab,
+        TogglePalette,
+        OpenSettings,
+        IncreaseFontSize,
+        DecreaseFontSize,
+        ResetFontSize,
+        UseOledTheme,
+        UseGraphiteTheme,
+        UsePaperTheme,
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Workspace");
@@ -26,6 +42,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
         KeyBinding::new("ctrl-tab", NextTab, ctx),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, ctx),
+        KeyBinding::new("secondary-,", OpenSettings, ctx),
+        KeyBinding::new("secondary-=", IncreaseFontSize, ctx),
+        KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
+        KeyBinding::new("secondary--", DecreaseFontSize, ctx),
+        KeyBinding::new("secondary-0", ResetFontSize, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([KeyBinding::new("cmd-shift-]", NextTab, ctx), KeyBinding::new("cmd-shift-[", PreviousTab, ctx)]);
@@ -89,8 +110,6 @@ pub struct Workspace {
     tabs: Vec<Tab>,
     active: Option<usize>,
     sidebar: Transition,
-    /// Off by default: some people want the file name and caret position visible at all times.
-    fade_while_typing: bool,
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
@@ -102,9 +121,12 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let tree = cx.new(|_| FileTree::new(root));
-        let subscriptions = vec![cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
-            FileTreeEvent::Open(path) => this.open_file(path.clone(), window, cx),
-        })];
+        let subscriptions = vec![
+            cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
+                FileTreeEvent::Open(path) => this.open_file(path.clone(), window, cx),
+            }),
+            cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
+        ];
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |this, cx| this.confirm_unsaved(CloseAction::CloseWindow, window, cx)).unwrap_or(true)
@@ -114,8 +136,7 @@ impl Workspace {
             tree,
             tabs: Vec::new(),
             active: None,
-            sidebar: Transition::new(true),
-            fade_while_typing: false,
+            sidebar: Transition::new(cx.global::<Settings>().sidebar_visible),
             chrome: Transition::new(true),
             last_mouse: None,
             palette: None,
@@ -137,12 +158,18 @@ impl Workspace {
         let editor = cx.new(|cx| Editor::open(path, cx));
         let subscriptions = [
             cx.observe(&editor, |_, _, cx| cx.notify()),
-            cx.subscribe(&editor, |this, _, event, cx| match event {
-                EditorEvent::Edited if this.fade_while_typing => {
+            cx.subscribe(&editor, |this, editor, event, cx| match event {
+                EditorEvent::Edited if cx.global::<Settings>().fade_bars_while_typing => {
                     this.chrome.set(false, FADE_IN, FADE_OUT);
                     cx.notify();
                 }
                 EditorEvent::Edited => {}
+                // Hand edits to the settings file take effect when saved.
+                EditorEvent::Saved => {
+                    if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
+                        settings::reload(cx);
+                    }
+                }
             }),
         ];
         let ix = self.active.map_or(self.tabs.len(), |ix| ix + 1);
@@ -297,28 +324,38 @@ impl Workspace {
     }
 
     /// Every command the palette offers right now, with its shortcut.
-    fn commands(&self, window: &Window) -> Vec<Command> {
-        let fade = if self.fade_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
-        let mut commands: Vec<(&str, Box<dyn Action>)> = vec![
-            ("Open File or Folder…", Box::new(Open)),
-            ("Toggle Sidebar", Box::new(ToggleSidebar)),
-            (fade, Box::new(ToggleFadeWhileTyping)),
+    fn commands(&self, window: &Window, cx: &App) -> Vec<Command> {
+        let settings = cx.global::<Settings>();
+        let fade =
+            if settings.fade_bars_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
+        let theme_label = |name: ThemeName| {
+            let current = if settings.theme == name { " (current)" } else { "" };
+            format!("Theme: {}{current}", name.label())
+        };
+        let mut commands: Vec<(String, Box<dyn Action>)> = vec![
+            ("Open File or Folder…".into(), Box::new(Open)),
+            ("Toggle Sidebar".into(), Box::new(ToggleSidebar)),
+            (fade.into(), Box::new(ToggleFadeWhileTyping)),
+            (theme_label(ThemeName::Oled), Box::new(UseOledTheme)),
+            (theme_label(ThemeName::Graphite), Box::new(UseGraphiteTheme)),
+            (theme_label(ThemeName::Paper), Box::new(UsePaperTheme)),
+            ("Bigger Text".into(), Box::new(IncreaseFontSize)),
+            ("Smaller Text".into(), Box::new(DecreaseFontSize)),
+            ("Actual Size".into(), Box::new(ResetFontSize)),
+            ("Open Settings File".into(), Box::new(OpenSettings)),
         ];
         if self.active.is_some() {
             commands.extend([
-                ("Save", Box::new(Save) as Box<dyn Action>),
-                ("Close Tab", Box::new(CloseTab)),
-                ("Next Tab", Box::new(NextTab)),
-                ("Previous Tab", Box::new(PreviousTab)),
-                ("Undo", Box::new(Undo)),
-                ("Redo", Box::new(Redo)),
-                ("Select All", Box::new(SelectAll)),
-                ("Bigger Text", Box::new(IncreaseFontSize)),
-                ("Smaller Text", Box::new(DecreaseFontSize)),
-                ("Actual Size", Box::new(ResetFontSize)),
+                ("Save".into(), Box::new(Save) as Box<dyn Action>),
+                ("Close Tab".into(), Box::new(CloseTab)),
+                ("Next Tab".into(), Box::new(NextTab)),
+                ("Previous Tab".into(), Box::new(PreviousTab)),
+                ("Undo".into(), Box::new(Undo)),
+                ("Redo".into(), Box::new(Redo)),
+                ("Select All".into(), Box::new(SelectAll)),
             ]);
         }
-        commands.push(("Quit Null", Box::new(Quit)));
+        commands.push(("Quit Null".into(), Box::new(Quit)));
         commands
             .into_iter()
             .map(|(label, action)| Command {
@@ -335,7 +372,7 @@ impl Workspace {
             return;
         }
         self.focus_before_palette = window.focused(cx);
-        let commands = self.commands(window);
+        let commands = self.commands(window, cx);
         let root = self.tree.read(cx).root().to_path_buf();
         let palette = cx.new(|cx| Palette::new(commands, root, cx));
         let subscription = cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
@@ -364,18 +401,56 @@ impl Workspace {
         cx.notify();
     }
 
-    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar.set(!self.sidebar.on, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+    /// Brings the window in line with settings after they change.
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.global::<Settings>().clone();
+        self.sidebar.set(settings.sidebar_visible, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        if !settings.fade_bars_while_typing {
+            self.chrome.set(true, FADE_IN, FADE_OUT);
+        }
+        for tab in &self.tabs {
+            tab.editor.update(cx, |editor, cx| editor.set_font_size(px(settings.font_size), cx));
+        }
+        menus::set(cx, settings.fade_bars_while_typing);
         cx.notify();
     }
 
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.sidebar_visible = !s.sidebar_visible);
+    }
+
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
-        self.fade_while_typing = !self.fade_while_typing;
-        if !self.fade_while_typing {
-            self.chrome.set(true, FADE_IN, FADE_OUT);
+        settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
+    }
+
+    fn increase_font_size(&mut self, _: &IncreaseFontSize, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.font_size += 1.);
+    }
+
+    fn decrease_font_size(&mut self, _: &DecreaseFontSize, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.font_size -= 1.);
+    }
+
+    fn reset_font_size(&mut self, _: &ResetFontSize, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.font_size = DEFAULT_FONT_SIZE);
+    }
+
+    fn use_oled_theme(&mut self, _: &UseOledTheme, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.theme = ThemeName::Oled);
+    }
+
+    fn use_graphite_theme(&mut self, _: &UseGraphiteTheme, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.theme = ThemeName::Graphite);
+    }
+
+    fn use_paper_theme(&mut self, _: &UsePaperTheme, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.theme = ThemeName::Paper);
+    }
+
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = Settings::ensure_file(cx) {
+            self.open_file(path, window, cx);
         }
-        menus::set(cx, self.fade_while_typing);
-        cx.notify();
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -567,6 +642,13 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
+            .on_action(cx.listener(Self::increase_font_size))
+            .on_action(cx.listener(Self::decrease_font_size))
+            .on_action(cx.listener(Self::reset_font_size))
+            .on_action(cx.listener(Self::use_oled_theme))
+            .on_action(cx.listener(Self::use_graphite_theme))
+            .on_action(cx.listener(Self::use_paper_theme))
+            .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::quit))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(titlebar)

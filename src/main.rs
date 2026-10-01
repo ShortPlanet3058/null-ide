@@ -7,6 +7,7 @@ mod fuzzy;
 mod highlight;
 mod menus;
 mod palette;
+mod settings;
 mod text_input;
 mod theme;
 mod workspace;
@@ -37,14 +38,14 @@ fn main() {
     let (root, file) = resolve_args();
 
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
-        theme::init(cx);
+        settings::init(cx);
         editor::bind_keys(cx);
         workspace::bind_keys(cx);
         palette::bind_keys(cx);
         text_input::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        menus::set(cx, false);
+        menus::set(cx, cx.global::<settings::Settings>().fade_bars_while_typing);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
