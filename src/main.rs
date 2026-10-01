@@ -15,6 +15,7 @@ mod palette;
 mod project_search;
 mod search;
 mod settings;
+mod terminal;
 mod text_input;
 mod theme;
 mod workspace;
@@ -50,6 +51,7 @@ fn main() {
         workspace::bind_keys(cx);
         palette::bind_keys(cx);
         find_bar::bind_keys(cx);
+        terminal::bind_keys(cx);
         text_input::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
