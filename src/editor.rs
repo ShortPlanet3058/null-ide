@@ -1,12 +1,15 @@
 use crate::buffer::Buffer;
 use crate::element::EditorElement;
+use crate::find_bar::{CloseFind, DeployFind, DeployReplace, FindBar, FindNext, FindPrevious};
 use crate::highlight::{Highlighter, Span};
+use crate::search::SearchQuery;
 use crate::settings::Settings;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
     ScrollWheelEvent, ShapedLine, Task, UTF16Selection, Window, actions, div, point, prelude::*, px, size,
 };
+use regex::Regex;
 use ropey::Rope;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -190,6 +193,20 @@ pub struct CaretMotion {
     pub placed: bool,
 }
 
+/// The active search in an editor. Match ranges are char offsets, kept up to date as the text changes.
+pub struct SearchState {
+    pub query: SearchQuery,
+    regex: Option<Regex>,
+    pub matches: Vec<Range<usize>>,
+    pub current: Option<usize>,
+}
+
+impl SearchState {
+    pub fn is_invalid(&self) -> bool {
+        self.regex.is_none() && !self.query.text.is_empty()
+    }
+}
+
 pub struct Editor {
     focus_handle: FocusHandle,
     pub buffer: Buffer,
@@ -211,6 +228,10 @@ pub struct Editor {
     pub autoscroll: bool,
     dragging: Option<DragUnit>,
     pub font_size: Pixels,
+    pub search: Option<SearchState>,
+    find_bar: Option<Entity<FindBar>>,
+    /// Reused by Find Next when the find bar is closed, and to prefill it.
+    last_query: SearchQuery,
 }
 
 impl Editor {
@@ -243,6 +264,9 @@ impl Editor {
             autoscroll: false,
             dragging: None,
             font_size: px(cx.global::<Settings>().font_size),
+            search: None,
+            find_bar: None,
+            last_query: SearchQuery::default(),
         };
         editor.rehighlight();
         editor
@@ -279,9 +303,172 @@ impl Editor {
         (self.font_size * 1.7).round()
     }
 
+    /// Brings everything derived from the text up to date after it changes.
     fn rehighlight(&mut self) {
         if let Some(highlighter) = &mut self.highlighter {
             self.spans = highlighter.highlight(&self.buffer.to_string());
+        }
+        self.refresh_search();
+    }
+
+    // ---------- find & replace ----------
+
+    pub fn set_search(&mut self, query: SearchQuery, cx: &mut Context<Self>) {
+        if !query.text.is_empty() {
+            self.last_query = query.clone();
+        }
+        let regex = query.build().ok();
+        self.search = Some(SearchState { query, regex, matches: Vec::new(), current: None });
+        self.refresh_search();
+        self.select_current_match(cx);
+        cx.notify();
+    }
+
+    fn refresh_search(&mut self) {
+        let Some(search) = &mut self.search else { return };
+        let Some(regex) = &search.regex else {
+            search.matches.clear();
+            search.current = None;
+            return;
+        };
+        let text = self.buffer.to_string();
+        let rope = self.buffer.rope();
+        search.matches = search
+            .query
+            .find_all(regex, &text)
+            .into_iter()
+            .map(|r| rope.byte_to_char(r.start)..rope.byte_to_char(r.end))
+            .collect();
+        let from = self.selection.range().start;
+        search.current =
+            search.matches.iter().position(|m| m.start >= from).or((!search.matches.is_empty()).then_some(0));
+    }
+
+    fn select_current_match(&mut self, cx: &mut Context<Self>) {
+        let Some(range) = self.search.as_ref().and_then(|s| s.matches.get(s.current?)).cloned() else { return };
+        self.selection = Selection { anchor: range.start, head: range.end };
+        self.goal_column = None;
+        self.touch(cx);
+    }
+
+    fn step_match(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.search.is_none() && !self.last_query.text.is_empty() {
+            self.set_search(self.last_query.clone(), cx);
+            return;
+        }
+        let selection = self.selection.range();
+        let Some(search) = &mut self.search else { return };
+        if search.matches.is_empty() {
+            return;
+        }
+        let last = search.matches.len() - 1;
+        search.current = Some(if forward {
+            search.matches.iter().position(|m| m.start >= selection.end && *m != selection).unwrap_or(0)
+        } else {
+            search.matches.iter().rposition(|m| m.end <= selection.start && *m != selection).unwrap_or(last)
+        });
+        self.select_current_match(cx);
+    }
+
+    pub fn select_next_match(&mut self, cx: &mut Context<Self>) {
+        self.step_match(true, cx);
+    }
+
+    pub fn select_previous_match(&mut self, cx: &mut Context<Self>) {
+        self.step_match(false, cx);
+    }
+
+    /// Replaces the selected match (if the selection is one), then moves to the next.
+    pub fn replace_next_match(&mut self, replacement: &str, cx: &mut Context<Self>) {
+        let selection = self.selection.range();
+        let Some(search) = &self.search else { return };
+        if let (Some(regex), true) = (&search.regex, search.matches.contains(&selection)) {
+            let text = self.buffer.to_string();
+            let rope = self.buffer.rope();
+            let bytes = rope.char_to_byte(selection.start)..rope.char_to_byte(selection.end);
+            let new_text = search.query.replacement_for(regex, &text, bytes, replacement);
+            self.edit(selection, &new_text, EditKind::Other, cx);
+        }
+        self.step_match(true, cx);
+    }
+
+    /// Replaces every match as a single undo step.
+    pub fn replace_all_matches(&mut self, replacement: &str, cx: &mut Context<Self>) {
+        let Some(search) = &self.search else { return };
+        let Some(regex) = &search.regex else { return };
+        if search.matches.is_empty() {
+            return;
+        }
+        let text = self.buffer.to_string();
+        let rope = self.buffer.rope();
+        let edits: Vec<(Range<usize>, String)> = search
+            .matches
+            .iter()
+            .map(|m| {
+                let bytes = rope.char_to_byte(m.start)..rope.char_to_byte(m.end);
+                (m.clone(), search.query.replacement_for(regex, &text, bytes, replacement))
+            })
+            .collect();
+        self.record_undo(EditKind::Other);
+        for (range, new_text) in edits.iter().rev() {
+            self.buffer.replace(range.clone(), new_text);
+        }
+        self.selection = Selection::caret(edits[0].0.start);
+        self.marked = None;
+        self.rehighlight();
+        cx.emit(EditorEvent::Edited);
+        self.touch(cx);
+    }
+
+    fn deploy_find_bar(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.buffer.slice(self.selection.range());
+        let prefill = (!selected.is_empty() && !selected.contains('\n')).then_some(selected);
+        if let Some(bar) = self.find_bar.clone() {
+            bar.update(cx, |bar, cx| bar.show(prefill, replace, window, cx));
+            return;
+        }
+        let query =
+            SearchQuery { text: prefill.unwrap_or_else(|| self.last_query.text.clone()), ..self.last_query.clone() };
+        let editor = cx.entity().downgrade();
+        let bar = cx.new(|cx| FindBar::new(editor, &query, replace, cx));
+        bar.update(cx, |bar, cx| bar.show(None, replace, window, cx));
+        self.find_bar = Some(bar);
+        self.set_search(query, cx);
+    }
+
+    /// Closes the find bar, keeps the current match selected, and returns to the text.
+    pub fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_bar = None;
+        self.search = None;
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn deploy_find(&mut self, _: &DeployFind, window: &mut Window, cx: &mut Context<Self>) {
+        self.deploy_find_bar(false, window, cx);
+    }
+
+    fn deploy_replace(&mut self, _: &DeployReplace, window: &mut Window, cx: &mut Context<Self>) {
+        self.deploy_find_bar(true, window, cx);
+    }
+
+    fn find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_next_match(cx);
+    }
+
+    fn find_previous(&mut self, _: &FindPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_previous_match(cx);
+    }
+
+    /// Escape: closes the find bar if it's open, otherwise collapses the selection.
+    fn escape(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_bar.is_some() {
+            self.close_find(window, cx);
+        } else if !self.selection.is_empty() {
+            self.selection = Selection::caret(self.selection.head);
+            cx.notify();
+        } else {
+            cx.propagate();
         }
     }
 
@@ -943,7 +1130,10 @@ impl EntityInputHandler for Editor {
 
 impl Render for Editor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        // The find bar sits beside the text, not inside the "Editor" key context,
+        // so typing in it never triggers editor shortcuts.
+        let find_bar = self.find_bar.clone();
+        let text = div()
             .key_context("Editor")
             .track_focus(&self.focus_handle)
             .size_full()
@@ -984,11 +1174,21 @@ impl Render for Editor {
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::deploy_find))
+            .on_action(cx.listener(Self::deploy_replace))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_previous))
+            .on_action(cx.listener(Self::escape))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .child(EditorElement::new(cx.entity()))
+            .child(EditorElement::new(cx.entity()));
+        div()
+            .relative()
+            .size_full()
+            .child(text)
+            .when_some(find_bar, |editor, bar| editor.child(div().absolute().top(px(8.)).right(px(16.)).child(bar)))
     }
 }

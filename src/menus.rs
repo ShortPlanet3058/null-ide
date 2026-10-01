@@ -1,4 +1,5 @@
 use crate::editor::{Copy, Cut, Paste, Redo, Save, SelectAll, Undo};
+use crate::find_bar::{DeployFind, DeployReplace, FindNext, FindPrevious};
 use crate::workspace::{
     CloseTab, DecreaseFontSize, IncreaseFontSize, NextTab, Open, OpenSettings, PreviousTab, ResetFontSize,
     TogglePalette, ToggleSidebar, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
@@ -41,6 +42,11 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                 MenuItem::action("Copy", Copy),
                 MenuItem::action("Paste", Paste),
                 MenuItem::action("Select All", SelectAll),
+                MenuItem::separator(),
+                MenuItem::action("Find…", DeployFind),
+                MenuItem::action("Find Next", FindNext),
+                MenuItem::action("Find Previous", FindPrevious),
+                MenuItem::action("Replace…", DeployReplace),
             ],
         },
         Menu {

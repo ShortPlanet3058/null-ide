@@ -96,6 +96,22 @@ impl TextInput {
         &self.content
     }
 
+    /// Replaces the text and selects all of it, so typing starts over.
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.content = text.replace(['\n', '\r'], " ");
+        self.selected = 0..self.content.len();
+        self.reversed = false;
+        self.marked = None;
+        cx.emit(TextInputEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        self.selected = 0..self.content.len();
+        self.reversed = false;
+        cx.notify();
+    }
+
     fn cursor(&self) -> usize {
         if self.reversed { self.selected.start } else { self.selected.end }
     }

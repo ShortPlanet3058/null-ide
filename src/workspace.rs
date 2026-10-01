@@ -1,5 +1,6 @@
 use crate::editor::{Editor, EditorEvent, Redo, Save, SelectAll, Undo};
 use crate::file_tree::{FileTree, FileTreeEvent};
+use crate::find_bar::{DeployFind, DeployReplace};
 use crate::fonts::Fonts;
 use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
@@ -354,6 +355,8 @@ impl Workspace {
                 ("Undo".into(), Box::new(Undo)),
                 ("Redo".into(), Box::new(Redo)),
                 ("Select All".into(), Box::new(SelectAll)),
+                ("Find…".into(), Box::new(DeployFind)),
+                ("Replace…".into(), Box::new(DeployReplace)),
             ]);
         }
         commands.push(("Quit Null".into(), Box::new(Quit)));

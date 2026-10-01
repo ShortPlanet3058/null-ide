@@ -35,6 +35,7 @@ pub struct Prepaint {
     numbers: Vec<(ShapedLine, Point<Pixels>)>,
     lines: Vec<(ShapedLine, Point<Pixels>)>,
     selection: Vec<Bounds<Pixels>>,
+    matches: Vec<(Bounds<Pixels>, bool)>,
     marked: Vec<Bounds<Pixels>>,
     caret: Option<(Bounds<Pixels>, f32)>,
 }
@@ -224,11 +225,15 @@ impl Element for EditorElement {
                 })
                 .collect();
 
-            let mut selection = Vec::new();
-            if !selection_range.is_empty() {
-                let (start_line, start_col) = editor.buffer.point(selection_range.start);
-                let (end_line, end_col) = editor.buffer.point(selection_range.end);
-                for line in start_line.max(visible.start)..=end_line.min(visible.end.saturating_sub(1)) {
+            // Rectangles covering a char range on the visible lines, one per line.
+            let range_rects = |range: std::ops::Range<usize>| -> Vec<Bounds<Pixels>> {
+                let mut rects = Vec::new();
+                if range.is_empty() || visible.is_empty() {
+                    return rects;
+                }
+                let (start_line, start_col) = editor.buffer.point(range.start);
+                let (end_line, end_col) = editor.buffer.point(range.end);
+                for line in start_line.max(visible.start)..=end_line.min(visible.end - 1) {
                     let x0 = if line == start_line { x_of(line, start_col) } else { px(0.) };
                     let x1 = if line == end_line {
                         x_of(line, end_col)
@@ -236,11 +241,28 @@ impl Element for EditorElement {
                         shaped[line - visible.start].width + char_width * 0.6
                     };
                     if x1 > x0 {
-                        selection.push(Bounds::from_corners(
+                        rects.push(Bounds::from_corners(
                             point(origin.x + x0, row_top(line)),
                             point(origin.x + x1, row_top(line) + line_height),
                         ));
                     }
+                }
+                rects
+            };
+            let selection = range_rects(selection_range.clone());
+
+            // Search matches on screen; the current one is drawn with an outline.
+            let mut matches = Vec::new();
+            if let Some(search) = &editor.search {
+                let first_char = editor.buffer.line_to_char(visible.start);
+                let last_char = editor.buffer.line_to_char(visible.end);
+                let first = search.matches.partition_point(|m| m.end <= first_char);
+                for (i, m) in search.matches.iter().enumerate().skip(first) {
+                    if m.start > last_char {
+                        break;
+                    }
+                    let current = search.current == Some(i);
+                    matches.extend(range_rects(m.clone()).into_iter().map(|r| (r, current)));
                 }
             }
 
@@ -333,7 +355,7 @@ impl Element for EditorElement {
                 shaped,
             });
 
-            Prepaint { text_bounds, line_height, current_line, numbers, lines, selection, marked, caret }
+            Prepaint { text_bounds, line_height, current_line, numbers, lines, selection, matches, marked, caret }
         })
     }
 
@@ -360,6 +382,10 @@ impl Element for EditorElement {
             number.paint(*origin, line_height, window, cx).ok();
         }
         window.with_content_mask(Some(ContentMask { bounds: prepaint.text_bounds }), |window| {
+            for (rect, current) in &prepaint.matches {
+                let quad = fill(*rect, theme.find_match).corner_radii(px(3.));
+                window.paint_quad(if *current { quad.border_widths(px(1.)).border_color(theme.caret) } else { quad });
+            }
             for rect in &prepaint.selection {
                 window.paint_quad(fill(*rect, theme.selection).corner_radii(px(3.)));
             }
