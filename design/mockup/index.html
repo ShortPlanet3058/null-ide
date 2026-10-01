@@ -1,0 +1,1857 @@
+<title>Null IDE Mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=Instrument+Sans:wdth,wght@75..100,400..700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+/* Layout: one full-bleed editor surface. Chrome is a thin frame that recedes while you type;
+   AI only arrives as a layer that opens inside the code or floats above it, then leaves. */
+:root {
+  --ui: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --fs: 14px;
+  --lh: 24px;
+  --gw: 56px;
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  /* OLED (default when the viewer is dark) */
+  --bg: #000000; --surface: #08080a; --raised: rgba(20, 20, 24, .88); --solid: #141418;
+  --line: #1d1d22; --line-2: #2c2c33;
+  --fg: #ebe8e2; --muted: #8b8a92; --faint: #46464e;
+  --accent: #f2b35b; --accent-ink: #1b1206; --accent-soft: rgba(242, 179, 91, .14);
+  --sel: rgba(242, 179, 91, .22); --cur: #0b0b0e;
+  --add: rgba(104, 201, 140, .13); --add-fg: #86d6a2; --del: rgba(238, 104, 104, .12); --del-fg: #e88d8d;
+  --warn: #e6d27e; --scrim: rgba(0, 0, 0, .45);
+  --shadow: 0 24px 80px rgba(0, 0, 0, .7), 0 0 0 1px rgba(255, 255, 255, .07);
+  --k: #c6a6f6; --ty: #87c7e1; --fn: #f1d9a9; --st: #a9d59c; --nu: #f3a37e; --co: #5f626e; --ma: #7fd2c7; --pu: #8d8c96; --at: #9aa6ba;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #fcfcfb; --surface: #f4f4f2; --raised: rgba(255, 255, 255, .93); --solid: #ffffff;
+    --line: #e6e5e1; --line-2: #d4d3ce;
+    --fg: #1d1e22; --muted: #6a6b72; --faint: #b0b1b7;
+    --accent: #b4620c; --accent-ink: #ffffff; --accent-soft: rgba(180, 98, 12, .1);
+    --sel: rgba(180, 98, 12, .17); --cur: #f4f3ef;
+    --add: rgba(40, 150, 80, .12); --add-fg: #1f7a43; --del: rgba(200, 50, 50, .09); --del-fg: #b23a3a;
+    --warn: #9a7400; --scrim: rgba(20, 20, 25, .16);
+    --shadow: 0 24px 70px rgba(30, 30, 40, .16), 0 0 0 1px rgba(0, 0, 0, .07);
+    --k: #7a3ec8; --ty: #1e6c92; --fn: #8c4a00; --st: #3a7a2e; --nu: #b4461e; --co: #9a9ca3; --ma: #0f7f78; --pu: #6f7077; --at: #5c6b82;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"], .t-paper, html:root[data-ide="paper"] {
+  --bg: #fcfcfb; --surface: #f4f4f2; --raised: rgba(255, 255, 255, .93); --solid: #ffffff;
+  --line: #e6e5e1; --line-2: #d4d3ce;
+  --fg: #1d1e22; --muted: #6a6b72; --faint: #b0b1b7;
+  --accent: #b4620c; --accent-ink: #ffffff; --accent-soft: rgba(180, 98, 12, .1);
+  --sel: rgba(180, 98, 12, .17); --cur: #f4f3ef;
+  --add: rgba(40, 150, 80, .12); --add-fg: #1f7a43; --del: rgba(200, 50, 50, .09); --del-fg: #b23a3a;
+  --warn: #9a7400; --scrim: rgba(20, 20, 25, .16);
+  --shadow: 0 24px 70px rgba(30, 30, 40, .16), 0 0 0 1px rgba(0, 0, 0, .07);
+  --k: #7a3ec8; --ty: #1e6c92; --fn: #8c4a00; --st: #3a7a2e; --nu: #b4461e; --co: #9a9ca3; --ma: #0f7f78; --pu: #6f7077; --at: #5c6b82;
+  color-scheme: light;
+}
+.t-oled, html:root[data-ide="oled"] {
+  --bg: #000000; --surface: #08080a; --raised: rgba(20, 20, 24, .88); --solid: #141418;
+  --line: #1d1d22; --line-2: #2c2c33;
+  --fg: #ebe8e2; --muted: #8b8a92; --faint: #46464e;
+  --accent: #f2b35b; --accent-ink: #1b1206; --accent-soft: rgba(242, 179, 91, .14);
+  --sel: rgba(242, 179, 91, .22); --cur: #0b0b0e;
+  --add: rgba(104, 201, 140, .13); --add-fg: #86d6a2; --del: rgba(238, 104, 104, .12); --del-fg: #e88d8d;
+  --warn: #e6d27e; --scrim: rgba(0, 0, 0, .45);
+  --shadow: 0 24px 80px rgba(0, 0, 0, .7), 0 0 0 1px rgba(255, 255, 255, .07);
+  --k: #c6a6f6; --ty: #87c7e1; --fn: #f1d9a9; --st: #a9d59c; --nu: #f3a37e; --co: #5f626e; --ma: #7fd2c7; --pu: #8d8c96; --at: #9aa6ba;
+  color-scheme: dark;
+}
+.t-graphite, html:root[data-ide="graphite"] {
+  --bg: #131417; --surface: #18191d; --raised: rgba(34, 35, 40, .9); --solid: #212227;
+  --line: #26272d; --line-2: #35363d;
+  --fg: #e4e3e0; --muted: #8f8f98; --faint: #4d4e56;
+  --accent: #efb565; --accent-ink: #1b1206; --accent-soft: rgba(239, 181, 101, .14);
+  --sel: rgba(239, 181, 101, .2); --cur: #18191d;
+  --add: rgba(104, 201, 140, .13); --add-fg: #8ad7a5; --del: rgba(238, 104, 104, .12); --del-fg: #ea9393;
+  --warn: #e3d184; --scrim: rgba(0, 0, 0, .32);
+  --shadow: 0 24px 80px rgba(0, 0, 0, .5), 0 0 0 1px rgba(255, 255, 255, .07);
+  --k: #c4a8f0; --ty: #8ac6dd; --fn: #eed9b0; --st: #acd3a0; --nu: #f0a685; --co: #676a75; --ma: #84cfc5; --pu: #91909a; --at: #9ca7b8;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  margin: 0; overflow: hidden;
+  background: var(--bg); color: var(--fg);
+  font: 13px/1.45 var(--ui);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color .6s var(--ease), color .6s var(--ease);
+}
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+kbd {
+  font: 500 11px/1 var(--ui); color: var(--muted);
+  padding: 3px 5px; border-radius: 5px; border: 1px solid var(--line-2);
+  background: var(--surface); white-space: nowrap;
+}
+code { font-family: var(--mono); font-size: .92em; }
+
+/* ---------- app frame ---------- */
+.app {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-rows: 42px minmax(0, 1fr) 28px;
+  transition: grid-template-columns .38s var(--ease);
+}
+.app.no-sidebar { grid-template-columns: 0px minmax(0, 1fr); }
+.app.arriving { animation: arrive 1s var(--ease); }
+@keyframes arrive { from { opacity: 0; transform: scale(.985); filter: blur(8px); } }
+
+.chrome { transition: opacity .2s var(--ease); }
+body.typing .chrome { opacity: .1; transition: opacity .9s var(--ease) .15s; }
+body.typing .row .ln { color: color-mix(in srgb, var(--faint) 55%, transparent); }
+
+.titlebar {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.lights { display: flex; gap: 8px; flex: none; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; background: var(--line-2); transition: background .2s; }
+.lights:hover i:nth-child(1) { background: #ff5f57; }
+.lights:hover i:nth-child(2) { background: #febc2e; }
+.lights:hover i:nth-child(3) { background: #28c840; }
+.icon-btn {
+  width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center;
+  color: var(--muted); flex: none;
+}
+.icon-btn:hover { background: var(--line); color: var(--fg); }
+.icon-btn svg { width: 16px; height: 16px; }
+.tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; flex: 1; }
+.tab {
+  display: flex; align-items: center; gap: 8px;
+  height: 28px; padding: 0 8px 0 12px; border-radius: 7px;
+  color: var(--muted); white-space: nowrap;
+}
+.tab:hover { background: var(--line); }
+.tab.active { color: var(--fg); background: var(--line); }
+.tab .x { width: 16px; height: 16px; display: grid; place-items: center; border-radius: 4px; position: relative; }
+.tab .x::before { content: "×"; font-size: 14px; line-height: 1; opacity: 0; }
+.tab:hover .x::before, .tab.active .x::before { opacity: .7; }
+.tab.dirty .x::after { content: ""; position: absolute; width: 7px; height: 7px; border-radius: 50%; background: var(--fg); }
+.tab.dirty:hover .x::after { display: none; }
+.tab.only .x::before { display: none; }
+.title-name { color: var(--faint); font-size: 12px; white-space: nowrap; flex: none; }
+
+.sidebar {
+  grid-row: 2 / 3;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  overflow: hidden auto;
+  padding-block: 12px;
+  min-width: 0;
+}
+.app.no-sidebar .sidebar { border-right-color: transparent; }
+.tree-head {
+  padding: 4px 16px 10px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--faint); font-weight: 600; white-space: nowrap;
+}
+.tree button {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  height: 26px; padding: 0 16px; text-align: left; color: var(--muted); white-space: nowrap;
+}
+.tree button:hover { color: var(--fg); background: var(--line); }
+.tree button.active { color: var(--fg); background: var(--accent-soft); }
+.tree button.active .fdot { background: var(--accent); }
+.tree .nested { padding-left: 32px; }
+.chev { width: 10px; color: var(--faint); font-size: 10px; }
+.fdot { width: 6px; height: 6px; border-radius: 2px; background: var(--faint); flex: none; }
+
+.main { grid-row: 2 / 3; grid-column: 2 / 3; display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
+.crumbs {
+  display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 16px 0 calc(var(--gw) + 8px);
+  color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; flex: none;
+}
+.crumbs b { font-weight: 500; color: var(--muted); }
+.crumbs .sep { opacity: .6; }
+
+.scroll { flex: 1; overflow: auto; position: relative; min-height: 0; }
+.sheet { position: relative; min-width: 100%; padding-bottom: 40vh; cursor: text; }
+.lines { padding-top: 6px; font-family: var(--mono); font-size: var(--fs); line-height: var(--lh); }
+.row { display: flex; height: var(--lh); background: var(--bg); transition: opacity .35s var(--ease); }
+.row.cur { background: var(--cur); }
+.row .ln {
+  position: sticky; left: 0; z-index: 2; flex: 0 0 var(--gw);
+  padding: 0 16px; text-align: right; color: var(--faint);
+  background: inherit; user-select: none; font-variant-numeric: tabular-nums;
+  transition: color .6s var(--ease);
+}
+.row.cur .ln { color: var(--muted); }
+.row .tx { white-space: pre; padding-left: 8px; padding-right: 48px; }
+.row.dim { opacity: .26; }
+.row.in-scope .ln { box-shadow: inset -2px 0 0 var(--accent); }
+.row.add { background: linear-gradient(var(--add), var(--add)), var(--bg); }
+.row.add .ln { color: var(--add-fg); }
+.row.add.pending { display: none; }
+.row.del { background: linear-gradient(var(--del), var(--del)), var(--bg); }
+.row.del .ln { color: var(--del-fg); }
+.row.del .tx { opacity: .55; text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--del-fg) 60%, transparent); }
+.row.flash { animation: flash 1.4s var(--ease); }
+@keyframes flash { from { background: linear-gradient(var(--add), var(--add)), var(--bg); } }
+.stream-caret { display: inline-block; width: 2px; height: 1.1em; vertical-align: -0.2em; background: var(--accent); margin-left: 1px; }
+
+.k { color: var(--k); } .ty { color: var(--ty); } .fn { color: var(--fn); } .st { color: var(--st); }
+.nu { color: var(--nu); } .co { color: var(--co); font-style: italic; } .ma { color: var(--ma); }
+.pu { color: var(--pu); } .at { color: var(--at); } .hd { color: var(--k); font-weight: 500; }
+.diag { text-decoration: underline wavy var(--warn); text-decoration-thickness: 1px; text-underline-offset: 4px; }
+.ghost { color: var(--faint); font-style: italic; }
+.explaining .tx [data-x] { text-decoration: underline dotted var(--muted); text-underline-offset: 4px; cursor: help; }
+.explaining .tx .diag[data-x] { text-decoration: underline wavy var(--warn); }
+
+.caret {
+  position: absolute; top: 0; left: 0; width: 2px; height: var(--lh);
+  background: var(--accent); border-radius: 1px; z-index: 3; pointer-events: none;
+  transition: transform 90ms var(--ease), opacity .2s;
+}
+.caret.blink { animation: blink 1.1s ease-in-out infinite; }
+@keyframes blink { 0%, 45% { opacity: 1; } 60%, 90% { opacity: 0; } 100% { opacity: 1; } }
+.caret.unfocused { opacity: .35; animation: none; }
+.caret[hidden] { display: none; }
+.sel-layer { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.sel-layer i { position: absolute; background: var(--sel); border-radius: 3px; }
+#input { position: absolute; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; overflow: hidden; z-index: -1; }
+.probe { position: absolute; visibility: hidden; white-space: pre; font-family: var(--mono); font-size: var(--fs); }
+
+/* ---------- inline AI prompt: the code opens up to make room ---------- */
+.row.prompt-row { height: auto; background: var(--bg); }
+.prompt-wrap { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .34s var(--ease); flex: 1; min-width: 0; }
+.prompt-row.open .prompt-wrap { grid-template-rows: 1fr; }
+.prompt-inner { overflow: hidden; min-height: 0; }
+.prompt-slot { position: sticky; left: var(--gw); width: min(600px, calc(100vw - var(--gw) - 48px)); padding: 10px 0 12px 8px; }
+.ai-prompt {
+  font-family: var(--ui); font-size: 13px; line-height: 1.45;
+  background: var(--solid); border-radius: 12px; box-shadow: var(--shadow);
+  padding: 12px 12px 10px; display: grid; gap: 10px;
+}
+.ai-head { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.ai-head .grow { flex: 1; }
+.ai-mark { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+.ai-prompt.working .ai-mark { animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; transform: scale(.7); } }
+.ai-input {
+  width: 100%; border: 0; outline: 0; background: transparent; color: var(--fg);
+  font: 15px/1.4 var(--ui); padding: 2px 0;
+}
+.ai-input::placeholder { color: var(--faint); }
+.ai-input:focus-visible { outline: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--muted); font-size: 12px;
+}
+.chip:hover { color: var(--fg); border-color: var(--muted); }
+.chip.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.ai-status { color: var(--muted); font-size: 12px; }
+.ai-status .shimmer {
+  background: linear-gradient(90deg, var(--muted) 0%, var(--fg) 50%, var(--muted) 100%);
+  background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shimmer 1.4s linear infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+.ai-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ai-note { color: var(--faint); font-size: 12px; flex: 1 1 200px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px;
+  border-radius: 8px; border: 1px solid var(--line-2); color: var(--fg); white-space: nowrap;
+}
+.btn:hover { background: var(--line); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.06); background: var(--accent); }
+.btn.primary kbd { background: transparent; color: inherit; border-color: color-mix(in srgb, var(--accent-ink) 30%, transparent); }
+
+/* ---------- status bar ---------- */
+.status {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 16px;
+  padding: 0 16px; background: var(--surface); border-top: 1px solid var(--line);
+  color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; min-width: 0;
+}
+.status .grow { flex: 1; }
+.status button:hover { color: var(--fg); }
+.status .warncount::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); margin-right: 6px; }
+.status .pos { font-variant-numeric: tabular-nums; }
+.ai-pill { display: inline-flex; align-items: center; gap: 6px; }
+.ai-pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); opacity: .55; }
+.ai-pill.suggest i { opacity: 1; box-shadow: 0 0 0 3px var(--accent-soft); }
+.ai-pill.off i { background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); opacity: 1; }
+
+/* ---------- floating layers ---------- */
+.layer-scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 30; opacity: 0; transition: opacity .2s; }
+.layer-scrim.show { opacity: 1; }
+.palette, .answer {
+  position: fixed; left: 50%; z-index: 31;
+  width: min(640px, calc(100% - 32px));
+  background: var(--raised); -webkit-backdrop-filter: blur(28px) saturate(1.4); backdrop-filter: blur(28px) saturate(1.4);
+  border-radius: 14px; box-shadow: var(--shadow);
+  opacity: 0; transform: translate(-50%, -6px) scale(.985);
+  transition: opacity .16s var(--ease), transform .2s var(--ease);
+}
+.palette.show, .answer.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+.palette { top: 12%; overflow: hidden; }
+.pal-input {
+  width: 100%; border: 0; outline: 0; background: transparent; color: var(--fg);
+  font: 17px/1.3 var(--ui); padding: 18px 20px; border-bottom: 1px solid var(--line);
+}
+.pal-input::placeholder { color: var(--faint); }
+.pal-input:focus-visible { outline: 0; }
+.pal-list { max-height: min(380px, 50vh); overflow-y: auto; padding: 6px; }
+.pal-item {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  padding: 9px 14px; border-radius: 9px; color: var(--fg);
+}
+.pal-item .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal-item .lbl b { color: var(--accent); font-weight: 600; }
+.pal-item .sub { color: var(--faint); font-size: 12px; white-space: nowrap; }
+.pal-item .kind { width: 18px; color: var(--faint); font-size: 12px; text-align: center; flex: none; }
+.pal-item.sel { background: var(--accent-soft); }
+.pal-item.sel .kind { color: var(--accent); }
+.pal-item.hint { cursor: default; color: var(--muted); }
+.pal-foot { display: flex; gap: 14px; flex-wrap: wrap; padding: 10px 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+.answer { top: 72px; max-height: calc(100% - 150px); display: flex; flex-direction: column; width: min(700px, calc(100% - 32px)); }
+.answer-body { overflow-y: auto; padding: 22px 26px 8px; display: grid; gap: 14px; }
+.answer-q { font-size: 16px; font-weight: 600; text-wrap: balance; }
+.answer-q:not(:first-child) { margin-top: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+.answer-p { margin: 0; font-size: 14px; line-height: 1.6; max-width: 65ch; color: var(--fg); }
+.answer-p code { background: var(--line); padding: 1px 5px; border-radius: 4px; }
+.answer-code { position: relative; background: var(--bg); border-radius: 10px; border: 1px solid var(--line); overflow-x: auto; }
+.answer-code pre { margin: 0; padding: 14px 16px; font: 13px/1.6 var(--mono); }
+.answer-code .copy { position: absolute; top: 8px; right: 8px; font-size: 12px; color: var(--muted); padding: 3px 8px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); }
+.answer-code .copy:hover { color: var(--fg); }
+.answer-meta { color: var(--faint); font-size: 12px; }
+.answer-foot { display: flex; align-items: center; gap: 12px; padding: 12px 18px 14px 26px; border-top: 1px solid var(--line); }
+.answer-foot input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--fg); font: 14px var(--ui); }
+.answer-foot input::placeholder { color: var(--faint); }
+.answer-foot input:focus-visible { outline: 0; }
+.answer-foot span { color: var(--faint); font-size: 12px; white-space: nowrap; }
+
+.explain {
+  position: fixed; z-index: 40; width: min(380px, calc(100% - 32px));
+  background: var(--raised); -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4);
+  border-radius: 12px; box-shadow: var(--shadow); padding: 12px 14px; display: grid; gap: 8px;
+  opacity: 0; transform: translateY(3px); transition: opacity .14s, transform .16s var(--ease);
+}
+.explain.show { opacity: 1; transform: none; }
+.explain .sig { font: 12.5px/1.5 var(--mono); color: var(--fg); overflow-wrap: anywhere; }
+.explain .src { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+.explain .body { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.explain .body code { color: var(--fg); }
+.explain .warnline { color: var(--warn); font-size: 12.5px; }
+.explain .acts { display: flex; gap: 8px; flex-wrap: wrap; padding-top: 2px; }
+.explain .btn { height: 26px; font-size: 12px; padding: 0 10px; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 44px; z-index: 60; transform: translate(-50%, 8px);
+  background: var(--solid); color: var(--fg); box-shadow: var(--shadow);
+  padding: 9px 14px; border-radius: 10px; font-size: 13px; opacity: 0; pointer-events: none;
+  transition: opacity .18s, transform .22s var(--ease); max-width: calc(100% - 32px);
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- mockup guide (not part of the IDE) ---------- */
+.guide {
+  position: fixed; right: 16px; bottom: 40px; z-index: 20; width: 272px;
+  background: var(--raised); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px);
+  border-radius: 14px; box-shadow: var(--shadow); padding: 12px 8px 10px;
+}
+.guide-head { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 6px; }
+.guide-head b { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); font-weight: 600; }
+.guide-list { display: grid; }
+.guide-list button {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 8px; border-radius: 8px; text-align: left; color: var(--fg);
+}
+.guide-list button:hover { background: var(--line); }
+.guide-list .keys { display: flex; gap: 3px; flex: none; }
+.guide-note { color: var(--faint); font-size: 11.5px; padding: 8px 8px 0; line-height: 1.4; }
+.guide.collapsed { width: auto; padding: 0; border-radius: 999px; }
+.guide.collapsed .guide-body { display: none; }
+.guide-pill { display: none; padding: 8px 14px; font-size: 12px; color: var(--muted); }
+.guide.collapsed .guide-pill { display: block; }
+.guide.collapsed .guide-head { display: none; }
+
+/* ---------- first launch ---------- */
+.welcome {
+  position: fixed; inset: 0; z-index: 50; background: var(--bg); color: var(--fg);
+  transition: background-color .7s var(--ease), color .7s var(--ease), opacity .7s var(--ease);
+  overflow: hidden auto;
+}
+.welcome.leaving { opacity: 0; pointer-events: none; }
+.stage { min-height: 100%; display: none; }
+.welcome[data-stage="hello"] .stage-hello { display: grid; }
+.welcome[data-stage="setup"] .stage-setup { display: flex; }
+
+.stage-hello { grid-template-rows: auto 1fr auto; padding: 24px 16px 40px; }
+.wordmark { font: 500 15px/1 var(--mono); letter-spacing: -.01em; color: var(--fg); display: inline-flex; align-items: center; gap: 2px; }
+.wordmark i { width: 2px; height: 1.05em; background: var(--accent); border-radius: 1px; animation: blink 1.1s ease-in-out infinite; }
+.hello-center { display: grid; place-items: center; align-content: center; gap: 22px; text-align: center; }
+.hello-lines { position: relative; height: 1.3em; width: 100%; font-family: var(--mono); font-size: clamp(22px, 5.2vw, 56px); letter-spacing: -.02em; }
+.hello-line {
+  position: absolute; inset: 0; display: flex; justify-content: center; align-items: center; white-space: nowrap;
+  opacity: 0; filter: blur(10px); transform: translateY(10px);
+  transition: opacity .9s var(--ease), filter .9s var(--ease), transform .9s var(--ease);
+}
+.hello-line.on { opacity: 1; filter: none; transform: none; }
+.hello-line.off { opacity: 0; filter: blur(10px); transform: translateY(-10px); }
+.hello-line .hc { display: inline-block; width: .08em; min-width: 2px; height: 1em; margin-left: .06em; background: var(--accent); border-radius: 2px; }
+.hello-line.on .hc { animation: blink 1.1s ease-in-out infinite; }
+.hello-lang { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); height: 1.2em; transition: opacity .4s; }
+.hello-foot { display: grid; justify-items: center; gap: 14px; }
+.hello-tag { color: var(--muted); font-size: 15px; margin: 0; }
+.btn-begin {
+  display: inline-flex; align-items: center; gap: 10px; height: 44px; padding: 0 22px; border-radius: 999px;
+  background: var(--fg); color: var(--bg); font-weight: 600; font-size: 15px;
+  transition: transform .2s var(--ease), box-shadow .2s;
+}
+.btn-begin:hover { transform: translateY(-1px); box-shadow: 0 8px 30px color-mix(in srgb, var(--fg) 18%, transparent); }
+.btn-begin kbd { background: transparent; color: inherit; border-color: color-mix(in srgb, var(--bg) 35%, transparent); }
+.link { color: var(--faint); font-size: 13px; }
+.link:hover { color: var(--muted); }
+
+.stage-setup { flex-direction: column; padding: 24px 16px; gap: 20px; }
+.setup-top { display: flex; justify-content: space-between; align-items: center; }
+.step-count { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.steps { flex: 1; display: grid; align-items: center; justify-items: center; }
+.step { grid-area: 1 / 1; width: min(760px, 100%); display: none; gap: 22px; }
+.step.on { display: grid; animation: stepIn .6s var(--ease); }
+@keyframes stepIn { from { opacity: .3; transform: translateX(14px); } }
+.step h1 { font-size: clamp(26px, 4vw, 38px); font-weight: 600; font-stretch: 92%; letter-spacing: -.02em; margin: 0; text-wrap: balance; line-height: 1.1; }
+.step .sub { margin: -10px 0 0; color: var(--muted); font-size: 15px; max-width: 60ch; }
+.theme-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.theme-card { text-align: left; display: grid; align-content: start; gap: 10px; border-radius: 14px; padding: 6px; border: 1.5px solid transparent; transition: border-color .2s, transform .2s var(--ease); }
+.theme-card:hover { transform: translateY(-2px); }
+.theme-card.on { border-color: var(--accent); }
+.mini { background: var(--bg); color: var(--fg); border-radius: 10px; padding: 14px 14px 16px; font: 12px/1.7 var(--mono); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; white-space: pre; }
+.mini .mc { display: inline-block; width: 2px; height: 1.2em; vertical-align: -.25em; background: var(--accent); }
+.theme-card .nm { font-weight: 600; font-size: 14px; padding: 0 4px; }
+.theme-card .ds { color: var(--muted); font-size: 12.5px; padding: 0 4px 4px; margin-top: -6px; }
+
+.font-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.font-opt { text-align: left; padding: 14px; border-radius: 12px; border: 1.5px solid var(--line-2); display: grid; gap: 6px; transition: border-color .2s; }
+.font-opt.on { border-color: var(--accent); }
+.font-opt .smp { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.font-opt .nm { color: var(--muted); font-size: 12px; }
+.size-row { display: flex; align-items: center; gap: 14px; color: var(--muted); }
+.size-row input { flex: 1; accent-color: var(--accent); max-width: 280px; }
+.size-row output { font-variant-numeric: tabular-nums; color: var(--fg); width: 4em; }
+.type-preview { background: var(--surface); border-radius: 12px; padding: 16px 0; overflow-x: auto; font-family: var(--mono); font-size: var(--fs); line-height: var(--lh); box-shadow: inset 0 0 0 1px var(--line); }
+.type-preview div { white-space: pre; padding: 0 18px; }
+
+.choices { display: grid; gap: 10px; }
+.choices.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.choice { text-align: left; display: flex; gap: 14px; align-items: flex-start; padding: 14px 16px; border-radius: 12px; border: 1.5px solid var(--line-2); transition: border-color .2s, background .2s; }
+.choice:hover { background: var(--surface); }
+.choice.on { border-color: var(--accent); background: var(--accent-soft); }
+.choice .ring { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--faint); flex: none; margin-top: 2px; display: grid; place-items: center; }
+.choice.on .ring { border-color: var(--accent); }
+.choice.on .ring::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.choice .t { font-weight: 600; font-size: 14px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.choice .t small { font-weight: 500; color: var(--accent); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+.choice .d { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.sub-h { font-size: 13px; color: var(--muted); margin: 6px 0 -10px; }
+.fine { color: var(--faint); font-size: 12px; margin: -8px 0 0; }
+
+.setup-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: min(760px, 100%); margin: 0 auto; }
+.dots { display: flex; gap: 6px; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--line-2); transition: background .3s, width .3s var(--ease); }
+.dots i.on { background: var(--fg); width: 18px; border-radius: 3px; }
+.btn-ghost { height: 40px; padding: 0 16px; border-radius: 999px; color: var(--muted); }
+.btn-ghost:hover { color: var(--fg); background: var(--surface); }
+.btn-next { display: inline-flex; align-items: center; gap: 10px; height: 40px; padding: 0 20px; border-radius: 999px; background: var(--fg); color: var(--bg); font-weight: 600; }
+.btn-next kbd { background: transparent; color: inherit; border-color: color-mix(in srgb, var(--bg) 35%, transparent); }
+
+@media (max-width: 760px) {
+  .app { grid-template-columns: 0px minmax(0, 1fr); }
+  .app .sidebar { position: fixed; top: 42px; bottom: 28px; left: 0; width: 240px; z-index: 25; transform: translateX(-100%); transition: transform .3s var(--ease); box-shadow: var(--shadow); }
+  .app.mobile-tree .sidebar { transform: none; }
+  .title-name, .status .hide-sm { display: none; }
+  .theme-grid, .font-grid, .choices.two { grid-template-columns: minmax(0, 1fr); }
+  .guide { right: 16px; left: 16px; width: auto; }
+  .guide.collapsed { left: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; animation-iteration-count: 1 !important; }
+}
+</style>
+
+<div class="app" id="app">
+  <header class="titlebar chrome">
+    <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+    <button class="icon-btn" id="sbToggle" title="Toggle sidebar" aria-label="Toggle sidebar">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11"/></svg>
+    </button>
+    <nav class="tabs" id="tabs" aria-label="Open files"></nav>
+    <span class="title-name">null-ide</span>
+  </header>
+
+  <aside class="sidebar chrome" id="sidebar" aria-label="Files">
+    <div class="tree-head">null-ide</div>
+    <div class="tree" id="tree"></div>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="crumbs chrome" id="crumbs"></div>
+    <div class="scroll" id="scroll">
+      <div class="sheet" id="sheet">
+        <div class="sel-layer" id="selLayer"></div>
+        <div class="lines" id="lines"></div>
+        <div class="caret" id="caret"></div>
+        <textarea id="input" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Code editor"></textarea>
+      </div>
+    </div>
+  </main>
+
+  <footer class="status chrome" id="status"></footer>
+</div>
+
+<div class="guide chrome" id="guide">
+  <div class="guide-head"><b>Try the mockup</b><button class="icon-btn" id="guideMin" aria-label="Minimise guide" title="Minimise">–</button></div>
+  <div class="guide-body">
+    <div class="guide-list" id="guideList"></div>
+    <div class="guide-note">AI replies are scripted. No model is connected and nothing leaves this page.</div>
+  </div>
+  <button class="guide-pill" id="guidePill">Try the mockup</button>
+</div>
+
+<div class="layer-scrim" id="scrim" hidden></div>
+
+<div class="palette" id="palette" hidden role="dialog" aria-label="Command palette">
+  <input class="pal-input" id="palInput" placeholder="Search files and commands. Type ? to ask." autocomplete="off" spellcheck="false">
+  <div class="pal-list" id="palList" role="listbox"></div>
+  <div class="pal-foot" id="palFoot"></div>
+</div>
+
+<div class="answer" id="answer" hidden role="dialog" aria-label="Answer">
+  <div class="answer-body" id="answerBody"></div>
+  <div class="answer-foot">
+    <input id="followup" placeholder="Ask a follow-up" autocomplete="off">
+    <span>Esc puts this away</span>
+  </div>
+</div>
+
+<div class="explain" id="explain" hidden></div>
+<div class="toast" id="toast" role="status"></div>
+
+<div class="welcome t-oled" id="welcome" data-stage="hello" hidden>
+  <section class="stage stage-hello">
+    <div><span class="wordmark">null<i></i></span></div>
+    <div class="hello-center">
+      <div class="hello-lines" id="helloLines" aria-live="off"></div>
+      <div class="hello-lang" id="helloLang">Rust</div>
+    </div>
+    <div class="hello-foot">
+      <p class="hello-tag">A calm place to write code.</p>
+      <button class="btn-begin" id="begin">Begin <kbd>↵</kbd></button>
+      <button class="link" id="skip">Skip setup</button>
+    </div>
+  </section>
+
+  <section class="stage stage-setup">
+    <div class="setup-top"><span class="wordmark">null<i></i></span><span class="step-count" id="stepCount">1 of 4</span></div>
+    <div class="steps">
+      <div class="step" data-n="1">
+        <h1>Choose how Null looks</h1>
+        <p class="sub">You can switch any time from the command palette.</p>
+        <div class="theme-grid" id="themeGrid"></div>
+      </div>
+      <div class="step" data-n="2">
+        <h1>Pick a typeface you can read all day</h1>
+        <p class="sub">All three are free, monospaced and made for code.</p>
+        <div class="font-grid" id="fontGrid"></div>
+        <label class="size-row" for="fsize">Size <input type="range" id="fsize" min="12" max="18" step="1"> <output id="fsizeOut">14 px</output></label>
+        <div class="type-preview" id="typePreview"></div>
+      </div>
+      <div class="step" data-n="3">
+        <h1>Which shortcuts do your hands know?</h1>
+        <p class="sub">Null's own map keeps the common VS Code keys, and adds a few for the palette and AI.</p>
+        <div class="choices two" id="keyChoices"></div>
+      </div>
+      <div class="step" data-n="4">
+        <h1>How present should AI be?</h1>
+        <p class="sub">It never opens a panel on its own and never edits without showing you a diff.</p>
+        <div class="choices" id="aiChoices"></div>
+        <p class="sub-h">Where answers come from</p>
+        <div class="chips" id="modelChips"></div>
+        <p class="fine">Nothing is sent anywhere in this mockup.</p>
+      </div>
+    </div>
+    <div class="setup-nav">
+      <button class="btn-ghost" id="back">Back</button>
+      <div class="dots" id="dots"><i></i><i></i><i></i><i></i></div>
+      <button class="btn-next" id="next">Continue <kbd>↵</kbd></button>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+'use strict';
+const $ = (s, r = document) => r.querySelector(s);
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+const MOD = isMac ? '⌘' : 'Ctrl';
+const ALT = isMac ? '⌥' : 'Alt';
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const inl = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+
+/* ---------------- settings ---------------- */
+const KEY = 'null-mockup-v1';
+const S = { ide: null, font: 'Geist Mono', size: 14, keymap: 'Null', ai: 'oncall', model: 'later', onboarded: false, guide: true };
+try { Object.assign(S, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (e) {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
+
+/* ---------------- project files ---------------- */
+const SRC = {
+'src/buffer.rs': `use ropey::Rope;
+use std::ops::Range;
+
+/// Text storage for one open file. Backed by a rope, so edits stay
+/// fast even on very large files.
+pub struct Buffer {
+    text: Rope,
+    version: u64,
+    dirty: bool,
+}
+
+impl Buffer {
+    pub fn new() -> Self {
+        Self { text: Rope::new(), version: 0, dirty: false }
+    }
+
+    pub fn from_text(source: &str) -> Self {
+        Self { text: Rope::from_str(source), version: 0, dirty: false }
+    }
+
+    pub fn insert(&mut self, char_idx: usize, text: &str) {
+        self.text.insert(char_idx, text);
+        self.bump();
+    }
+
+    pub fn delete(&mut self, range: Range<usize>) {
+        self.text.remove(range);
+        self.bump();
+    }
+
+    pub fn line(&self, idx: usize) -> String {
+        self.text.line(idx).to_string()
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.text.len_lines()
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    fn bump(&mut self) {
+        self.version += 1;
+        self.dirty = true;
+    }
+}`,
+'src/main.rs': `mod app;
+mod buffer;
+mod caret;
+mod theme;
+
+use gpui::{App, Application};
+
+fn main() {
+    Application::new().run(|cx: &mut App| {
+        theme::init(cx);
+        app::open_window(cx);
+    });
+}`,
+'src/app.rs': `use gpui::{div, prelude::*, px, rgb, size, App, Bounds, Context, Window, WindowBounds, WindowOptions};
+
+struct Workspace;
+
+impl Render for Workspace {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().bg(rgb(0x000000))
+    }
+}
+
+pub fn open_window(cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        ..Default::default()
+    };
+    cx.open_window(options, |_, cx| cx.new(|_| Workspace)).unwrap();
+}`,
+'src/caret.rs': `use std::time::Duration;
+
+/// How long the caret takes to glide to a new position.
+pub const GLIDE: Duration = Duration::from_millis(90);
+
+/// The caret stays solid while you type and only starts
+/// blinking after this much idle time.
+pub const BLINK_DELAY: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caret {
+    pub line: usize,
+    pub column: usize,
+}`,
+'src/theme.rs': `use gpui::{rgb, App, Global, Hsla};
+
+/// The true-black theme. On OLED panels, black pixels are switched off.
+pub struct Theme {
+    pub background: Hsla,
+    pub foreground: Hsla,
+    pub caret: Hsla,
+    pub selection: Hsla,
+}
+
+impl Global for Theme {}
+
+impl Theme {
+    pub fn oled() -> Self {
+        Self {
+            background: rgb(0x000000).into(),
+            foreground: rgb(0xebe8e2).into(),
+            caret: rgb(0xf2b35b).into(),
+            selection: rgb(0x3a2c17).into(),
+        }
+    }
+}
+
+pub fn init(cx: &mut App) {
+    cx.set_global(Theme::oled());
+}`,
+'Cargo.toml': `[package]
+name = "null-ide"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "null"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "0.2"
+ropey = "1.6"`,
+'README.md': `# Null IDE
+
+A calm, fast code editor where nothing gets in your way.
+
+## Principles
+
+- Code first. No permanent side panels.
+- AI on demand, never in charge.
+- Speed is a feature.
+- Crafted details.`
+};
+const LANG = p => p.endsWith('.rs') ? 'rust' : p.endsWith('.toml') ? 'toml' : 'md';
+const FILES = {};
+for (const [p, t] of Object.entries(SRC)) FILES[p] = { path: p, lang: LANG(p), lines: t.split('\n'), caret: { l: 0, c: 0 }, anchor: null, undo: [], redo: [], dirty: false, scroll: 0 };
+{
+  const b = FILES['src/buffer.rs'];
+  const i = b.lines.findIndex(l => l.includes('self.text.insert'));
+  b.caret = { l: i, c: 8 };
+}
+const TREE = [
+  { dir: 'src', files: ['src/app.rs', 'src/buffer.rs', 'src/caret.rs', 'src/main.rs', 'src/theme.rs'] },
+  { file: 'Cargo.toml' }, { file: 'README.md' }
+];
+
+/* ---------------- editor state ---------------- */
+const ed = { path: 'src/buffer.rs', tabs: ['src/buffer.rs'], focus: false, prompt: null, ghost: null, history: [], lastEditAt: 0, dragging: false, goalX: null, focused: false };
+const cur = () => FILES[ed.path];
+const els = {
+  app: $('#app'), tabs: $('#tabs'), tree: $('#tree'), crumbs: $('#crumbs'), scroll: $('#scroll'), sheet: $('#sheet'),
+  lines: $('#lines'), caret: $('#caret'), sel: $('#selLayer'), input: $('#input'), status: $('#status')
+};
+let cw = 8.4, lh = 24, gw = 56;
+const TXPAD = 8, PADT = 6;
+
+/* ---------------- highlighting ---------------- */
+const RUST_KW = new Set('as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while'.split(' '));
+const PRIMS = new Set(['usize', 'u64', 'u32', 'u8', 'i32', 'i64', 'bool', 'str', 'char', 'f32', 'f64']);
+const RX = /(\/\/.*$)|("(?:\\.|[^"\\])*"?)|('(?:\\.|[^'\\])')|(#!?\[[^\]]*\]?)|(\b0x[0-9a-fA-F_]+\b|\b\d[\d_]*(?:\.\d+)?(?:[iu](?:8|16|32|64|128|size)|f32|f64)?\b)|([A-Za-z_][A-Za-z0-9_]*)(!?)|(\s+)|([^\sA-Za-z0-9_"'#/]+|\/|#|')/g;
+
+function hlRust(line, ctx = {}) {
+  let out = '', m, prev = '', prev2 = '';
+  RX.lastIndex = 0;
+  while ((m = RX.exec(line))) {
+    const [tok, com, str, chr, attr, num, id, bang, ws, pun] = m;
+    if (com) out += `<span class="co">${esc(com)}</span>`;
+    else if (str || chr) out += `<span class="st">${esc(tok)}</span>`;
+    else if (attr) out += `<span class="at">${esc(attr)}</span>`;
+    else if (num) out += `<span class="nu">${esc(num)}</span>`;
+    else if (id) {
+      const after = line.slice(RX.lastIndex).match(/^\s*(\(|::<)/);
+      let cls = '';
+      if (bang) cls = 'ma';
+      else if (RUST_KW.has(id)) cls = 'k';
+      else if (PRIMS.has(id) || /^[A-Z]/.test(id)) cls = 'ty';
+      else if (after || prev === 'fn') cls = 'fn';
+      let key = null;
+      if (ctx.docs) {
+        const scoped = (prev === '.' && prev2 === 'text') || (prev === '::' && prev2 === 'Rope') ? 'rope:' + id : null;
+        if (scoped && ctx.docs(scoped)) key = scoped;
+        else if (ctx.docs(id)) key = id;
+      }
+      const isDiag = ctx.diag && ctx.diag.word === id && !ctx.diagDone;
+      if (isDiag) { ctx.diagDone = true; key = 'diag:' + id; cls += ' diag'; }
+      const attrs = key ? ` data-x="${key}"` : '';
+      out += cls || attrs ? `<span class="${cls.trim()}"${attrs}>${id}</span>` : id;
+      if (bang) out += `<span class="ma">!</span>`;
+      prev2 = prev; prev = id;
+      continue;
+    } else if (ws) { out += ws; continue; }
+    else out += `<span class="pu">${esc(tok)}</span>`;
+    prev2 = prev; prev = tok;
+  }
+  return out;
+}
+function hlToml(line) {
+  if (/^\s*#/.test(line)) return `<span class="co">${esc(line)}</span>`;
+  if (/^\s*\[/.test(line)) return `<span class="k">${esc(line)}</span>`;
+  const m = line.match(/^(\s*)([\w.-]+)(\s*=\s*)(.*)$/);
+  if (!m) return esc(line);
+  const v = m[4];
+  const vh = /^"/.test(v) ? `<span class="st">${esc(v)}</span>` : /^(true|false)$/.test(v) ? `<span class="k">${v}</span>` : /^\d/.test(v) ? `<span class="nu">${esc(v)}</span>` : esc(v);
+  return `${m[1]}<span class="ty">${esc(m[2])}</span><span class="pu">${esc(m[3])}</span>${vh}`;
+}
+function hlMd(line) {
+  if (/^#/.test(line)) return `<span class="hd">${esc(line)}</span>`;
+  return esc(line).replace(/^(\s*)(-)/, '$1<span class="pu">$2</span>').replace(/`([^`]+)`/g, '<span class="st">`$1`</span>');
+}
+const hl = (line, lang, ctx) => lang === 'rust' ? hlRust(line, ctx) : lang === 'toml' ? hlToml(line) : hlMd(line);
+
+/* ---------------- structure helpers ---------------- */
+function stripForBraces(s) { return s.replace(/\/\/.*$/, '').replace(/"(?:\\.|[^"\\])*"/g, '""'); }
+function blockEnd(L, i) {
+  let depth = 0, opened = false;
+  for (let j = i; j < L.length; j++) {
+    for (const ch of stripForBraces(L[j])) {
+      if (ch === '{') { depth++; opened = true; }
+      else if (ch === '}') { depth--; if (opened && depth === 0) return j; }
+    }
+  }
+  return opened ? L.length - 1 : i;
+}
+function fnScope(f, l) {
+  if (f.lang !== 'rust') return null;
+  const L = f.lines;
+  for (let i = Math.min(l, L.length - 1); i >= 0; i--) {
+    const m = L[i].match(/^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)/);
+    if (m) { const e = blockEnd(L, i); return e >= l ? { s: i, e, name: m[2], ind: m[1] } : null; }
+  }
+  return null;
+}
+function implScope(f, l) {
+  if (f.lang !== 'rust') return null;
+  for (let i = Math.min(l, f.lines.length - 1); i >= 0; i--) {
+    const m = f.lines[i].match(/^impl(?:<[^>]*>)?\s+(.+?)\s*\{\s*$/);
+    if (m) return blockEnd(f.lines, i) >= l ? { s: i, name: m[1] } : null;
+  }
+  return null;
+}
+function diagnostics(f) {
+  if (f.path !== 'src/buffer.rs') return [];
+  const L = f.lines;
+  const l = L.findIndex(x => /pub fn new\(\)/.test(x));
+  if (l < 0 || L.some(x => /impl Default for Buffer/.test(x)) || L.some(x => /derive\([^)]*Default/.test(x))) return [];
+  return [{ l, word: 'new', msg: 'you should consider adding a `Default` implementation for `Buffer`' }];
+}
+
+/* ---------------- explanations (hold Alt) ---------------- */
+function docs(key) {
+  const f = cur();
+  const inBuf = f.path === 'src/buffer.rs';
+  const findLine = re => f.lines.findIndex(x => re.test(x)) + 1;
+  const D = {
+    'Rope': { sig: 'pub struct Rope', src: 'ropey 1.6 · rust-analyzer', body: 'A UTF-8 text rope. Inserts, removals and index lookups are O(log n), so a 100 MB file edits as smoothly as a small one.' },
+    'rope:new': { sig: 'pub fn new() -> Rope', src: 'ropey 1.6 · rust-analyzer', body: 'Creates an empty rope.' },
+    'rope:from_str': { sig: 'pub fn from_str(text: &str) -> Rope', src: 'ropey 1.6 · rust-analyzer', body: 'Creates a rope from a string slice. Runs in O(n).' },
+    'rope:insert': { sig: 'pub fn insert(&mut self, char_idx: usize, text: &str)', src: 'ropey 1.6 · rust-analyzer', body: 'Inserts `text` at char index `char_idx`.', warn: 'Panics if `char_idx > len_chars()`.' },
+    'rope:remove': { sig: 'pub fn remove<R>(&mut self, char_range: R)\nwhere R: RangeBounds<usize>', src: 'ropey 1.6 · rust-analyzer', body: 'Removes the chars in `char_range`.', warn: 'Panics if the start is after the end, or the end is out of bounds.' },
+    'rope:line': { sig: "pub fn line(&self, line_idx: usize) -> RopeSlice<'_>", src: 'ropey 1.6 · rust-analyzer', body: 'Returns the line at `line_idx`, including its line break.', warn: 'Panics if `line_idx` is out of bounds.' },
+    'rope:len_lines': { sig: 'pub fn len_lines(&self) -> usize', src: 'ropey 1.6 · rust-analyzer', body: 'Total number of lines. A trailing line break counts as one extra, empty line.' },
+    'Range': { sig: 'pub struct Range<Idx> {\n    pub start: Idx,\n    pub end: Idx,\n}', src: 'core::ops · rust-analyzer', body: 'A half-open range `start..end`: includes `start`, excludes `end`.' },
+    'usize': { sig: 'usize', src: 'primitive · rust-analyzer', body: 'An unsigned integer the size of a pointer: 64 bits on 64-bit targets. Rust uses it for indexes and lengths.' },
+    'u64': { sig: 'u64', src: 'primitive · rust-analyzer', body: 'A 64-bit unsigned integer.' },
+    'String': { sig: 'pub struct String', src: 'alloc::string · rust-analyzer', body: 'An owned, growable UTF-8 string.' },
+    'Self': { sig: 'Self', src: 'keyword · rust-analyzer', body: inBuf ? 'Inside an `impl` block, `Self` is the type being implemented. Here it means `Buffer`.' : 'Inside an `impl` block, `Self` is the type being implemented.' }
+  };
+  if (inBuf) {
+    const callers = f.lines.map((x, i) => x.includes('self.bump()') ? fnScope(f, i)?.name : null).filter(Boolean);
+    D.Buffer = { sig: 'pub struct Buffer', src: 'buffer.rs · rust-analyzer', body: `Defined on line ${findLine(/pub struct Buffer/)}. Holds the text of one open file.` };
+    D.bump = { sig: 'fn bump(&mut self)', src: 'buffer.rs · rust-analyzer', body: `Private helper on line ${findLine(/fn bump\(/)}. Called by ${callers.length ? callers.map(n => '`' + n + '`').join(' and ') : 'nothing yet'}.` };
+    D.version = { sig: 'version: u64', src: 'buffer.rs · rust-analyzer', body: 'Field. Goes up by one on every edit, so views can skip redrawing when nothing changed.' };
+    D.dirty = { sig: 'dirty: bool', src: 'buffer.rs · rust-analyzer', body: 'Field. `true` when the buffer has changes that are not saved yet.' };
+    D['diag:new'] = { sig: 'pub fn new() -> Self', src: 'clippy · warning', body: 'Types with a no-argument `new()` should usually implement `Default` as well.', warn: 'clippy::new_without_default', fix: true };
+  }
+  return D[key] || null;
+}
+const explainEl = $('#explain');
+let explainFor = null, explainSticky = false, altHeld = false, hoverEl = null;
+function showExplain(el, sticky = false) {
+  const key = el.dataset.x, d = docs(key);
+  if (!d) return;
+  explainFor = el; explainSticky = sticky;
+  const aiBtn = S.ai !== 'off' ? `<button class="btn" data-act="ask">Explain in context</button>` : '';
+  explainEl.innerHTML = `
+    <div class="src">${esc(d.src)}</div>
+    <div class="sig">${esc(d.sig).replace(/\n/g, '<br>').replace(/ {4}/g, '&nbsp;&nbsp;&nbsp;&nbsp;')}</div>
+    <div class="body">${inl(d.body)}</div>
+    ${d.warn ? `<div class="warnline">${inl(d.warn)}</div>` : ''}
+    ${d.fix || aiBtn ? `<div class="acts">${d.fix ? `<button class="btn primary" data-act="fix">Add impl Default</button>` : ''}${aiBtn}</div>` : ''}`;
+  explainEl.hidden = false;
+  const r = el.getBoundingClientRect(), w = explainEl.offsetWidth, h = explainEl.offsetHeight;
+  let x = Math.min(Math.max(16, r.left - 12), innerWidth - w - 16);
+  let y = r.bottom + 8;
+  if (y + h > innerHeight - 36) y = Math.max(8, r.top - h - 8);
+  explainEl.style.left = x + 'px'; explainEl.style.top = y + 'px';
+  requestAnimationFrame(() => explainEl.classList.add('show'));
+  explainEl.onclick = e => {
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (act === 'fix') { hideExplain(true); addDefaultImpl(); }
+    if (act === 'ask') { hideExplain(true); openAnswer(key.startsWith('diag:') ? 'Why does clippy want a Default impl?' : `Explain ${key.replace(/^rope:/, 'Rope::')} in this file`); }
+  };
+}
+function hideExplain(force = false) {
+  if (!explainFor) return;
+  if (!force && explainEl.matches(':hover')) return;
+  explainFor = null; explainSticky = false;
+  explainEl.classList.remove('show');
+  setTimeout(() => { if (!explainFor) explainEl.hidden = true; }, 160);
+}
+explainEl.addEventListener('mouseleave', () => { if (!altHeld && !explainSticky) hideExplain(); });
+
+/* ---------------- rendering ---------------- */
+function measure() {
+  const root = document.documentElement;
+  root.style.setProperty('--mono', `"${S.font}", ui-monospace, "SF Mono", Menlo, Consolas, monospace`);
+  lh = Math.round(S.size * 1.72);
+  root.style.setProperty('--fs', S.size + 'px');
+  root.style.setProperty('--lh', lh + 'px');
+  const p = document.createElement('span');
+  p.className = 'probe'; p.textContent = 'x'.repeat(200);
+  els.sheet.appendChild(p);
+  cw = p.getBoundingClientRect().width / 200 || 8.4;
+  p.remove();
+  const digits = Math.max(2, String(cur().lines.length).length);
+  gw = Math.ceil(digits * cw + 32);
+  root.style.setProperty('--gw', gw + 'px');
+}
+
+function render() { renderTabs(); renderTree(); renderCode(); renderStatus(); renderCrumbs(); }
+
+function renderTabs() {
+  els.tabs.innerHTML = ed.tabs.map(p => {
+    const f = FILES[p];
+    return `<button class="tab${p === ed.path ? ' active' : ''}${f.dirty ? ' dirty' : ''}${ed.tabs.length === 1 ? ' only' : ''}" data-p="${p}">${esc(p.split('/').pop())}<span class="x" data-close="${p}" aria-label="Close"></span></button>`;
+  }).join('');
+}
+function renderTree() {
+  const btn = (p, nested) => `<button class="${nested ? 'nested ' : ''}${p === ed.path ? 'active' : ''}" data-p="${p}"><span class="fdot"></span>${esc(p.split('/').pop())}</button>`;
+  els.tree.innerHTML = TREE.map(n => n.dir
+    ? `<button data-dir="${n.dir}"><span class="chev">▾</span>${n.dir}</button>${n.files.map(p => btn(p, true)).join('')}`
+    : btn(n.file, false).replace('<span class="fdot">', '<span class="chev"></span><span class="fdot">')).join('');
+}
+function renderCrumbs() {
+  const f = cur(), parts = ['null-ide', ...f.path.split('/')];
+  let html = parts.map((p, i) => i === parts.length - 1 ? `<b>${esc(p)}</b>` : esc(p)).join('<span class="sep">/</span>');
+  const im = implScope(f, f.caret.l), fn = fnScope(f, f.caret.l);
+  if (im) html += `<span class="sep">›</span>impl ${esc(im.name)}`;
+  if (fn) html += `<span class="sep">›</span>fn ${esc(fn.name)}`;
+  els.crumbs.innerHTML = html;
+}
+function renderStatus() {
+  const f = cur(), d = diagnostics(f);
+  const aiLabel = { off: 'AI off', oncall: 'AI on call', suggest: 'AI suggests' }[S.ai];
+  els.status.innerHTML = `
+    <span class="hide-sm">dev</span>
+    ${d.length ? `<button class="warncount" id="goWarn">${d.length} warning</button>` : '<span>No problems</span>'}
+    <span class="grow"></span>
+    <span class="pos">Ln ${f.caret.l + 1}, Col ${f.caret.c + 1}</span>
+    <span class="hide-sm">Spaces: 4</span>
+    <span class="hide-sm">${{ rust: 'Rust', toml: 'TOML', md: 'Markdown' }[f.lang]}</span>
+    ${S.keymap !== 'Null' ? `<span class="hide-sm">${esc(S.keymap)} keys</span>` : ''}
+    <button class="ai-pill ${S.ai}" id="aiPill" title="AI presence"><i></i>${aiLabel}</button>`;
+}
+
+function renderCode() {
+  const f = cur(), L = f.lines, P = ed.prompt && ed.prompt.path === f.path ? ed.prompt : null;
+  const dg = diagnostics(f)[0];
+  const scope = ed.focus && !P ? fnScope(f, f.caret.l) : null;
+  const out = [];
+  const row = (i, extra = '') => {
+    const ctx = { docs, diag: dg && dg.l === i ? dg : null };
+    const ghost = ed.ghost && ed.ghost.l === i && !P ? `<span class="ghost">${esc(ed.ghost.text)}</span>` : '';
+    const cls = ['row', extra];
+    if (!P && i === f.caret.l) cls.push('cur');
+    if (scope && (i < scope.s || i > scope.e)) cls.push('dim');
+    return `<div class="${cls.join(' ').trim()}" data-l="${i}"><span class="ln">${i + 1}</span><span class="tx">${hl(L[i], f.lang, ctx)}${ghost}</span></div>`;
+  };
+  for (let i = 0; i < L.length; i++) {
+    if (P && i === P.s) {
+      out.push(`<div class="row prompt-row${P.opened ? ' open' : ''}" id="promptRow"><span class="ln"></span><div class="prompt-wrap"><div class="prompt-inner"><div class="prompt-slot"></div></div></div></div>`);
+      if (P.ops) {
+        for (const op of P.ops) {
+          if (op.op === 'eq') out.push(row(P.s + op.i, 'in-scope'));
+          else if (op.op === 'del') out.push(row(P.s + op.i, 'in-scope del'));
+          else out.push(`<div class="row in-scope add pending" data-add="${op.n}"><span class="ln">+</span><span class="tx"></span></div>`);
+        }
+        i = P.e;
+        continue;
+      }
+    }
+    out.push(row(i, P && i >= P.s && i <= P.e ? 'in-scope' : ''));
+  }
+  els.lines.innerHTML = out.join('');
+  const longest = L.reduce((m, x) => Math.max(m, x.length), 0);
+  els.sheet.style.width = Math.max(els.scroll.clientWidth, gw + TXPAD + longest * cw + 80) + 'px';
+  if (P) {
+    $('.prompt-slot', els.lines).appendChild(P.el);
+    if (P.ops) paintAdds();
+  }
+  placeCaret();
+}
+
+function caretXY(l, c) { return { x: gw + TXPAD + c * cw, y: PADT + l * lh }; }
+let blinkTimer = null;
+function placeCaret() {
+  const f = cur();
+  const hide = !!ed.prompt;
+  els.caret.hidden = hide;
+  els.sel.innerHTML = '';
+  if (hide) return;
+  const { x, y } = caretXY(f.caret.l, f.caret.c);
+  els.caret.style.transform = `translate(${x}px, ${y}px)`;
+  els.caret.classList.remove('blink');
+  els.caret.classList.toggle('unfocused', !ed.focused);
+  clearTimeout(blinkTimer);
+  blinkTimer = setTimeout(() => els.caret.classList.add('blink'), 520);
+  els.input.style.transform = `translate(${x}px, ${y}px)`;
+  const r = selRange();
+  if (r) {
+    const parts = [];
+    for (let l = r.s.l; l <= r.e.l; l++) {
+      const c0 = l === r.s.l ? r.s.c : 0;
+      const c1 = l === r.e.l ? r.e.c : f.lines[l].length + 1;
+      if (c1 <= c0) continue;
+      const a = caretXY(l, c0);
+      parts.push(`<i style="left:${a.x}px;top:${a.y}px;width:${(c1 - c0) * cw}px;height:${lh}px"></i>`);
+    }
+    els.sel.innerHTML = parts.join('');
+  }
+}
+function scrollCaretIntoView() {
+  const f = cur(), { x, y } = caretXY(f.caret.l, f.caret.c), s = els.scroll;
+  if (y < s.scrollTop + lh) s.scrollTop = Math.max(0, y - lh * 3);
+  else if (y + lh * 2 > s.scrollTop + s.clientHeight) s.scrollTop = y - s.clientHeight + lh * 4;
+  if (x < s.scrollLeft + gw + 16) s.scrollLeft = Math.max(0, x - gw - 48);
+  else if (x > s.scrollLeft + s.clientWidth - 40) s.scrollLeft = x - s.clientWidth + 96;
+}
+function refresh(scroll = true) { renderCode(); renderTabs(); renderStatus(); renderCrumbs(); if (scroll) scrollCaretIntoView(); }
+
+/* ---------------- editing ---------------- */
+const cmp = (a, b) => a.l - b.l || a.c - b.c;
+function selRange() {
+  const f = cur();
+  if (!f.anchor || cmp(f.anchor, f.caret) === 0) return null;
+  return cmp(f.anchor, f.caret) < 0 ? { s: f.anchor, e: f.caret } : { s: f.caret, e: f.anchor };
+}
+function selText() {
+  const r = selRange(); if (!r) return '';
+  const L = cur().lines;
+  if (r.s.l === r.e.l) return L[r.s.l].slice(r.s.c, r.e.c);
+  return [L[r.s.l].slice(r.s.c), ...L.slice(r.s.l + 1, r.e.l), L[r.e.l].slice(0, r.e.c)].join('\n');
+}
+function snapshot(f) { return { lines: f.lines.slice(), caret: { ...f.caret }, anchor: f.anchor && { ...f.anchor } }; }
+function pushUndo(kind) {
+  const f = cur(), now = Date.now();
+  if (kind === 'type' && ed.lastKind === 'type' && now - ed.lastEditAt < 900) { ed.lastEditAt = now; return; }
+  f.undo.push(snapshot(f)); if (f.undo.length > 200) f.undo.shift();
+  f.redo = []; ed.lastKind = kind; ed.lastEditAt = now;
+}
+function restore(from, to) {
+  const f = cur(); if (!from.length) return;
+  to.push(snapshot(f));
+  const s = from.pop();
+  f.lines = s.lines; f.caret = s.caret; f.anchor = s.anchor; f.dirty = true;
+  ed.lastKind = null; refresh();
+}
+function deleteSel() {
+  const r = selRange(), f = cur();
+  if (!r) { f.anchor = null; return false; }
+  const L = f.lines;
+  L.splice(r.s.l, r.e.l - r.s.l + 1, L[r.s.l].slice(0, r.s.c) + L[r.e.l].slice(r.e.c));
+  f.caret = { ...r.s }; f.anchor = null;
+  return true;
+}
+function insertText(t) {
+  const f = cur();
+  deleteSel();
+  const L = f.lines, { l, c } = f.caret;
+  const head = L[l].slice(0, c), tail = L[l].slice(c), parts = t.split('\n');
+  if (parts.length === 1) { L[l] = head + t + tail; f.caret = { l, c: c + t.length }; }
+  else {
+    const last = parts[parts.length - 1];
+    L.splice(l, 1, head + parts[0], ...parts.slice(1, -1), last + tail);
+    f.caret = { l: l + parts.length - 1, c: last.length };
+  }
+}
+function edited() {
+  const f = cur(); f.dirty = true; ed.goalX = null;
+  updateGhost();
+  document.body.classList.add('typing');
+  refresh();
+}
+function updateGhost() {
+  ed.ghost = null;
+  const f = cur();
+  if (S.ai !== 'suggest' || f.lang !== 'rust' || selRange()) return;
+  const line = f.lines[f.caret.l];
+  if (f.caret.c !== line.length) return;
+  const t = line.trimStart();
+  if (t.length < 8 || !t.startsWith('pub fn ')) return;
+  const target = ['pub fn is_empty(&self) -> bool { self.text.len_chars() == 0 }', 'pub fn len_chars(&self) -> usize { self.text.len_chars() }', 'pub fn is_dirty(&self) -> bool { self.dirty }']
+    .find(g => g.startsWith(t) && g !== t);
+  if (target) ed.ghost = { l: f.caret.l, text: target.slice(t.length) };
+}
+function moveTo(l, c, extend) {
+  const f = cur();
+  if (extend) { if (!f.anchor) f.anchor = { ...f.caret }; } else f.anchor = null;
+  l = Math.max(0, Math.min(f.lines.length - 1, l));
+  c = Math.max(0, Math.min(f.lines[l].length, c));
+  f.caret = { l, c };
+  ed.ghost = null;
+  renderCode(); renderStatus(); renderCrumbs(); scrollCaretIntoView();
+}
+function wordJump(dir) {
+  const f = cur(), L = f.lines; let { l, c } = f.caret;
+  if (dir < 0) {
+    if (c === 0) return l > 0 ? [l - 1, L[l - 1].length] : [0, 0];
+    const before = L[l].slice(0, c).replace(/\s+$/, '');
+    const m = before.match(/(\w+|[^\w\s]+)$/);
+    return [l, m ? before.length - m[0].length : 0];
+  }
+  if (c >= L[l].length) return l < L.length - 1 ? [l + 1, 0] : [l, c];
+  const rest = L[l].slice(c), m = rest.match(/^\s*(\w+|[^\w\s]+)/);
+  return [l, c + (m ? m[0].length : rest.length)];
+}
+
+function onEditorKey(e) {
+  const f = cur(), mod = isMac ? e.metaKey : e.ctrlKey;
+  if (ed.prompt) return;
+  const k = e.key, sh = e.shiftKey;
+  const L = f.lines, { l, c } = f.caret;
+  const vert = d => {
+    if (ed.goalX == null) ed.goalX = c;
+    const goal = ed.goalX; moveTo(l + d, goal, sh); ed.goalX = goal;
+  };
+  switch (k) {
+    case 'ArrowLeft': e.preventDefault();
+      if (!sh && selRange()) { const r = selRange(); return moveTo(r.s.l, r.s.c); }
+      if (mod) return moveTo(l, L[l].search(/\S|$/) === c ? 0 : L[l].search(/\S|$/), sh);
+      if (e.altKey) { const [a, b] = wordJump(-1); return moveTo(a, b, sh); }
+      return c > 0 ? moveTo(l, c - 1, sh) : moveTo(l - 1, l > 0 ? L[l - 1].length : 0, sh);
+    case 'ArrowRight': e.preventDefault();
+      if (!sh && selRange()) { const r = selRange(); return moveTo(r.e.l, r.e.c); }
+      if (mod) return moveTo(l, L[l].length, sh);
+      if (e.altKey) { const [a, b] = wordJump(1); return moveTo(a, b, sh); }
+      return c < L[l].length ? moveTo(l, c + 1, sh) : (l < L.length - 1 ? moveTo(l + 1, 0, sh) : null);
+    case 'ArrowUp': e.preventDefault(); return mod ? moveTo(0, 0, sh) : vert(-1);
+    case 'ArrowDown': e.preventDefault(); return mod ? moveTo(L.length - 1, L[L.length - 1].length, sh) : vert(1);
+    case 'Home': e.preventDefault(); return moveTo(l, L[l].search(/\S|$/) === c ? 0 : L[l].search(/\S|$/), sh);
+    case 'End': e.preventDefault(); return moveTo(l, L[l].length, sh);
+    case 'Tab': e.preventDefault();
+      pushUndo('edit');
+      if (ed.ghost) { insertText(ed.ghost.text); ed.ghost = null; f.dirty = true; document.body.classList.add('typing'); return refresh(); }
+      insertText(' '.repeat(4 - (c % 4))); return edited();
+    case 'Enter': {
+      e.preventDefault(); pushUndo('edit');
+      if (selRange()) deleteSel();
+      const { l: l2, c: c2 } = f.caret, line = f.lines[l2];
+      const ind = line.match(/^\s*/)[0], before = line[c2 - 1], after = line[c2];
+      if (before === '{' && after === '}') { insertText('\n' + ind + '    \n' + ind); f.caret = { l: l2 + 1, c: ind.length + 4 }; }
+      else insertText('\n' + ind + (before === '{' ? '    ' : ''));
+      return edited();
+    }
+    case 'Backspace': {
+      e.preventDefault(); pushUndo('type');
+      if (deleteSel()) return edited();
+      if (c === 0 && l === 0) return;
+      if (c === 0) { const pl = L[l - 1].length; L[l - 1] += L[l]; L.splice(l, 1); f.caret = { l: l - 1, c: pl }; return edited(); }
+      if (mod) { L[l] = L[l].slice(c); f.caret = { l, c: 0 }; return edited(); }
+      let n = 1;
+      if (e.altKey) n = c - wordJump(-1)[1];
+      else if (/^ +$/.test(L[l].slice(0, c)) && c % 4 === 0) n = 4;
+      L[l] = L[l].slice(0, c - n) + L[l].slice(c); f.caret = { l, c: c - n };
+      return edited();
+    }
+    case 'Delete': {
+      e.preventDefault(); pushUndo('type');
+      if (deleteSel()) return edited();
+      if (c < L[l].length) L[l] = L[l].slice(0, c) + L[l].slice(c + 1);
+      else if (l < L.length - 1) { L[l] += L[l + 1]; L.splice(l + 1, 1); }
+      return edited();
+    }
+  }
+  if (mod && k.toLowerCase() === 'a') { e.preventDefault(); f.anchor = { l: 0, c: 0 }; f.caret = { l: L.length - 1, c: L[L.length - 1].length }; return placeCaret(); }
+  if (mod && k.toLowerCase() === 'z') { e.preventDefault(); return sh ? restore(f.redo, f.undo) : restore(f.undo, f.redo); }
+  if (mod && k.toLowerCase() === 'y' && !isMac) { e.preventDefault(); return restore(f.redo, f.undo); }
+}
+let composing = false;
+els.input.addEventListener('compositionstart', () => composing = true);
+els.input.addEventListener('compositionend', () => { composing = false; takeInput(); });
+els.input.addEventListener('input', () => { if (!composing) takeInput(); });
+function takeInput() {
+  const v = els.input.value; els.input.value = '';
+  if (!v || ed.prompt) return;
+  pushUndo('type'); insertText(v); edited();
+}
+els.input.addEventListener('keydown', onEditorKey);
+els.input.addEventListener('copy', e => { const t = selText(); if (t) { e.clipboardData.setData('text/plain', t); e.preventDefault(); } });
+els.input.addEventListener('cut', e => { const t = selText(); if (t) { e.clipboardData.setData('text/plain', t); e.preventDefault(); pushUndo('edit'); deleteSel(); edited(); } });
+els.input.addEventListener('paste', e => { const t = e.clipboardData.getData('text/plain'); e.preventDefault(); if (t && !ed.prompt) { pushUndo('edit'); insertText(t.replace(/\r\n?/g, '\n').replace(/\t/g, '    ')); edited(); } });
+els.input.addEventListener('focus', () => { ed.focused = true; els.caret.classList.remove('unfocused'); });
+els.input.addEventListener('blur', () => { ed.focused = false; els.caret.classList.add('unfocused'); });
+
+function pointToPos(e) {
+  const r = els.lines.getBoundingClientRect(), f = cur();
+  const l = Math.max(0, Math.min(f.lines.length - 1, Math.floor((e.clientY - r.top - PADT) / lh)));
+  const c = Math.max(0, Math.min(f.lines[l].length, Math.round((e.clientX - r.left - gw - TXPAD) / cw)));
+  return { l, c };
+}
+els.sheet.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  if (ed.prompt) { if (!e.target.closest('.ai-prompt')) { e.preventDefault(); ed.prompt.focus(); } return; }
+  if (e.target.closest('[data-x]') && (altHeld || e.altKey)) { e.preventDefault(); return showExplain(e.target.closest('[data-x]'), true); }
+  e.preventDefault();
+  const f = cur(), p = pointToPos(e);
+  if (e.detail === 2) {
+    const line = f.lines[p.l]; let a = p.c, b = p.c;
+    while (a > 0 && /\w/.test(line[a - 1])) a--;
+    while (b < line.length && /\w/.test(line[b])) b++;
+    f.anchor = { l: p.l, c: a }; f.caret = { l: p.l, c: b };
+  } else {
+    if (e.shiftKey) { if (!f.anchor) f.anchor = { ...f.caret }; } else f.anchor = { ...p };
+    f.caret = p; ed.dragging = true;
+  }
+  ed.goalX = null; ed.ghost = null;
+  els.input.focus({ preventScroll: true });
+  renderCode(); renderStatus(); renderCrumbs();
+});
+addEventListener('mousemove', e => {
+  if (ed.dragging) { cur().caret = pointToPos(e); placeCaret(); }
+});
+addEventListener('mouseup', () => {
+  if (!ed.dragging) return;
+  ed.dragging = false;
+  const f = cur(); if (f.anchor && cmp(f.anchor, f.caret) === 0) f.anchor = null;
+  renderCode(); renderStatus(); renderCrumbs();
+});
+
+/* ---------------- inline AI edit ---------------- */
+const DOC = {
+  new: ['Creates an empty buffer.'],
+  from_text: ['Creates a buffer holding a copy of `source`.'],
+  insert: ['Inserts `text` at `char_idx` and marks the buffer dirty.', '', '# Panics', '', 'Panics if `char_idx` is past the end of the buffer.'],
+  delete: ['Removes the characters in `range` and marks the buffer dirty.', '', '# Panics', '', 'Panics if `range` is out of bounds.'],
+  line: ['Returns line `idx`, including its line break.'],
+  line_count: ['Returns the number of lines. A trailing line break counts', 'as one extra, empty line.'],
+  version: ['Goes up by one on every edit, so views can skip redrawing', 'when nothing changed.'],
+  bump: ['Records an edit: bumps the version and marks the buffer dirty.'],
+  main: ['Starts the app: loads the theme, then opens the first window.'],
+  oled: ['The default theme: true black, so OLED pixels stay off.'],
+  init: ['Registers the default theme as a global.'],
+  open_window: ['Opens a centered 1280×800 workspace window.']
+};
+function suggestionsFor(name) {
+  const s = ['Add a doc comment'];
+  if (['insert', 'delete', 'line'].includes(name)) s.push('Clamp out-of-range indexes');
+  s.push('Add a trace log');
+  if (name) s.push(`Rename ${name} to …`);
+  return s;
+}
+function makeEdit(f, P, req) {
+  const old = f.lines.slice(P.s, P.e + 1), name = P.name, ind = P.ind || '';
+  const q = req.toLowerCase();
+  const ren = req.match(/rename\s+`?(\w+)`?\s+to\s+`?(\w+)`?/i);
+  if (ren) {
+    const re = new RegExp(`\\b${ren[1]}\\b`, 'g');
+    const lines = old.map(x => x.replace(re, ren[2]));
+    return lines.join('\n') === old.join('\n') ? { note: `\`${ren[1]}\` doesn't appear in this scope.` } : { lines, note: 'Only this scope was renamed. Callers elsewhere still use the old name.' };
+  }
+  if (!name) return { note: 'In this mockup, scripted edits work on whole functions. Put the caret inside a function and try again.' };
+  if (/clamp|bound|panic|safe|range|check|guard/.test(q)) {
+    const lines = old.slice();
+    if (name === 'insert') lines.splice(1, 0, `${ind}    let char_idx = char_idx.min(self.text.len_chars());`);
+    else if (name === 'delete') {
+      const i = lines.findIndex(x => x.includes('self.text.remove(range)'));
+      if (i < 0) return { note: 'This function has changed since the script was written.' };
+      lines.splice(i, 1, `${ind}    let end = range.end.min(self.text.len_chars());`, `${ind}    let start = range.start.min(end);`, `${ind}    self.text.remove(start..end);`);
+    } else if (name === 'line') lines.splice(1, 0, `${ind}    if idx >= self.text.len_lines() {`, `${ind}        return String::new();`, `${ind}    }`);
+    else return { note: `Nothing in \`${name}\` can index out of bounds. No changes needed.` };
+    return { lines, note: 'Out-of-range input is now clamped instead of panicking.' };
+  }
+  if (/log|trace|debug/.test(q)) {
+    const lines = old.slice(); lines.splice(1, 0, `${ind}    tracing::trace!("${name}");`);
+    return { lines, note: 'Needs the `tracing` crate in Cargo.toml.' };
+  }
+  const doc = DOC[name] || [`${name[0].toUpperCase()}${name.slice(1).replace(/_/g, ' ')}.`];
+  const fallback = !/doc|comment|document|explain/.test(q);
+  return { lines: [...doc.map(d => d ? `${ind}/// ${d}` : `${ind}///`), ...old], note: fallback ? 'This mockup only knows a few edits, so it wrote a doc comment instead.' : '' };
+}
+function diffLines(a, b) {
+  const n = a.length, m = b.length, dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const ops = []; let i = 0, j = 0, k = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ops.push({ op: 'eq', i }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push({ op: 'del', i }); i++; }
+    else { ops.push({ op: 'add', t: b[j], n: k++, j }); j++; }
+  }
+  while (i < n) ops.push({ op: 'del', i: i++ });
+  while (j < m) { ops.push({ op: 'add', t: b[j], n: k++, j }); j++; }
+  return ops;
+}
+function openPrompt() {
+  if (S.ai === 'off') return toast(`AI is off. Turn it on from the palette with “AI: On call”.`);
+  if (ed.prompt) return ed.prompt.focus();
+  closePalette(); closeAnswer(); hideExplain(true);
+  const f = cur(), r = selRange();
+  let s, e2, name = null, ind = '';
+  if (r) {
+    s = r.s.l; e2 = r.e.c === 0 && r.e.l > r.s.l ? r.e.l - 1 : r.e.l;
+    const fs = fnScope(f, s);
+    if (fs && fs.s === s && fs.e === e2) { name = fs.name; ind = fs.ind; }
+  } else {
+    const fs = fnScope(f, f.caret.l);
+    if (fs) { s = fs.s; e2 = fs.e; name = fs.name; ind = fs.ind; } else { s = e2 = f.caret.l; }
+  }
+  const el = document.createElement('div');
+  el.className = 'ai-prompt';
+  const label = name ? `Edit <code>fn ${esc(name)}</code>` : `Edit ${e2 > s ? `lines ${s + 1}–${e2 + 1}` : `line ${s + 1}`}`;
+  el.innerHTML = `
+    <div class="ai-head"><span class="ai-mark"></span><span>${label}</span><span class="grow"></span><kbd>Esc</kbd></div>
+    <input class="ai-input" id="aiInput" placeholder="Describe the change" autocomplete="off" spellcheck="false">
+    <div class="chips">${suggestionsFor(name).map(t => `<button class="chip" data-chip="${esc(t)}">${esc(t)}</button>`).join('')}</div>
+    <div class="ai-status" hidden></div>
+    <div class="ai-actions" hidden></div>`;
+  const input = $('.ai-input', el);
+  const P = ed.prompt = { path: f.path, s, e: e2, name, ind, el, input, phase: 'ask', opened: false, ops: null, reveal: 0, focus: () => (P.phase === 'ask' ? input : el).focus({ preventScroll: true }) };
+  el.tabIndex = -1;
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter' && input.value.trim()) { ev.preventDefault(); runPrompt(input.value.trim()); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closePrompt(); }
+  });
+  el.addEventListener('click', ev => {
+    const chip = ev.target.closest('[data-chip]');
+    if (chip && P.phase === 'ask') {
+      const t = chip.dataset.chip;
+      if (t.endsWith('…')) { input.value = t.replace('…', ''); input.focus(); }
+      else { input.value = t; runPrompt(t); }
+    }
+    const act = ev.target.closest('[data-act]')?.dataset.act;
+    if (act === 'accept') acceptPrompt();
+    if (act === 'reject') closePrompt();
+  });
+  els.input.blur();
+  renderCode();
+  const row = $('#promptRow');
+  row.getBoundingClientRect();
+  requestAnimationFrame(() => { row.classList.add('open'); P.opened = true; });
+  input.focus({ preventScroll: true });
+  setTimeout(() => {
+    const rr = row.getBoundingClientRect(), sr = els.scroll.getBoundingClientRect();
+    if (rr.top < sr.top + 20 || rr.bottom > sr.bottom - 120) els.scroll.scrollTo({ top: els.scroll.scrollTop + rr.top - sr.top - lh * 3, behavior: reduceMotion ? 'auto' : 'smooth' });
+  }, 60);
+}
+function runPrompt(req) {
+  const P = ed.prompt, f = FILES[P.path];
+  P.phase = 'gen';
+  P.input.readOnly = true;
+  $('.chips', P.el).hidden = true;
+  P.el.classList.add('working');
+  const st = $('.ai-status', P.el); st.hidden = false;
+  st.innerHTML = `<span class="shimmer">Writing a change for ${P.name ? 'fn ' + esc(P.name) : 'this selection'}…</span>`;
+  const res = makeEdit(f, P, req);
+  P.el.focus({ preventScroll: true });
+  setTimeout(() => {
+    if (ed.prompt !== P) return;
+    if (!res.lines) {
+      P.el.classList.remove('working'); P.phase = 'none';
+      st.innerHTML = inl(res.note);
+      showActions(P, false, '');
+      return;
+    }
+    P.newLines = res.lines;
+    P.ops = diffLines(f.lines.slice(P.s, P.e + 1), res.lines);
+    P.total = P.ops.filter(o => o.op === 'add').reduce((n, o) => n + o.t.length + 1, 0);
+    P.reveal = 0;
+    renderCode();
+    const tick = () => {
+      if (ed.prompt !== P) return;
+      P.reveal += reduceMotion ? 1e9 : 3 + Math.floor(Math.random() * 4);
+      paintAdds();
+      if (P.reveal < P.total) setTimeout(tick, 16);
+      else {
+        P.phase = 'ready'; P.el.classList.remove('working'); st.hidden = true;
+        showActions(P, true, res.note);
+      }
+    };
+    tick();
+  }, reduceMotion ? 0 : 650);
+}
+function showActions(P, canAccept, note) {
+  const a = $('.ai-actions', P.el); a.hidden = false;
+  a.innerHTML = (canAccept ? `<button class="btn primary" data-act="accept">Accept <kbd>Tab</kbd></button><button class="btn" data-act="reject">Reject <kbd>Esc</kbd></button>` : `<button class="btn" data-act="reject">Close <kbd>Esc</kbd></button>`) + (note ? `<span class="ai-note">${inl(note)}</span>` : '');
+  P.el.focus({ preventScroll: true });
+}
+function paintAdds() {
+  const P = ed.prompt; if (!P || !P.ops) return;
+  const f = FILES[P.path];
+  let left = P.reveal;
+  for (const op of P.ops) {
+    if (op.op !== 'add') continue;
+    const rowEl = els.lines.querySelector(`[data-add="${op.n}"]`); if (!rowEl) continue;
+    if (left <= 0) { rowEl.classList.add('pending'); continue; }
+    const shown = op.t.slice(0, left), done = left > op.t.length;
+    rowEl.classList.remove('pending');
+    $('.tx', rowEl).innerHTML = hl(shown, f.lang, {}) + (done ? '' : '<span class="stream-caret"></span>');
+    left -= op.t.length + 1;
+  }
+}
+function acceptPrompt() {
+  const P = ed.prompt; if (!P || P.phase !== 'ready') return;
+  const f = FILES[P.path];
+  pushUndo('edit');
+  f.lines.splice(P.s, P.e - P.s + 1, ...P.newLines);
+  const added = P.ops.filter(o => o.op === 'add').map(o => P.s + o.j);
+  f.caret = { l: P.s, c: f.lines[P.s].search(/\S|$/) }; f.anchor = null; f.dirty = true;
+  closePrompt(added);
+}
+function closePrompt(flash) {
+  const P = ed.prompt; if (!P) return;
+  P.ops = null; P.e = -1; P.phase = 'closing';
+  renderCode();
+  const row = $('#promptRow');
+  if (row) row.classList.remove('open');
+  setTimeout(() => {
+    if (ed.prompt !== P) return;
+    ed.prompt = null;
+    refresh(false);
+    if (Array.isArray(flash)) flash.forEach(l => els.lines.querySelector(`[data-l="${l}"]`)?.classList.add('flash'));
+    els.input.focus({ preventScroll: true });
+  }, reduceMotion ? 0 : 300);
+}
+function addDefaultImpl() {
+  const f = FILES['src/buffer.rs'];
+  if (ed.path !== f.path) openFile(f.path);
+  const i = f.lines.findIndex(x => /^impl Buffer\b/.test(x)); if (i < 0) return;
+  const end = blockEnd(f.lines, i);
+  pushUndo('edit');
+  const add = ['', 'impl Default for Buffer {', '    fn default() -> Self {', '        Self::new()', '    }', '}'];
+  f.lines.splice(end + 1, 0, ...add);
+  f.caret = { l: end + 2, c: 0 }; f.anchor = null; f.dirty = true;
+  refresh();
+  for (let k = 1; k < add.length; k++) els.lines.querySelector(`[data-l="${end + 1 + k}"]`)?.classList.add('flash');
+  toast('Added impl Default for Buffer. The warning is gone.');
+}
+
+/* ---------------- ask: answers float over the code ---------------- */
+const ans = { el: $('#answer'), body: $('#answerBody'), follow: $('#followup'), run: 0 };
+function answerFor(q) {
+  const t = q.toLowerCase(), f = cur();
+  if (/default|clippy|new_without/.test(t)) return [
+    { p: 'Clippy\'s `new_without_default` lint fires because `Buffer::new()` takes no arguments. By convention, a type like that also implements `Default`, so it works with `..Default::default()`, `unwrap_or_default()` and `#[derive(Default)]` on structs that contain it.' },
+    { p: 'The quick fix adds this after the `impl Buffer` block:' },
+    { code: 'impl Default for Buffer {\n    fn default() -> Self {\n        Self::new()\n    }\n}' },
+    { p: 'You could also derive it. `Rope`, `u64` and `bool` all implement `Default`, so `#[derive(Default)]` on `Buffer` gives the same result with less code.' }];
+  if (/rope|string|why/.test(t)) return [
+    { p: '`Buffer` keeps its text in a `Rope` instead of a `String` because editors insert and delete in the middle of files all the time.' },
+    { p: 'A `String` is one contiguous array. Typing near the top of a 50 MB file would copy everything after the caret on every keystroke. A rope is a balanced tree of small chunks, so an edit only touches the chunks along one path: O(log n) instead of O(n).' },
+    { p: 'Ropey also stores line-break counts inside the tree, which is why `line()` and `len_lines()` stay fast without scanning the whole file.' }];
+  if (/panic|bound|crash|safe/.test(t)) return [
+    { p: '`insert`, `delete` and `line` pass indexes straight to ropey, which panics when they are out of range.' },
+    { p: 'The editor normally clamps caret positions before calling them, but input from outside (an LSP edit, a plugin, a stale undo step) could still crash the app.' },
+    { p: 'Two options: clamp inside `Buffer`, which is forgiving but can hide bugs, or return a `Result`, which is explicit but adds noise at every call site. For an editor, clamping at this boundary and logging the bad index is the usual choice. Press ' + MOD + ' I inside `delete` and pick “Clamp out-of-range indexes” to see it.' }];
+  if (/test/.test(t)) return [
+    { p: 'This test checks that edits change the text and bump the version:' },
+    { code: '#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn edits_bump_version() {\n        let mut buf = Buffer::from_text("hello");\n        buf.insert(5, " world");\n        buf.delete(0..6);\n        assert_eq!(buf.line(0), "world");\n        assert_eq!(buf.version(), 2);\n    }\n}' },
+    { p: 'Paste it at the bottom of `buffer.rs` and run `cargo test`.' }];
+  if (/version|dirty/.test(t)) return [
+    { p: '`version` goes up on every edit through `bump()`. A view remembers the version it last drew, and skips reshaping text when the number hasn\'t changed. That keeps idle frames almost free.' },
+    { p: '`dirty` is separate: it tracks unsaved changes and would be reset on save. This file doesn\'t implement saving yet.' }];
+  const summaries = {
+    'src/buffer.rs': ['`buffer.rs` defines `Buffer`, the text storage behind every open file. It wraps a `ropey::Rope` and adds two pieces of bookkeeping: a `version` counter that goes up on every edit, and a `dirty` flag for unsaved changes.', 'The public API is small: create (`new`, `from_text`), edit (`insert`, `delete`) and read (`line`, `line_count`, `version`). Every edit goes through the private `bump()` helper, so the bookkeeping can\'t be forgotten.'],
+    'src/main.rs': ['`main.rs` is the entry point. It declares the modules, starts a GPUI `Application`, installs the theme and opens the first window.'],
+    'src/app.rs': ['`app.rs` opens the main window, centered at 1280×800, and renders an empty `Workspace` view filled with the theme background.'],
+    'src/caret.rs': ['`caret.rs` holds the caret position and the two timings that make it feel calm: a 90 ms glide between positions, and a 500 ms pause before blinking starts.'],
+    'src/theme.rs': ['`theme.rs` defines the OLED theme and registers it as a GPUI global so every view can read the same colors.'],
+    'Cargo.toml': ['`Cargo.toml` names the package `null-ide`, builds a binary called `null`, and depends on GPUI for the UI and ropey for text storage.'],
+    'README.md': ['The README states the project\'s principles: code first, AI on demand, speed, and crafted details.']
+  };
+  return summaries[f.path].map(p => ({ p }));
+}
+function openAnswer(q) {
+  if (S.ai === 'off') return toast(`AI is off. Turn it on from the palette with “AI: On call”.`);
+  closePalette(); hideExplain(true);
+  if (ans.el.hidden) {
+    ans.body.innerHTML = '';
+    showScrim(closeAnswer);
+    ans.el.hidden = false;
+    requestAnimationFrame(() => ans.el.classList.add('show'));
+  }
+  const blocks = answerFor(q);
+  ed.history = ed.history.filter(h => h !== q); ed.history.push(q);
+  const qEl = document.createElement('div'); qEl.className = 'answer-q'; qEl.textContent = q;
+  ans.body.appendChild(qEl);
+  const run = ++ans.run;
+  const meta = document.createElement('div'); meta.className = 'answer-meta'; meta.textContent = `About ${cur().path} · scripted answer`;
+  let bi = 0;
+  const next = () => {
+    if (run !== ans.run || ans.el.hidden) return;
+    if (bi >= blocks.length) { ans.body.appendChild(meta); ans.follow.focus({ preventScroll: true }); return; }
+    const b = blocks[bi++];
+    if (b.code) {
+      const wrap = document.createElement('div'); wrap.className = 'answer-code';
+      wrap.innerHTML = `<button class="copy">Copy</button><pre>${b.code.split('\n').map(x => hlRust(x)).join('\n')}</pre>`;
+      $('.copy', wrap).onclick = () => {
+        try { navigator.clipboard.writeText(b.code).then(() => toast('Copied'), () => toast('Copy was blocked. Select the code instead.')); } catch (e) { toast('Copy was blocked. Select the code instead.'); }
+      };
+      ans.body.appendChild(wrap);
+      ans.body.scrollTop = ans.body.scrollHeight;
+      setTimeout(next, reduceMotion ? 0 : 220);
+      return;
+    }
+    const p = document.createElement('p'); p.className = 'answer-p'; ans.body.appendChild(p);
+    const words = b.p.split(/(?<=\s)/); let w = 0;
+    const tick = () => {
+      if (run !== ans.run || ans.el.hidden) return;
+      w = reduceMotion ? words.length : Math.min(words.length, w + 2);
+      p.innerHTML = inl(words.slice(0, w).join(''));
+      ans.body.scrollTop = ans.body.scrollHeight;
+      if (w < words.length) setTimeout(tick, 28); else setTimeout(next, 120);
+    };
+    tick();
+  };
+  setTimeout(next, reduceMotion ? 0 : 380);
+}
+function closeAnswer() {
+  if (ans.el.hidden) return;
+  ans.run++;
+  ans.el.classList.remove('show'); hideScrim();
+  setTimeout(() => { ans.el.hidden = true; }, 180);
+  els.input.focus({ preventScroll: true });
+}
+ans.follow.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && ans.follow.value.trim()) { const q = ans.follow.value.trim(); ans.follow.value = ''; openAnswer(q); }
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeAnswer(); }
+});
+
+const scrim = $('#scrim'); let scrimClose = null;
+function showScrim(onClose) { scrimClose = onClose; scrim.hidden = false; requestAnimationFrame(() => scrim.classList.add('show')); }
+function hideScrim() { scrim.classList.remove('show'); setTimeout(() => { if (!scrim.classList.contains('show')) scrim.hidden = true; }, 200); }
+scrim.addEventListener('mousedown', () => scrimClose && scrimClose());
+
+/* ---------------- command palette ---------------- */
+const pal = { el: $('#palette'), input: $('#palInput'), list: $('#palList'), foot: $('#palFoot'), items: [], idx: 0 };
+function commands() {
+  const C = [];
+  const add = (label, run, sub = '') => C.push({ kind: '›', label, run, sub });
+  add('Edit with AI…', openPrompt, `${MOD} I`);
+  add('Ask about this file…', () => { pal.input.value = '?'; updatePalette(); return 'keep'; }, '?');
+  add('Toggle sidebar', toggleSidebar, `${MOD} B`);
+  add(ed.focus ? 'Turn off focus mode' : 'Focus mode: dim everything outside this function', toggleFocus);
+  if (diagnostics(cur()).length) add('Go to warning', goToWarning);
+  for (const [id, n] of [['oled', 'OLED'], ['graphite', 'Graphite'], ['paper', 'Paper'], [null, 'Match system']]) add(`Theme: ${n}`, () => setTheme(id), S.ide === id ? 'Current' : '');
+  for (const n of ['Geist Mono', 'JetBrains Mono', 'IBM Plex Mono']) add(`Font: ${n}`, () => setFont(n), S.font === n ? 'Current' : '');
+  add('Font size: Larger', () => setSize(S.size + 1), `${S.size} px`);
+  add('Font size: Smaller', () => setSize(S.size - 1), `${S.size} px`);
+  for (const [id, n] of [['off', 'Off'], ['oncall', 'On call'], ['suggest', 'Suggest while typing']]) add(`AI: ${n}`, () => setAI(id), S.ai === id ? 'Current' : '');
+  add('Save', saveFile, `${MOD} S`);
+  add('Replay the welcome', showWelcome);
+  return C;
+}
+function fuzzy(label, q) {
+  if (!q) return { score: 0, html: esc(label) };
+  const L = label.toLowerCase(), Q = q.toLowerCase();
+  let i = 0, score = 0, last = -2, html = '';
+  for (let k = 0; k < label.length; k++) {
+    if (i < Q.length && L[k] === Q[i]) { score += (k === last + 1 ? 3 : 1) + (k === 0 || /[\s/:._-]/.test(label[k - 1]) ? 2 : 0); last = k; i++; html += `<b>${esc(label[k])}</b>`; }
+    else html += esc(label[k]);
+  }
+  return i === Q.length ? { score, html } : null;
+}
+function updatePalette() {
+  const q = pal.input.value;
+  let items = [];
+  if (q.startsWith('?')) {
+    const t = q.slice(1).trim();
+    if (S.ai === 'off') items.push({ kind: '', label: 'AI is off', sub: 'Choose “AI: On call” to ask questions', hint: true });
+    else {
+      if (t) items.push({ kind: '?', label: t, sub: `Ask about ${cur().path.split('/').pop()}`, run: () => openAnswer(t) });
+      else items.push({ kind: '', label: 'Type a question about this file', sub: 'The answer floats over your code', hint: true });
+      const recent = [...ed.history].reverse().slice(0, 3).filter(h => h !== t);
+      recent.forEach(h => items.push({ kind: '↺', label: h, sub: 'Recent', run: () => openAnswer(h) }));
+      if (!t) ['Why a rope instead of a String?', 'What could make this panic?', 'Write a test for version bumps']
+        .filter(s => !recent.includes(s)).forEach(s => items.push({ kind: '?', label: s, sub: 'Suggested', run: () => openAnswer(s) }));
+    }
+    pal.foot.innerHTML = `<span><kbd>↵</kbd> ask</span><span><kbd>Esc</kbd> close</span><span>Answers float over your code and leave when you're done.</span>`;
+  } else {
+    const files = Object.keys(FILES).map(p => ({ kind: '·', label: p, sub: p === ed.path ? 'Open' : '', run: () => openFile(p) }));
+    const all = [...files, ...commands()];
+    items = all.map(it => ({ it, m: fuzzy(it.label, q) })).filter(x => x.m)
+      .sort((a, b) => b.m.score - a.m.score).map(x => ({ ...x.it, html: x.m.html }));
+    if (!q) items = [...commands().slice(0, 4), ...files];
+    if (!items.length) items = [{ kind: '', label: 'No matches', sub: 'Type ? to ask instead', hint: true }];
+    pal.foot.innerHTML = `<span><kbd>↑</kbd> <kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>?</kbd> ask about this file</span>`;
+  }
+  pal.items = items; pal.idx = items.findIndex(x => !x.hint); if (pal.idx < 0) pal.idx = 0;
+  drawPalette();
+}
+function drawPalette() {
+  pal.list.innerHTML = pal.items.map((x, i) => `<button class="pal-item${i === pal.idx && !x.hint ? ' sel' : ''}${x.hint ? ' hint' : ''}" data-i="${i}" role="option"><span class="kind">${x.kind}</span><span class="lbl">${x.html || esc(x.label)}</span><span class="sub">${esc(x.sub || '')}</span></button>`).join('');
+  pal.list.querySelector('.sel')?.scrollIntoView({ block: 'nearest' });
+}
+function runPaletteItem(i) {
+  const x = pal.items[i]; if (!x || x.hint || !x.run) return;
+  const keep = x.run === undefined ? null : null;
+  closePalette(true);
+  const r = x.run();
+  if (r === 'keep') openPalette(pal.input.value);
+}
+function openPalette(prefix = '') {
+  closeAnswer(); hideExplain(true);
+  if (ed.prompt) closePrompt();
+  pal.input.value = prefix;
+  if (pal.el.hidden) { showScrim(() => closePalette()); pal.el.hidden = false; requestAnimationFrame(() => pal.el.classList.add('show')); }
+  updatePalette();
+  pal.input.focus();
+}
+function closePalette(silent) {
+  if (pal.el.hidden) return;
+  pal.el.classList.remove('show'); hideScrim();
+  setTimeout(() => { if (!pal.el.classList.contains('show')) pal.el.hidden = true; }, 160);
+  if (!silent) els.input.focus({ preventScroll: true });
+}
+pal.input.addEventListener('input', updatePalette);
+pal.input.addEventListener('keydown', e => {
+  const n = pal.items.length;
+  if (e.key === 'ArrowDown') { e.preventDefault(); do pal.idx = (pal.idx + 1) % n; while (pal.items[pal.idx].hint && pal.items.some(x => !x.hint)); drawPalette(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); do pal.idx = (pal.idx - 1 + n) % n; while (pal.items[pal.idx].hint && pal.items.some(x => !x.hint)); drawPalette(); }
+  else if (e.key === 'Enter') { e.preventDefault(); runPaletteItem(pal.idx); }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePalette(); }
+});
+pal.list.addEventListener('mousemove', e => { const b = e.target.closest('[data-i]'); if (b && +b.dataset.i !== pal.idx && !pal.items[+b.dataset.i].hint) { pal.idx = +b.dataset.i; drawPalette(); } });
+pal.list.addEventListener('click', e => { const b = e.target.closest('[data-i]'); if (b) runPaletteItem(+b.dataset.i); });
+
+/* ---------------- actions ---------------- */
+function openFile(p) {
+  const prev = cur(); prev.scroll = els.scroll.scrollTop;
+  if (!ed.tabs.includes(p)) ed.tabs.push(p);
+  ed.path = p; ed.ghost = null;
+  measure(); render();
+  els.scroll.scrollTop = FILES[p].scroll || 0;
+  els.input.focus({ preventScroll: true });
+}
+function closeTab(p) {
+  if (ed.tabs.length === 1) return;
+  const i = ed.tabs.indexOf(p); ed.tabs.splice(i, 1);
+  if (p === ed.path) openFile(ed.tabs[Math.max(0, i - 1)]); else renderTabs();
+}
+function toggleSidebar() {
+  if (matchMedia('(max-width: 760px)').matches) els.app.classList.toggle('mobile-tree');
+  else els.app.classList.toggle('no-sidebar');
+  setTimeout(() => renderCode(), 400);
+}
+function toggleFocus() { ed.focus = !ed.focus; renderCode(); toast(ed.focus ? 'Focus mode on. Code outside the current function fades back.' : 'Focus mode off'); }
+function goToWarning() { const d = diagnostics(cur())[0]; if (!d) return; const c = cur().lines[d.l].indexOf(d.word); moveTo(d.l, c); els.input.focus(); }
+function saveFile() { const f = cur(); f.dirty = false; renderTabs(); toast(`Saved ${f.path.split('/').pop()}`); }
+function setTheme(id) { S.ide = id; save(); applyTheme(); }
+function applyTheme() { if (S.ide) document.documentElement.dataset.ide = S.ide; else delete document.documentElement.dataset.ide; }
+function setFont(n) { S.font = n; save(); loadFont().then(() => { measure(); renderCode(); }); }
+function setSize(n) { S.size = Math.max(11, Math.min(20, n)); save(); measure(); renderCode(); scrollCaretIntoView(); }
+function setAI(id) { S.ai = id; save(); renderStatus(); if (id === 'off') { closeAnswer(); if (ed.prompt) closePrompt(); } toast({ off: 'AI is off. Nothing AI-related will appear.', oncall: `AI is on call. Press ${MOD} I or ask from the palette.`, suggest: 'AI suggests while typing. Try typing “pub fn is” inside impl Buffer.' }[id]); }
+function loadFont() { try { return document.fonts.load(`${S.size}px "${S.font}"`).catch(() => {}); } catch (e) { return Promise.resolve(); } }
+
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+els.tabs.addEventListener('click', e => {
+  const x = e.target.closest('[data-close]'); if (x && ed.tabs.length > 1) { e.stopPropagation(); return closeTab(x.dataset.close); }
+  const t = e.target.closest('[data-p]'); if (t) openFile(t.dataset.p);
+});
+els.tree.addEventListener('click', e => { const t = e.target.closest('[data-p]'); if (t) { openFile(t.dataset.p); els.app.classList.remove('mobile-tree'); } });
+$('#sbToggle').addEventListener('click', toggleSidebar);
+els.status.addEventListener('click', e => {
+  if (e.target.closest('#goWarn')) goToWarning();
+  if (e.target.closest('#aiPill')) S.ai === 'off' ? openPalette('AI: ') : openPalette('?');
+});
+
+/* ---------------- global keys ---------------- */
+document.addEventListener('keydown', e => {
+  const mod = isMac ? e.metaKey : e.ctrlKey, k = e.key.toLowerCase();
+  if (!$('#welcome').hidden) return welcomeKey(e);
+  if (e.key === 'Alt') {
+    altHeld = true; document.body.classList.add('explaining');
+    if (hoverEl) showExplain(hoverEl);
+    return;
+  }
+  if (mod && k === 'k') { e.preventDefault(); return pal.el.hidden ? openPalette() : closePalette(); }
+  if (mod && k === 'p') { e.preventDefault(); return openPalette(); }
+  if (mod && k === 'i') { e.preventDefault(); return openPrompt(); }
+  if (mod && k === 'b') { e.preventDefault(); return toggleSidebar(); }
+  if (mod && k === 's') { e.preventDefault(); return saveFile(); }
+  if (e.key === 'Escape') {
+    if (explainFor) return hideExplain(true);
+    if (!ans.el.hidden) return closeAnswer();
+    if (!pal.el.hidden) return closePalette();
+    if (ed.prompt) { e.preventDefault(); return closePrompt(); }
+    const f = cur(); if (f.anchor) { f.anchor = null; placeCaret(); }
+    if (ed.ghost) { ed.ghost = null; renderCode(); }
+    return;
+  }
+  if (ed.prompt && ed.prompt.phase === 'ready' && (e.key === 'Tab' || (mod && e.key === 'Enter'))) { e.preventDefault(); return acceptPrompt(); }
+  if (ed.prompt && ed.prompt.phase === 'none' && e.key === 'Enter') { e.preventDefault(); return closePrompt(); }
+});
+document.addEventListener('keyup', e => {
+  if (e.key === 'Alt') { altHeld = false; document.body.classList.remove('explaining'); if (!explainSticky) hideExplain(); }
+});
+addEventListener('blur', () => { altHeld = false; document.body.classList.remove('explaining'); });
+let lastMove = { x: 0, y: 0 };
+document.addEventListener('mousemove', e => {
+  if (Math.abs(e.clientX - lastMove.x) + Math.abs(e.clientY - lastMove.y) > 6) { document.body.classList.remove('typing'); lastMove = { x: e.clientX, y: e.clientY }; }
+  const h = e.target.closest ? e.target.closest('.tx [data-x]') : null;
+  if (h !== hoverEl) {
+    hoverEl = h;
+    if (altHeld) { if (h) showExplain(h); else if (!explainEl.contains(e.target)) hideExplain(); }
+  }
+});
+document.addEventListener('mousedown', e => { if (explainSticky && !explainEl.contains(e.target)) hideExplain(true); }, true);
+
+/* ---------------- mockup guide ---------------- */
+const GUIDE = [
+  { t: 'Command palette', keys: [MOD, 'K'], run: () => openPalette() },
+  { t: 'Edit a function with AI', keys: [MOD, 'I'], run: () => { els.input.focus(); openPrompt(); } },
+  { t: 'Explain a symbol', keys: ['Hold ' + ALT], run: () => { const el = els.lines.querySelector('[data-x="rope:insert"]') || els.lines.querySelector('[data-x]'); if (el) { el.scrollIntoView({ block: 'center' }); setTimeout(() => showExplain(el, true), 60); } } },
+  { t: 'Ask about this file', keys: [MOD, 'K', '?'], run: () => openPalette('?') },
+  { t: 'Fix the warning', keys: [], run: () => { const el = els.lines.querySelector('.diag'); if (el) { el.scrollIntoView({ block: 'center' }); setTimeout(() => showExplain(el, true), 60); } else toast('No warnings left.'); } },
+  { t: 'Focus mode', keys: [], run: toggleFocus },
+  { t: 'Hide the sidebar', keys: [MOD, 'B'], run: toggleSidebar },
+  { t: 'Replay the welcome', keys: [], run: () => showWelcome() }
+];
+$('#guideList').innerHTML = GUIDE.map((g, i) => `<button data-g="${i}"><span>${g.t}</span><span class="keys">${g.keys.map(k => `<kbd>${k}</kbd>`).join('')}</span></button>`).join('');
+$('#guideList').addEventListener('click', e => { const b = e.target.closest('[data-g]'); if (b) GUIDE[+b.dataset.g].run(); });
+const guide = $('#guide');
+const setGuide = open => { guide.classList.toggle('collapsed', !open); S.guide = open; save(); };
+$('#guideMin').addEventListener('click', () => setGuide(false));
+$('#guidePill').addEventListener('click', () => setGuide(true));
+
+/* ---------------- first launch ---------------- */
+const W = $('#welcome');
+const HELLO = [['Rust', 'println!("hello");'], ['Python', 'print("hello")'], ['JavaScript', 'console.log("hello")'], ['Go', 'fmt.Println("hello")'], ['Ruby', 'puts "hello"'], ['C', 'printf("hello\\n");'], ['Elixir', 'IO.puts "hello"']];
+let helloTimer = null, helloIdx = 0, step = 1;
+$('#helloLines').innerHTML = HELLO.map(([, code], i) => `<div class="hello-line${i === 0 ? ' on' : ''}">${hlRust(code)}<span class="hc"></span></div>`).join('');
+function cycleHello() {
+  const lines = W.querySelectorAll('.hello-line'), lang = $('#helloLang');
+  const prev = lines[helloIdx]; helloIdx = (helloIdx + 1) % HELLO.length;
+  prev.classList.remove('on'); prev.classList.add('off');
+  setTimeout(() => prev.classList.remove('off'), 900);
+  lines[helloIdx].classList.add('on');
+  lang.style.opacity = 0;
+  setTimeout(() => { lang.textContent = HELLO[helloIdx][0]; lang.style.opacity = 1; }, 400);
+}
+const MINI = ['fn greet(name: &str) {', '    println!("hi, {name}");', '}'];
+$('#themeGrid').innerHTML = [['oled', 'OLED', 'True black. On OLED screens, those pixels are off.'], ['graphite', 'Graphite', 'Soft charcoal for long sessions.'], ['paper', 'Paper', 'Light, for bright rooms.']]
+  .map(([id, n, d]) => `<button class="theme-card" data-theme-pick="${id}"><div class="mini t-${id}">${MINI.map((l, i) => hlRust(l) + (i === 1 ? '<span class="mc"></span>' : '')).join('\n')}</div><span class="nm">${n}</span><span class="ds">${d}</span></button>`).join('');
+$('#fontGrid').innerHTML = ['Geist Mono', 'JetBrains Mono', 'IBM Plex Mono'].map(n => `<button class="font-opt" data-font="${n}"><span class="smp" style="font-family:'${n}', monospace">let caret = Caret::new();</span><span class="nm">${n}</span></button>`).join('');
+const PREVIEW = FILES['src/buffer.rs'].lines.slice(19, 26);
+$('#typePreview').innerHTML = PREVIEW.map(l => `<div>${hlRust(l) || ' '}</div>`).join('');
+const KEYMAPS = [['Null', 'VS Code basics, plus Null\'s palette and AI keys.'], ['VS Code', 'The bindings you already know from VS Code.'], ['JetBrains', 'IntelliJ, RustRover, WebStorm and friends.'], ['Vim', 'Modal editing. Starts in Normal mode.']];
+$('#keyChoices').innerHTML = KEYMAPS.map(([n, d]) => `<button class="choice" data-key="${n}"><span class="ring"></span><span><span class="t">${n}${n === 'Null' ? '<small>Default</small>' : ''}</span><span class="d">${d}</span></span></button>`).join('');
+const AIS = [['off', 'Off', 'Null never shows AI features. You can turn them on later.'], ['oncall', 'On call', `Nothing appears until you press ${MOD} I or ask from the palette.`], ['suggest', 'Suggest while typing', 'On call, plus faint one-line completions you accept with Tab.']];
+$('#aiChoices').innerHTML = AIS.map(([id, n, d]) => `<button class="choice" data-ai="${id}"><span class="ring"></span><span><span class="t">${n}${id === 'oncall' ? '<small>Recommended</small>' : ''}</span><span class="d">${d}</span></span></button>`).join('');
+$('#modelChips').innerHTML = [['local', 'A local model'], ['key', 'My own API key'], ['later', 'Decide later']].map(([id, n]) => `<button class="chip" data-model="${id}">${n}</button>`).join('');
+
+function syncWelcome() {
+  const resolved = S.ide || (document.documentElement.dataset.theme === 'light' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: light)').matches) ? 'paper' : 'oled');
+  W.querySelectorAll('[data-theme-pick]').forEach(b => b.classList.toggle('on', b.dataset.themePick === resolved));
+  W.querySelectorAll('[data-font]').forEach(b => b.classList.toggle('on', b.dataset.font === S.font));
+  W.querySelectorAll('[data-key]').forEach(b => b.classList.toggle('on', b.dataset.key === S.keymap));
+  W.querySelectorAll('[data-ai]').forEach(b => b.classList.toggle('on', b.dataset.ai === S.ai));
+  W.querySelectorAll('[data-model]').forEach(b => b.classList.toggle('on', b.dataset.model === S.model));
+  $('#fsize').value = S.size; $('#fsizeOut').textContent = S.size + ' px';
+}
+function showWelcome() {
+  closePalette(true); closeAnswer(); hideExplain(true); if (ed.prompt) closePrompt();
+  W.hidden = false; W.classList.remove('leaving'); W.classList.add('t-oled');
+  W.dataset.stage = 'hello'; helloIdx = 0;
+  W.querySelectorAll('.hello-line').forEach((l, i) => { l.classList.remove('off'); l.classList.toggle('on', i === 0); });
+  $('#helloLang').textContent = HELLO[0][0];
+  clearInterval(helloTimer); helloTimer = setInterval(cycleHello, 2200);
+  setTimeout(() => $('#begin').focus({ preventScroll: true }), 50);
+}
+function goStep(n) {
+  step = n;
+  if (n === 1 && W.dataset.stage === 'hello') { clearInterval(helloTimer); W.dataset.stage = 'setup'; W.classList.remove('t-oled'); }
+  W.querySelectorAll('.step').forEach(s => s.classList.toggle('on', +s.dataset.n === n));
+  W.querySelectorAll('#dots i').forEach((d, i) => d.classList.toggle('on', i === n - 1));
+  $('#stepCount').textContent = `${n} of 4`;
+  $('#next').innerHTML = n === 4 ? 'Start coding <kbd>↵</kbd>' : 'Continue <kbd>↵</kbd>';
+  $('#back').style.visibility = 'visible';
+  syncWelcome();
+  setTimeout(() => $('#next').focus({ preventScroll: true }), 30);
+}
+function finishWelcome() {
+  clearInterval(helloTimer);
+  S.onboarded = true; save();
+  W.classList.add('leaving');
+  els.app.classList.remove('arriving'); void els.app.offsetWidth; els.app.classList.add('arriving');
+  measure(); render(); scrollCaretIntoView();
+  setTimeout(() => { W.hidden = true; W.classList.remove('leaving'); }, 720);
+  setTimeout(() => els.input.focus({ preventScroll: true }), 100);
+}
+function welcomeKey(e) {
+  if (e.key === 'Enter' && !e.target.matches('input')) {
+    if (e.target.closest('.choice, .theme-card, .font-opt, .chip') && document.activeElement === e.target) return;
+    e.preventDefault();
+    if (W.dataset.stage === 'hello') goStep(1); else if (step < 4) goStep(step + 1); else finishWelcome();
+  }
+}
+$('#begin').addEventListener('click', () => goStep(1));
+$('#skip').addEventListener('click', finishWelcome);
+$('#next').addEventListener('click', () => step < 4 ? goStep(step + 1) : finishWelcome());
+$('#back').addEventListener('click', () => step > 1 ? goStep(step - 1) : showWelcome());
+W.addEventListener('click', e => {
+  const t = e.target.closest('[data-theme-pick]'); if (t) { setTheme(t.dataset.themePick); syncWelcome(); }
+  const f = e.target.closest('[data-font]'); if (f) { S.font = f.dataset.font; save(); measure(); syncWelcome(); }
+  const k = e.target.closest('[data-key]'); if (k) { S.keymap = k.dataset.key; save(); syncWelcome(); }
+  const a = e.target.closest('[data-ai]'); if (a) { S.ai = a.dataset.ai; save(); syncWelcome(); }
+  const m = e.target.closest('[data-model]'); if (m) { S.model = m.dataset.model; save(); syncWelcome(); }
+});
+$('#fsize').addEventListener('input', e => { S.size = +e.target.value; save(); measure(); syncWelcome(); });
+
+/* ---------------- boot ---------------- */
+applyTheme();
+setGuide(S.guide !== false && !matchMedia('(max-width: 760px)').matches);
+measure(); render(); scrollCaretIntoView();
+loadFont().then(() => { measure(); renderCode(); });
+try { document.fonts.ready.then(() => { measure(); renderCode(); }); } catch (e) {}
+addEventListener('resize', () => renderCode());
+if (!S.onboarded) showWelcome(); else setTimeout(() => els.input.focus({ preventScroll: true }), 50);
+})();
+</script>
