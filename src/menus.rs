@@ -2,7 +2,7 @@ use crate::editor::{Copy, Cut, GoToDefinition, Paste, Redo, Save, SelectAll, Sho
 use crate::find_bar::{DeployFind, DeployReplace, FindNext, FindPrevious};
 use crate::workspace::{
     CloseTab, DecreaseFontSize, IncreaseFontSize, NextTab, Open, OpenSettings, PreviousTab, ResetFontSize,
-    SearchProject, TogglePalette, ToggleSidebar, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
+    SearchProject, TogglePalette, ToggleSidebar, ToggleTerminal, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
 };
 use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
 
@@ -59,6 +59,7 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                 MenuItem::action("Command Palette…", TogglePalette),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Toggle Terminal", ToggleTerminal),
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Previous Tab", PreviousTab),
                 MenuItem::separator(),

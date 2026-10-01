@@ -8,6 +8,7 @@ use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
+use crate::terminal::{Shell, TerminalEvent, TerminalView};
 use crate::theme::{Theme, ThemeName};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
@@ -36,6 +37,7 @@ actions!(
         SearchProject,
         ShowFiles,
         ToggleAutocomplete,
+        ToggleTerminal,
     ]
 );
 
@@ -53,6 +55,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenSettings, ctx),
         KeyBinding::new("secondary-shift-f", SearchProject, ctx),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
+        KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("secondary-=", IncreaseFontSize, ctx),
         KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
         KeyBinding::new("secondary--", DecreaseFontSize, ctx),
@@ -74,6 +77,8 @@ const SIDEBAR_WIDTH: f32 = 240.;
 /// Search results need more room than file names.
 const SEARCH_SIDEBAR_WIDTH: f32 = 340.;
 const SIDEBAR_SLIDE: Duration = Duration::from_millis(260);
+const TERMINAL_HEIGHT: f32 = 300.;
+const TERMINAL_SLIDE: Duration = Duration::from_millis(240);
 /// Room for the window buttons at the left of the title bar.
 const TITLEBAR_INSET: f32 = if cfg!(target_os = "macos") { 84. } else { 12. };
 const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
@@ -129,6 +134,9 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// The terminal, once opened. It keeps running while the panel is hidden.
+    terminal: Option<(Entity<TerminalView>, Subscription)>,
+    terminal_open: Transition,
     /// The current git branch of the project, if it's a repository.
     branch: Option<String>,
     branch_task: Option<Task<()>>,
@@ -186,6 +194,8 @@ impl Workspace {
             ready_since: None,
             branch: None,
             branch_task: None,
+            terminal: None,
+            terminal_open: Transition::new(false),
             focus_before_palette: None,
             _subscriptions: subscriptions,
         };
@@ -421,6 +431,7 @@ impl Workspace {
             ("Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             ("Search in Project".into(), Box::new(SearchProject)),
             ("Show Files".into(), Box::new(ShowFiles)),
+            ("Toggle Terminal".into(), Box::new(ToggleTerminal)),
             (fade.into(), Box::new(ToggleFadeWhileTyping)),
             (theme_label(ThemeName::Oled), Box::new(UseOledTheme)),
             (theme_label(ThemeName::Graphite), Box::new(UseGraphiteTheme)),
@@ -580,6 +591,93 @@ impl Workspace {
 
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
+    }
+
+    fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_open.on {
+            let had_focus = self.terminal.as_ref().is_some_and(|(t, _)| t.focus_handle(cx).is_focused(window));
+            self.terminal_open.set(false, TERMINAL_SLIDE, TERMINAL_SLIDE);
+            if had_focus {
+                self.focus_main(window, cx);
+            }
+            return cx.notify();
+        }
+        if self.terminal.is_none() {
+            let root = self.tree.read(cx).root().to_path_buf();
+            let shell = match Shell::start(root) {
+                Ok(shell) => shell,
+                Err(err) => return eprintln!("null: couldn't start a terminal: {err}"),
+            };
+            let terminal = cx.new(|cx| TerminalView::new(shell, cx));
+            let subscription = cx.subscribe_in(&terminal, window, |this, _, event, window, cx| match event {
+                TerminalEvent::TitleChanged => cx.notify(),
+                // The shell exited (e.g. `exit`): close the panel; the next toggle starts a new one.
+                TerminalEvent::Exited => {
+                    this.terminal = None;
+                    this.terminal_open.set(false, TERMINAL_SLIDE, TERMINAL_SLIDE);
+                    this.focus_main(window, cx);
+                    cx.notify();
+                }
+            });
+            self.terminal = Some((terminal, subscription));
+        }
+        self.terminal_open.set(true, TERMINAL_SLIDE, TERMINAL_SLIDE);
+        if let Some((terminal, _)) = &self.terminal {
+            window.focus(&terminal.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    fn render_terminal_panel(&self, height: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (terminal, _) = self.terminal.as_ref()?;
+        if height < 0.5 {
+            return None;
+        }
+        let theme = cx.global::<Theme>();
+        let title = terminal.read(cx).title.clone();
+        let header = div()
+            .h(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(12.))
+            .text_size(px(12.))
+            .text_color(theme.muted)
+            .child(div().text_color(theme.foreground).child("Terminal"))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_color(theme.faint).child(title))
+            .child(
+                div()
+                    .id("close-terminal")
+                    .size(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .hover(|s| s.bg(theme.hairline))
+                    .child(svg().path("icons/x.svg").size(px(12.)).text_color(theme.muted))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.toggle_terminal(&ToggleTerminal, window, cx)
+                    })),
+            );
+        Some(
+            div()
+                .flex_none()
+                .h(px(height))
+                .overflow_hidden()
+                .border_t_1()
+                .border_color(theme.hairline)
+                .bg(theme.background)
+                .child(
+                    div()
+                        .h(px(TERMINAL_HEIGHT))
+                        .flex()
+                        .flex_col()
+                        .child(header)
+                        .child(div().flex_1().min_h_0().child(terminal.clone())),
+                )
+                .into_any_element(),
+        )
     }
 
     fn toggle_autocomplete(&mut self, _: &ToggleAutocomplete, _: &mut Window, cx: &mut Context<Self>) {
@@ -762,7 +860,8 @@ impl Render for Workspace {
         let (chrome, fading) = self.chrome.value(FADE_IN, FADE_OUT);
         let (sidebar, sliding) = self.sidebar.value(SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         let (searching, switching) = self.sidebar_search.value(SIDEBAR_SLIDE, SIDEBAR_SLIDE);
-        if fading || sliding || switching {
+        let (terminal_shown, terminal_sliding) = self.terminal_open.value(TERMINAL_SLIDE, TERMINAL_SLIDE);
+        if fading || sliding || switching || terminal_sliding {
             window.request_animation_frame();
         }
         let opacity = DIMMED + (1. - DIMMED) * chrome;
@@ -796,6 +895,7 @@ impl Render for Workspace {
             None => (vec![root.display().to_string()], (0, 0)),
         };
         let tabs = self.render_tabs(cx);
+        let terminal_panel = self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx);
         let body = match self.active_editor() {
             Some(editor) => div().size_full().child(editor.clone()),
             None => div().size_full().child(self.render_empty(cx)),
@@ -884,6 +984,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
             .on_action(cx.listener(Self::toggle_autocomplete))
+            .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -896,7 +997,17 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::quit))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(titlebar)
-            .child(div().flex_1().min_h_0().flex().child(sidebar_panel).child(div().flex_1().min_w_0().child(body)))
+            .child(
+                div().flex_1().min_h_0().flex().child(sidebar_panel).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_1().min_h_0().child(body))
+                        .children(terminal_panel),
+                ),
+            )
             .child(status)
             .when_some(self.palette.as_ref().map(|(p, _)| p.clone()), |root, palette| {
                 root.child(

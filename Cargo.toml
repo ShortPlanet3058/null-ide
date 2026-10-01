@@ -11,6 +11,7 @@ name = "null"
 path = "src/main.rs"
 
 [dependencies]
+alacritty_terminal = "0.26.0"
 futures = "0.3"
 # Shaders are compiled when the app starts, so building doesn't need Xcode's
 # separate Metal Toolchain download. Release builds can switch to precompiled shaders.
