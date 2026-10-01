@@ -109,6 +109,14 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Selects a byte range of the text, clamped to it.
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let end = range.end.min(self.content.len());
+        self.selected = range.start.min(end)..end;
+        self.reversed = false;
+        cx.notify();
+    }
+
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
         self.selected = 0..self.content.len();
         self.reversed = false;

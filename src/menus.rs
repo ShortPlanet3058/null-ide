@@ -1,8 +1,9 @@
 use crate::editor::{Copy, Cut, GoToDefinition, Paste, Redo, Save, SelectAll, ShowInfo, Undo};
 use crate::find_bar::{DeployFind, DeployReplace, FindNext, FindPrevious};
 use crate::workspace::{
-    CloseTab, DecreaseFontSize, IncreaseFontSize, NextTab, Open, OpenSettings, PreviousTab, ResetFontSize,
-    SearchProject, TogglePalette, ToggleSidebar, ToggleTerminal, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
+    CloseAllTabs, CloseTab, DecreaseFontSize, IncreaseFontSize, NewUntitled, NextTab, Open, OpenSettings, PreviousTab,
+    ReopenClosedTab, ResetFontSize, SaveAll, SaveAs, SearchProject, TogglePalette, ToggleSidebar, ToggleTerminal,
+    UseGraphiteTheme, UseOledTheme, UsePaperTheme,
 };
 use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
 
@@ -26,10 +27,15 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
         Menu {
             name: "File".into(),
             items: vec![
+                MenuItem::action("New File", NewUntitled),
                 MenuItem::action("Open…", Open),
+                MenuItem::action("Reopen Closed Tab", ReopenClosedTab),
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),
+                MenuItem::action("Save As…", SaveAs),
+                MenuItem::action("Save All", SaveAll),
                 MenuItem::action("Close Tab", CloseTab),
+                MenuItem::action("Close All Tabs", CloseAllTabs),
             ],
         },
         Menu {
