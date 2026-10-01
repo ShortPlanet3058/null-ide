@@ -1,13 +1,21 @@
+mod intel;
+
+pub use intel::HoverCard;
+
 use crate::buffer::Buffer;
 use crate::element::EditorElement;
 use crate::find_bar::{CloseFind, DeployFind, DeployReplace, FindBar, FindNext, FindPrevious};
+use crate::fonts::Fonts;
 use crate::highlight::{Highlighter, Span};
+use crate::lsp_store::LspStore;
 use crate::search::SearchQuery;
 use crate::settings::Settings;
+use crate::theme::Theme;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
-    ScrollWheelEvent, ShapedLine, Task, UTF16Selection, Window, actions, div, point, prelude::*, px, size,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, KeyBinding, KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, ShapedLine, Subscription, Task,
+    UTF16Selection, Window, actions, anchored, deferred, div, point, prelude::*, px, size,
 };
 use regex::Regex;
 use ropey::Rope;
@@ -54,6 +62,7 @@ actions!(
         Undo,
         Redo,
         Save,
+        GoToDefinition,
     ]
 );
 
@@ -91,6 +100,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-shift-z", Redo, ctx),
         KeyBinding::new("secondary-s", Save, ctx),
+        KeyBinding::new("f12", GoToDefinition, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -163,6 +173,11 @@ struct Snapshot {
 pub enum EditorEvent {
     Edited,
     Saved,
+    /// Go to definition landed in another file.
+    GoTo {
+        path: PathBuf,
+        range: lsp_types::Range,
+    },
 }
 
 impl EventEmitter<EditorEvent> for Editor {}
@@ -232,6 +247,17 @@ pub struct Editor {
     find_bar: Option<Entity<FindBar>>,
     /// Reused by Find Next when the find bar is closed, and to prefill it.
     last_query: SearchQuery,
+    lsp: Option<Entity<LspStore>>,
+    lsp_version: i32,
+    lsp_subscription: Option<Subscription>,
+    pub hover: Option<HoverCard>,
+    hover_word: Option<Range<usize>>,
+    hover_task: Option<Task<()>>,
+    /// Typing with Alt held (e.g. Alt+arrows) hides the card until Alt is released.
+    hover_suppressed: bool,
+    alt_held: bool,
+    mouse_position: Option<Point<Pixels>>,
+    definition_task: Option<Task<()>>,
 }
 
 impl Editor {
@@ -267,15 +293,29 @@ impl Editor {
             search: None,
             find_bar: None,
             last_query: SearchQuery::default(),
+            lsp: None,
+            lsp_version: 0,
+            lsp_subscription: None,
+            hover: None,
+            hover_word: None,
+            hover_task: None,
+            hover_suppressed: false,
+            alt_held: false,
+            mouse_position: None,
+            definition_task: None,
         };
         editor.rehighlight();
         editor
     }
 
     /// Opens `path`, or an empty buffer that will be saved there if it doesn't exist yet.
-    pub fn open(path: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn open(path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) -> Self {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        Self::new(Buffer::from_text(&text), Some(path), cx)
+        let mut editor = Self::new(Buffer::from_text(&text), Some(path), cx);
+        if let Some(lsp) = lsp {
+            editor.attach_lsp(lsp, cx);
+        }
+        editor
     }
 
     pub fn file_name(&self) -> String {
@@ -301,6 +341,14 @@ impl Editor {
 
     pub fn line_height(&self) -> Pixels {
         (self.font_size * 1.7).round()
+    }
+
+    /// Call after every change to the text.
+    fn text_changed(&mut self, cx: &mut Context<Self>) {
+        self.rehighlight();
+        self.sync_lsp(cx);
+        self.hover = None;
+        self.hover_word = None;
     }
 
     /// Brings everything derived from the text up to date after it changes.
@@ -415,7 +463,7 @@ impl Editor {
         }
         self.selection = Selection::caret(edits[0].0.start);
         self.marked = None;
-        self.rehighlight();
+        self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
     }
@@ -741,7 +789,7 @@ impl Editor {
         self.selection = Selection::caret(end);
         self.marked = None;
         self.goal_column = None;
-        self.rehighlight();
+        self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
     }
@@ -857,7 +905,7 @@ impl Editor {
         self.selection = snapshot.selection;
         self.last_edit = None;
         self.marked = None;
-        self.rehighlight();
+        self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
     }
@@ -872,6 +920,7 @@ impl Editor {
         match std::fs::write(path, self.buffer.to_string()) {
             Ok(()) => {
                 self.buffer.mark_saved();
+                self.lsp_saved(cx);
                 cx.emit(EditorEvent::Saved);
                 cx.notify();
                 true
@@ -889,6 +938,63 @@ impl Editor {
             self.caret.placed = false;
             self.touch(cx);
         }
+    }
+
+    fn render_hover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let card = self.hover.as_ref()?;
+        let bounds = self.caret_bounds(card.range.start)?;
+        let theme = cx.global::<Theme>();
+        let code_font = cx.global::<Fonts>().code.clone();
+        let diagnostics = card.diagnostics.iter().map(|(severity, message)| {
+            let color = if *severity == lsp_types::DiagnosticSeverity::ERROR {
+                theme.error
+            } else if *severity == lsp_types::DiagnosticSeverity::WARNING {
+                theme.warning
+            } else {
+                theme.muted
+            };
+            div().text_color(color).child(message.clone())
+        });
+        let blocks = card.blocks.iter().map(|block| {
+            if block.code {
+                div()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .rounded(px(6.))
+                    .bg(theme.background)
+                    .font_family(code_font.clone())
+                    .text_size(px(12.5))
+                    .text_color(theme.foreground)
+                    .child(block.text.clone())
+            } else {
+                div().text_color(theme.muted).child(block.text.clone())
+            }
+        });
+        let card = div()
+            .occlude()
+            .max_w(px(560.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .p(px(10.))
+            .rounded(px(10.))
+            .bg(theme.raised)
+            .border_1()
+            .border_color(theme.hairline)
+            .shadow_lg()
+            .text_size(px(13.))
+            .line_height(px(19.))
+            .children(diagnostics)
+            .children(blocks);
+        Some(
+            deferred(
+                anchored()
+                    .position(point(bounds.left(), bounds.bottom() + px(6.)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(card),
+            )
+            .into_any_element(),
+        )
     }
 
     // ---------- mouse ----------
@@ -943,9 +1049,17 @@ impl Editor {
         self.goal_column = None;
         self.dragging = Some(unit);
         self.touch(cx);
+        if event.modifiers.secondary() && event.click_count == 1 {
+            self.dragging = None;
+            self.go_to_definition_at(offset, cx);
+        }
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.mouse_position = Some(event.position);
+        if self.alt_held {
+            self.update_hover(cx);
+        }
         if event.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -971,6 +1085,25 @@ impl Editor {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.dragging = None;
+    }
+
+    fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.alt_held = event.modifiers.alt;
+        if !self.alt_held {
+            self.hover_suppressed = false;
+        }
+        self.update_hover(cx);
+    }
+
+    fn on_key_down(&mut self, _: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.alt_held && !self.hover_suppressed {
+            self.hover_suppressed = true;
+            self.update_hover(cx);
+        }
+    }
+
+    fn go_to_definition(&mut self, _: &GoToDefinition, _: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_definition_at(self.selection.head, cx);
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1116,7 +1249,7 @@ impl EntityInputHandler for Editor {
             }
             None => Selection::caret(end),
         };
-        self.rehighlight();
+        self.text_changed(cx);
         self.touch(cx);
     }
 
@@ -1191,16 +1324,21 @@ impl Render for Editor {
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::escape))
+            .on_action(cx.listener(Self::go_to_definition))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(EditorElement::new(cx.entity()));
+        let hover = self.render_hover(cx);
         div()
             .relative()
             .size_full()
             .child(text)
             .when_some(find_bar, |editor, bar| editor.child(div().absolute().top(px(8.)).right(px(16.)).child(bar)))
+            .children(hover)
     }
 }

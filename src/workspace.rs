@@ -1,7 +1,8 @@
-use crate::editor::{Editor, EditorEvent, Redo, Save, SelectAll, Undo};
+use crate::editor::{Editor, EditorEvent, GoToDefinition, Redo, Save, SelectAll, Undo};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::find_bar::{DeployFind, DeployReplace};
 use crate::fonts::Fonts;
+use crate::lsp_store::LspStore;
 use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
@@ -116,6 +117,7 @@ struct Tab {
 pub struct Workspace {
     focus_handle: FocusHandle,
     tree: Entity<FileTree>,
+    lsp: Entity<LspStore>,
     project_search: Entity<ProjectSearch>,
     /// On while the sidebar shows project search instead of files.
     sidebar_search: Transition,
@@ -133,12 +135,14 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
+        let lsp = cx.new(|_| LspStore::new(root.clone()));
         let tree = cx.new(|_| FileTree::new(root));
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) => this.open_file(path.clone(), window, cx),
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
+            cx.observe(&lsp, |_, _, cx| cx.notify()),
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
                 ProjectSearchEvent::Open { path, line, columns, query } => {
                     let (line, columns, query) = (*line, columns.clone(), query.clone());
@@ -156,6 +160,7 @@ impl Workspace {
         Self {
             focus_handle: cx.focus_handle(),
             tree,
+            lsp,
             project_search,
             sidebar_search: Transition::new(false),
             tabs: Vec::new(),
@@ -179,10 +184,11 @@ impl Workspace {
             self.activate(ix, window, cx);
             return;
         }
-        let editor = cx.new(|cx| Editor::open(path, cx));
+        let lsp = self.lsp.clone();
+        let editor = cx.new(|cx| Editor::open(path, Some(lsp), cx));
         let subscriptions = [
             cx.observe(&editor, |_, _, cx| cx.notify()),
-            cx.subscribe(&editor, |this, editor, event, cx| match event {
+            cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited if cx.global::<Settings>().fade_bars_while_typing => {
                     this.chrome.set(false, FADE_IN, FADE_OUT);
                     cx.notify();
@@ -192,6 +198,13 @@ impl Workspace {
                 EditorEvent::Saved => {
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
+                    }
+                }
+                EditorEvent::GoTo { path, range } => {
+                    let range = *range;
+                    this.open_file(path.clone(), window, cx);
+                    if let Some(editor) = this.active_editor() {
+                        editor.update(cx, |editor, cx| editor.select_lsp_range(range, cx));
                     }
                 }
             }),
@@ -205,6 +218,15 @@ impl Workspace {
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
             self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
+            // Language servers work per project: restart them for the new folder.
+            let root = path.clone();
+            self.lsp.update(cx, |lsp, _| {
+                lsp.shutdown();
+                *lsp = LspStore::new(root);
+            });
+            for tab in &self.tabs {
+                tab.editor.update(cx, |editor, cx| editor.reattach_lsp(cx));
+            }
             self.tree.update(cx, |tree, cx| tree.set_root(path, cx));
             let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
             self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
@@ -224,7 +246,8 @@ impl Workspace {
     }
 
     fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.tabs.remove(ix);
+        let tab = self.tabs.remove(ix);
+        tab.editor.update(cx, |editor, cx| editor.release_lsp(cx));
         if self.tabs.is_empty() {
             self.active = None;
             window.set_window_title("Null");
@@ -381,6 +404,7 @@ impl Workspace {
                 ("Redo".into(), Box::new(Redo)),
                 ("Select All".into(), Box::new(SelectAll)),
                 ("Find…".into(), Box::new(DeployFind)),
+                ("Go to Definition".into(), Box::new(GoToDefinition)),
                 ("Replace…".into(), Box::new(DeployReplace)),
             ]);
         }
@@ -646,18 +670,24 @@ impl Render for Workspace {
         };
 
         let root = self.tree.read(cx).root().to_path_buf();
-        let status_items: Vec<String> = match self.active_editor().map(|e| e.read(cx)) {
+        let lsp_status = self.lsp.read(cx).status();
+        let (status_items, problems): (Vec<String>, (usize, usize)) = match self.active_editor().map(|e| e.read(cx)) {
             Some(editor) => {
                 let (line, col) = editor.caret_point();
                 let path = editor.path().map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string());
-                vec![
-                    path.unwrap_or_else(|| "untitled".into()),
-                    format!("Ln {}, Col {}", line + 1, col + 1),
-                    "Spaces: 4".into(),
-                    editor.language_name().into(),
-                ]
+                let problems = editor.problems(cx);
+                let count = |s| problems.iter().filter(|p| p.severity == s).count();
+                (
+                    vec![
+                        path.unwrap_or_else(|| "untitled".into()),
+                        format!("Ln {}, Col {}", line + 1, col + 1),
+                        "Spaces: 4".into(),
+                        editor.language_name().into(),
+                    ],
+                    (count(lsp_types::DiagnosticSeverity::ERROR), count(lsp_types::DiagnosticSeverity::WARNING)),
+                )
             }
-            None => vec![root.display().to_string()],
+            None => (vec![root.display().to_string()], (0, 0)),
         };
         let tabs = self.render_tabs(cx);
         let body = match self.active_editor() {
@@ -705,6 +735,20 @@ impl Render for Workspace {
             .text_color(theme.muted)
             .opacity(opacity)
             .child(div().flex_1().overflow_hidden().whitespace_nowrap().children(items.next()))
+            .children(lsp_status.map(|s| div().text_color(theme.faint).whitespace_nowrap().child(s)))
+            .when(problems != (0, 0), |bar| {
+                let (errors, warnings) = problems;
+                let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+                bar.child(
+                    div()
+                        .flex()
+                        .gap(px(10.))
+                        .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
+                        .when(warnings > 0, |d| {
+                            d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
+                        }),
+                )
+            })
             .children(items);
 
         div()
