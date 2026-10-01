@@ -4,11 +4,10 @@
 use super::{Editor, EditorEvent, Selection};
 use crate::lsp::path_for;
 use crate::lsp_store::{LspStore, Readiness};
+use crate::markdown;
 use gpui::{App, Context, Entity};
 use lsp_types::{DiagnosticSeverity, HoverContents, MarkedString, Position};
-use regex::Regex;
 use std::ops::Range;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Alt over a word this long shows its card.
@@ -346,8 +345,6 @@ impl Editor {
     }
 }
 
-static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
-
 /// Splits a hover's markdown into code blocks and plain paragraphs.
 pub fn hover_blocks(contents: HoverContents) -> Vec<HoverBlock> {
     let marked = |m: MarkedString| match m {
@@ -359,67 +356,10 @@ pub fn hover_blocks(contents: HoverContents) -> Vec<HoverBlock> {
         HoverContents::Array(items) => items.into_iter().map(marked).collect::<Vec<_>>().join("\n\n"),
         HoverContents::Markup(m) => m.value,
     };
-    let mut blocks = Vec::new();
-    let mut lines: Vec<&str> = Vec::new();
-    let mut in_code = false;
-    let flush = |lines: &mut Vec<&str>, code: bool, blocks: &mut Vec<HoverBlock>| {
-        let text = lines.join("\n");
-        lines.clear();
-        let text = if code { text.trim_end().to_string() } else { clean_markdown(&text) };
-        if !text.trim().is_empty() {
-            blocks.push(HoverBlock { code, text });
-        }
-    };
-    for line in markdown.lines() {
-        if line.trim_start().starts_with("```") {
-            flush(&mut lines, in_code, &mut blocks);
-            in_code = !in_code;
-        } else if !in_code && line.trim() == "---" {
-            flush(&mut lines, false, &mut blocks);
-        } else {
-            lines.push(line);
-        }
-    }
-    flush(&mut lines, in_code, &mut blocks);
-
-    // Keep long docs from covering the screen.
-    let mut budget = MAX_HOVER_LINES;
-    blocks
+    markdown::blocks(&markdown, Some(MAX_HOVER_LINES))
         .into_iter()
-        .filter_map(|mut b| {
-            if budget == 0 {
-                return None;
-            }
-            let lines: Vec<&str> = b.text.lines().take(budget).collect();
-            budget -= lines.len();
-            b.text = lines.join("\n");
-            Some(b)
-        })
+        .map(|b| HoverBlock { code: b.code, text: b.text })
         .collect()
-}
-
-/// Turns markdown into readable plain text: no heading marks, links or emphasis.
-fn clean_markdown(text: &str) -> String {
-    let text = LINK.replace_all(text, "$1").replace("**", "").replace("__", "").replace('`', "");
-    let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        let line = if let Some(rest) = trimmed.strip_prefix('#') {
-            rest.trim_start_matches('#').trim().to_string()
-        } else if let Some(rest) = trimmed.strip_prefix("* ").or_else(|| trimmed.strip_prefix("- ")) {
-            format!("• {rest}")
-        } else if let Some(rest) = trimmed.strip_prefix('>') {
-            rest.trim().to_string()
-        } else {
-            line.to_string()
-        };
-        // Collapse runs of blank lines.
-        if line.trim().is_empty() && out.last().is_none_or(|l| l.trim().is_empty()) {
-            continue;
-        }
-        out.push(line);
-    }
-    out.join("\n").trim().to_string()
 }
 
 #[cfg(test)]
@@ -437,10 +377,5 @@ mod tests {
             texts,
             vec![(true, "null_ide::buffer"), (true, "pub struct Buffer"), (false, "Text storage, see ropey.")]
         );
-    }
-
-    #[test]
-    fn cleans_headings_lists_and_quotes() {
-        assert_eq!(clean_markdown("# Title\n\n\n* one\n> note"), "Title\n\n• one\nnote");
     }
 }

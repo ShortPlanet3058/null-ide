@@ -73,6 +73,8 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     selecting: bool,
+    /// Shows dots instead of the text, for secrets like API keys.
+    pub masked: bool,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -89,6 +91,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             selecting: false,
+            masked: false,
         }
     }
 
@@ -472,6 +475,8 @@ impl Element for TextInputElement {
         let style = window.text_style();
         let (text, color) = if input.content.is_empty() {
             (input.placeholder.clone(), theme.faint)
+        } else if input.masked {
+            (SharedString::from("•".repeat(input.content.chars().count())), style.color)
         } else {
             (SharedString::from(input.content.clone()), style.color)
         };
@@ -486,7 +491,16 @@ impl Element for TextInputElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window.text_system().shape_line(text, font_size, &[run], None);
 
-        let x = |offset: usize| if input.content.is_empty() { px(0.) } else { line.x_for_index(offset) };
+        let x = |offset: usize| {
+            if input.content.is_empty() {
+                px(0.)
+            } else if input.masked {
+                // Each character shows as one dot, which is 3 bytes long.
+                line.x_for_index(input.content[..offset].chars().count() * '•'.len_utf8())
+            } else {
+                line.x_for_index(offset)
+            }
+        };
         let (selection, caret) = if input.selected.is_empty() {
             let caret_height = bounds.size.height * 0.8;
             let caret = fill(
@@ -532,7 +546,7 @@ impl Element for TextInputElement {
             window.paint_quad(caret);
         }
         let line = prepaint.line.clone();
-        let is_placeholder = self.input.read(cx).content.is_empty();
+        let is_placeholder = self.input.read(cx).content.is_empty() || self.input.read(cx).masked;
         self.input.update(cx, |input, _| {
             input.last_layout = (!is_placeholder).then_some(line);
             input.last_bounds = Some(bounds);

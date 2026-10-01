@@ -17,6 +17,7 @@ futures = "0.3"
 # separate Metal Toolchain download. Release builds can switch to precompiled shaders.
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 ignore = "0.4"
+keyring = "4"
 lsp-types = "0.97"
 regex = "1"
 ropey = "1.6"
@@ -27,4 +28,5 @@ tree-sitter = "0.25"
 tree-sitter-highlight = "0.25"
 tree-sitter-rust = "0.24"
 unicode-segmentation = "1"
+ureq = { version = "3", features = ["json"] }
 url = "2"

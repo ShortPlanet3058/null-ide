@@ -1,3 +1,4 @@
+mod assist;
 mod changes;
 mod completion;
 mod intel;
@@ -72,6 +73,7 @@ actions!(
         CompletionPrevious,
         ConfirmCompletion,
         CancelCompletion,
+        InlineAssist,
     ]
 );
 
@@ -112,6 +114,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("secondary-shift-i", ShowInfo, ctx),
         KeyBinding::new("ctrl-space", ShowCompletions, ctx),
+        KeyBinding::new("secondary-i", InlineAssist, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -295,6 +298,8 @@ pub struct Editor {
     pub git_hunks: Vec<crate::git::Hunk>,
     git_base_task: Option<Task<()>>,
     git_diff_task: Option<Task<()>>,
+    /// The Cmd+I card, while it's open.
+    assist: Option<(Entity<crate::inline_assist::InlineAssist>, Subscription)>,
 }
 
 impl Editor {
@@ -351,6 +356,7 @@ impl Editor {
             git_hunks: Vec::new(),
             git_base_task: None,
             git_diff_task: None,
+            assist: None,
         };
         editor.rehighlight();
         editor
@@ -1257,6 +1263,10 @@ impl Editor {
         self.accept_completion(selected, cx);
     }
 
+    fn inline_assist(&mut self, _: &InlineAssist, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_inline_assist(window, cx);
+    }
+
     fn cancel_completion(&mut self, _: &CancelCompletion, _: &mut Window, cx: &mut Context<Self>) {
         self.close_completion(cx);
     }
@@ -1515,6 +1525,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::completion_previous))
             .on_action(cx.listener(Self::confirm_completion))
             .on_action(cx.listener(Self::cancel_completion))
+            .on_action(cx.listener(Self::inline_assist))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -1525,6 +1536,7 @@ impl Render for Editor {
             .child(EditorElement::new(cx.entity()));
         let hover = self.render_hover(cx);
         let completions = self.render_completions(cx);
+        let assist = self.render_assist(cx);
         div()
             .relative()
             .size_full()
@@ -1532,5 +1544,6 @@ impl Render for Editor {
             .when_some(find_bar, |editor, bar| editor.child(div().absolute().top(px(8.)).right(px(16.)).child(bar)))
             .children(hover)
             .children(completions)
+            .children(assist)
     }
 }

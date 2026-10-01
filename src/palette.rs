@@ -61,6 +61,8 @@ pub enum PaletteEvent {
     Dismissed,
     OpenFile(PathBuf),
     Run(Box<dyn Action>),
+    /// Typed after a `?`: a question for the AI.
+    Ask(String),
 }
 
 /// Search across the project's files and every command, from one field.
@@ -72,6 +74,8 @@ pub struct Palette {
     selected: usize,
     scroll: UniformListScrollHandle,
     opened_at: Instant,
+    /// Set while the query starts with `?`.
+    question: Option<String>,
     _subscription: Subscription,
 }
 
@@ -79,7 +83,7 @@ impl EventEmitter<PaletteEvent> for Palette {}
 
 impl Palette {
     pub fn new(commands: Vec<Command>, root: PathBuf, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextInput::new("Search files and commands", cx));
+        let input = cx.new(|cx| TextInput::new("Search files and commands, or type ? to ask AI", cx));
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_matches(cx));
         cx.spawn(async move |this, cx| {
             let files = cx.background_executor().spawn(async move { list_files(&root) }).await;
@@ -98,6 +102,7 @@ impl Palette {
             selected: 0,
             scroll: UniformListScrollHandle::new(),
             opened_at: Instant::now(),
+            question: None,
             _subscription: subscription,
         };
         palette.update_matches(cx);
@@ -106,6 +111,14 @@ impl Palette {
 
     fn update_matches(&mut self, cx: &mut Context<Self>) {
         let query = self.input.read(cx).text().to_string();
+        // A leading `?` turns the palette into a question box.
+        if let Some(question) = query.strip_prefix('?') {
+            self.question = Some(question.trim().to_string());
+            self.matches.clear();
+            cx.notify();
+            return;
+        }
+        self.question = None;
         let mut matches: Vec<Match> = self
             .commands
             .iter()
@@ -176,6 +189,14 @@ impl Palette {
     }
 
     fn confirm_at(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(question) = &self.question {
+            if !question.is_empty()
+                && cx.global::<crate::settings::Settings>().ai.provider != crate::ai::ProviderId::Off
+            {
+                cx.emit(PaletteEvent::Ask(question.clone()));
+            }
+            return;
+        }
         match self.matches.get(ix).map(|m| m.item) {
             Some(Item::Command(i)) => cx.emit(PaletteEvent::Run(self.commands[i].action.boxed_clone())),
             Some(Item::File(i)) => cx.emit(PaletteEvent::OpenFile(self.files[i].path.clone())),
@@ -331,10 +352,36 @@ impl Render for Palette {
             .border_color(theme.hairline)
             .text_size(px(12.))
             .text_color(theme.faint)
-            .child("↑↓ to move")
-            .child("↵ to open")
+            .when(self.question.is_none(), |f| f.child("↑↓ to move").child("↵ to open"))
+            .when(self.question.is_some(), |f| f.child("↵ to ask"))
             .child("Esc to close");
-        let list = if rows == 0 {
+        let ai = cx.global::<crate::settings::Settings>().ai.provider;
+        let list = if let Some(question) = &self.question {
+            let (marker, text, color) = if ai == crate::ai::ProviderId::Off {
+                ("!", "AI is off. Choose a provider first: type “AI: Use”.".to_string(), theme.muted)
+            } else if question.is_empty() {
+                ("?", format!("Ask {} about this file…", ai.label()), theme.faint)
+            } else {
+                ("?", format!("Ask {}: {question}", ai.label()), theme.foreground)
+            };
+            div()
+                .p(px(6.))
+                .child(
+                    div()
+                        .h(px(ROW_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .px(px(14.))
+                        .rounded(px(9.))
+                        .bg(theme.accent_soft)
+                        .text_size(px(14.))
+                        .text_color(color)
+                        .child(div().w(px(12.)).text_color(theme.caret).child(marker))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(text)),
+                )
+                .into_any_element()
+        } else if rows == 0 {
             div()
                 .h(px(list_height))
                 .flex()

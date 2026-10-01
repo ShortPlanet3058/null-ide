@@ -40,6 +40,7 @@ pub struct Prepaint {
     matches: Vec<(Bounds<Pixels>, bool)>,
     link: Vec<Bounds<Pixels>>,
     git_marks: Vec<(Bounds<Pixels>, Hsla)>,
+    assist_band: Option<Bounds<Pixels>>,
     marked: Vec<Bounds<Pixels>>,
     caret: Option<(Bounds<Pixels>, f32)>,
 }
@@ -252,6 +253,14 @@ impl Element for EditorElement {
             let row_top = |line: usize| origin.y + line_height * line as f32;
 
             let selection_range = editor.selection.range();
+            // While the Cmd+I card is open, the code it changes is tinted, with a bar in the gutter.
+            let assist_band =
+                editor.assist_target(cx).filter(|l| l.end > visible.start && l.start < visible.end).map(|l| {
+                    Bounds::from_corners(
+                        point(bounds.left() + gutter_width - px(9.), row_top(l.start.max(visible.start))),
+                        point(bounds.right(), row_top(l.end.min(visible.end))),
+                    )
+                });
             let current_line = editor
                 .selection
                 .is_empty()
@@ -449,6 +458,7 @@ impl Element for EditorElement {
                 matches,
                 link,
                 git_marks,
+                assist_band,
                 marked,
                 caret,
             }
@@ -473,6 +483,10 @@ impl Element for EditorElement {
         window.paint_quad(fill(bounds, theme.background));
         if let Some(row) = prepaint.current_line {
             window.paint_quad(fill(row, theme.current_line));
+        }
+        if let Some(band) = prepaint.assist_band {
+            window.paint_quad(fill(band, theme.accent_soft));
+            window.paint_quad(fill(gpui::Bounds::new(band.origin, gpui::size(px(3.), band.size.height)), theme.caret));
         }
         for (rect, color) in &prepaint.git_marks {
             window.paint_quad(fill(*rect, *color).corner_radii(px(1.5)));

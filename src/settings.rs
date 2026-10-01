@@ -24,6 +24,8 @@ pub struct Settings {
     pub fade_bars_while_typing: bool,
     /// Show suggestions while typing. Ctrl+Space asks for them either way.
     pub autocomplete: bool,
+    /// Where AI answers come from. Off until a provider is chosen.
+    pub ai: crate::ai::AiSettings,
 }
 
 impl Default for Settings {
@@ -36,6 +38,7 @@ impl Default for Settings {
             sidebar_visible: true,
             fade_bars_while_typing: false,
             autocomplete: true,
+            ai: Default::default(),
         }
     }
 }
