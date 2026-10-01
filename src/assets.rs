@@ -2,7 +2,10 @@ use gpui::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
 
 /// Icons compiled into the binary, so Null never depends on files next to it.
-const ICONS: &[(&str, &[u8])] = &[("icons/chevron-right.svg", include_bytes!("../assets/icons/chevron-right.svg"))];
+const ICONS: &[(&str, &[u8])] = &[
+    ("icons/chevron-right.svg", include_bytes!("../assets/icons/chevron-right.svg")),
+    ("icons/x.svg", include_bytes!("../assets/icons/x.svg")),
+];
 
 pub struct Assets;
 
