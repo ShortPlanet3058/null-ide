@@ -4,6 +4,7 @@ use crate::find_bar::{DeployFind, DeployReplace};
 use crate::fonts::Fonts;
 use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
+use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::theme::{Theme, ThemeName};
 use gpui::{
@@ -30,6 +31,8 @@ actions!(
         UseOledTheme,
         UseGraphiteTheme,
         UsePaperTheme,
+        SearchProject,
+        ShowFiles,
     ]
 );
 
@@ -45,6 +48,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-tab", NextTab, ctx),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, ctx),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
+        KeyBinding::new("secondary-shift-f", SearchProject, ctx),
+        KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("secondary-=", IncreaseFontSize, ctx),
         KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
         KeyBinding::new("secondary--", DecreaseFontSize, ctx),
@@ -63,6 +68,8 @@ const FADE_IN: Duration = Duration::from_millis(180);
 /// Mouse movement smaller than this (trackpad jitter) doesn't bring the chrome back.
 const WAKE_DISTANCE: f32 = 6.;
 const SIDEBAR_WIDTH: f32 = 240.;
+/// Search results need more room than file names.
+const SEARCH_SIDEBAR_WIDTH: f32 = 340.;
 const SIDEBAR_SLIDE: Duration = Duration::from_millis(260);
 /// Room for the window buttons at the left of the title bar.
 const TITLEBAR_INSET: f32 = if cfg!(target_os = "macos") { 84. } else { 12. };
@@ -109,6 +116,9 @@ struct Tab {
 pub struct Workspace {
     focus_handle: FocusHandle,
     tree: Entity<FileTree>,
+    project_search: Entity<ProjectSearch>,
+    /// On while the sidebar shows project search instead of files.
+    sidebar_search: Transition,
     tabs: Vec<Tab>,
     active: Option<usize>,
     sidebar: Transition,
@@ -122,12 +132,22 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
         let tree = cx.new(|_| FileTree::new(root));
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) => this.open_file(path.clone(), window, cx),
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
+            cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
+                ProjectSearchEvent::Open { path, line, columns, query } => {
+                    let (line, columns, query) = (*line, columns.clone(), query.clone());
+                    this.open_file(path.clone(), window, cx);
+                    if let Some(editor) = this.active_editor() {
+                        editor.update(cx, |editor, cx| editor.reveal_match(line, columns, query, cx));
+                    }
+                }
+            }),
         ];
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -136,6 +156,8 @@ impl Workspace {
         Self {
             focus_handle: cx.focus_handle(),
             tree,
+            project_search,
+            sidebar_search: Transition::new(false),
             tabs: Vec::new(),
             active: None,
             sidebar: Transition::new(cx.global::<Settings>().sidebar_visible),
@@ -182,6 +204,7 @@ impl Workspace {
     /// Opens a folder as the project, or a file in a tab.
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
+            self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
             self.tree.update(cx, |tree, cx| tree.set_root(path, cx));
             let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
             self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
@@ -337,6 +360,8 @@ impl Workspace {
         let mut commands: Vec<(String, Box<dyn Action>)> = vec![
             ("Open File or Folder…".into(), Box::new(Open)),
             ("Toggle Sidebar".into(), Box::new(ToggleSidebar)),
+            ("Search in Project".into(), Box::new(SearchProject)),
+            ("Show Files".into(), Box::new(ShowFiles)),
             (fade.into(), Box::new(ToggleFadeWhileTyping)),
             (theme_label(ThemeName::Oled), Box::new(UseOledTheme)),
             (theme_label(ThemeName::Graphite), Box::new(UseGraphiteTheme)),
@@ -417,6 +442,51 @@ impl Workspace {
         }
         menus::set(cx, settings.fade_bars_while_typing);
         cx.notify();
+    }
+
+    fn search_project(&mut self, _: &SearchProject, window: &mut Window, cx: &mut Context<Self>) {
+        let selected =
+            self.active_editor().map(|e| e.read(cx).selected_text()).filter(|t| !t.is_empty() && !t.contains('\n'));
+        self.sidebar_search.set(true, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        self.project_search.update(cx, |search, cx| search.focus(selected, window, cx));
+        cx.notify();
+    }
+
+    fn show_files(&mut self, _: &ShowFiles, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        cx.notify();
+    }
+
+    fn render_sidebar_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.global::<Theme>();
+        let searching = self.sidebar_search.on;
+        let tab = |id: &'static str, label: &'static str, on: bool| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .text_size(px(12.))
+                .text_color(if on { theme.foreground } else { theme.faint })
+                .when(on, |t| t.bg(theme.hairline))
+                .when(!on, |t| t.hover(|s| s.text_color(theme.muted)))
+                .child(label)
+        };
+        div()
+            .flex()
+            .gap(px(4.))
+            .px(px(10.))
+            .pt(px(10.))
+            .child(
+                tab("files", "Files", !searching)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx))),
+            )
+            .child(tab("search", "Search", searching).on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
+            ))
+            .into_any_element()
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -561,11 +631,19 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (chrome, fading) = self.chrome.value(FADE_IN, FADE_OUT);
         let (sidebar, sliding) = self.sidebar.value(SIDEBAR_SLIDE, SIDEBAR_SLIDE);
-        if fading || sliding {
+        let (searching, switching) = self.sidebar_search.value(SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        if fading || sliding || switching {
             window.request_animation_frame();
         }
         let opacity = DIMMED + (1. - DIMMED) * chrome;
-        let sidebar_width = SIDEBAR_WIDTH * sidebar;
+        let full_width = SIDEBAR_WIDTH + (SEARCH_SIDEBAR_WIDTH - SIDEBAR_WIDTH) * searching;
+        let sidebar_width = full_width * sidebar;
+        let switch = self.render_sidebar_switch(cx);
+        let sidebar_content = if self.sidebar_search.on {
+            div().flex_1().min_h_0().pt(px(6.)).child(self.project_search.clone())
+        } else {
+            div().flex_1().min_h_0().child(self.tree.clone())
+        };
 
         let root = self.tree.read(cx).root().to_path_buf();
         let status_items: Vec<String> = match self.active_editor().map(|e| e.read(cx)) {
@@ -610,7 +688,7 @@ impl Render for Workspace {
             .bg(theme.surface)
             .when(sidebar_width > 0.5, |panel| panel.border_r_1().border_color(theme.hairline))
             .opacity(opacity)
-            .child(div().w(px(SIDEBAR_WIDTH)).h_full().child(self.tree.clone()));
+            .child(div().w(px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
 
         let mut items = status_items.into_iter();
         let status = div()
@@ -653,6 +731,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::use_graphite_theme))
             .on_action(cx.listener(Self::use_paper_theme))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::search_project))
+            .on_action(cx.listener(Self::show_files))
             .on_action(cx.listener(Self::quit))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(titlebar)

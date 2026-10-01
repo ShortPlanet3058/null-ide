@@ -436,6 +436,18 @@ impl Editor {
         self.set_search(query, cx);
     }
 
+    /// Selects a match found by project search and highlights the query's other matches.
+    pub fn reveal_match(&mut self, line: usize, columns: Range<usize>, query: SearchQuery, cx: &mut Context<Self>) {
+        let start = self.buffer.offset(line, columns.start);
+        let end = self.buffer.offset(line, columns.end);
+        self.selection = Selection { anchor: start, head: end };
+        self.set_search(query, cx);
+    }
+
+    pub fn selected_text(&self) -> String {
+        self.buffer.slice(self.selection.range())
+    }
+
     /// Closes the find bar, keeps the current match selected, and returns to the text.
     pub fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.find_bar = None;
@@ -460,9 +472,9 @@ impl Editor {
         self.select_previous_match(cx);
     }
 
-    /// Escape: closes the find bar if it's open, otherwise collapses the selection.
+    /// Escape: closes the find bar or clears search highlights, otherwise collapses the selection.
     fn escape(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_bar.is_some() {
+        if self.find_bar.is_some() || self.search.is_some() {
             self.close_find(window, cx);
         } else if !self.selection.is_empty() {
             self.selection = Selection::caret(self.selection.head);

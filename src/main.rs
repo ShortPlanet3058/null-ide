@@ -9,6 +9,7 @@ mod fuzzy;
 mod highlight;
 mod menus;
 mod palette;
+mod project_search;
 mod search;
 mod settings;
 mod text_input;

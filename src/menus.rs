@@ -2,7 +2,7 @@ use crate::editor::{Copy, Cut, Paste, Redo, Save, SelectAll, Undo};
 use crate::find_bar::{DeployFind, DeployReplace, FindNext, FindPrevious};
 use crate::workspace::{
     CloseTab, DecreaseFontSize, IncreaseFontSize, NextTab, Open, OpenSettings, PreviousTab, ResetFontSize,
-    TogglePalette, ToggleSidebar, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
+    SearchProject, TogglePalette, ToggleSidebar, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
 };
 use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
 
@@ -47,6 +47,7 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                 MenuItem::action("Find Next", FindNext),
                 MenuItem::action("Find Previous", FindPrevious),
                 MenuItem::action("Replace…", DeployReplace),
+                MenuItem::action("Search in Project…", SearchProject),
             ],
         },
         Menu {
