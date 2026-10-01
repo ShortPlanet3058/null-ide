@@ -1,3 +1,5 @@
+mod ai;
+mod ask;
 mod assets;
 mod buffer;
 mod editor;
@@ -8,8 +10,11 @@ mod fonts;
 mod fuzzy;
 mod git;
 mod highlight;
+mod inline_assist;
+mod key_prompt;
 mod lsp;
 mod lsp_store;
+mod markdown;
 mod menus;
 mod palette;
 mod project_search;
@@ -52,6 +57,9 @@ fn main() {
         palette::bind_keys(cx);
         find_bar::bind_keys(cx);
         terminal::bind_keys(cx);
+        inline_assist::bind_keys(cx);
+        ask::bind_keys(cx);
+        key_prompt::bind_keys(cx);
         text_input::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());

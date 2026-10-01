@@ -1,8 +1,11 @@
+use crate::ai::ProviderId;
+use crate::ask::{AskContext, AskEvent, AskPanel};
 use crate::editor::{Editor, EditorEvent, GoToDefinition, Redo, Save, SelectAll, ShowInfo, Undo};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::find_bar::{DeployFind, DeployReplace};
 use crate::fonts::Fonts;
 use crate::git;
+use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
 use crate::lsp_store::{LspStore, Readiness};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
@@ -38,6 +41,14 @@ actions!(
         ShowFiles,
         ToggleAutocomplete,
         ToggleTerminal,
+        UseNvidia,
+        UseOllama,
+        UseOpenAiCompatible,
+        UseClaudeApi,
+        UseClaudeCode,
+        UseCodex,
+        TurnOffAi,
+        SetApiKey,
     ]
 );
 
@@ -134,6 +145,12 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// The AI answer panel, while open.
+    ask: Option<(Entity<AskPanel>, Subscription)>,
+    key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
+    /// A short message at the bottom of the window, and when it appeared.
+    notice: Option<(String, Instant)>,
+    notice_task: Option<Task<()>>,
     /// The terminal, once opened. It keeps running while the panel is hidden.
     terminal: Option<(Entity<TerminalView>, Subscription)>,
     terminal_open: Transition,
@@ -196,6 +213,10 @@ impl Workspace {
             branch_task: None,
             terminal: None,
             terminal_open: Transition::new(false),
+            ask: None,
+            key_prompt: None,
+            notice: None,
+            notice_task: None,
             focus_before_palette: None,
             _subscriptions: subscriptions,
         };
@@ -422,6 +443,10 @@ impl Workspace {
         let settings = cx.global::<Settings>();
         let fade =
             if settings.fade_bars_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
+        let ai_label = |id: ProviderId| {
+            let current = if settings.ai.provider == id { " (current)" } else { "" };
+            format!("AI: Use {}{current}", id.label())
+        };
         let theme_label = |name: ThemeName| {
             let current = if settings.theme == name { " (current)" } else { "" };
             format!("Theme: {}{current}", name.label())
@@ -432,6 +457,14 @@ impl Workspace {
             ("Search in Project".into(), Box::new(SearchProject)),
             ("Show Files".into(), Box::new(ShowFiles)),
             ("Toggle Terminal".into(), Box::new(ToggleTerminal)),
+            (ai_label(ProviderId::Nvidia), Box::new(UseNvidia)),
+            (ai_label(ProviderId::Ollama), Box::new(UseOllama)),
+            (ai_label(ProviderId::OpenaiCompatible), Box::new(UseOpenAiCompatible)),
+            (ai_label(ProviderId::Claude), Box::new(UseClaudeApi)),
+            (ai_label(ProviderId::ClaudeCode), Box::new(UseClaudeCode)),
+            (ai_label(ProviderId::Codex), Box::new(UseCodex)),
+            ("AI: Set API Key…".into(), Box::new(SetApiKey)),
+            ("AI: Turn Off".into(), Box::new(TurnOffAi)),
             (fade.into(), Box::new(ToggleFadeWhileTyping)),
             (theme_label(ThemeName::Oled), Box::new(UseOledTheme)),
             (theme_label(ThemeName::Graphite), Box::new(UseGraphiteTheme)),
@@ -457,6 +490,7 @@ impl Workspace {
                 ("Find…".into(), Box::new(DeployFind)),
                 ("Go to Definition".into(), Box::new(GoToDefinition)),
                 ("Show Info at Cursor".into(), Box::new(ShowInfo)),
+                ("AI: Edit with AI…".into(), Box::new(crate::editor::InlineAssist)),
                 ("Replace…".into(), Box::new(DeployReplace)),
             ]);
         }
@@ -486,6 +520,11 @@ impl Workspace {
                 let path = path.clone();
                 this.close_palette(window, cx);
                 this.open_file(path, window, cx);
+            }
+            PaletteEvent::Ask(question) => {
+                let question = question.clone();
+                this.close_palette(window, cx);
+                this.open_ask(question, window, cx);
             }
             PaletteEvent::Run(action) => {
                 let action = action.boxed_clone();
@@ -591,6 +630,102 @@ impl Workspace {
 
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
+    }
+
+    fn use_ai(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.ai.provider = provider);
+        let hint = if provider.uses_api_key() && crate::ai::api_key(provider).is_none() {
+            " Add a key with “AI: Set API Key”."
+        } else {
+            ""
+        };
+        self.show_notice(format!("AI answers now come from {}.{hint}", provider.label()), cx);
+    }
+
+    fn use_nvidia(&mut self, _: &UseNvidia, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::Nvidia, cx);
+    }
+
+    fn use_ollama(&mut self, _: &UseOllama, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::Ollama, cx);
+    }
+
+    fn use_openai_compatible(&mut self, _: &UseOpenAiCompatible, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::OpenaiCompatible, cx);
+    }
+
+    fn use_claude_api(&mut self, _: &UseClaudeApi, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::Claude, cx);
+    }
+
+    fn use_claude_code(&mut self, _: &UseClaudeCode, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::ClaudeCode, cx);
+    }
+
+    fn use_codex(&mut self, _: &UseCodex, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::Codex, cx);
+    }
+
+    fn turn_off_ai(&mut self, _: &TurnOffAi, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.ai.provider = ProviderId::Off);
+        self.show_notice("AI is off. Nothing AI-related will appear.".into(), cx);
+    }
+
+    fn set_api_key(&mut self, _: &SetApiKey, window: &mut Window, cx: &mut Context<Self>) {
+        let provider = cx.global::<Settings>().ai.provider;
+        if !provider.uses_api_key() {
+            let message = match provider {
+                ProviderId::Off => "Choose a provider first with “AI: Use …”.".to_string(),
+                _ => format!("{} doesn't use an API key.", provider.label()),
+            };
+            return self.show_notice(message, cx);
+        }
+        self.focus_before_palette = window.focused(cx);
+        let prompt = cx.new(|cx| KeyPrompt::new(provider, cx));
+        let subscription = cx.subscribe_in(&prompt, window, |this, _, event, window, cx| {
+            if let KeyPromptEvent::Finished(message) = event {
+                this.show_notice(message.clone(), cx);
+            }
+            this.key_prompt = None;
+            this.close_palette(window, cx);
+        });
+        window.focus(&prompt.focus_handle(cx));
+        self.key_prompt = Some((prompt, subscription));
+        cx.notify();
+    }
+
+    fn open_ask(&mut self, question: String, window: &mut Window, cx: &mut Context<Self>) {
+        let context = self.active_editor().map(|editor| {
+            let editor = editor.read(cx);
+            AskContext {
+                path: editor.path().map(Path::to_path_buf),
+                language: editor.language_name(),
+                text: editor.buffer.to_string(),
+                selection: editor.selected_text(),
+            }
+        });
+        self.focus_before_palette = self.active_editor().map(|e| e.focus_handle(cx));
+        let panel = cx.new(|cx| AskPanel::new(context, question, cx));
+        let subscription = cx.subscribe_in(&panel, window, |this, _, AskEvent::Closed, window, cx| {
+            this.ask = None;
+            this.close_palette(window, cx);
+        });
+        window.focus(&panel.focus_handle(cx));
+        self.ask = Some((panel, subscription));
+        cx.notify();
+    }
+
+    fn show_notice(&mut self, message: String, cx: &mut Context<Self>) {
+        self.notice = Some((message, Instant::now()));
+        self.notice_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(4)).await;
+            this.update(cx, |this, cx| {
+                this.notice = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
@@ -900,6 +1035,15 @@ impl Render for Workspace {
             Some(editor) => div().size_full().child(editor.clone()),
             None => div().size_full().child(self.render_empty(cx)),
         };
+        // One floating layer at a time: the palette, an AI answer, or the key prompt.
+        let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
+            Some(palette.clone().into_any_element())
+        } else if let Some((ask, _)) = &self.ask {
+            Some(ask.clone().into_any_element())
+        } else {
+            self.key_prompt.as_ref().map(|(prompt, _)| prompt.clone().into_any_element())
+        };
+        let ai_provider = cx.global::<Settings>().ai.provider;
         let theme = cx.global::<Theme>();
 
         let titlebar = div()
@@ -951,6 +1095,21 @@ impl Render for Workspace {
             }))
             .child(div().flex_1().overflow_hidden().whitespace_nowrap().children(items.next()))
             .children(lsp_status)
+            .when(ai_provider != ProviderId::Off, |bar| {
+                bar.child(
+                    div()
+                        .id("ai-status")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_color(theme.muted)
+                        .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
+                        .child(format!("AI · {}", ai_provider.label()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.toggle_palette(&TogglePalette, window, cx)
+                        })),
+                )
+            })
             .when(problems != (0, 0), |bar| {
                 let (errors, warnings) = problems;
                 let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
@@ -985,6 +1144,14 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_fade_while_typing))
             .on_action(cx.listener(Self::toggle_autocomplete))
             .on_action(cx.listener(Self::toggle_terminal))
+            .on_action(cx.listener(Self::use_nvidia))
+            .on_action(cx.listener(Self::use_ollama))
+            .on_action(cx.listener(Self::use_openai_compatible))
+            .on_action(cx.listener(Self::use_claude_api))
+            .on_action(cx.listener(Self::use_claude_code))
+            .on_action(cx.listener(Self::use_codex))
+            .on_action(cx.listener(Self::turn_off_ai))
+            .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -1009,7 +1176,7 @@ impl Render for Workspace {
                 ),
             )
             .child(status)
-            .when_some(self.palette.as_ref().map(|(p, _)| p.clone()), |root, palette| {
+            .when_some(overlay, |root, layer| {
                 root.child(
                     div()
                         .absolute()
@@ -1024,10 +1191,29 @@ impl Render for Workspace {
                         .occlude()
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, _: &MouseDownEvent, window, cx| this.close_palette(window, cx)),
+                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                this.ask = None;
+                                this.key_prompt = None;
+                                this.close_palette(window, cx);
+                            }),
                         )
-                        .child(palette),
+                        .child(layer),
                 )
             })
+            .children(self.notice.as_ref().map(|(message, _)| {
+                div().absolute().bottom(px(44.)).left_0().w_full().flex().justify_center().child(
+                    div()
+                        .px(px(14.))
+                        .py(px(8.))
+                        .rounded(px(9.))
+                        .bg(theme.raised)
+                        .border_1()
+                        .border_color(theme.hairline)
+                        .shadow_lg()
+                        .text_size(px(13.))
+                        .text_color(theme.foreground)
+                        .child(message.clone()),
+                )
+            }))
     }
 }

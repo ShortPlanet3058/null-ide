@@ -56,6 +56,26 @@ doesn't need Xcode's separate Metal Toolchain download.
 - Feature branches — branch off `dev`, named `feature/<topic>`, `fix/<topic>`, etc.,
   and open a pull request back into `dev`.
 
+## AI (optional, off by default)
+
+AI only appears when you call it: Cmd/Ctrl+I to change the code at the caret (shown as a
+diff you accept or reject), or `?` in the command palette to ask about the open file.
+Choose where answers come from in the palette (“AI: Use …”):
+
+| Provider | Needs |
+|---|---|
+| NVIDIA | an NVIDIA API key |
+| Ollama | Ollama running locally |
+| OpenAI-compatible | any compatible endpoint (`base_url` + `model` in settings), key optional |
+| Claude API | an Anthropic API key |
+| Claude Code | the `claude` CLI, signed in (uses your Claude plan) |
+| Codex | the `codex` CLI, signed in (uses your ChatGPT plan) |
+
+API keys are stored in the system keychain (“AI: Set API Key…”), or read from
+`NVIDIA_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`; they never go in the settings
+file. Claude Code and Codex run with every tool disabled, so they can only answer; Null
+applies changes itself. Models and endpoints can be changed under `"ai"` in settings.
+
 ## Fonts
 
 Null ships with [Geist Mono](https://github.com/vercel/geist-font) for code and
