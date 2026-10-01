@@ -202,6 +202,8 @@ pub enum EditorEvent {
     NeedsPath,
     /// The file changed on disk while there were unsaved edits here.
     ChangedOnDisk,
+    /// Writing the file failed; the message says why.
+    SaveFailed(String),
     /// Go to definition landed in another file.
     GoTo {
         path: PathBuf,
@@ -1034,7 +1036,8 @@ impl Editor {
                 true
             }
             Err(err) => {
-                eprintln!("null: couldn't save {}: {err}", path.display());
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                cx.emit(EditorEvent::SaveFailed(format!("Couldn't save {name}: {err}")));
                 false
             }
         }

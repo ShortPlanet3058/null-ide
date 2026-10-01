@@ -321,7 +321,7 @@ impl Workspace {
     /// Points open tabs at their new location after a file or folder was renamed.
     fn paths_renamed(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
         for tab in &self.tabs {
-            let moved = tab.editor.read(cx).path().and_then(|p| p.strip_prefix(from).ok()).map(|rest| to.join(rest));
+            let moved = tab.editor.read(cx).path().and_then(|p| moved_path(p, from, to));
             if let Some(new_path) = moved {
                 let lsp = self.lsp.clone();
                 tab.editor.update(cx, |editor, cx| editor.set_path(new_path, Some(lsp), cx));
@@ -379,6 +379,7 @@ impl Workspace {
                     cx.notify();
                 }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
+                EditorEvent::SaveFailed(message) => this.show_notice(message.clone(), cx),
                 EditorEvent::ChangedOnDisk => {
                     let name = editor.read(cx).file_name();
                     this.show_notice(format!("{name} changed on disk. Your unsaved edits were kept."), cx);
@@ -1179,6 +1180,13 @@ impl Workspace {
     }
 }
 
+/// Where `path` ends up when `from` (it, or a folder above it) is renamed to `to`.
+fn moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    let rest = path.strip_prefix(from).ok()?;
+    // Joining an empty rest would add a trailing slash and turn the file into a "folder".
+    Some(if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) })
+}
+
 #[derive(Clone)]
 enum CloseAction {
     Quit,
@@ -1422,5 +1430,20 @@ impl Render for Workspace {
                         .child(message.clone()),
                 )
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renamed_paths_never_gain_a_trailing_slash() {
+        let (from, to) = (Path::new("/p/old.py"), Path::new("/p/test.py"));
+        assert_eq!(moved_path(from, from, to).unwrap(), PathBuf::from("/p/test.py"));
+        assert!(!moved_path(from, from, to).unwrap().to_string_lossy().ends_with('/'));
+        let (dir, new_dir) = (Path::new("/p/src"), Path::new("/p/lib"));
+        assert_eq!(moved_path(Path::new("/p/src/a/b.rs"), dir, new_dir).unwrap(), PathBuf::from("/p/lib/a/b.rs"));
+        assert_eq!(moved_path(Path::new("/p/other.rs"), dir, new_dir), None);
     }
 }
