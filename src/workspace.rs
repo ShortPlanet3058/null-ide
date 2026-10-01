@@ -43,6 +43,7 @@ actions!(
         ToggleTerminal,
         NewUntitled,
         SaveAs,
+        SaveAll,
         ReopenClosedTab,
         CloseAllTabs,
         CloseOtherTabs,
@@ -74,6 +75,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("secondary-n", NewUntitled, ctx),
         KeyBinding::new("secondary-shift-s", SaveAs, ctx),
+        // Also here, not only in the editor: saving must work wherever the keyboard is
+        // (the file tree after clicking a file, the terminal, the find bar...).
+        KeyBinding::new("secondary-s", Save, ctx),
+        KeyBinding::new("secondary-alt-s", SaveAll, ctx),
         KeyBinding::new("secondary-shift-t", ReopenClosedTab, ctx),
         KeyBinding::new("secondary-=", IncreaseFontSize, ctx),
         KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
@@ -561,6 +566,24 @@ impl Workspace {
         self.add_tab(editor, window, cx);
     }
 
+    /// Save from anywhere in the window: the open file is saved even when the
+    /// keyboard is in the tree or the terminal.
+    fn save_active(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor().cloned() {
+            editor.update(cx, |editor, cx| editor.save_to_disk(cx));
+        }
+    }
+
+    fn save_all(&mut self, _: &SaveAll, _: &mut Window, cx: &mut Context<Self>) {
+        let dirty: Vec<Entity<Editor>> =
+            self.tabs.iter().map(|t| t.editor.clone()).filter(|e| e.read(cx).buffer.is_dirty()).collect();
+        let count = dirty.len();
+        let saved = dirty.into_iter().filter(|e| e.update(cx, |e, cx| e.save_to_disk(cx))).count();
+        if count > 1 {
+            self.show_notice(format!("Saved {saved} of {count} files"), cx);
+        }
+    }
+
     fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor().cloned() {
             self.ask_where_to_save(editor, window, cx);
@@ -681,6 +704,7 @@ impl Workspace {
             commands.extend([
                 ("Save".into(), Box::new(Save) as Box<dyn Action>),
                 ("Save As…".into(), Box::new(SaveAs)),
+                ("Save All".into(), Box::new(SaveAll)),
                 ("Close Tab".into(), Box::new(CloseTab)),
                 ("Close All Tabs".into(), Box::new(CloseAllTabs)),
                 ("Close Other Tabs".into(), Box::new(CloseOtherTabs)),
@@ -1356,6 +1380,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::new_untitled))
             .on_action(cx.listener(Self::save_as))
+            .on_action(cx.listener(Self::save_active))
+            .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::reopen_closed_tab))
             .on_action(cx.listener(Self::close_all_tabs))
             .on_action(cx.listener(Self::close_other_tabs))
