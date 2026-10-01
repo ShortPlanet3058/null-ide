@@ -6,6 +6,7 @@ mod file_tree;
 mod find_bar;
 mod fonts;
 mod fuzzy;
+mod git;
 mod highlight;
 mod lsp;
 mod lsp_store;

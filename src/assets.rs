@@ -5,6 +5,7 @@ use std::borrow::Cow;
 const ICONS: &[(&str, &[u8])] = &[
     ("icons/chevron-right.svg", include_bytes!("../assets/icons/chevron-right.svg")),
     ("icons/x.svg", include_bytes!("../assets/icons/x.svg")),
+    ("icons/branch.svg", include_bytes!("../assets/icons/branch.svg")),
 ];
 
 pub struct Assets;
