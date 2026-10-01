@@ -21,7 +21,7 @@ impl Editor {
             return start..end;
         }
         let (caret_line, _) = self.caret_point();
-        if self.highlighter.is_some()
+        if self.language_name() == "Rust"
             && let Some(lines) = self.rust_item_lines(caret_line)
         {
             return lines;

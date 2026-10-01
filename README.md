@@ -6,8 +6,9 @@ Null is a new IDE built around one idea: the screen belongs to your code. It aim
 first-class, polished experience — instant, fluid, beautiful — and keeps AI within reach
 without ever making it the center of the room.
 
-> Status: **pre-alpha**. Opens a folder with a file tree and tabs, and edits files with
-> syntax highlighting for Rust. Most features are still to come.
+> Status: **pre-alpha**. Opens a folder with a file tree, tabs, a terminal and project
+> search, with syntax highlighting for Rust, Python, JavaScript, TypeScript, JSON, TOML,
+> Markdown, HTML, CSS, Go, C, C++, YAML and shell scripts.
 
 ## Building
 
