@@ -1,3 +1,4 @@
+use crate::fonts::{self, DEFAULT_CODE_FONT, DEFAULT_UI_FONT};
 use crate::theme::{Theme, ThemeName};
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,10 @@ pub const MAX_FONT_SIZE: f32 = 32.;
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemeName,
+    /// Font family for code. Any installed font works; Geist Mono ships with Null.
+    pub code_font: String,
+    /// Font family for menus, tabs and the palette. Instrument Sans ships with Null.
+    pub ui_font: String,
     pub font_size: f32,
     pub sidebar_visible: bool,
     /// Dim the title bar, sidebar and status bar while typing.
@@ -23,6 +28,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeName::Oled,
+            code_font: DEFAULT_CODE_FONT.into(),
+            ui_font: DEFAULT_UI_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
             sidebar_visible: true,
             fade_bars_while_typing: false,
@@ -85,8 +92,10 @@ impl Settings {
 }
 
 pub fn init(cx: &mut App) {
+    fonts::register(cx);
     let settings = Settings::load();
     cx.set_global(Theme::named(settings.theme));
+    fonts::apply(&settings.code_font, &settings.ui_font, cx);
     cx.set_global(settings);
 }
 
@@ -110,8 +119,14 @@ pub fn reload(cx: &mut App) {
 }
 
 fn apply(settings: Settings, cx: &mut App) {
-    if settings.theme != cx.global::<Settings>().theme {
+    let old = cx.global::<Settings>();
+    let theme_changed = settings.theme != old.theme;
+    let fonts_changed = settings.code_font != old.code_font || settings.ui_font != old.ui_font;
+    if theme_changed {
         cx.set_global(Theme::named(settings.theme));
+    }
+    if fonts_changed {
+        fonts::apply(&settings.code_font, &settings.ui_font, cx);
     }
     cx.set_global(settings);
     cx.refresh_windows();

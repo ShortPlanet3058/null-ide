@@ -3,6 +3,7 @@ mod buffer;
 mod editor;
 mod element;
 mod file_tree;
+mod fonts;
 mod fuzzy;
 mod highlight;
 mod menus;
