@@ -1,4 +1,5 @@
 use crate::editor::{Copy, Cut, DecreaseFontSize, IncreaseFontSize, Paste, Redo, ResetFontSize, Save, SelectAll, Undo};
+use crate::workspace::{CloseTab, NextTab, Open, PreviousTab, ToggleSidebar};
 use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
 
 actions!(null, [Quit, ToggleFadeWhileTyping]);
@@ -16,7 +17,15 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                 MenuItem::action("Quit Null", Quit),
             ],
         },
-        Menu { name: "File".into(), items: vec![MenuItem::action("Save", Save)] },
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("Open…", Open),
+                MenuItem::separator(),
+                MenuItem::action("Save", Save),
+                MenuItem::action("Close Tab", CloseTab),
+            ],
+        },
         Menu {
             name: "Edit".into(),
             items: vec![
@@ -32,6 +41,10 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
         Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Next Tab", NextTab),
+                MenuItem::action("Previous Tab", PreviousTab),
+                MenuItem::separator(),
                 MenuItem::action("Bigger Text", IncreaseFontSize),
                 MenuItem::action("Smaller Text", DecreaseFontSize),
                 MenuItem::action("Actual Size", ResetFontSize),

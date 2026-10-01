@@ -167,6 +167,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)] // the reversed range is what's being tested
     fn out_of_range_edits_are_clamped() {
         let mut buf = Buffer::from_text("abc");
         let end = buf.replace(10..20, "!");

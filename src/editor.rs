@@ -670,13 +670,22 @@ impl Editor {
     }
 
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = &self.path else { return };
+        self.save_to_disk(cx);
+    }
+
+    /// Writes the buffer to its file. Returns false if there's no file or writing failed.
+    pub fn save_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(path) = &self.path else { return false };
         match std::fs::write(path, self.buffer.to_string()) {
             Ok(()) => {
                 self.buffer.mark_saved();
                 cx.notify();
+                true
             }
-            Err(err) => eprintln!("null: couldn't save {}: {err}", path.display()),
+            Err(err) => {
+                eprintln!("null: couldn't save {}: {err}", path.display());
+                false
+            }
         }
     }
 

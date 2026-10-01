@@ -6,15 +6,17 @@ Null is a new IDE built around one idea: the screen belongs to your code. It aim
 first-class, polished experience — instant, fluid, beautiful — and keeps AI within reach
 without ever making it the center of the room.
 
-> Status: **pre-alpha**. A single-file editor with syntax highlighting runs; most features
-> are still to come.
+> Status: **pre-alpha**. Opens a folder with a file tree and tabs, and edits files with
+> syntax highlighting for Rust. Most features are still to come.
 
 ## Building
 
 Requires [Rust](https://rustup.rs) (stable) and, on macOS, Xcode.
 
 ```sh
-cargo run -- path/to/file.rs
+cargo run                      # open the current folder
+cargo run -- path/to/folder    # open another folder
+cargo run -- path/to/file.rs   # open a file
 ```
 
 Shaders are compiled when the app starts (GPUI's `runtime_shaders` feature), so the build
