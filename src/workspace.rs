@@ -1,7 +1,8 @@
-use crate::editor::{Editor, EditorEvent, Redo, Save, SelectAll, Undo};
+use crate::editor::{Editor, EditorEvent, GoToDefinition, Redo, Save, SelectAll, ShowInfo, Undo};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::find_bar::{DeployFind, DeployReplace};
 use crate::fonts::Fonts;
+use crate::lsp_store::{LspStore, Readiness};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
@@ -116,6 +117,7 @@ struct Tab {
 pub struct Workspace {
     focus_handle: FocusHandle,
     tree: Entity<FileTree>,
+    lsp: Entity<LspStore>,
     project_search: Entity<ProjectSearch>,
     /// On while the sidebar shows project search instead of files.
     sidebar_search: Transition,
@@ -125,6 +127,8 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// When language support first became ready this session, to show a short tip once.
+    ready_since: Option<Instant>,
     /// Where focus goes back to when the palette closes.
     focus_before_palette: Option<FocusHandle>,
     _subscriptions: Vec<Subscription>,
@@ -133,12 +137,14 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
+        let lsp = cx.new(|_| LspStore::new(root.clone()));
         let tree = cx.new(|_| FileTree::new(root));
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) => this.open_file(path.clone(), window, cx),
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
+            cx.observe(&lsp, |_, _, cx| cx.notify()),
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
                 ProjectSearchEvent::Open { path, line, columns, query } => {
                     let (line, columns, query) = (*line, columns.clone(), query.clone());
@@ -156,6 +162,7 @@ impl Workspace {
         Self {
             focus_handle: cx.focus_handle(),
             tree,
+            lsp,
             project_search,
             sidebar_search: Transition::new(false),
             tabs: Vec::new(),
@@ -164,6 +171,7 @@ impl Workspace {
             chrome: Transition::new(true),
             last_mouse: None,
             palette: None,
+            ready_since: None,
             focus_before_palette: None,
             _subscriptions: subscriptions,
         }
@@ -179,10 +187,11 @@ impl Workspace {
             self.activate(ix, window, cx);
             return;
         }
-        let editor = cx.new(|cx| Editor::open(path, cx));
+        let lsp = self.lsp.clone();
+        let editor = cx.new(|cx| Editor::open(path, Some(lsp), cx));
         let subscriptions = [
             cx.observe(&editor, |_, _, cx| cx.notify()),
-            cx.subscribe(&editor, |this, editor, event, cx| match event {
+            cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited if cx.global::<Settings>().fade_bars_while_typing => {
                     this.chrome.set(false, FADE_IN, FADE_OUT);
                     cx.notify();
@@ -192,6 +201,13 @@ impl Workspace {
                 EditorEvent::Saved => {
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
+                    }
+                }
+                EditorEvent::GoTo { path, range } => {
+                    let range = *range;
+                    this.open_file(path.clone(), window, cx);
+                    if let Some(editor) = this.active_editor() {
+                        editor.update(cx, |editor, cx| editor.select_lsp_range(range, cx));
                     }
                 }
             }),
@@ -205,6 +221,15 @@ impl Workspace {
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
             self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
+            // Language servers work per project: restart them for the new folder.
+            let root = path.clone();
+            self.lsp.update(cx, |lsp, _| {
+                lsp.shutdown();
+                *lsp = LspStore::new(root);
+            });
+            for tab in &self.tabs {
+                tab.editor.update(cx, |editor, cx| editor.reattach_lsp(cx));
+            }
             self.tree.update(cx, |tree, cx| tree.set_root(path, cx));
             let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
             self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
@@ -224,7 +249,8 @@ impl Workspace {
     }
 
     fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.tabs.remove(ix);
+        let tab = self.tabs.remove(ix);
+        tab.editor.update(cx, |editor, cx| editor.release_lsp(cx));
         if self.tabs.is_empty() {
             self.active = None;
             window.set_window_title("Null");
@@ -381,6 +407,8 @@ impl Workspace {
                 ("Redo".into(), Box::new(Redo)),
                 ("Select All".into(), Box::new(SelectAll)),
                 ("Find…".into(), Box::new(DeployFind)),
+                ("Go to Definition".into(), Box::new(GoToDefinition)),
+                ("Show Info at Cursor".into(), Box::new(ShowInfo)),
                 ("Replace…".into(), Box::new(DeployReplace)),
             ]);
         }
@@ -453,10 +481,29 @@ impl Workspace {
         cx.notify();
     }
 
-    fn show_files(&mut self, _: &ShowFiles, _: &mut Window, cx: &mut Context<Self>) {
+    fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
+        self.leave_hidden_focus(window, cx);
         cx.notify();
+    }
+
+    /// When the focused field is about to disappear (the search box when switching
+    /// to files, or the sidebar being hidden), focus the text instead. Otherwise
+    /// focus would sit on something no longer on screen and shortcuts would stop working.
+    fn leave_hidden_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let search_hidden = !self.sidebar_search.on || !cx.global::<Settings>().sidebar_visible;
+        if search_hidden && self.project_search.focus_handle(cx).contains_focused(window, cx) {
+            self.focus_main(window, cx);
+        }
+    }
+
+    /// Focuses the open file, or the window itself when nothing is open.
+    fn focus_main(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.active_editor() {
+            Some(editor) => window.focus(&editor.focus_handle(cx)),
+            None => window.focus(&self.focus_handle),
+        }
     }
 
     fn render_sidebar_switch(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -489,8 +536,9 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
         settings::update(cx, |s| s.sidebar_visible = !s.sidebar_visible);
+        self.leave_hidden_focus(window, cx);
     }
 
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
@@ -537,6 +585,47 @@ impl Workspace {
             if !self.chrome.on {
                 self.chrome.set(true, FADE_IN, FADE_OUT);
                 cx.notify();
+            }
+        }
+    }
+
+    /// What the status bar says about code intelligence for the open file.
+    fn language_status(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        const TIP_FOR: Duration = Duration::from_secs(8);
+        let editor = self.active_editor()?.read(cx);
+        let readiness = editor.readiness(cx)?;
+        let theme = cx.global::<Theme>();
+        let dot = |color| div().size(px(6.)).rounded_full().bg(color);
+        let item = |color, text: String| {
+            div().flex().items_center().gap(px(6.)).whitespace_nowrap().child(dot(color)).child(text).into_any_element()
+        };
+        match readiness {
+            Readiness::Starting => Some(item(theme.caret, "Starting…".into())),
+            Readiness::Indexing { percent } => {
+                let percent = percent.map(|p| format!(" {p}%")).unwrap_or_default();
+                Some(item(theme.caret, format!("Indexing{percent}")))
+            }
+            Readiness::Unavailable { program } => {
+                Some(div().text_color(theme.faint).child(format!("{program} isn't installed")).into_any_element())
+            }
+            Readiness::Ready { checking } => {
+                let since = *self.ready_since.get_or_insert_with(|| {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(TIP_FOR).await;
+                        this.update(cx, |_, cx| cx.notify()).ok();
+                    })
+                    .detach();
+                    Instant::now()
+                });
+                if since.elapsed() < TIP_FOR {
+                    let tip = if cfg!(target_os = "macos") {
+                        "Hold ⌥ over code for info · ⌘-click to jump"
+                    } else {
+                        "Hold Alt over code for info · Ctrl+click to jump"
+                    };
+                    return Some(div().text_color(theme.muted).whitespace_nowrap().child(tip).into_any_element());
+                }
+                checking.then(|| div().text_color(theme.faint).child("Checking…").into_any_element())
             }
         }
     }
@@ -646,18 +735,24 @@ impl Render for Workspace {
         };
 
         let root = self.tree.read(cx).root().to_path_buf();
-        let status_items: Vec<String> = match self.active_editor().map(|e| e.read(cx)) {
+        let lsp_status = self.language_status(cx);
+        let (status_items, problems): (Vec<String>, (usize, usize)) = match self.active_editor().map(|e| e.read(cx)) {
             Some(editor) => {
                 let (line, col) = editor.caret_point();
                 let path = editor.path().map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string());
-                vec![
-                    path.unwrap_or_else(|| "untitled".into()),
-                    format!("Ln {}, Col {}", line + 1, col + 1),
-                    "Spaces: 4".into(),
-                    editor.language_name().into(),
-                ]
+                let problems = editor.problems(cx);
+                let count = |s| problems.iter().filter(|p| p.severity == s).count();
+                (
+                    vec![
+                        path.unwrap_or_else(|| "untitled".into()),
+                        format!("Ln {}, Col {}", line + 1, col + 1),
+                        "Spaces: 4".into(),
+                        editor.language_name().into(),
+                    ],
+                    (count(lsp_types::DiagnosticSeverity::ERROR), count(lsp_types::DiagnosticSeverity::WARNING)),
+                )
             }
-            None => vec![root.display().to_string()],
+            None => (vec![root.display().to_string()], (0, 0)),
         };
         let tabs = self.render_tabs(cx);
         let body = match self.active_editor() {
@@ -705,6 +800,20 @@ impl Render for Workspace {
             .text_color(theme.muted)
             .opacity(opacity)
             .child(div().flex_1().overflow_hidden().whitespace_nowrap().children(items.next()))
+            .children(lsp_status)
+            .when(problems != (0, 0), |bar| {
+                let (errors, warnings) = problems;
+                let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+                bar.child(
+                    div()
+                        .flex()
+                        .gap(px(10.))
+                        .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
+                        .when(warnings > 0, |d| {
+                            d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
+                        }),
+                )
+            })
             .children(items);
 
         div()

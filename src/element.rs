@@ -3,10 +3,12 @@ use crate::fonts::Fonts;
 use crate::highlight::{Span, spans_in};
 use crate::theme::{Syntax, Theme};
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Focusable, Font, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Point, ShapedLine, Style, TextRun, Window, fill, font, point,
-    px, relative, size,
+    App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Focusable, Font, GlobalElementId, Hsla,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Point, ShapedLine, Style, TextRun, UnderlineStyle, Window, fill,
+    font, point, px, relative, size,
 };
+use lsp_types::DiagnosticSeverity;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 /// How long the caret takes to glide to a new position.
@@ -36,6 +38,7 @@ pub struct Prepaint {
     lines: Vec<(ShapedLine, Point<Pixels>)>,
     selection: Vec<Bounds<Pixels>>,
     matches: Vec<(Bounds<Pixels>, bool)>,
+    link: Vec<Bounds<Pixels>>,
     marked: Vec<Bounds<Pixels>>,
     caret: Option<(Bounds<Pixels>, f32)>,
 }
@@ -54,24 +57,33 @@ fn run(len: usize, font: &Font, color: gpui::Hsla) -> TextRun {
 
 /// Text runs covering exactly `text`, colored by the highlight spans that
 /// fall inside it. `line_start` is the line's byte offset in the document.
-fn runs_for(text: &str, line_start: usize, spans: &[Span], theme: &Theme, font: &Font) -> Vec<TextRun> {
-    let mut runs = Vec::new();
-    let mut cursor = 0;
-    for (range, syntax) in spans_in(spans, line_start..line_start + text.len()) {
-        let start = range.start.max(cursor);
-        if start >= range.end || !text.is_char_boundary(start) || !text.is_char_boundary(range.end) {
-            continue;
-        }
-        if start > cursor {
-            runs.push(run(start - cursor, font, theme.syntax(Syntax::Plain)));
-        }
-        runs.push(run(range.end - start, font, theme.syntax(syntax)));
-        cursor = range.end;
-    }
-    if cursor < text.len() {
-        runs.push(run(text.len() - cursor, font, theme.syntax(Syntax::Plain)));
-    }
-    runs
+fn runs_for(
+    text: &str,
+    line_start: usize,
+    spans: &[Span],
+    underlines: &[(Range<usize>, Hsla)],
+    theme: &Theme,
+    font: &Font,
+) -> Vec<TextRun> {
+    let colored: Vec<Span> = spans_in(spans, line_start..line_start + text.len()).collect();
+    // Cut the line wherever a color or an underline starts or ends.
+    let mut cuts: Vec<usize> = vec![0, text.len()];
+    cuts.extend(colored.iter().flat_map(|(r, _)| [r.start, r.end]));
+    cuts.extend(underlines.iter().flat_map(|(r, _)| [r.start, r.end]));
+    cuts.retain(|&c| c <= text.len() && text.is_char_boundary(c));
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2)
+        .map(|w| {
+            let (a, b) = (w[0], w[1]);
+            let syntax = colored.iter().find(|(r, _)| r.start <= a && b <= r.end).map_or(Syntax::Plain, |(_, s)| *s);
+            let mut run = run(b - a, font, theme.syntax(syntax));
+            if let Some((_, color)) = underlines.iter().find(|(r, _)| r.start <= a && b <= r.end) {
+                run.underline = Some(UnderlineStyle { color: Some(*color), thickness: px(1.), wavy: true });
+            }
+            run
+        })
+        .collect()
 }
 
 fn byte_of_column(text: &str, column: usize) -> usize {
@@ -170,11 +182,41 @@ impl Element for EditorElement {
             let visible = first.min(total_lines)..(first + count).min(total_lines);
 
             let texts: Vec<String> = visible.clone().map(|l| editor.buffer.line_text(l)).collect();
+
+            // Errors and warnings get a wavy underline and color their line number.
+            // Hints and notes only show in the hover card, to keep the code calm.
+            let mut underlines: Vec<Vec<(Range<usize>, Hsla)>> = vec![Vec::new(); visible.len()];
+            let mut flagged: Vec<Option<Hsla>> = vec![None; visible.len()];
+            for problem in editor.problems(cx) {
+                let color = match problem.severity {
+                    DiagnosticSeverity::ERROR => theme.error,
+                    DiagnosticSeverity::WARNING => theme.warning,
+                    _ => continue,
+                };
+                let (start_line, start_col) = editor.buffer.point(problem.range.start);
+                let (end_line, end_col) = editor.buffer.point(problem.range.end);
+                for line in start_line.max(visible.start)..=end_line.min(visible.end.saturating_sub(1)) {
+                    let i = line - visible.start;
+                    let text = &texts[i];
+                    let from = if line == start_line { start_col } else { 0 };
+                    let mut to = if line == end_line { end_col } else { text.chars().count() };
+                    if to <= from {
+                        to = from + 1; // zero-width problems still get one character underlined
+                    }
+                    underlines[i].push((byte_of_column(text, from)..byte_of_column(text, to), color));
+                    if line == start_line && flagged[i] != Some(theme.error) {
+                        flagged[i] = Some(color);
+                    }
+                }
+            }
+
             let shaped: Vec<ShapedLine> = visible
                 .clone()
                 .zip(&texts)
-                .map(|(line, text)| {
-                    let runs = runs_for(text, editor.buffer.line_to_byte(line), &editor.spans, &theme, &font);
+                .enumerate()
+                .map(|(i, (line, text))| {
+                    let runs =
+                        runs_for(text, editor.buffer.line_to_byte(line), &editor.spans, &underlines[i], &theme, &font);
                     shape(text.clone(), &runs)
                 })
                 .collect();
@@ -218,7 +260,11 @@ impl Element for EditorElement {
                 .clone()
                 .map(|line| {
                     let label = (line + 1).to_string();
-                    let color = if line == caret_line { theme.muted } else { theme.faint };
+                    let color = flagged[line - visible.start].unwrap_or(if line == caret_line {
+                        theme.muted
+                    } else {
+                        theme.faint
+                    });
                     let shaped = shape(label.clone(), &[run(label.len(), &font, color)]);
                     let x = bounds.left() + gutter_width - px(GUTTER_PADDING) - shaped.width;
                     (shaped, point(x, row_top(line)))
@@ -250,6 +296,15 @@ impl Element for EditorElement {
                 rects
             };
             let selection = range_rects(selection_range.clone());
+            // A thin underline under the word that Cmd/Ctrl+click would follow.
+            let link: Vec<Bounds<Pixels>> = editor
+                .link_word
+                .clone()
+                .map(range_rects)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| Bounds::new(point(r.left(), r.bottom() - line_height * 0.18), size(r.size.width, px(1.))))
+                .collect();
 
             // Search matches on screen; the current one is drawn with an outline.
             let mut matches = Vec::new();
@@ -355,7 +410,7 @@ impl Element for EditorElement {
                 shaped,
             });
 
-            Prepaint { text_bounds, line_height, current_line, numbers, lines, selection, matches, marked, caret }
+            Prepaint { text_bounds, line_height, current_line, numbers, lines, selection, matches, link, marked, caret }
         })
     }
 
@@ -391,6 +446,9 @@ impl Element for EditorElement {
             }
             for (line, origin) in &prepaint.lines {
                 line.paint(*origin, line_height, window, cx).ok();
+            }
+            for rect in &prepaint.link {
+                window.paint_quad(fill(*rect, theme.foreground));
             }
             for rect in &prepaint.marked {
                 window.paint_quad(fill(*rect, theme.foreground));

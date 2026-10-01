@@ -7,6 +7,8 @@ mod find_bar;
 mod fonts;
 mod fuzzy;
 mod highlight;
+mod lsp;
+mod lsp_store;
 mod menus;
 mod palette;
 mod project_search;

@@ -131,6 +131,22 @@ impl Buffer {
         self.line_to_char(line) + column.min(self.line_len(line))
     }
 
+    /// Column (in chars) of a UTF-16 position on `line`, as language servers count.
+    pub fn utf16_to_column(&self, line: usize, utf16: usize) -> usize {
+        let mut units = 0;
+        for (column, c) in self.line_text(line).chars().enumerate() {
+            if units >= utf16 {
+                return column;
+            }
+            units += c.len_utf16();
+        }
+        self.line_len(line)
+    }
+
+    pub fn column_to_utf16(&self, line: usize, column: usize) -> usize {
+        self.line_text(line).chars().take(column).map(char::len_utf16).sum()
+    }
+
     pub fn char_to_utf16(&self, offset: usize) -> usize {
         self.text.char_to_utf16_cu(offset.min(self.len_chars()))
     }
@@ -194,6 +210,14 @@ mod tests {
         assert_eq!(buf.point(offset), (1, 4));
         assert_eq!(buf.offset(1, 99), buf.offset(1, 15));
         assert_eq!(buf.offset(99, 0), buf.line_to_char(2));
+    }
+
+    #[test]
+    fn utf16_columns_round_trip() {
+        let buf = Buffer::from_text("x\n😀ab");
+        assert_eq!(buf.utf16_to_column(1, 3), 2);
+        assert_eq!(buf.column_to_utf16(1, 2), 3);
+        assert_eq!(buf.utf16_to_column(1, 99), 3);
     }
 
     #[test]
