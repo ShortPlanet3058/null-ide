@@ -1,3 +1,4 @@
+mod assets;
 mod buffer;
 mod editor;
 mod element;
@@ -32,7 +33,7 @@ fn resolve_args() -> (PathBuf, Option<PathBuf>) {
 fn main() {
     let (root, file) = resolve_args();
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         theme::init(cx);
         editor::bind_keys(cx);
         workspace::bind_keys(cx);

@@ -1,10 +1,17 @@
 use crate::theme::Theme;
-use gpui::{ClickEvent, Context, EventEmitter, SharedString, Window, div, prelude::*, px, uniform_list};
+use gpui::{
+    ClickEvent, Context, EventEmitter, SharedString, Transformation, Window, div, prelude::*, px, radians, svg,
+    uniform_list,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub const ROW_HEIGHT: f32 = 26.;
 const INDENT: f32 = 14.;
+const CHEVRON: &str = "icons/chevron-right.svg";
+/// How long a folder's arrow takes to turn when it opens or closes.
+const TURN: Duration = Duration::from_millis(160);
 /// Never worth showing in a project tree.
 const ALWAYS_HIDDEN: &[&str] = &[".git", ".DS_Store"];
 
@@ -32,6 +39,8 @@ struct Row {
 pub struct FileTree {
     root: PathBuf,
     expanded: HashSet<PathBuf>,
+    /// When each folder was last opened or closed, to animate its arrow.
+    toggled_at: HashMap<PathBuf, Instant>,
     children: HashMap<PathBuf, Vec<Entry>>,
     rows: Vec<Row>,
     active: Option<PathBuf>,
@@ -43,6 +52,7 @@ impl FileTree {
     pub fn new(root: PathBuf) -> Self {
         let mut tree = Self {
             expanded: HashSet::from([root.clone()]),
+            toggled_at: HashMap::new(),
             root,
             children: HashMap::new(),
             rows: Vec::new(),
@@ -122,13 +132,24 @@ impl FileTree {
         }
     }
 
+    /// How far a folder's arrow has turned: 0 points right (closed), 1 points down (open).
+    /// Also says whether it's still turning.
+    fn chevron_turn(&self, row: &Row) -> (f32, bool) {
+        let target = if row.expanded { 1. } else { 0. };
+        let Some(at) = self.toggled_at.get(&row.entry.path) else { return (target, false) };
+        let t = (at.elapsed().as_secs_f32() / TURN.as_secs_f32()).min(1.);
+        let eased = 1. - (1. - t).powi(3);
+        (1. - target + (2. * target - 1.) * eased, t < 1.)
+    }
+
     fn click(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(row) = self.rows.get(ix) else { return };
         let path = row.entry.path.clone();
         if row.entry.is_dir {
             if !self.expanded.remove(&path) {
-                self.expanded.insert(path);
+                self.expanded.insert(path.clone());
             }
+            self.toggled_at.insert(path, Instant::now());
             self.rebuild();
             cx.notify();
         } else {
@@ -159,7 +180,7 @@ impl Render for FileTree {
                 uniform_list(
                     "file-tree",
                     self.rows.len(),
-                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
                         let theme = cx.global::<Theme>();
                         range
                             .map(|ix| {
@@ -173,14 +194,22 @@ impl Render for FileTree {
                                     theme.muted
                                 };
                                 let marker = if row.entry.is_dir {
-                                    div().w(px(10.)).text_size(px(10.)).text_color(theme.faint).child(if row.expanded {
-                                        "▾"
-                                    } else {
-                                        "▸"
-                                    })
+                                    let (turn, turning) = this.chevron_turn(row);
+                                    if turning {
+                                        window.request_animation_frame();
+                                    }
+                                    div().size(px(14.)).flex().items_center().justify_center().child(
+                                        svg()
+                                            .path(CHEVRON)
+                                            .size(px(12.))
+                                            .text_color(if active { theme.foreground } else { theme.muted })
+                                            .with_transformation(Transformation::rotate(radians(
+                                                turn * std::f32::consts::FRAC_PI_2,
+                                            ))),
+                                    )
                                 } else {
-                                    div().w(px(10.)).flex().justify_center().child(
-                                        div().size(px(6.)).rounded(px(2.)).bg(if active {
+                                    div().size(px(14.)).flex().items_center().justify_center().child(
+                                        div().size(px(5.)).rounded(px(2.)).bg(if active {
                                             theme.caret
                                         } else {
                                             theme.faint
