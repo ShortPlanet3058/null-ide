@@ -1,20 +1,26 @@
-use crate::editor::{Editor, EditorEvent};
+use crate::editor::{
+    DecreaseFontSize, Editor, EditorEvent, IncreaseFontSize, Redo, ResetFontSize, Save, SelectAll, Undo,
+};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping};
+use crate::palette::{Command, Palette, PaletteEvent, format_keys};
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseMoveEvent,
-    PathPromptOptions, Pixels, Point, PromptLevel, Subscription, Window, WindowControlArea, actions, div, prelude::*,
-    px,
+    Action, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
+    MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Subscription, Window,
+    WindowControlArea, actions, div, prelude::*, px,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-actions!(workspace, [Open, CloseTab, ToggleSidebar, NextTab, PreviousTab]);
+actions!(workspace, [Open, CloseTab, ToggleSidebar, NextTab, PreviousTab, TogglePalette]);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Workspace");
     let mut keys = vec![
+        KeyBinding::new("secondary-k", TogglePalette, ctx),
+        KeyBinding::new("secondary-p", TogglePalette, ctx),
+        KeyBinding::new("secondary-shift-p", TogglePalette, ctx),
         KeyBinding::new("secondary-o", Open, ctx),
         KeyBinding::new("secondary-w", CloseTab, ctx),
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
@@ -87,6 +93,9 @@ pub struct Workspace {
     fade_while_typing: bool,
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
+    palette: Option<(Entity<Palette>, Subscription)>,
+    /// Where focus goes back to when the palette closes.
+    focus_before_palette: Option<FocusHandle>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -109,6 +118,8 @@ impl Workspace {
             fade_while_typing: false,
             chrome: Transition::new(true),
             last_mouse: None,
+            palette: None,
+            focus_before_palette: None,
             _subscriptions: subscriptions,
         }
     }
@@ -283,6 +294,74 @@ impl Workspace {
         if let Some(ix) = self.active {
             self.activate((ix + self.tabs.len() - 1) % self.tabs.len(), window, cx);
         }
+    }
+
+    /// Every command the palette offers right now, with its shortcut.
+    fn commands(&self, window: &Window) -> Vec<Command> {
+        let fade = if self.fade_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
+        let mut commands: Vec<(&str, Box<dyn Action>)> = vec![
+            ("Open File or Folder…", Box::new(Open)),
+            ("Toggle Sidebar", Box::new(ToggleSidebar)),
+            (fade, Box::new(ToggleFadeWhileTyping)),
+        ];
+        if self.active.is_some() {
+            commands.extend([
+                ("Save", Box::new(Save) as Box<dyn Action>),
+                ("Close Tab", Box::new(CloseTab)),
+                ("Next Tab", Box::new(NextTab)),
+                ("Previous Tab", Box::new(PreviousTab)),
+                ("Undo", Box::new(Undo)),
+                ("Redo", Box::new(Redo)),
+                ("Select All", Box::new(SelectAll)),
+                ("Bigger Text", Box::new(IncreaseFontSize)),
+                ("Smaller Text", Box::new(DecreaseFontSize)),
+                ("Actual Size", Box::new(ResetFontSize)),
+            ]);
+        }
+        commands.push(("Quit Null", Box::new(Quit)));
+        commands
+            .into_iter()
+            .map(|(label, action)| Command {
+                label: label.into(),
+                keys: window.highest_precedence_binding_for_action(action.as_ref()).map(|b| format_keys(&b)),
+                action,
+            })
+            .collect()
+    }
+
+    fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+            return;
+        }
+        self.focus_before_palette = window.focused(cx);
+        let commands = self.commands(window);
+        let root = self.tree.read(cx).root().to_path_buf();
+        let palette = cx.new(|cx| Palette::new(commands, root, cx));
+        let subscription = cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
+            PaletteEvent::Dismissed => this.close_palette(window, cx),
+            PaletteEvent::OpenFile(path) => {
+                let path = path.clone();
+                this.close_palette(window, cx);
+                this.open_file(path, window, cx);
+            }
+            PaletteEvent::Run(action) => {
+                let action = action.boxed_clone();
+                this.close_palette(window, cx);
+                // Run once focus is back where it was, so editor commands reach the editor.
+                window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
+            }
+        });
+        window.focus(&palette.focus_handle(cx));
+        self.palette = Some((palette, subscription));
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        let fallback = self.active_editor().map(|e| e.focus_handle(cx)).unwrap_or(self.focus_handle.clone());
+        window.focus(&self.focus_before_palette.take().unwrap_or(fallback));
+        cx.notify();
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -480,6 +559,8 @@ impl Render for Workspace {
             .bg(theme.background)
             .text_color(theme.foreground)
             .font_family(".SystemUIFont")
+            .relative()
+            .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -491,5 +572,25 @@ impl Render for Workspace {
             .child(titlebar)
             .child(div().flex_1().min_h_0().flex().child(sidebar_panel).child(div().flex_1().min_w_0().child(body)))
             .child(status)
+            .when_some(self.palette.as_ref().map(|(p, _)| p.clone()), |root, palette| {
+                root.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .justify_center()
+                        .px(px(16.))
+                        .pt(px(88.))
+                        .bg(theme.scrim)
+                        .occlude()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, window, cx| this.close_palette(window, cx)),
+                        )
+                        .child(palette),
+                )
+            })
     }
 }
