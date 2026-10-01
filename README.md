@@ -19,6 +19,9 @@ cargo run -- path/to/folder    # open another folder
 cargo run -- path/to/file.rs   # open a file
 ```
 
+Settings live in `~/.config/null/settings.json` (`%APPDATA%\Null\settings.json` on
+Windows). Open it from the command palette with “Open Settings File”, or with ⌘, / Ctrl+,.
+
 Shaders are compiled when the app starts (GPUI's `runtime_shaders` feature), so the build
 doesn't need Xcode's separate Metal Toolchain download.
 

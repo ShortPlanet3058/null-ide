@@ -1,5 +1,8 @@
-use crate::editor::{Copy, Cut, DecreaseFontSize, IncreaseFontSize, Paste, Redo, ResetFontSize, Save, SelectAll, Undo};
-use crate::workspace::{CloseTab, NextTab, Open, PreviousTab, TogglePalette, ToggleSidebar};
+use crate::editor::{Copy, Cut, Paste, Redo, Save, SelectAll, Undo};
+use crate::workspace::{
+    CloseTab, DecreaseFontSize, IncreaseFontSize, NextTab, Open, OpenSettings, PreviousTab, ResetFontSize,
+    TogglePalette, ToggleSidebar, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
+};
 use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
 
 actions!(null, [Quit, ToggleFadeWhileTyping]);
@@ -12,6 +15,8 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
         Menu {
             name: "Null".into(),
             items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Quit Null", Quit),
@@ -51,6 +56,14 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                 MenuItem::action("Smaller Text", DecreaseFontSize),
                 MenuItem::action("Actual Size", ResetFontSize),
                 MenuItem::separator(),
+                MenuItem::submenu(Menu {
+                    name: "Theme".into(),
+                    items: vec![
+                        MenuItem::action("OLED", UseOledTheme),
+                        MenuItem::action("Graphite", UseGraphiteTheme),
+                        MenuItem::action("Paper", UsePaperTheme),
+                    ],
+                }),
                 MenuItem::action(fade_label, ToggleFadeWhileTyping),
             ],
         },

@@ -1,6 +1,7 @@
 use crate::buffer::Buffer;
 use crate::element::EditorElement;
 use crate::highlight::{Highlighter, Span};
+use crate::settings::Settings;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
@@ -50,14 +51,10 @@ actions!(
         Undo,
         Redo,
         Save,
-        IncreaseFontSize,
-        DecreaseFontSize,
-        ResetFontSize,
     ]
 );
 
 pub const TAB_SIZE: usize = 4;
-const DEFAULT_FONT_SIZE: f32 = 14.;
 /// Edits of the same kind closer together than this undo as one step.
 const UNDO_GROUP: Duration = Duration::from_millis(1000);
 
@@ -91,10 +88,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-shift-z", Redo, ctx),
         KeyBinding::new("secondary-s", Save, ctx),
-        KeyBinding::new("secondary-=", IncreaseFontSize, ctx),
-        KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
-        KeyBinding::new("secondary--", DecreaseFontSize, ctx),
-        KeyBinding::new("secondary-0", ResetFontSize, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -166,6 +159,7 @@ struct Snapshot {
 
 pub enum EditorEvent {
     Edited,
+    Saved,
 }
 
 impl EventEmitter<EditorEvent> for Editor {}
@@ -248,7 +242,7 @@ impl Editor {
             layout: None,
             autoscroll: false,
             dragging: None,
-            font_size: px(DEFAULT_FONT_SIZE),
+            font_size: px(cx.global::<Settings>().font_size),
         };
         editor.rehighlight();
         editor
@@ -679,6 +673,7 @@ impl Editor {
         match std::fs::write(path, self.buffer.to_string()) {
             Ok(()) => {
                 self.buffer.mark_saved();
+                cx.emit(EditorEvent::Saved);
                 cx.notify();
                 true
             }
@@ -689,22 +684,12 @@ impl Editor {
         }
     }
 
-    fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
-        self.font_size = px(size.clamp(9., 32.));
-        self.caret.placed = false;
-        self.touch(cx);
-    }
-
-    fn increase_font_size(&mut self, _: &IncreaseFontSize, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_font_size(f32::from(self.font_size) + 1., cx);
-    }
-
-    fn decrease_font_size(&mut self, _: &DecreaseFontSize, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_font_size(f32::from(self.font_size) - 1., cx);
-    }
-
-    fn reset_font_size(&mut self, _: &ResetFontSize, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_font_size(DEFAULT_FONT_SIZE, cx);
+    pub fn set_font_size(&mut self, size: Pixels, cx: &mut Context<Self>) {
+        if size != self.font_size {
+            self.font_size = size;
+            self.caret.placed = false;
+            self.touch(cx);
+        }
     }
 
     // ---------- mouse ----------
@@ -999,9 +984,6 @@ impl Render for Editor {
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::save))
-            .on_action(cx.listener(Self::increase_font_size))
-            .on_action(cx.listener(Self::decrease_font_size))
-            .on_action(cx.listener(Self::reset_font_size))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
