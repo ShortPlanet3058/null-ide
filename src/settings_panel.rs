@@ -667,7 +667,7 @@ impl SettingsPanel {
         rows.push(Self::heading("Suggestions while typing", &theme));
         rows.push(Self::row(
             "Suggest code as you type",
-            Some("Names from the file at once, then the AI's guess when you pause; ⇥ takes it"),
+            Some("Names from the file at once, then the AI's guess when you pause. ⇥ takes it, ⌥→ a word, ⌘→ a line, ⌥⇥ another"),
             Self::toggle("ai-completions", s.ai.completions, &theme, cx, |s| s.ai.completions = !s.ai.completions),
             &theme,
         ));

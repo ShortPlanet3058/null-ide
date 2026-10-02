@@ -178,6 +178,8 @@ pub struct Workspace {
     /// Watches the project folder so the tree and open files follow changes made elsewhere.
     _watcher: Option<notify::RecommendedWatcher>,
     watch_task: Option<Task<()>>,
+    index_task: Option<Task<()>>,
+    reindex_task: Option<Task<()>>,
     /// The AI answer panel, while open.
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
     /// A short message at the bottom of the window, and when it appeared.
@@ -259,6 +261,8 @@ impl Workspace {
             recent_commands: Vec::new(),
             _watcher: None,
             watch_task: None,
+            index_task: None,
+            reindex_task: None,
             key_prompt: None,
             notice: None,
             notice_task: None,
@@ -267,7 +271,70 @@ impl Workspace {
         };
         workspace.refresh_git(cx);
         workspace.watch(workspace.tree.read(cx).root().to_path_buf(), cx);
+        workspace.build_index(cx);
         workspace
+    }
+
+    /// Finds what the project defines, for suggestions, without slowing anything down.
+    fn build_index(&mut self, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.set_global(crate::project_index::ProjectContext { root: root.clone(), ..Default::default() });
+        self.index_task = Some(cx.spawn(async move |_, cx| {
+            let definitions = cx.background_executor().spawn(async move { crate::project_index::index(&root) }).await;
+            cx.update(|cx| {
+                cx.global_mut::<crate::project_index::ProjectContext>().definitions = std::sync::Arc::new(definitions)
+            })
+            .ok();
+        }));
+    }
+
+    /// Re-reads the definitions of source files that changed.
+    fn reindex(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let changed: Vec<PathBuf> = paths.iter().filter(|p| crate::project_index::is_source(p)).cloned().collect();
+        if changed.is_empty() || !cx.has_global::<crate::project_index::ProjectContext>() {
+            return;
+        }
+        let current = cx.global::<crate::project_index::ProjectContext>().definitions.clone();
+        self.reindex_task = Some(cx.spawn(async move |_, cx| {
+            let updated = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut definitions: Vec<_> =
+                        current.iter().filter(|d| !changed.contains(&d.path)).cloned().collect();
+                    for path in &changed {
+                        if let Ok(text) = std::fs::read_to_string(path) {
+                            definitions.extend(crate::project_index::definitions_in(path, &text));
+                        }
+                    }
+                    definitions
+                })
+                .await;
+            cx.update(|cx| {
+                cx.global_mut::<crate::project_index::ProjectContext>().definitions = std::sync::Arc::new(updated)
+            })
+            .ok();
+        }));
+    }
+
+    /// Tells suggestions which other files are open, most recently used first.
+    fn share_open_files(&mut self, cx: &mut Context<Self>) {
+        const OPEN_FILES: usize = 3;
+        const OPEN_FILE_CHARS: usize = 3_000;
+        let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        let open: Vec<(PathBuf, String)> = self
+            .recent_files
+            .iter()
+            .filter(|p| Some(*p) != active.as_ref())
+            .filter_map(|p| {
+                let tab = self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(p.as_path()))?;
+                let text: String = tab.editor.read(cx).buffer.to_string().chars().take(OPEN_FILE_CHARS).collect();
+                Some((p.clone(), text))
+            })
+            .take(OPEN_FILES)
+            .collect();
+        if cx.has_global::<crate::project_index::ProjectContext>() {
+            cx.global_mut::<crate::project_index::ProjectContext>().open_files = open;
+        }
     }
 
     /// Watches the project folder; changes made elsewhere (terminal, git, other apps)
@@ -313,6 +380,7 @@ impl Workspace {
         let visible: Vec<PathBuf> =
             paths.into_iter().filter(|p| !p.components().any(|c| c.as_os_str() == ".git")).collect();
         self.tree.update(cx, |tree, cx| tree.refresh(&visible, cx));
+        self.reindex(&visible, cx);
         for tab in &self.tabs {
             let changed = tab.editor.read(cx).path().is_some_and(|p| visible.iter().any(|v| v == p));
             if changed {
@@ -454,6 +522,7 @@ impl Workspace {
         }
         window.set_window_title(&editor.file_name());
         window.focus(&editor.focus_handle(cx));
+        self.share_open_files(cx);
         self.tree.update(cx, |tree, cx| tree.set_active(path, cx));
         cx.notify();
     }

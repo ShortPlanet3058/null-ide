@@ -403,7 +403,7 @@ pub fn store_api_key(id: ProviderId, key: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Prompt {
     pub system: String,
     pub user: String,
@@ -413,6 +413,8 @@ pub struct Prompt {
     pub max_tokens: Option<u32>,
     /// A different thinking level than the provider's (the least, for suggestions).
     pub effort: Option<Effort>,
+    /// More varied answers (for another option); the usual when unset.
+    pub temperature: Option<f32>,
 }
 
 pub enum AiEvent {
@@ -554,7 +556,7 @@ fn chat_body(id: ProviderId, base: &str, model: &str, effort: Effort, prompt: &P
     } else {
         body["max_tokens"] = json!(max_tokens);
         if !matches!(id, ProviderId::OpenRouter | ProviderId::OpenaiCompatible) {
-            body["temperature"] = json!(0.2);
+            body["temperature"] = json!(prompt.temperature.unwrap_or(0.2));
         }
     }
     // Each service asks for thinking its own way; unknown fields can be refused, so
@@ -843,10 +845,12 @@ fn codex(model: Option<String>, effort: Effort, prompt: &Prompt, on_text: &mut d
 // ---------- fill in the middle ----------
 
 /// The code around the caret, for a model trained to write what goes between.
+#[derive(Clone)]
 pub struct Fim {
     pub prefix: String,
     pub suffix: String,
     pub max_tokens: u32,
+    pub temperature: f32,
 }
 
 /// How a code model expects the text before and after the gap.
@@ -965,7 +969,7 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
                 "prompt": fim.prefix,
                 "suffix": fim.suffix,
                 "stream": true,
-                "options": { "num_predict": fim.max_tokens, "temperature": 0.2, "stop": FIM_STOPS },
+                "options": { "num_predict": fim.max_tokens, "temperature": fim.temperature, "stop": FIM_STOPS },
             });
             let response = agent()
                 .post(&format!("{host}/api/generate"))
@@ -996,7 +1000,7 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
                 "prompt": fim.prefix,
                 "suffix": fim.suffix,
                 "max_tokens": fim.max_tokens,
-                "temperature": 0.2,
+                "temperature": fim.temperature,
                 "stream": true,
             });
             let response = agent()
@@ -1033,7 +1037,7 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
                 "model": model,
                 "prompt": format.prompt(&fim.prefix, &fim.suffix),
                 "max_tokens": fim.max_tokens,
-                "temperature": 0.2,
+                "temperature": fim.temperature,
                 "stream": true,
                 "stop": FIM_STOPS,
             });

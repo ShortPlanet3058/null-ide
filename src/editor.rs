@@ -372,6 +372,7 @@ pub struct Editor {
     note: Option<assist::Note>,
     ghost: Option<ghost::Ghost>,
     ghost_task: Option<Task<()>>,
+    ghost_cache: Vec<(String, Vec<String>)>,
     /// Rows between the lines for those, rebuilt as they change.
     pub blocks: Vec<Block>,
 }
@@ -440,6 +441,7 @@ impl Editor {
             note: None,
             ghost: None,
             ghost_task: None,
+            ghost_cache: Vec::new(),
             blocks: Vec::new(),
         };
         editor.rehighlight();
@@ -1930,6 +1932,10 @@ impl Render for Editor {
             .on_action(cx.listener(Self::undo_change_action))
             .on_action(cx.listener(Self::close_note_action))
             .on_action(cx.listener(Self::accept_ghost_action))
+            .on_action(cx.listener(Self::accept_ghost_word))
+            .on_action(cx.listener(Self::accept_ghost_line))
+            .on_action(cx.listener(Self::next_ghost))
+            .on_action(cx.listener(Self::previous_ghost))
             .on_action(cx.listener(Self::dismiss_ghost_action))
             .on_action(cx.listener(Self::toggle_comment_action))
             .on_action(cx.listener(Self::indent))

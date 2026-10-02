@@ -841,10 +841,8 @@ mod tests {
         let (e, cx) = editor(cx, "x = 1\ny = \n");
         e.update_in(cx, |e, window, cx| {
             e.selection = Selection::caret(10);
-            let ghost = |e: &Editor| super::super::ghost::Ghost {
-                offset: 10,
-                version: e.buffer.version(),
-                lines: vec!["x + 1".into(), "z = 3".into()],
+            let ghost = |e: &Editor| {
+                super::super::ghost::Ghost::new(10, e.buffer.version(), vec!["x + 1".into(), "z = 3".into()])
             };
             e.ghost = Some(ghost(e));
             e.rebuild_blocks();
@@ -854,11 +852,7 @@ mod tests {
             assert_eq!(e.buffer.to_string(), "x = 1\ny = x + 1\nz = 3\n");
             assert!(e.blocks.is_empty());
             // Moving the caret away drops a ghost.
-            e.ghost = Some(super::super::ghost::Ghost {
-                offset: e.selection.head,
-                version: e.buffer.version(),
-                lines: vec!["!".into()],
-            });
+            e.ghost = Some(super::super::ghost::Ghost::new(e.selection.head, e.buffer.version(), vec!["!".into()]));
             e.move_head(0, false, cx);
             assert!(e.ghost.is_none());
         });
@@ -882,8 +876,16 @@ mod tests {
             assert_eq!(e.ghost_text().map(|(first, _)| first), Some("ute_moving_average"));
             e.replace_text_in_range(None, "u", window, cx);
             assert_eq!(e.ghost_text().map(|(first, _)| first), Some("te_moving_average"));
-            e.accept_ghost_action(&super::super::ghost::AcceptGhost, window, cx);
+            // ⌥→ takes one word at a time; the rest stays suggested.
+            e.selection = Selection::caret(e.buffer.len_chars());
+            e.ghost = Some(super::super::ghost::Ghost::new(
+                e.selection.head,
+                e.buffer.version(),
+                vec!["te_moving_average(xs)".into()],
+            ));
+            e.accept_ghost_word(&super::super::ghost::AcceptGhostWord, window, cx);
             assert!(e.buffer.to_string().ends_with("res = compute_moving_average"));
+            assert_eq!(e.ghost_text().map(|(first, _)| first), Some("(xs)"));
         });
     }
 
