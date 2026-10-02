@@ -3,8 +3,10 @@ mod changes;
 mod commands;
 mod completion;
 mod cursors;
+mod ghost;
 mod intel;
 
+pub use assist::{Block, BlockKind};
 pub use completion::CompletionMenu;
 pub use cursors::Cursor;
 pub use intel::HoverCard;
@@ -97,6 +99,12 @@ actions!(
 pub const TAB_SIZE: usize = 4;
 /// Edits of the same kind closer together than this undo as one step.
 const UNDO_GROUP: Duration = Duration::from_millis(1000);
+
+/// The keys for the AI's field and changes; registered after every other part's keys.
+pub fn bind_ai_keys(cx: &mut App) {
+    assist::bind_keys(cx);
+    ghost::bind_keys(cx);
+}
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Editor");
@@ -250,6 +258,8 @@ pub struct Layout {
     /// Screen position of line 0, column 0, with scrolling applied.
     pub text_origin: Point<Pixels>,
     pub text_bounds: Bounds<Pixels>,
+    /// The whole editor, gutter included.
+    pub bounds: Bounds<Pixels>,
     pub line_height: Pixels,
     pub char_width: Pixels,
     /// The rows on screen (lines, or parts of lines when they wrap), from `first_row`.
@@ -356,8 +366,14 @@ pub struct Editor {
     pub git_hunks: Vec<crate::git::Hunk>,
     git_base_task: Option<Task<()>>,
     git_diff_task: Option<Task<()>>,
-    /// The Cmd+I card, while it's open.
-    assist: Option<(Entity<crate::inline_assist::InlineAssist>, Subscription)>,
+    /// ⌘I: the field while it's open, a change until it's kept or undone, an answer.
+    prompt: Option<assist::Prompting>,
+    ai_change: Option<assist::Change>,
+    note: Option<assist::Note>,
+    ghost: Option<ghost::Ghost>,
+    ghost_task: Option<Task<()>>,
+    /// Rows between the lines for those, rebuilt as they change.
+    pub blocks: Vec<Block>,
 }
 
 impl Editor {
@@ -419,7 +435,12 @@ impl Editor {
             git_hunks: Vec::new(),
             git_base_task: None,
             git_diff_task: None,
-            assist: None,
+            prompt: None,
+            ai_change: None,
+            note: None,
+            ghost: None,
+            ghost_task: None,
+            blocks: Vec::new(),
         };
         editor.rehighlight();
         editor
@@ -513,6 +534,7 @@ impl Editor {
             return;
         }
         self.rehighlight();
+        self.ai_text_changed();
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
         self.close_hover(cx);
@@ -709,6 +731,7 @@ impl Editor {
 
     /// Marks the caret as just used: it stops blinking and the view follows it.
     fn touch(&mut self, cx: &mut Context<Self>) {
+        self.check_ghost();
         if self.hover_from_keyboard {
             self.close_hover(cx);
         }
@@ -822,12 +845,17 @@ impl Editor {
             let edge = if lines < 0 { self.selection.range().start } else { self.selection.range().end };
             self.selection = Selection::caret(edge);
         }
-        self.wrap.update(&self.buffer, self.wrap.width());
+        self.wrap.update(&self.buffer, self.wrap.width(), &self.block_specs());
         let (line, col) = self.buffer.point(self.selection.head);
         let (row, display_col) = self.wrap.to_display(line, col);
         let goal = self.goal_column.unwrap_or(display_col);
         let last = self.wrap.rows() - 1;
-        let target = row as isize + lines;
+        let mut target = row as isize + lines;
+        // Step over rows that aren't text (the AI's field, a note...).
+        let step = lines.signum();
+        while target >= 0 && (target as usize) <= last && self.wrap.block_at(target as usize).is_some() {
+            target += step;
+        }
         let offset = if target < 0 {
             0
         } else if target as usize > last {
@@ -1107,7 +1135,9 @@ impl Editor {
             let indent: String = this.buffer.line_text(line).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
             let before = range.start.checked_sub(1).and_then(|i| this.buffer.char_at(i));
             let after = this.buffer.char_at(range.end);
-            let opens = matches!(before, Some('{' | '(' | '['));
+            // Python blocks open with a colon.
+            let python_block = before == Some(':') && this.language_name() == "Python";
+            let opens = matches!(before, Some('{' | '(' | '[')) || python_block;
             let inner = format!("{indent}{}", if opens { " ".repeat(TAB_SIZE) } else { String::new() });
             if opens
                 && matches!((before, after), (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']')))
@@ -1120,6 +1150,8 @@ impl Editor {
                 this.edit(range, &format!("\n{inner}"), EditKind::Other, cx);
             }
         });
+        // A new line is a good moment for a suggestion (the body after `def f():`...).
+        self.schedule_ghost(None, cx);
     }
 
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
@@ -1371,7 +1403,9 @@ impl Editor {
         match row.checked_sub(layout.first_row).and_then(|i| layout.rows.get(i)) {
             Some(r) => {
                 let byte = r.shaped.closest_index_for_x(x - r.x);
-                let col = r.row.cols.start + r.text[..byte].chars().count();
+                // The row can show more than its text (a ghost completion): clicks past it land at its end.
+                let chars = r.text.get(..byte).map_or(r.text.chars().count(), |t| t.chars().count());
+                let col = r.row.cols.start + chars;
                 // Past the end of a wrapped row, stay on it rather than jump to the next.
                 let col =
                     if r.row.last { col } else { col.min(r.row.cols.end.saturating_sub(1)).max(r.row.cols.start) };
@@ -1599,7 +1633,12 @@ impl Editor {
     }
 
     fn inline_assist(&mut self, _: &InlineAssist, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_inline_assist(window, cx);
+        self.open_inline_assist(false, window, cx);
+    }
+
+    /// Opens the ⌘I field to ask about the code at the caret.
+    pub fn ask_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_inline_assist(true, window, cx);
     }
 
     fn cancel_completion(&mut self, _: &CancelCompletion, _: &mut Window, cx: &mut Context<Self>) {
@@ -1753,6 +1792,9 @@ impl EntityInputHandler for Editor {
                 this.edit(range, &text, EditKind::Typing, cx);
             });
         }
+        // Typing what the suggestion shows keeps it.
+        let kept =
+            if self.marked.is_none() && range == self.selection.range() { self.type_into_ghost(text) } else { None };
         let mut chars = text.chars();
         if let (Some(c), None, None) = (chars.next(), chars.next(), &self.marked)
             && range == self.selection.range()
@@ -1762,6 +1804,7 @@ impl EntityInputHandler for Editor {
         }
         self.edit(range, text, EditKind::Typing, cx);
         self.completion_after_typing(text, cx);
+        self.schedule_ghost(kept, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -1828,6 +1871,7 @@ impl Render for Editor {
         if self.completion.is_some() {
             key_context.add("showing_completions");
         }
+        self.ai_key_context(&mut key_context);
         let text = div()
             .key_context(key_context)
             .track_focus(&self.focus_handle)
@@ -1882,6 +1926,11 @@ impl Render for Editor {
             .on_action(cx.listener(Self::confirm_completion))
             .on_action(cx.listener(Self::cancel_completion))
             .on_action(cx.listener(Self::inline_assist))
+            .on_action(cx.listener(Self::keep_change_action))
+            .on_action(cx.listener(Self::undo_change_action))
+            .on_action(cx.listener(Self::close_note_action))
+            .on_action(cx.listener(Self::accept_ghost_action))
+            .on_action(cx.listener(Self::dismiss_ghost_action))
             .on_action(cx.listener(Self::toggle_comment_action))
             .on_action(cx.listener(Self::indent))
             .on_action(cx.listener(Self::outdent))
@@ -1905,14 +1954,16 @@ impl Render for Editor {
             .child(EditorElement::new(cx.entity()));
         let hover = self.render_hover(cx);
         let completions = self.render_completions(cx);
-        let assist = self.render_assist(cx);
+        let ai_blocks = self.render_ai_blocks(cx);
         div()
             .relative()
             .size_full()
+            // The AI's rows scroll with the code; clip them to the editor.
+            .overflow_hidden()
             .child(text)
             .when_some(find_bar, |editor, bar| editor.child(div().absolute().top(px(8.)).right(px(16.)).child(bar)))
             .children(hover)
             .children(completions)
-            .children(assist)
+            .children(ai_blocks)
     }
 }

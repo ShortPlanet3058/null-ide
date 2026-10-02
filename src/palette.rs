@@ -4,7 +4,6 @@
 //! - Quick (⌘K): the settings changed all the time, changed right in the list
 //!   (switches, ←→ on choices), and every command once you type.
 //! - Line (⌃G): go to a line.
-//! - Ask: a question for the AI about the open file.
 
 use crate::fuzzy;
 use crate::settings::Settings;
@@ -55,7 +54,6 @@ pub enum PaletteKind {
     Files,
     Quick,
     Line,
-    Ask,
 }
 
 impl PaletteKind {
@@ -64,7 +62,6 @@ impl PaletteKind {
             PaletteKind::Files => "Go to file",
             PaletteKind::Quick => "Quick settings and commands",
             PaletteKind::Line => "Go to line",
-            PaletteKind::Ask => "Ask about this file",
         }
     }
 }
@@ -269,7 +266,6 @@ pub enum PaletteEvent {
     Run(Box<dyn Action>),
     /// Change a setting and stay open, so its effect shows at once.
     Apply(Box<dyn Action>),
-    Ask(String),
     GoToLine(usize),
 }
 
@@ -356,7 +352,7 @@ impl Palette {
         match self.kind {
             PaletteKind::Files => self.file_rows(&query),
             PaletteKind::Quick => self.quick_rows(&query),
-            PaletteKind::Line | PaletteKind::Ask => {}
+            PaletteKind::Line => {}
         }
         self.selected = 0;
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
@@ -505,12 +501,6 @@ impl Palette {
             PaletteKind::Line => {
                 if let Some(line) = self.line_target() {
                     cx.emit(PaletteEvent::GoToLine(line));
-                }
-                return;
-            }
-            PaletteKind::Ask => {
-                if !self.query.is_empty() {
-                    cx.emit(PaletteEvent::Ask(self.query.clone()));
                 }
                 return;
             }
@@ -715,7 +705,6 @@ impl Palette {
         match self.kind {
             PaletteKind::Files => "↵ open",
             PaletteKind::Line => "↵ go",
-            PaletteKind::Ask => "↵ ask",
             PaletteKind::Quick => match self.selected_item() {
                 Some(Item::Quick(q)) if q.is_choice() => "←→ change",
                 Some(Item::Quick(Quick::AllSettings)) | Some(Item::Command(_)) => "↵ run",
@@ -817,15 +806,6 @@ impl Render for Palette {
                     (None, None) => "A line number".to_string(),
                 };
                 Some(self.render_message(text, self.line_target().is_some(), cx))
-            }
-            PaletteKind::Ask => {
-                let provider = cx.global::<Settings>().ai.active();
-                let text = if self.query.is_empty() {
-                    format!("{} answers questions about the open file", provider.label())
-                } else {
-                    format!("Ask {}: {}", provider.label(), self.query)
-                };
-                Some(self.render_message(text, !self.query.is_empty(), cx))
             }
             _ if self.rows.is_empty() => {
                 let text = match self.kind {

@@ -100,6 +100,9 @@ impl Render for KeyPrompt {
                     .line_height(px(20.))
                     .child(self.input.clone()),
             )
+            .children(self.provider.key_url().map(|url| {
+                div().text_size(px(12.)).text_color(theme.muted).child(format!("Get a key at {url}"))
+            }))
             .child(div().text_size(px(12.)).text_color(theme.faint).child(format!(
                 "Stored in your {store}, never in the settings file. Leave it empty and press ↵ to remove the saved key."
             )))

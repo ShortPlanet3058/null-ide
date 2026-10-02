@@ -6,8 +6,8 @@ use crate::theme::{Syntax, Theme};
 use crate::wrap::{Row, WrapMap};
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Focusable, Font, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Point, ShapedLine, Style, TextRun, UnderlineStyle, Window, fill,
-    font, point, px, relative, size,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Point, ShapedLine, StrikethroughStyle, Style, TextRun,
+    UnderlineStyle, Window, fill, font, point, px, relative, size,
 };
 use lsp_types::DiagnosticSeverity;
 use std::ops::Range;
@@ -44,7 +44,7 @@ pub fn position(
 ) -> (usize, Pixels) {
     let (row, display_col) = wrap.to_display(line, col);
     match row.checked_sub(first_row).and_then(|i| rows.get(i)) {
-        Some(r) if r.row.line == line => {
+        Some(r) if r.row.line == line && r.row.block.is_none() => {
             let col = col.saturating_sub(r.row.cols.start);
             (row, r.x + r.shaped.x_for_index(byte_of_column(&r.text, col)))
         }
@@ -74,6 +74,7 @@ pub struct Prepaint {
     link: Vec<Bounds<Pixels>>,
     git_marks: Vec<(Bounds<Pixels>, Hsla)>,
     assist_band: Option<Bounds<Pixels>>,
+    ai_tints: Vec<(Bounds<Pixels>, Hsla)>,
     scroll_thumb: Option<(Bounds<Pixels>, f32)>,
     scroll_marks: Vec<(Bounds<Pixels>, Hsla)>,
     bracket_boxes: Vec<Bounds<Pixels>>,
@@ -198,7 +199,7 @@ impl Element for EditorElement {
             // Word wrap: rows as wide as the text area (clear of the scrollbar), in characters.
             let wrap_width =
                 cx.global::<Settings>().word_wrap.then(|| ((text_width - BAR - cw) / cw).floor().max(1.) as usize);
-            editor.wrap.update(&editor.buffer, wrap_width);
+            editor.wrap.update(&editor.buffer, wrap_width, &editor.block_specs());
             let total_rows = editor.wrap.rows();
             let (caret_row, _) = editor.wrap.to_display(caret_line, caret_col);
 
@@ -267,6 +268,33 @@ impl Element for EditorElement {
             let row_layouts: Vec<RowLayout> = rows
                 .into_iter()
                 .map(|row| {
+                    // Lines a change removed: struck through, faint. Other blocks are drawn on top.
+                    if let Some((block, i)) = row.block {
+                        let text = match &editor.blocks[block].kind {
+                            crate::editor::BlockKind::Removed(lines) => lines.get(i).cloned().unwrap_or_default(),
+                            crate::editor::BlockKind::Writing(lines) => {
+                                // The AI's new code, arriving: plain text on the "added" tint.
+                                let text = lines.get(i).cloned().unwrap_or_default();
+                                let shaped = shape(text.clone(), &[run(text.len(), &font, theme.foreground)]);
+                                return RowLayout { x: px(0.), row, text, shaped };
+                            }
+                            crate::editor::BlockKind::Ghost(lines) => {
+                                // The rest of a ghost completion: faint, nothing struck.
+                                let text = lines.get(i).cloned().unwrap_or_default();
+                                let shaped = shape(text.clone(), &[run(text.len(), &font, theme.faint)]);
+                                return RowLayout { x: px(0.), row, text, shaped };
+                            }
+                            _ => String::new(),
+                        };
+                        // Struck through from the first character, not across the indentation.
+                        let indent = text.len() - text.trim_start().len();
+                        let mut struck = run(text.len() - indent, &font, theme.faint);
+                        struck.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: Some(theme.faint) });
+                        let runs: Vec<TextRun> =
+                            if indent > 0 { vec![run(indent, &font, theme.faint), struck] } else { vec![struck] };
+                        let shaped = shape(text.clone(), &runs);
+                        return RowLayout { x: px(0.), row, text, shaped };
+                    }
                     let i = row.line - lines_shown.start;
                     let line_text = &texts[i];
                     let (b0, b1) = (byte_of_column(line_text, row.cols.start), byte_of_column(line_text, row.cols.end));
@@ -279,6 +307,33 @@ impl Element for EditorElement {
                         })
                         .collect();
                     let line_byte = editor.buffer.line_to_byte(row.line) + b0;
+                    // A ghost completion's first line shows faintly right at the caret.
+                    if row.last
+                        && editor.ghost_line() == Some(row.line)
+                        && let Some((ghost, _)) = editor.ghost_text()
+                        && caret_col >= row.cols.start
+                    {
+                        let at = byte_of_column(&text, caret_col - row.cols.start);
+                        let (before, after) = text.split_at(at);
+                        let split = |r: &(Range<usize>, Hsla), from: usize, to: usize| {
+                            let (start, end) = (r.0.start.max(from), r.0.end.min(to));
+                            (start < end).then(|| (start - from..end - from, r.1))
+                        };
+                        let under_before: Vec<_> = row_underlines.iter().filter_map(|r| split(r, 0, at)).collect();
+                        let under_after: Vec<_> =
+                            row_underlines.iter().filter_map(|r| split(r, at, text.len())).collect();
+                        let mut runs = runs_for(before, line_byte, &editor.spans, &under_before, &theme, &font);
+                        runs.push(run(ghost.len(), &font, theme.faint));
+                        runs.extend(runs_for(after, line_byte + at, &editor.spans, &under_after, &theme, &font));
+                        let shown = format!("{before}{ghost}{after}");
+                        let shaped = shape(shown, &runs);
+                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped };
+                    }
+                    // The code the AI is rewriting fades while the new code appears.
+                    if editor.ai_writing_lines().is_some_and(|l| l.contains(&row.line)) {
+                        let shaped = shape(text.clone(), &[run(text.len(), &font, theme.faint)]);
+                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped };
+                    }
                     let runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
                     let shaped = shape(text.clone(), &runs);
                     RowLayout { x: char_width * row.indent as f32, row, text, shaped }
@@ -312,18 +367,48 @@ impl Element for EditorElement {
             let row_top = |row: usize| origin.y + line_height * row as f32;
             // The rows a range of lines takes, clipped to the screen.
             let rows_of = |lines: Range<usize>| {
-                row_of_line(lines.start).max(visible.start)..row_of_line(lines.end).min(visible.end)
+                let end =
+                    if lines.end > lines.start { wrap.text_rows(lines.end - 1).end } else { row_of_line(lines.start) };
+                row_of_line(lines.start).max(visible.start)..end.min(visible.end)
             };
 
             let selection_range = editor.selection.range();
             // While the Cmd+I card is open, the code it changes is tinted, with a bar in the gutter.
-            let assist_band = editor.assist_target(cx).map(rows_of).filter(|r| !r.is_empty()).map(|r| {
+            let assist_band = editor.assist_target().map(rows_of).filter(|r| !r.is_empty()).map(|r| {
                 Bounds::from_corners(
                     point(bounds.left() + gutter_width - px(9.), row_top(r.start)),
                     point(bounds.right(), row_top(r.end)),
                 )
             });
-            let caret_rows = row_of_line(caret_line)..row_of_line(caret_line + 1);
+            let caret_rows = wrap.text_rows(caret_line);
+            // A change from the AI: its new lines tinted green, the removed ones red.
+            let mut ai_tints: Vec<(Bounds<Pixels>, Hsla)> = editor
+                .ai_added_lines()
+                .iter()
+                .map(|lines| rows_of(lines.clone()))
+                .filter(|r| !r.is_empty())
+                .map(|r| {
+                    let rect = Bounds::from_corners(
+                        point(bounds.left() + gutter_width - px(9.), row_top(r.start)),
+                        point(bounds.right(), row_top(r.end)),
+                    );
+                    (rect, theme.git_added.opacity(0.13))
+                })
+                .collect();
+            for (r, row) in row_layouts.iter().zip(visible.clone()) {
+                let tint = match r.row.block.map(|(b, _)| &editor.blocks[b].kind) {
+                    Some(crate::editor::BlockKind::Removed(_)) => Some(theme.git_deleted.opacity(0.13)),
+                    Some(crate::editor::BlockKind::Writing(_)) => Some(theme.git_added.opacity(0.13)),
+                    _ => None,
+                };
+                if let Some(tint) = tint {
+                    let rect = Bounds::new(
+                        point(bounds.left() + gutter_width - px(9.), row_top(row)),
+                        size(bounds.size.width - gutter_width + px(9.), line_height),
+                    );
+                    ai_tints.push((rect, tint));
+                }
+            }
             let current_line = editor.selection.is_empty().then(|| {
                 Bounds::new(
                     point(bounds.left(), row_top(caret_rows.start)),
@@ -335,7 +420,7 @@ impl Element for EditorElement {
             let numbers = row_layouts
                 .iter()
                 .zip(visible.clone())
-                .filter(|(r, _)| r.row.cols.start == 0)
+                .filter(|(r, _)| r.row.cols.start == 0 && r.row.block.is_none())
                 .map(|(r, row)| {
                     let line = r.row.line;
                     let label = (line + 1).to_string();
@@ -362,6 +447,9 @@ impl Element for EditorElement {
                 let (end_row, x_end) = pos(end_line, end_col);
                 for row in start_row.max(visible.start)..=end_row.min(visible.end - 1) {
                     let r = &row_layouts[row - visible.start];
+                    if r.row.block.is_some() {
+                        continue;
+                    }
                     let x0 = if row == start_row { x_start } else { r.x };
                     let x1 = if row == end_row {
                         x_end
@@ -586,6 +674,7 @@ impl Element for EditorElement {
             editor.layout = Some(Layout {
                 text_origin: origin,
                 text_bounds,
+                bounds,
                 line_height,
                 char_width,
                 first_row: visible.start,
@@ -608,6 +697,7 @@ impl Element for EditorElement {
                 link,
                 git_marks,
                 assist_band,
+                ai_tints,
                 scroll_thumb: scrollbar.map(|b| (b.thumb, thumb_emphasis)),
                 scroll_marks,
                 bracket_boxes,
@@ -640,6 +730,9 @@ impl Element for EditorElement {
         if let Some(band) = prepaint.assist_band {
             window.paint_quad(fill(band, theme.accent_soft));
             window.paint_quad(fill(gpui::Bounds::new(band.origin, gpui::size(px(3.), band.size.height)), theme.caret));
+        }
+        for (rect, color) in &prepaint.ai_tints {
+            window.paint_quad(fill(*rect, *color));
         }
         for (rect, color) in &prepaint.git_marks {
             window.paint_quad(fill(*rect, *color).corner_radii(px(1.5)));
