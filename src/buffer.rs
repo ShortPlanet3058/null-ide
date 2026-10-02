@@ -33,7 +33,7 @@ impl Buffer {
         &self.text
     }
 
-    #[cfg(test)]
+    /// Goes up with every edit.
     pub fn version(&self) -> u64 {
         self.version
     }

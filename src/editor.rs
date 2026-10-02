@@ -10,7 +10,7 @@ pub use cursors::Cursor;
 pub use intel::HoverCard;
 
 use crate::buffer::Buffer;
-use crate::element::EditorElement;
+use crate::element::{EditorElement, RowLayout};
 use crate::find_bar::{CloseFind, DeployFind, DeployReplace, FindBar, FindNext, FindPrevious};
 use crate::fonts::Fonts;
 use crate::highlight::{Highlighter, Span};
@@ -22,7 +22,7 @@ use crate::theme::Theme;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, HighlightStyle, KeyBinding, KeyContext, KeyDownEvent, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, ShapedLine, StyledText,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, StyledText,
     Subscription, Task, UTF16Selection, Window, actions, anchored, deferred, div, point, prelude::*, px, size,
 };
 use regex::Regex;
@@ -252,8 +252,9 @@ pub struct Layout {
     pub text_bounds: Bounds<Pixels>,
     pub line_height: Pixels,
     pub char_width: Pixels,
-    pub visible_lines: Range<usize>,
-    pub shaped: Vec<ShapedLine>,
+    /// The rows on screen (lines, or parts of lines when they wrap), from `first_row`.
+    pub first_row: usize,
+    pub rows: Vec<RowLayout>,
     /// None when everything fits and there's nothing to scroll.
     pub scrollbar: Option<ScrollbarLayout>,
 }
@@ -318,6 +319,8 @@ pub struct Editor {
     pub last_activity: Instant,
     wake_task: Option<Task<()>>,
     pub layout: Option<Layout>,
+    /// Which screen rows each line takes; kept up to date when drawing.
+    pub wrap: crate::wrap::WrapMap,
     pub autoscroll: bool,
     dragging: Option<DragUnit>,
     pub font_size: Pixels,
@@ -387,6 +390,7 @@ impl Editor {
             last_activity: Instant::now(),
             wake_task: None,
             layout: None,
+            wrap: Default::default(),
             autoscroll: false,
             dragging: None,
             font_size: px(cx.global::<Settings>().font_size),
@@ -810,22 +814,26 @@ impl Editor {
         self.buffer.offset(line, if col == indent { 0 } else { indent })
     }
 
+    /// Up and down move by rows on screen, so a wrapped line takes several presses.
+    /// The goal column is a screen column, kept while moving through shorter rows.
     fn move_vertically(&mut self, lines: isize, select: bool, cx: &mut Context<Self>) {
         self.close_completion(cx);
-        let (line, col) = self.buffer.point(self.selection.head);
         if !select && !self.selection.is_empty() && lines.abs() == 1 {
             let edge = if lines < 0 { self.selection.range().start } else { self.selection.range().end };
             self.selection = Selection::caret(edge);
         }
-        let goal = self.goal_column.unwrap_or(col);
-        let last = self.buffer.len_lines() - 1;
-        let target = line as isize + lines;
+        self.wrap.update(&self.buffer, self.wrap.width());
+        let (line, col) = self.buffer.point(self.selection.head);
+        let (row, display_col) = self.wrap.to_display(line, col);
+        let goal = self.goal_column.unwrap_or(display_col);
+        let last = self.wrap.rows() - 1;
+        let target = row as isize + lines;
         let offset = if target < 0 {
             0
         } else if target as usize > last {
             self.buffer.len_chars()
         } else {
-            self.buffer.offset(target as usize, goal)
+            self.wrap.to_offset(target as usize, goal, &self.buffer)
         };
         if select {
             self.selection.head = offset;
@@ -1355,19 +1363,22 @@ impl Editor {
         if y < 0. {
             return 0;
         }
-        let line = y.floor() as usize;
-        if line >= self.buffer.len_lines() {
+        let row = y.floor() as usize;
+        if row >= self.wrap.rows() {
             return self.buffer.len_chars();
         }
         let x = position.x - layout.text_origin.x;
-        let col = if layout.visible_lines.contains(&line) {
-            let shaped = &layout.shaped[line - layout.visible_lines.start];
-            let byte = shaped.closest_index_for_x(x);
-            self.buffer.line_text(line)[..byte].chars().count()
-        } else {
-            (x / layout.char_width).round().max(0.) as usize
-        };
-        self.buffer.offset(line, col)
+        match row.checked_sub(layout.first_row).and_then(|i| layout.rows.get(i)) {
+            Some(r) => {
+                let byte = r.shaped.closest_index_for_x(x - r.x);
+                let col = r.row.cols.start + r.text[..byte].chars().count();
+                // Past the end of a wrapped row, stay on it rather than jump to the next.
+                let col =
+                    if r.row.last { col } else { col.min(r.row.cols.end.saturating_sub(1)).max(r.row.cols.start) };
+                self.buffer.offset(r.row.line, col)
+            }
+            None => self.wrap.to_offset(row, (x / layout.char_width).round().max(0.) as usize, &self.buffer),
+        }
     }
 
     fn line_range(&self, offset: usize) -> Range<usize> {
@@ -1621,15 +1632,10 @@ impl Editor {
     fn caret_bounds(&self, offset: usize) -> Option<Bounds<Pixels>> {
         let layout = self.layout.as_ref()?;
         let (line, col) = self.buffer.point(offset);
-        let x = if layout.visible_lines.contains(&line) {
-            let text = self.buffer.line_text(line);
-            let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
-            layout.shaped[line - layout.visible_lines.start].x_for_index(byte)
-        } else {
-            layout.char_width * col as f32
-        };
+        let (row, x) =
+            crate::element::position(&layout.rows, layout.first_row, &self.wrap, layout.char_width, line, col);
         Some(Bounds::new(
-            point(layout.text_origin.x + x, layout.text_origin.y + layout.line_height * line as f32),
+            point(layout.text_origin.x + x, layout.text_origin.y + layout.line_height * row as f32),
             size(px(2.), layout.line_height),
         ))
     }

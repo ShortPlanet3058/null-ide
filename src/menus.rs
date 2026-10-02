@@ -11,12 +11,15 @@ use crate::workspace::{
 };
 use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
 
-actions!(null, [Quit, ToggleFadeWhileTyping]);
+actions!(null, [Quit, ToggleFadeWhileTyping, ToggleWordWrap]);
 
-/// Installs the menu bar. Menu items can't show a checkmark yet, so the fade
-/// toggle's label says what choosing it will do.
-pub fn set(cx: &mut App, fade_while_typing: bool) {
-    let fade_label = if fade_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
+/// Installs the menu bar. Menu items can't show a checkmark yet, so toggles
+/// are labelled with what choosing them will do.
+pub fn set(cx: &mut App) {
+    let settings = cx.global::<crate::settings::Settings>();
+    let fade_label =
+        if settings.fade_bars_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
+    let wrap_label = if settings.word_wrap { "Stop Wrapping Lines" } else { "Wrap Lines" };
     cx.set_menus(vec![
         Menu {
             name: "Null".into(),
@@ -112,6 +115,7 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                         MenuItem::action("Paper", UsePaperTheme),
                     ],
                 }),
+                MenuItem::action(wrap_label, ToggleWordWrap),
                 MenuItem::action(fade_label, ToggleFadeWhileTyping),
             ],
         },
