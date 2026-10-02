@@ -26,17 +26,20 @@ const UI_FONTS: &[(&str, &str)] =
 enum Section {
     Appearance,
     Editor,
+    Languages,
     Ai,
     Keyboard,
 }
 
 impl Section {
-    const ALL: [Section; 4] = [Section::Appearance, Section::Editor, Section::Ai, Section::Keyboard];
+    const ALL: [Section; 5] =
+        [Section::Appearance, Section::Editor, Section::Languages, Section::Ai, Section::Keyboard];
 
     fn label(self) -> &'static str {
         match self {
             Section::Appearance => "Appearance",
             Section::Editor => "Editor",
+            Section::Languages => "Languages",
             Section::Ai => "AI",
             Section::Keyboard => "Keyboard",
         }
@@ -58,6 +61,7 @@ pub enum SettingsPanelEvent {
 
 pub struct SettingsPanel {
     focus_handle: FocusHandle,
+    lsp: Entity<crate::lsp_store::LspStore>,
     section: Section,
     shortcuts: Vec<Shortcut>,
     installed_fonts: Vec<String>,
@@ -74,11 +78,13 @@ pub struct SettingsPanel {
 impl EventEmitter<SettingsPanelEvent> for SettingsPanel {}
 
 impl SettingsPanel {
-    pub fn new(shortcuts: Vec<Shortcut>, cx: &mut Context<Self>) -> Self {
+    pub fn new(shortcuts: Vec<Shortcut>, lsp: Entity<crate::lsp_store::LspStore>, cx: &mut Context<Self>) -> Self {
         let model = cx.new(|cx| TextInput::new("Model", cx));
         let address = cx.new(|cx| TextInput::new("Address", cx));
         let completion_model = cx.new(|cx| TextInput::new("Same as above", cx));
         let subscriptions = vec![
+            // Install progress shows as it happens.
+            cx.observe(&lsp, |_, _, cx| cx.notify()),
             cx.subscribe(&model, |this, input, TextInputEvent::Changed, cx| {
                 let text = input.read(cx).text().trim().to_string();
                 let provider = this.fields_for;
@@ -114,6 +120,7 @@ impl SettingsPanel {
         let installed_fonts = cx.text_system().all_font_names();
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
+            lsp,
             section: Section::Appearance,
             shortcuts,
             installed_fonts,
@@ -251,7 +258,7 @@ impl SettingsPanel {
             .into_any_element()
     }
 
-    fn button(id: &'static str, label: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    fn button(id: impl Into<gpui::ElementId>, label: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
             .px(px(12.))
@@ -500,6 +507,58 @@ impl SettingsPanel {
                     .on_click(move |_, _, cx| input.update(cx, |input, cx| input.set_text(r.model, cx)))
             }))
             .into_any_element()
+    }
+
+    /// Every language Null has a server for: installed or not, and one click to install.
+    fn languages(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.global::<Theme>().clone();
+        let mut rows = vec![
+            Self::heading("Language servers", &theme),
+            div()
+                .pt(px(6.))
+                .text_size(px(12.))
+                .text_color(theme.faint)
+                .child("Completions, errors, info on hover and go to definition. Null installs them in its own folder, never on the system.")
+                .into_any_element(),
+        ];
+        for (i, server) in crate::servers::SERVERS.iter().enumerate() {
+            let state = self.lsp.read(cx).install_state(server.name);
+            let found = crate::servers::find(server);
+            let (detail, control): (String, AnyElement) = match (state, &found) {
+                (Some(Ok(())), _) => (
+                    server.name.to_string(),
+                    div().text_size(px(13.)).text_color(theme.caret).child("Installing…").into_any_element(),
+                ),
+                (_, Some(path)) => {
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let shown = path.display().to_string().replacen(&home, "~", 1);
+                    (
+                        format!("{} · {shown}", server.name),
+                        div().text_size(px(13.)).text_color(theme.muted).child("Installed").into_any_element(),
+                    )
+                }
+                (failed, None) => {
+                    let can = crate::servers::can_install(server);
+                    let detail = match (failed, &can) {
+                        (Some(Err(reason)), _) => reason.to_string(),
+                        (_, Err(reason)) => reason.clone(),
+                        _ => format!("{} · not installed", server.name),
+                    };
+                    let control = if can.is_ok() {
+                        Self::button(("install", i), "Install", &theme)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.lsp.update(cx, |lsp, cx| lsp.install_server(server, cx))
+                            }))
+                            .into_any_element()
+                    } else {
+                        div().text_size(px(13.)).text_color(theme.faint).child("Not installed").into_any_element()
+                    };
+                    (detail, control)
+                }
+            };
+            rows.push(Self::row(server.label, Some(&detail), control, &theme));
+        }
+        rows
     }
 
     fn ai(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -778,6 +837,7 @@ impl Render for SettingsPanel {
         let content = match self.section {
             Section::Appearance => self.appearance(cx),
             Section::Editor => self.editor(cx),
+            Section::Languages => self.languages(cx),
             Section::Ai => self.ai(cx),
             Section::Keyboard => self.keyboard(window, cx),
         };
@@ -887,7 +947,10 @@ mod tests {
                     label: "Save".into(),
                     action: Box::new(crate::editor::Save),
                 }];
-                let (panel, cx) = cx.add_window_view(|_, cx| SettingsPanel::new(shortcuts, cx));
+                let (panel, cx) = cx.add_window_view(|_, cx| {
+                    let lsp = cx.new(|_| crate::lsp_store::LspStore::new(std::path::PathBuf::from("/tmp")));
+                    SettingsPanel::new(shortcuts, lsp, cx)
+                });
                 panel.update(cx, |panel, cx| {
                     panel.section = section;
                     cx.notify();

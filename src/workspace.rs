@@ -216,6 +216,15 @@ impl Workspace {
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
             cx.observe(&lsp, |_, _, cx| cx.notify()),
+            cx.subscribe(&lsp, |this, _, event, cx| {
+                if let crate::lsp_store::LspEvent::Installed(result) = event {
+                    let message = match result {
+                        Ok(name) => format!("{name} is installed"),
+                        Err(reason) => reason.clone(),
+                    };
+                    this.show_notice(message, cx);
+                }
+            }),
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
                 ProjectSearchEvent::Open { path, line, columns, query } => {
                     let (line, columns, query) = (*line, columns.clone(), query.clone());
@@ -1252,7 +1261,8 @@ impl Workspace {
             .into_iter()
             .map(|c| Shortcut { category: c.category, label: c.label, action: c.action })
             .collect();
-        let panel = cx.new(|cx| SettingsPanel::new(shortcuts, cx));
+        let lsp = self.lsp.clone();
+        let panel = cx.new(|cx| SettingsPanel::new(shortcuts, lsp, cx));
         let subscription = cx.subscribe_in(&panel, window, |this, _, event, window, cx| match event {
             SettingsPanelEvent::Closed => this.close_palette(window, cx),
             SettingsPanelEvent::Run(action) => {
@@ -1300,6 +1310,16 @@ impl Workspace {
     }
 
     /// What the status bar says about code intelligence for the open file.
+    /// Installs the language server for the open file, or says what's needed first.
+    fn install_language_server(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf)) else { return };
+        let Some(server) = crate::servers::for_path(&path) else { return };
+        if let Err(reason) = crate::servers::can_install(server) {
+            return self.show_notice(reason, cx);
+        }
+        self.lsp.update(cx, |lsp, cx| lsp.install(&path, cx));
+    }
+
     fn language_status(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         const TIP_FOR: Duration = Duration::from_secs(8);
         let editor = self.active_editor()?.read(cx);
@@ -1315,8 +1335,31 @@ impl Workspace {
                 let percent = percent.map(|p| format!(" {p}%")).unwrap_or_default();
                 Some(item(theme.caret, format!("Indexing{percent}")))
             }
+            // One quiet line: what's missing, and a word to fix it.
+            Readiness::Missing { server } | Readiness::InstallFailed { server } => {
+                let failed = matches!(readiness, Readiness::InstallFailed { .. });
+                let text = if failed {
+                    format!("Couldn't install {}", server.name)
+                } else {
+                    format!("No {} language server", server.label)
+                };
+                Some(
+                    div()
+                        .id("install-server")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .child(div().text_color(theme.faint).child(text))
+                        .child(div().text_color(theme.caret).child(if failed { "Retry" } else { "Install" }))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.install_language_server(cx)))
+                        .into_any_element(),
+                )
+            }
+            Readiness::Installing { server } => Some(item(theme.caret, format!("Installing {}…", server.name))),
             Readiness::Unavailable { program } => {
-                Some(div().text_color(theme.faint).child(format!("{program} isn't installed")).into_any_element())
+                Some(div().text_color(theme.faint).child(format!("{program} didn't start")).into_any_element())
             }
             Readiness::Ready { checking } => {
                 let since = *self.ready_since.get_or_insert_with(|| {

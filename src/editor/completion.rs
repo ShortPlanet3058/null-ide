@@ -37,6 +37,11 @@ pub struct CompletionMenu {
 }
 
 impl CompletionMenu {
+    /// Where the word being completed starts: the list lines up with it.
+    pub fn word_start(&self) -> usize {
+        self.word_start
+    }
+
     pub fn suggestion(&self, shown_ix: usize) -> &Suggestion {
         &self.suggestions[self.shown[shown_ix].0]
     }

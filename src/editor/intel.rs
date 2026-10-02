@@ -119,7 +119,14 @@ impl Editor {
                     "{label} support is still reading this project{percent}. Info shows up here once it's done."
                 ))
             }
-            Readiness::Unavailable { program } => Some(format!("Install {program} to get info here.")),
+            Readiness::Missing { server } => {
+                Some(format!("{label} needs {}: install it from the status bar to get info here.", server.name))
+            }
+            Readiness::Installing { server } => Some(format!("Installing {}…", server.name)),
+            Readiness::InstallFailed { server } => {
+                Some(format!("Installing {} failed: see the status bar.", server.name))
+            }
+            Readiness::Unavailable { program } => Some(format!("{program} didn't start.")),
         }
     }
 
