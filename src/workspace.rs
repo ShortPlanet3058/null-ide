@@ -102,6 +102,21 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(keys);
 }
 
+/// Where the window is, in the session's terms.
+fn window_state(window: &Window) -> crate::session::WindowState {
+    let (bounds, maximized) = match window.window_bounds() {
+        gpui::WindowBounds::Windowed(b) => (b, false),
+        gpui::WindowBounds::Maximized(b) | gpui::WindowBounds::Fullscreen(b) => (b, true),
+    };
+    crate::session::WindowState {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
+        maximized,
+    }
+}
+
 /// Chrome dims to this while you type.
 const DIMMED: f32 = 0.12;
 const FADE_OUT: Duration = Duration::from_millis(700);
@@ -182,6 +197,9 @@ pub struct Workspace {
     _watcher: Option<notify::RecommendedWatcher>,
     watch_task: Option<Task<()>>,
     index_task: Option<Task<()>>,
+    session_task: Option<Task<()>>,
+    /// The window's place on screen, for the session.
+    window_state: Option<crate::session::WindowState>,
     reindex_task: Option<Task<()>>,
     /// The AI answer panel, while open.
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
@@ -274,6 +292,8 @@ impl Workspace {
             _watcher: None,
             watch_task: None,
             index_task: None,
+            session_task: None,
+            window_state: None,
             reindex_task: None,
             key_prompt: None,
             notice: None,
@@ -284,7 +304,83 @@ impl Workspace {
         workspace.refresh_git(cx);
         workspace.watch(workspace.tree.read(cx).root().to_path_buf(), cx);
         workspace.build_index(cx);
+        // Save the session when quitting, when the window moves or resizes, and when Null
+        // goes to the background (so a crash loses little).
+        cx.on_app_quit(|this, cx| {
+            this.save_session(cx);
+            async {}
+        })
+        .detach();
+        workspace._subscriptions.push(cx.observe_window_bounds(window, |this, window, cx| {
+            this.window_state = Some(window_state(window));
+            this.schedule_session_save(cx);
+        }));
+        workspace._subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.save_session(cx);
+            }
+        }));
         workspace
+    }
+
+    /// The project as it is now: tabs with their caret and scroll, open folders, terminal, window.
+    fn session(&self, cx: &App) -> crate::session::Session {
+        let tabs = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let editor = tab.editor.read(cx);
+                let (line, column, top_line) = editor.view_state();
+                Some(crate::session::TabState { path: editor.path()?.to_path_buf(), line, column, top_line })
+            })
+            .collect::<Vec<_>>();
+        // The active tab among those saved (untitled tabs aren't).
+        let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        crate::session::Session {
+            active: active.and_then(|p| tabs.iter().position(|t| t.path == p)),
+            tabs,
+            expanded: self.tree.read(cx).expanded_folders(),
+            recent_files: self.recent_files.iter().take(20).cloned().collect(),
+            terminal_open: self.terminal_open.on,
+            window: self.window_state,
+        }
+    }
+
+    fn save_session(&self, cx: &App) {
+        self.session(cx).save(self.tree.read(cx).root());
+    }
+
+    /// Saves a moment after things settle, rather than on every change.
+    fn schedule_session_save(&mut self, cx: &mut Context<Self>) {
+        self.session_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(800)).await;
+            this.update(cx, |this, cx| this.save_session(cx)).ok();
+        }));
+    }
+
+    /// Opens the project as it was: its tabs (caret and scroll included), folders and terminal.
+    pub fn restore_session(&mut self, session: crate::session::Session, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree.update(cx, |tree, cx| tree.expand_folders(&session.expanded, cx));
+        for path in session.recent_files.iter().rev() {
+            self.recent_files.retain(|p| p != path);
+            self.recent_files.insert(0, path.clone());
+        }
+        self.window_state = session.window;
+        for tab in &session.tabs {
+            self.open_file(tab.path.clone(), window, cx);
+            if let Some(editor) = self.active_editor() {
+                editor.update(cx, |editor, cx| editor.restore_view(tab.line, tab.column, tab.top_line, cx));
+            }
+        }
+        if let Some(active) = session.active.and_then(|i| session.tabs.get(i)) {
+            self.open_file(active.path.clone(), window, cx);
+        }
+        if session.terminal_open && !self.terminal_open.on {
+            self.toggle_terminal(&ToggleTerminal, window, cx);
+        }
+        if self.tabs.is_empty() {
+            window.focus(&self.focus_handle);
+        }
     }
 
     /// Finds what the project defines, for suggestions, without slowing anything down.
@@ -554,6 +650,15 @@ impl Workspace {
     /// Opens a folder as the project, or a file in a tab.
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
+            // The project being left keeps its session; its tabs give way to the new one's,
+            // unless some have unsaved changes.
+            self.save_session(cx);
+            let all_saved = self.tabs.iter().all(|t| !t.editor.read(cx).buffer.is_dirty());
+            if all_saved {
+                while !self.tabs.is_empty() {
+                    self.remove_tab(self.tabs.len() - 1, window, cx);
+                }
+            }
             self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
             // Language servers work per project: restart them for the new folder.
             let root = path.clone();
@@ -566,9 +671,18 @@ impl Workspace {
             }
             self.refresh_git(cx);
             self.watch(path.clone(), cx);
-            self.tree.update(cx, |tree, cx| tree.set_root(path, cx));
+            self.tree.update(cx, |tree, cx| tree.set_root(path.clone(), cx));
+            self.build_index(cx);
+            let mut session = crate::session::Session::load(&path);
+            if !all_saved {
+                session.tabs.clear();
+                session.active = None;
+            }
+            session.window = self.window_state;
+            self.restore_session(session, window, cx);
             let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
             self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
+            self.schedule_session_save(cx);
         } else {
             self.open_file(path, window, cx);
         }
@@ -586,11 +700,13 @@ impl Workspace {
         window.set_window_title(&editor.file_name());
         window.focus(&editor.focus_handle(cx));
         self.share_open_files(cx);
+        self.schedule_session_save(cx);
         self.tree.update(cx, |tree, cx| tree.set_active(path, cx));
         cx.notify();
     }
 
     fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
         if let Some(path) = tab.editor.read(cx).path() {
             self.recently_closed.push(path.to_path_buf());

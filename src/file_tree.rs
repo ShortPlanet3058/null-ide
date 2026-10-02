@@ -233,6 +233,20 @@ impl FileTree {
         &self.root
     }
 
+    /// The folders expanded below the root, for the session.
+    pub fn expanded_folders(&self) -> Vec<PathBuf> {
+        let mut folders: Vec<PathBuf> = self.expanded.iter().filter(|p| **p != self.root).cloned().collect();
+        folders.sort();
+        folders
+    }
+
+    /// Expands folders again, as they were last time.
+    pub fn expand_folders(&mut self, folders: &[PathBuf], cx: &mut Context<Self>) {
+        self.expanded.extend(folders.iter().filter(|p| p.starts_with(&self.root) && p.is_dir()).cloned());
+        self.rebuild();
+        cx.notify();
+    }
+
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.expanded = HashSet::from([root.clone()]);
         self.root = root;

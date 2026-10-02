@@ -459,6 +459,14 @@ mod editor_tests {
     }
 
     #[gpui::test]
+    fn the_caret_and_view_come_back_as_they_were(cx: &mut TestAppContext) {
+        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let e = editor(cx, &text, "x.txt");
+        e.update(cx, |e, cx| e.restore_view(120, 3, 100, cx));
+        assert_eq!(e.read_with(cx, |e, _| e.view_state()), (120, 3, 100));
+    }
+
+    #[gpui::test]
     fn brackets_and_quotes_close_themselves(cx: &mut TestAppContext) {
         let e = editor(cx, "", "x.rs");
         e.update(cx, |e, cx| assert!(e.type_pair_char('(', cx)));

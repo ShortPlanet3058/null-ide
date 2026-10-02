@@ -8,6 +8,10 @@ use std::path::PathBuf;
 /// `~/Library/Application Support/Null` on macOS, `$XDG_DATA_HOME/null` (or
 /// `~/.local/share/null`) on Linux, `%LOCALAPPDATA%\Null` on Windows.
 pub fn data_dir() -> Option<PathBuf> {
+    // For trying Null without touching the real folder.
+    if let Some(dir) = std::env::var_os("NULL_DATA_DIR").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos") {
         Some(home?.join("Library/Application Support/Null"))
