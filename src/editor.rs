@@ -1260,43 +1260,64 @@ impl Editor {
         }
     }
 
+    /// The list of suggestions from the language server, kept quiet: names line up
+    /// under the word being typed, the typed letters stand out, a dot gives the kind, and
+    /// only the selected row shows its details.
     fn render_completions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        const ROW: f32 = 24.;
+        const ROWS: usize = 6;
+        const PAD: f32 = 4.;
+        const DOT_COLUMN: f32 = 18.;
         let menu = self.completion.as_ref()?;
-        let bounds = self.caret_bounds(self.selection.head)?;
+        let bounds = self.caret_bounds(menu.word_start().min(self.selection.head))?;
         let theme = cx.global::<Theme>();
         let code_font = cx.global::<Fonts>().code.clone();
         let rows = (0..menu.shown.len()).map(|ix| {
             let suggestion = menu.suggestion(ix);
             let selected = ix == menu.selected;
-            let (badge, color) = completion_badge(suggestion.kind, theme);
-            let highlight = HighlightStyle { color: Some(theme.caret), ..Default::default() };
+            let typed = HighlightStyle { color: Some(theme.foreground), ..Default::default() };
             let label =
                 StyledText::new(suggestion.label.clone()).with_highlights(menu.shown[ix].1.iter().filter_map(|&b| {
                     let len = suggestion.label.get(b..)?.chars().next()?.len_utf8();
-                    Some((b..b + len, highlight))
+                    Some((b..b + len, typed))
                 }));
             div()
                 .id(ix)
-                .h(px(26.))
+                .h(px(ROW))
                 .flex()
                 .items_center()
-                .gap(px(8.))
-                .px(px(8.))
-                .rounded(px(6.))
+                .pr(px(10.))
+                .rounded(px(5.))
                 .when(selected, |row| row.bg(theme.accent_soft))
-                .child(div().w(px(14.)).flex_none().text_color(color).text_size(px(11.)).child(badge))
-                .child(div().flex_none().text_color(theme.foreground).child(label))
-                .children(suggestion.detail.clone().map(|detail| {
+                .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
+                        .w(px(DOT_COLUMN))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .child(div().size(px(4.)).rounded_full().bg(kind_color(suggestion.kind, theme))),
+                )
+                .child(
+                    div()
+                        .flex_none()
                         .whitespace_nowrap()
-                        .text_right()
-                        .text_size(px(11.5))
-                        .text_color(theme.faint)
-                        .child(detail)
-                }))
+                        .text_color(if selected { theme.foreground } else { theme.muted })
+                        .child(label),
+                )
+                .when(selected, |row| {
+                    row.children(suggestion.detail.clone().map(|detail| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(16.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_right()
+                            .text_size(px(11.5))
+                            .text_color(theme.faint)
+                            .child(detail)
+                    }))
+                })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.accept_completion(ix, cx)))
         });
         let list = div()
@@ -1304,22 +1325,23 @@ impl Editor {
             .occlude()
             .track_scroll(&menu.scroll)
             .overflow_y_scroll()
-            .min_w(px(260.))
-            .max_w(px(520.))
-            .max_h(px(26. * 8. + 10.))
-            .p(px(4.))
-            .rounded(px(9.))
+            .min_w(px(220.))
+            .max_w(px(480.))
+            .max_h(px(ROW * ROWS as f32 + PAD * 2.))
+            .p(px(PAD))
+            .rounded(px(8.))
             .bg(theme.raised)
             .border_1()
             .border_color(theme.hairline)
-            .shadow_lg()
+            .shadow_md()
             .font_family(code_font)
-            .text_size(px(13.))
+            .text_size(self.font_size * 0.93)
             .children(rows);
+        // The names start exactly where the word being typed does.
         Some(
             deferred(
                 anchored()
-                    .position(point(bounds.left() - px(30.), bounds.bottom() + px(4.)))
+                    .position(point(bounds.left() - px(PAD + DOT_COLUMN), bounds.bottom() + px(3.)))
                     .snap_to_window_with_margin(px(8.))
                     .child(list),
             )
@@ -1690,21 +1712,19 @@ enum DragUnit {
 }
 
 /// A one-letter hint of what a suggestion is, in the color code uses for it.
-fn completion_badge(kind: Option<lsp_types::CompletionItemKind>, theme: &Theme) -> (&'static str, gpui::Hsla) {
+/// The dot beside a suggestion: the color its kind has in code.
+fn kind_color(kind: Option<lsp_types::CompletionItemKind>, theme: &Theme) -> gpui::Hsla {
     use crate::theme::Syntax;
     use lsp_types::CompletionItemKind as K;
     match kind {
-        Some(K::FUNCTION | K::METHOD | K::CONSTRUCTOR) => ("ƒ", theme.syntax(Syntax::Function)),
-        Some(K::STRUCT | K::CLASS | K::TYPE_PARAMETER) => ("S", theme.syntax(Syntax::Type)),
-        Some(K::ENUM | K::ENUM_MEMBER) => ("E", theme.syntax(Syntax::Type)),
-        Some(K::INTERFACE) => ("T", theme.syntax(Syntax::Type)),
-        Some(K::FIELD | K::PROPERTY) => ("·", theme.syntax(Syntax::Property)),
-        Some(K::VARIABLE) => ("v", theme.syntax(Syntax::Plain)),
-        Some(K::CONSTANT) => ("c", theme.syntax(Syntax::Number)),
-        Some(K::MODULE) => ("m", theme.syntax(Syntax::Keyword)),
-        Some(K::KEYWORD) => ("k", theme.syntax(Syntax::Keyword)),
-        Some(K::SNIPPET) => ("…", theme.muted),
-        _ => ("·", theme.muted),
+        Some(K::FUNCTION | K::METHOD | K::CONSTRUCTOR) => theme.syntax(Syntax::Function),
+        Some(K::STRUCT | K::CLASS | K::TYPE_PARAMETER | K::ENUM | K::ENUM_MEMBER | K::INTERFACE) => {
+            theme.syntax(Syntax::Type)
+        }
+        Some(K::FIELD | K::PROPERTY) => theme.syntax(Syntax::Property),
+        Some(K::CONSTANT) => theme.syntax(Syntax::Number),
+        Some(K::MODULE | K::KEYWORD) => theme.syntax(Syntax::Keyword),
+        _ => theme.faint,
     }
 }
 
