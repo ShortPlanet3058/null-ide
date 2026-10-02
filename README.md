@@ -24,14 +24,14 @@ Settings open with ⌘, / Ctrl+,. They're saved in `~/.config/null/settings.json
 (`%APPDATA%\Null\settings.json` on Windows), which can also be edited by hand
 (“Edit as JSON…” in Settings).
 
-One palette does everything; the first character picks what it searches:
+Getting around:
 
-| Type | Does | Shortcut |
-|---|---|---|
-| a name | open a file (recent ones first) | ⌘P |
-| `>` | run a command, grouped by category | ⌘⇧P |
-| `:` | go to a line | ⌃G |
-| `?` | ask the AI about the open file | |
+| Shortcut | Does |
+|---|---|
+| ⌘P | go to a file, recent ones first |
+| ⌘K | quick settings (theme, text size, wrap, sidebar, terminal, AI…) changed right in the list, and every command once you type |
+| ⌘, | all settings |
+| ⌃G | go to a line |
 
 Shaders are compiled when the app starts (GPUI's `runtime_shaders` feature), so the build
 doesn't need Xcode's separate Metal Toolchain download.
@@ -70,7 +70,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 ## AI (optional, off by default)
 
 AI only appears when you call it: Cmd/Ctrl+I to change the code at the caret (shown as a
-diff you accept or reject), or `?` in the palette to ask about the open file.
+diff you accept or reject), or “Ask About This File” in ⌘K. With AI switched off (in ⌘K
+or Settings), none of it shows.
 Choose where answers come from in Settings → AI:
 
 | Provider | Needs |

@@ -8,7 +8,7 @@ use crate::git;
 use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
 use crate::lsp_store::{LspStore, Readiness};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
-use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteOptions, format_keys};
+use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::settings_panel::{SettingsPanel, SettingsPanelEvent, Shortcut};
@@ -33,6 +33,7 @@ actions!(
         TogglePalette,
         ShowCommands,
         AskAi,
+        ToggleAi,
         OpenSettings,
         OpenSettingsFile,
         IncreaseFontSize,
@@ -67,7 +68,7 @@ pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Workspace");
     let mut keys = vec![
         KeyBinding::new("secondary-p", TogglePalette, ctx),
-        KeyBinding::new("secondary-k", TogglePalette, ctx),
+        KeyBinding::new("secondary-k", ShowCommands, ctx),
         KeyBinding::new("secondary-shift-p", ShowCommands, ctx),
         KeyBinding::new("secondary-o", Open, ctx),
         KeyBinding::new("secondary-w", CloseTab, ctx),
@@ -692,9 +693,7 @@ impl Workspace {
             (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
             (Go, "Go to File…".into(), Box::new(TogglePalette)),
             (Go, "Search in Project…".into(), Box::new(SearchProject)),
-            (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
-            (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
             (View, toggle(settings.word_wrap, "Stop Wrapping Lines", "Wrap Lines"), Box::new(ToggleWordWrap)),
             (
                 View,
@@ -707,21 +706,14 @@ impl Workspace {
             (Appearance, "Bigger Text".into(), Box::new(IncreaseFontSize)),
             (Appearance, "Smaller Text".into(), Box::new(DecreaseFontSize)),
             (Appearance, "Actual Size".into(), Box::new(ResetFontSize)),
-            (Ai, "Ask a Question…".into(), Box::new(AskAi)),
-            (Ai, ai_label(ProviderId::Nvidia), Box::new(UseNvidia)),
-            (Ai, ai_label(ProviderId::Ollama), Box::new(UseOllama)),
-            (Ai, ai_label(ProviderId::OpenaiCompatible), Box::new(UseOpenAiCompatible)),
-            (Ai, ai_label(ProviderId::Claude), Box::new(UseClaudeApi)),
-            (Ai, ai_label(ProviderId::ClaudeCode), Box::new(UseClaudeCode)),
-            (Ai, ai_label(ProviderId::Codex), Box::new(UseCodex)),
-            (Ai, "Set API Key…".into(), Box::new(SetApiKey)),
-            (Ai, "Turn Off AI".into(), Box::new(TurnOffAi)),
             (
                 Edit,
                 toggle(settings.autocomplete, "Turn Off Autocomplete", "Turn On Autocomplete"),
                 Box::new(ToggleAutocomplete),
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
+            (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
+            (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
         ];
         if self.active.is_some() {
@@ -754,8 +746,23 @@ impl Workspace {
                 (Go, "Show Info at Cursor".into(), Box::new(ShowInfo)),
                 (Go, "Next Tab".into(), Box::new(NextTab)),
                 (Go, "Previous Tab".into(), Box::new(PreviousTab)),
-                (Ai, "Edit with AI…".into(), Box::new(crate::editor::InlineAssist)),
             ]);
+        }
+        // With AI switched off, nothing about it shows up.
+        if settings.ai.enabled {
+            commands.extend([
+                (Ai, "Ask About This File…".into(), Box::new(AskAi) as Box<dyn Action>),
+                (Ai, ai_label(ProviderId::Nvidia), Box::new(UseNvidia)),
+                (Ai, ai_label(ProviderId::Ollama), Box::new(UseOllama)),
+                (Ai, ai_label(ProviderId::OpenaiCompatible), Box::new(UseOpenAiCompatible)),
+                (Ai, ai_label(ProviderId::Claude), Box::new(UseClaudeApi)),
+                (Ai, ai_label(ProviderId::ClaudeCode), Box::new(UseClaudeCode)),
+                (Ai, ai_label(ProviderId::Codex), Box::new(UseCodex)),
+                (Ai, "Set API Key…".into(), Box::new(SetApiKey)),
+            ]);
+            if self.active.is_some() {
+                commands.push((Ai, "Edit with AI…".into(), Box::new(crate::editor::InlineAssist)));
+            }
         }
         commands.push((App, "Quit Null".into(), Box::new(Quit)));
         commands
@@ -769,33 +776,30 @@ impl Workspace {
             .collect()
     }
 
-    /// Opens the palette with `query` typed in (">" for commands, ":" for a line...).
-    /// Pressing the same shortcut again closes it; another one switches mode.
-    pub fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the palette of that kind. Pressing the same shortcut again closes it;
+    /// another one switches to that kind.
+    pub fn open_palette(&mut self, kind: PaletteKind, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((palette, _)) = &self.palette {
-            let current = palette.read(cx).query(cx);
-            if crate::palette::Mode::of(&current).0 == crate::palette::Mode::of(query).0 {
-                self.close_palette(window, cx);
-            } else {
-                palette.update(cx, |palette, cx| palette.set_query(query, cx));
+            if palette.read(cx).kind() == kind {
+                return self.close_palette(window, cx);
             }
-            return;
-        }
-        // The palette replaces the Settings window, if it's open.
-        if self.settings_panel.take().is_none() {
+            self.palette = None;
+        } else if self.settings_panel.take().is_none() {
+            // The palette replaces the Settings window, if it's open.
             self.focus_before_palette = window.focused(cx);
         }
         let active_path = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let options = PaletteOptions {
-            commands: self.commands(window, cx),
+            kind,
+            commands: if kind == PaletteKind::Quick { self.commands(window, cx) } else { Vec::new() },
             root: self.tree.read(cx).root().to_path_buf(),
             recent_files: self.recent_files.iter().filter(|p| Some(*p) != active_path.as_ref()).cloned().collect(),
             recent_commands: self.recent_commands.clone(),
             line_count: self.active_editor().map(|e| e.read(cx).buffer.len_lines()),
-            query: query.to_string(),
+            terminal_open: self.terminal_open.on,
         };
         let palette = cx.new(|cx| Palette::new(options, cx));
-        let subscription = cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
+        let subscription = cx.subscribe_in(&palette, window, |this, palette, event, window, cx| match event {
             PaletteEvent::Dismissed => this.close_palette(window, cx),
             PaletteEvent::OpenFile(path) => {
                 let path = path.clone();
@@ -816,12 +820,23 @@ impl Workspace {
             }
             PaletteEvent::Run(action) => {
                 let action = action.boxed_clone();
-                this.recent_commands.retain(|n| *n != action.name());
-                this.recent_commands.insert(0, action.name());
-                this.recent_commands.truncate(20);
+                this.remember_command(action.name());
                 this.close_palette(window, cx);
                 // Run once focus is back where it was, so editor commands reach the editor.
                 window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
+            }
+            PaletteEvent::Apply(action) => {
+                // A quick setting: change it and stay in the palette to see the effect.
+                let action = action.boxed_clone();
+                let palette = palette.clone();
+                let workspace = cx.entity();
+                window.defer(cx, move |window, cx| {
+                    window.dispatch_action(action, cx);
+                    // Opening the terminal takes focus; give it back to the palette.
+                    window.focus(&palette.focus_handle(cx));
+                    let open = workspace.read(cx).terminal_open.on;
+                    palette.update(cx, |palette, cx| palette.set_terminal_open(open, cx));
+                });
             }
         });
         window.focus(&palette.focus_handle(cx));
@@ -829,20 +844,36 @@ impl Workspace {
         cx.notify();
     }
 
+    fn remember_command(&mut self, name: &'static str) {
+        self.recent_commands.retain(|n| *n != name);
+        self.recent_commands.insert(0, name);
+        self.recent_commands.truncate(20);
+    }
+
     fn show_commands(&mut self, _: &ShowCommands, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_palette(">", window, cx);
+        self.open_palette(PaletteKind::Quick, window, cx);
     }
 
     fn ask_ai(&mut self, _: &AskAi, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_palette("?", window, cx);
+        if cx.global::<Settings>().ai.enabled {
+            self.open_palette(PaletteKind::Ask, window, cx);
+        }
+    }
+
+    fn toggle_ai(&mut self, _: &ToggleAi, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.ai.enabled = !s.ai.enabled);
+        let ai = &cx.global::<Settings>().ai;
+        if ai.enabled && ai.provider == ProviderId::Off {
+            self.show_notice("AI is on. Choose where answers come from in Settings → AI (⌘,).".into(), cx);
+        }
     }
 
     fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_palette("", window, cx);
+        self.open_palette(PaletteKind::Files, window, cx);
     }
 
     fn go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_palette(":", window, cx);
+        self.open_palette(PaletteKind::Line, window, cx);
     }
 
     /// Closes whichever floating layer is open (the palette or the Settings window)
@@ -1404,7 +1435,7 @@ impl Render for Workspace {
         } else {
             self.key_prompt.as_ref().map(|(prompt, _)| prompt.clone().into_any_element())
         };
-        let ai_provider = cx.global::<Settings>().ai.provider;
+        let ai_provider = cx.global::<Settings>().ai.active();
         let theme = cx.global::<Theme>();
 
         let titlebar = div()
@@ -1467,7 +1498,7 @@ impl Render for Workspace {
                         .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
                         .child(format!("AI · {}", ai_provider.label()))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.toggle_palette(&TogglePalette, window, cx)
+                            this.open_settings(&OpenSettings, window, cx)
                         })),
                 )
             })
@@ -1499,6 +1530,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_settings_file))
             .on_action(cx.listener(Self::show_commands))
+            .on_action(cx.listener(Self::toggle_ai))
             .on_action(cx.listener(Self::ask_ai))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::close_tab))

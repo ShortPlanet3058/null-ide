@@ -446,8 +446,16 @@ impl SettingsPanel {
         let s = cx.global::<Settings>().clone();
         let theme = cx.global::<Theme>().clone();
         let current = s.ai.provider;
+        let switch = Self::row(
+            "Use AI",
+            Some("When off, AI shows up nowhere and nothing leaves your machine"),
+            Self::toggle("ai-enabled", s.ai.enabled, &theme, cx, |s| s.ai.enabled = !s.ai.enabled),
+            &theme,
+        );
+        if !s.ai.enabled {
+            return vec![Self::heading("AI", &theme), switch];
+        }
         let providers = [
-            (ProviderId::Off, "No AI. Nothing leaves your machine."),
             (ProviderId::ClaudeCode, "Your Claude subscription, through the claude command line tool"),
             (ProviderId::Codex, "Your ChatGPT subscription, through the codex command line tool"),
             (ProviderId::Claude, "The Anthropic API, with an API key"),
@@ -489,7 +497,18 @@ impl SettingsPanel {
                     )
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_provider(id, cx)))
             }));
-        let mut rows = vec![Self::heading("Provider", &theme), list.into_any_element()];
+        let mut rows = vec![Self::heading("AI", &theme), switch, Self::heading("Provider", &theme)];
+        if current == ProviderId::Off {
+            rows.push(
+                div()
+                    .pt(px(6.))
+                    .text_size(px(12.))
+                    .text_color(theme.muted)
+                    .child("Choose where answers come from.")
+                    .into_any_element(),
+            );
+        }
+        rows.push(list.into_any_element());
         if current != ProviderId::Off {
             rows.push(Self::heading(&format!("{} options", current.label()), &theme));
             if matches!(
@@ -546,17 +565,7 @@ impl SettingsPanel {
                 .child("Every shortcut, by category. Changing them is coming later.")
                 .into_any_element(),
         ];
-        for category in [
-            Category::File,
-            Category::Edit,
-            Category::Lines,
-            Category::Cursors,
-            Category::Go,
-            Category::View,
-            Category::Appearance,
-            Category::Ai,
-            Category::App,
-        ] {
+        for category in Category::ALL {
             let members: Vec<&Shortcut> = self.shortcuts.iter().filter(|s| s.category == category).collect();
             if members.is_empty() {
                 continue;

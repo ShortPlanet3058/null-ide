@@ -59,13 +59,14 @@ fn main() {
         editor::bind_keys(cx);
         workspace::bind_keys(cx);
         file_tree::bind_keys(cx);
-        palette::bind_keys(cx);
         find_bar::bind_keys(cx);
         terminal::bind_keys(cx);
         inline_assist::bind_keys(cx);
         ask::bind_keys(cx);
         key_prompt::bind_keys(cx);
         text_input::bind_keys(cx);
+        // After the text field's keys, so ←→ can change a choice in the palette.
+        palette::bind_keys(cx);
         settings_panel::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());

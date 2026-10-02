@@ -1,27 +1,32 @@
-//! The palette: one field for everything, steered by the first character.
+//! The floating search box, in a few kinds that each do one thing:
 //!
-//! - nothing: files, recent ones first
-//! - `>` commands, grouped by category
-//! - `:` go to a line
-//! - `?` ask the AI
+//! - Files (⌘P): go to a file, the recent ones first.
+//! - Quick (⌘K): the settings changed all the time, changed right in the list
+//!   (switches, ←→ on choices), and every command once you type.
+//! - Line (⌃G): go to a line.
+//! - Ask: a question for the AI about the open file.
 
 use crate::fuzzy;
+use crate::settings::Settings;
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeName};
 use gpui::{
-    Action, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    KeyBinding, MouseMoveEvent, ScrollHandle, SharedString, StyledText, Subscription, Window, actions, div, prelude::*,
-    px,
+    Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    HighlightStyle, KeyBinding, KeyContext, MouseMoveEvent, ScrollHandle, SharedString, StyledText, Subscription,
+    Window, actions, div, prelude::*, px,
 };
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-actions!(palette, [SelectNext, SelectPrevious, Confirm, Dismiss]);
+actions!(palette, [SelectNext, SelectPrevious, Confirm, Dismiss, AdjustLeft, AdjustRight]);
 
+/// Registered after the text field's keys: on a choice row, ←→ change the choice
+/// instead of moving the caret (the query is empty there anyway).
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Palette");
+    let adjusting = Some("(Palette && adjusting) > TextInput");
     cx.bind_keys([
         KeyBinding::new("down", SelectNext, ctx),
         KeyBinding::new("ctrl-n", SelectNext, ctx),
@@ -29,20 +34,42 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-p", SelectPrevious, ctx),
         KeyBinding::new("enter", Confirm, ctx),
         KeyBinding::new("escape", Dismiss, ctx),
+        KeyBinding::new("left", AdjustLeft, adjusting),
+        KeyBinding::new("right", AdjustRight, adjusting),
     ]);
 }
 
 const ROW_HEIGHT: f32 = 34.;
-const HEADER_HEIGHT: f32 = 28.;
 const LIST_HEIGHT: f32 = 380.;
-const MAX_RESULTS: usize = 200;
-/// Shown before the rest when nothing is typed yet.
-const MAX_RECENT: usize = 5;
+const MAX_RESULTS: usize = 100;
+/// ⌘P with nothing typed shows this many recent files.
+const MAX_RECENT: usize = 6;
+/// ...or, before anything was opened, this many of the project's files.
+const MAX_STARTER_FILES: usize = 8;
 /// Large projects are walked up to this many files.
 const MAX_FILES: usize = 50_000;
 const APPEAR: Duration = Duration::from_millis(140);
 
-/// Where a command is listed, in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteKind {
+    Files,
+    Quick,
+    Line,
+    Ask,
+}
+
+impl PaletteKind {
+    fn placeholder(self) -> &'static str {
+        match self {
+            PaletteKind::Files => "Go to file",
+            PaletteKind::Quick => "Quick settings and commands",
+            PaletteKind::Line => "Go to line",
+            PaletteKind::Ask => "Ask about this file",
+        }
+    }
+}
+
+/// Where a command is listed, shown beside it when searching.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
     File,
@@ -57,7 +84,7 @@ pub enum Category {
 }
 
 impl Category {
-    const ALL: [Category; 9] = [
+    pub const ALL: [Category; 9] = [
         Category::File,
         Category::Edit,
         Category::Lines,
@@ -92,18 +119,115 @@ pub struct Command {
     pub keys: Option<String>,
 }
 
+/// The settings in ⌘K, changed without leaving the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Quick {
+    Theme,
+    TextSize,
+    Wrap,
+    Sidebar,
+    Terminal,
+    Suggestions,
+    Fade,
+    Ai,
+    AllSettings,
+}
+
+impl Quick {
+    const ALL: [Quick; 9] = [
+        Quick::Theme,
+        Quick::TextSize,
+        Quick::Wrap,
+        Quick::Sidebar,
+        Quick::Terminal,
+        Quick::Suggestions,
+        Quick::Fade,
+        Quick::Ai,
+        Quick::AllSettings,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Quick::Theme => "Theme",
+            Quick::TextSize => "Text size",
+            Quick::Wrap => "Wrap lines",
+            Quick::Sidebar => "Sidebar",
+            Quick::Terminal => "Terminal",
+            Quick::Suggestions => "Suggestions while typing",
+            Quick::Fade => "Fade bars while typing",
+            Quick::Ai => "AI",
+            Quick::AllSettings => "All settings",
+        }
+    }
+
+    /// What Enter (or a click) does; for choices, the next one.
+    fn action(self, settings: &Settings) -> Box<dyn Action> {
+        use crate::workspace::*;
+        match self {
+            Quick::Theme => theme_action(next_theme(settings.theme, 1)),
+            Quick::TextSize => Box::new(IncreaseFontSize),
+            Quick::Wrap => Box::new(crate::menus::ToggleWordWrap),
+            Quick::Sidebar => Box::new(ToggleSidebar),
+            Quick::Terminal => Box::new(ToggleTerminal),
+            Quick::Suggestions => Box::new(ToggleAutocomplete),
+            Quick::Fade => Box::new(crate::menus::ToggleFadeWhileTyping),
+            Quick::Ai => Box::new(ToggleAi),
+            Quick::AllSettings => Box::new(OpenSettings),
+        }
+    }
+
+    fn is_choice(self) -> bool {
+        matches!(self, Quick::Theme | Quick::TextSize)
+    }
+}
+
+const THEMES: [ThemeName; 3] = [ThemeName::Oled, ThemeName::Graphite, ThemeName::Paper];
+
+fn next_theme(current: ThemeName, step: isize) -> ThemeName {
+    let i = THEMES.iter().position(|t| *t == current).unwrap_or(0) as isize;
+    THEMES[(i + step).rem_euclid(THEMES.len() as isize) as usize]
+}
+
+fn theme_action(theme: ThemeName) -> Box<dyn Action> {
+    use crate::workspace::{UseGraphiteTheme, UseOledTheme, UsePaperTheme};
+    match theme {
+        ThemeName::Oled => Box::new(UseOledTheme),
+        ThemeName::Graphite => Box::new(UseGraphiteTheme),
+        ThemeName::Paper => Box::new(UsePaperTheme),
+    }
+}
+
+/// Commands that a quick setting already covers, left out of ⌘K's search.
+fn covered_by_quick(name: &str) -> bool {
+    matches!(
+        name.rsplit("::").next().unwrap_or(name),
+        "ToggleWordWrap"
+            | "ToggleSidebar"
+            | "ToggleTerminal"
+            | "ToggleAutocomplete"
+            | "ToggleFadeWhileTyping"
+            | "ToggleAi"
+            | "UseOledTheme"
+            | "UseGraphiteTheme"
+            | "UsePaperTheme"
+            | "IncreaseFontSize"
+            | "DecreaseFontSize"
+            | "OpenSettings"
+    )
+}
+
 /// What the palette starts with.
 pub struct PaletteOptions {
+    pub kind: PaletteKind,
     pub commands: Vec<Command>,
     pub root: PathBuf,
     /// Files opened lately, most recent first (the current one left out).
     pub recent_files: Vec<PathBuf>,
-    /// Names of the actions run lately from the palette, most recent first.
+    /// Names of the actions run lately, most recent first; they rank higher.
     pub recent_commands: Vec<&'static str>,
-    /// Lines in the current file, for `:`.
+    /// Lines in the current file, for going to a line.
     pub line_count: Option<usize>,
-    /// What's typed in the field to begin with, like ">" for commands.
-    pub query: String,
+    pub terminal_open: bool,
 }
 
 struct FileEntry {
@@ -126,84 +250,44 @@ enum Item {
     Command(usize),
     File(usize),
     RecentFile(usize),
+    Quick(Quick),
+    /// ":42" typed in ⌘P.
+    Line(usize),
 }
 
-enum Row {
-    Header(&'static str),
-    Item {
-        item: Item,
-        highlights: Vec<usize>,
-        /// Commands found by searching show their category beside them.
-        show_category: bool,
-    },
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mode {
-    Files,
-    Commands,
-    Line,
-    Ask,
-}
-
-impl Mode {
-    const ALL: [Mode; 4] = [Mode::Files, Mode::Commands, Mode::Line, Mode::Ask];
-
-    /// The mode a query is in, and the query without its prefix.
-    pub fn of(query: &str) -> (Mode, &str) {
-        match query.chars().next() {
-            Some('>') => (Mode::Commands, &query[1..]),
-            Some(':') => (Mode::Line, &query[1..]),
-            Some('?') => (Mode::Ask, &query[1..]),
-            _ => (Mode::Files, query),
-        }
-    }
-
-    fn prefix(self) -> &'static str {
-        match self {
-            Mode::Files => "",
-            Mode::Commands => ">",
-            Mode::Line => ":",
-            Mode::Ask => "?",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Mode::Files => "Files",
-            Mode::Commands => "Commands",
-            Mode::Line => "Go to line",
-            Mode::Ask => "Ask AI",
-        }
-    }
+struct Row {
+    item: Item,
+    highlights: Vec<usize>,
+    /// Commands found by searching show their category beside them.
+    show_category: bool,
 }
 
 pub enum PaletteEvent {
     Dismissed,
     OpenFile(PathBuf),
+    /// Run a command and close.
     Run(Box<dyn Action>),
-    /// Typed after a `?`: a question for the AI.
+    /// Change a setting and stay open, so its effect shows at once.
+    Apply(Box<dyn Action>),
     Ask(String),
-    /// Typed after a `:`: a line number to jump to.
     GoToLine(usize),
 }
 
 pub struct Palette {
+    kind: PaletteKind,
     input: Entity<TextInput>,
     commands: Vec<Command>,
     files: Vec<FileEntry>,
+    files_loaded: bool,
     recent_files: Vec<FileEntry>,
     recent_commands: Vec<&'static str>,
     line_count: Option<usize>,
-    mode: Mode,
+    terminal_open: bool,
     rows: Vec<Row>,
-    /// Indices into `rows` of the rows that can be picked.
-    choices: Vec<usize>,
     selected: usize,
     scroll: ScrollHandle,
     opened_at: Instant,
-    /// What's typed after the prefix.
-    rest: String,
+    query: String,
     _subscription: Subscription,
 }
 
@@ -211,18 +295,22 @@ impl EventEmitter<PaletteEvent> for Palette {}
 
 impl Palette {
     pub fn new(options: PaletteOptions, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextInput::new("Search files by name", cx));
-        let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_matches(cx));
-        let root = options.root.clone();
-        cx.spawn(async move |this, cx| {
-            let files = cx.background_executor().spawn(async move { list_files(&root) }).await;
-            this.update(cx, |this, cx| {
-                this.files = files;
-                this.update_matches(cx);
+        let kind = options.kind;
+        let input = cx.new(|cx| TextInput::new(kind.placeholder(), cx));
+        let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_rows(cx));
+        if kind == PaletteKind::Files {
+            let root = options.root.clone();
+            cx.spawn(async move |this, cx| {
+                let files = cx.background_executor().spawn(async move { list_files(&root) }).await;
+                this.update(cx, |this, cx| {
+                    this.files = files;
+                    this.files_loaded = true;
+                    this.update_rows(cx);
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        }
         let recent_files = options
             .recent_files
             .into_iter()
@@ -231,84 +319,72 @@ impl Palette {
             .map(|p| FileEntry::new(p, &options.root))
             .collect();
         let mut palette = Self {
+            kind,
             input,
             commands: options.commands,
             files: Vec::new(),
+            files_loaded: false,
             recent_files,
             recent_commands: options.recent_commands,
             line_count: options.line_count,
-            mode: Mode::Files,
+            terminal_open: options.terminal_open,
             rows: Vec::new(),
-            choices: Vec::new(),
             selected: 0,
             scroll: ScrollHandle::new(),
             opened_at: Instant::now(),
-            rest: String::new(),
+            query: String::new(),
             _subscription: subscription,
         };
-        palette.set_query(&options.query, cx);
-        palette.update_matches(cx);
+        palette.update_rows(cx);
         palette
     }
 
-    pub fn query(&self, cx: &App) -> String {
-        self.input.read(cx).text().to_string()
+    pub fn kind(&self) -> PaletteKind {
+        self.kind
     }
 
-    pub fn set_query(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.input.update(cx, |input, cx| {
-            input.set_text(text, cx);
-            input.select_range(text.len()..text.len(), cx);
-        });
+    /// The workspace says when a quick setting it applied changed something only it knows.
+    pub fn set_terminal_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.terminal_open = open;
+        cx.notify();
     }
 
-    /// Switches mode, keeping what was typed after the old prefix.
-    fn switch_to(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.input.read(cx).text().to_string();
-        let (_, rest) = Mode::of(&query);
-        let rest = if mode == Mode::Line { String::new() } else { rest.to_string() };
-        self.set_query(&format!("{}{rest}", mode.prefix()), cx);
-        window.focus(&self.input.focus_handle(cx));
-    }
-
-    fn update_matches(&mut self, cx: &mut Context<Self>) {
-        let query = self.input.read(cx).text().to_string();
-        let (mode, rest) = Mode::of(&query);
-        self.mode = mode;
-        self.rest = rest.trim().to_string();
+    fn update_rows(&mut self, cx: &mut Context<Self>) {
+        self.query = self.input.read(cx).text().trim().to_string();
+        let query = self.query.clone();
         self.rows.clear();
-        match mode {
-            Mode::Files => self.match_files(rest.trim()),
-            Mode::Commands => self.match_commands(rest.trim()),
-            Mode::Line | Mode::Ask => {}
+        match self.kind {
+            PaletteKind::Files => self.file_rows(&query),
+            PaletteKind::Quick => self.quick_rows(&query),
+            PaletteKind::Line | PaletteKind::Ask => {}
         }
-        self.choices =
-            self.rows.iter().enumerate().filter(|(_, r)| matches!(r, Row::Item { .. })).map(|(i, _)| i).collect();
         self.selected = 0;
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
         cx.notify();
     }
 
-    fn item(&mut self, item: Item, highlights: Vec<usize>, show_category: bool) {
-        self.rows.push(Row::Item { item, highlights, show_category });
+    fn push(&mut self, item: Item, highlights: Vec<usize>, show_category: bool) {
+        self.rows.push(Row { item, highlights, show_category });
     }
 
-    fn match_files(&mut self, query: &str) {
-        let recent: HashSet<PathBuf> = self.recent_files.iter().map(|f| f.path.clone()).collect();
+    fn file_rows(&mut self, query: &str) {
+        // A hidden extra for those who know it: ":42" goes to line 42.
+        if let Some(line) = query.strip_prefix(':').and_then(|n| n.trim().parse().ok()) {
+            return self.push(Item::Line(line), Vec::new(), false);
+        }
         if query.is_empty() {
-            if !self.recent_files.is_empty() {
-                self.rows.push(Row::Header("Recently opened"));
-                for i in 0..self.recent_files.len() {
-                    self.item(Item::RecentFile(i), Vec::new(), false);
+            if self.recent_files.is_empty() {
+                for i in 0..self.files.len().min(MAX_STARTER_FILES) {
+                    self.push(Item::File(i), Vec::new(), false);
                 }
-                self.rows.push(Row::Header("All files"));
-            }
-            let all: Vec<usize> = (0..self.files.len()).filter(|&i| !recent.contains(&self.files[i].path)).collect();
-            for i in all.into_iter().take(MAX_RESULTS) {
-                self.item(Item::File(i), Vec::new(), false);
+            } else {
+                for i in 0..self.recent_files.len() {
+                    self.push(Item::RecentFile(i), Vec::new(), false);
+                }
             }
             return;
         }
+        let recent: HashSet<PathBuf> = self.recent_files.iter().map(|f| f.path.clone()).collect();
         let mut found: Vec<(i32, usize, Vec<usize>)> = self
             .files
             .iter()
@@ -334,99 +410,86 @@ impl Palette {
             .collect();
         found.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
         for (_, i, highlights) in found.into_iter().take(MAX_RESULTS) {
-            self.item(Item::File(i), highlights, false);
-        }
-        // Nothing by that name: maybe it was a command.
-        if self.rows.is_empty() {
-            let commands = self.command_matches(query);
-            if !commands.is_empty() {
-                self.rows.push(Row::Header("No files match · commands"));
-                for (i, highlights) in commands.into_iter().take(8) {
-                    self.item(Item::Command(i), highlights, true);
-                }
-            }
+            self.push(Item::File(i), highlights, false);
         }
     }
 
-    /// Commands matching `query`, best first. The category counts too, so "ai use"
-    /// finds "Use NVIDIA" under AI.
-    fn command_matches(&self, query: &str) -> Vec<(usize, Vec<usize>)> {
-        let mut found: Vec<(i32, usize, Vec<usize>)> = self
-            .commands
-            .iter()
-            .enumerate()
-            .filter_map(|(i, c)| {
-                let recent = self.recent_commands.iter().position(|&n| n == c.action.name());
-                let boost = recent.map_or(0, |r| 12 - r.min(12) as i32);
-                if let Some((score, highlights)) = fuzzy::score(&c.label, query) {
-                    return Some((score + boost + 5, i, highlights));
-                }
-                let prefix = format!("{} ", c.category.label());
-                let (score, highlights) = fuzzy::score(&format!("{prefix}{}", c.label), query)?;
-                let highlights = highlights.into_iter().filter_map(|b| b.checked_sub(prefix.len())).collect();
-                Some((score + boost, i, highlights))
-            })
-            .collect();
-        found.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
-        found.into_iter().map(|(_, i, h)| (i, h)).collect()
-    }
-
-    fn match_commands(&mut self, query: &str) {
-        if !query.is_empty() {
-            for (i, highlights) in self.command_matches(query) {
-                self.item(Item::Command(i), highlights, true);
+    fn quick_rows(&mut self, query: &str) {
+        if query.is_empty() {
+            for quick in Quick::ALL {
+                self.push(Item::Quick(quick), Vec::new(), false);
             }
             return;
         }
-        let recent: Vec<usize> = self
-            .recent_commands
-            .iter()
-            .filter_map(|name| self.commands.iter().position(|c| c.action.name() == *name))
-            .take(MAX_RECENT)
+        // Quick settings and commands in one list, best match first.
+        let mut found: Vec<(i32, Item, Vec<usize>)> = Quick::ALL
+            .into_iter()
+            .filter_map(|q| fuzzy::score(q.label(), query).map(|(s, h)| (s + 8, Item::Quick(q), h)))
             .collect();
-        if !recent.is_empty() {
-            self.rows.push(Row::Header("Recently used"));
-            for i in recent {
-                self.item(Item::Command(i), Vec::new(), true);
-            }
-        }
-        for category in Category::ALL {
-            let members: Vec<usize> =
-                (0..self.commands.len()).filter(|&i| self.commands[i].category == category).collect();
-            if members.is_empty() {
+        for (i, c) in self.commands.iter().enumerate() {
+            if covered_by_quick(c.action.name()) {
                 continue;
             }
-            self.rows.push(Row::Header(category.label()));
-            for i in members {
-                self.item(Item::Command(i), Vec::new(), false);
+            let recent = self.recent_commands.iter().position(|&n| n == c.action.name());
+            let boost = recent.map_or(0, |r| 12 - r.min(12) as i32);
+            if let Some((score, highlights)) = fuzzy::score(&c.label, query) {
+                found.push((score + boost + 5, Item::Command(i), highlights));
+                continue;
             }
+            // The category counts too, so "lines dup" finds "Duplicate Line".
+            let prefix = format!("{} ", c.category.label());
+            if let Some((score, highlights)) = fuzzy::score(&format!("{prefix}{}", c.label), query) {
+                let highlights = highlights.into_iter().filter_map(|b| b.checked_sub(prefix.len())).collect();
+                found.push((score + boost, Item::Command(i), highlights));
+            }
+        }
+        found.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+        for (_, item, highlights) in found.into_iter().take(MAX_RESULTS) {
+            self.push(item, highlights, true);
         }
     }
 
-    fn select(&mut self, choice: usize, cx: &mut Context<Self>) {
-        if choice < self.choices.len() && choice != self.selected {
-            self.selected = choice;
-            // Bring the group's header into view along with its first item.
-            let row = self.choices[choice];
-            let header_above = row > 0 && matches!(self.rows[row - 1], Row::Header(_));
-            self.scroll.scroll_to_item(if header_above && choice != 0 { row - 1 } else { row });
-            if choice == 0 {
-                self.scroll.set_offset(gpui::point(px(0.), px(0.)));
-            }
+    fn selected_item(&self) -> Option<Item> {
+        self.rows.get(self.selected).map(|r| r.item)
+    }
+
+    fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix < self.rows.len() && ix != self.selected {
+            self.selected = ix;
+            self.scroll.scroll_to_item(ix);
             cx.notify();
         }
     }
 
     fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.choices.is_empty() {
-            self.select((self.selected + 1) % self.choices.len(), cx);
+        if !self.rows.is_empty() {
+            self.select((self.selected + 1) % self.rows.len(), cx);
         }
     }
 
     fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.choices.is_empty() {
-            self.select((self.selected + self.choices.len() - 1) % self.choices.len(), cx);
+        if !self.rows.is_empty() {
+            self.select((self.selected + self.rows.len() - 1) % self.rows.len(), cx);
         }
+    }
+
+    fn adjust(&mut self, step: isize, cx: &mut Context<Self>) {
+        let settings = cx.global::<Settings>();
+        let action: Box<dyn Action> = match self.selected_item() {
+            Some(Item::Quick(Quick::Theme)) => theme_action(next_theme(settings.theme, step)),
+            Some(Item::Quick(Quick::TextSize)) if step > 0 => Box::new(crate::workspace::IncreaseFontSize),
+            Some(Item::Quick(Quick::TextSize)) => Box::new(crate::workspace::DecreaseFontSize),
+            _ => return,
+        };
+        cx.emit(PaletteEvent::Apply(action));
+    }
+
+    fn adjust_left(&mut self, _: &AdjustLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.adjust(-1, cx);
+    }
+
+    fn adjust_right(&mut self, _: &AdjustRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.adjust(1, cx);
     }
 
     fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
@@ -434,36 +497,35 @@ impl Palette {
     }
 
     fn line_target(&self) -> Option<usize> {
-        self.rest.parse().ok().filter(|&n| n > 0)
+        self.query.parse().ok().filter(|&n| n > 0)
     }
 
-    fn confirm_at(&mut self, choice: usize, cx: &mut Context<Self>) {
-        match self.mode {
-            Mode::Line => {
+    fn confirm_at(&mut self, ix: usize, cx: &mut Context<Self>) {
+        match self.kind {
+            PaletteKind::Line => {
                 if let Some(line) = self.line_target() {
                     cx.emit(PaletteEvent::GoToLine(line));
                 }
                 return;
             }
-            Mode::Ask => {
-                if !self.rest.is_empty()
-                    && cx.global::<crate::settings::Settings>().ai.provider != crate::ai::ProviderId::Off
-                {
-                    cx.emit(PaletteEvent::Ask(self.rest.clone()));
+            PaletteKind::Ask => {
+                if !self.query.is_empty() {
+                    cx.emit(PaletteEvent::Ask(self.query.clone()));
                 }
                 return;
             }
-            Mode::Files | Mode::Commands => {}
+            PaletteKind::Files | PaletteKind::Quick => {}
         }
-        let item = self.choices.get(choice).and_then(|&row| match &self.rows[row] {
-            Row::Item { item, .. } => Some(*item),
-            Row::Header(_) => None,
-        });
+        let Some(item) = self.rows.get(ix).map(|r| r.item) else { return };
         match item {
-            Some(Item::Command(i)) => cx.emit(PaletteEvent::Run(self.commands[i].action.boxed_clone())),
-            Some(Item::File(i)) => cx.emit(PaletteEvent::OpenFile(self.files[i].path.clone())),
-            Some(Item::RecentFile(i)) => cx.emit(PaletteEvent::OpenFile(self.recent_files[i].path.clone())),
-            None => {}
+            Item::Command(i) => cx.emit(PaletteEvent::Run(self.commands[i].action.boxed_clone())),
+            Item::File(i) => cx.emit(PaletteEvent::OpenFile(self.files[i].path.clone())),
+            Item::RecentFile(i) => cx.emit(PaletteEvent::OpenFile(self.recent_files[i].path.clone())),
+            Item::Line(line) => cx.emit(PaletteEvent::GoToLine(line)),
+            Item::Quick(Quick::AllSettings) => {
+                cx.emit(PaletteEvent::Run(Quick::AllSettings.action(cx.global::<Settings>())))
+            }
+            Item::Quick(quick) => cx.emit(PaletteEvent::Apply(quick.action(cx.global::<Settings>()))),
         }
     }
 
@@ -471,32 +533,75 @@ impl Palette {
         cx.emit(PaletteEvent::Dismissed);
     }
 
-    fn render_header(&self, label: &'static str, first: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// The control at the right of a quick setting, showing its current value.
+    fn quick_control(&self, quick: Quick, window: &Window, cx: &App) -> AnyElement {
         let theme = cx.global::<Theme>();
-        div()
-            .h(px(HEADER_HEIGHT))
-            .flex_none()
-            .flex()
-            .items_end()
-            .px(px(14.))
-            .pb(px(6.))
-            .when(!first, |d| d.mt(px(4.)))
-            .text_size(px(11.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.faint)
-            .child(label.to_uppercase())
-            .into_any_element()
+        let settings = cx.global::<Settings>();
+        let keys = |action: &dyn Action| {
+            window.highest_precedence_binding_for_action(action).map(|b| format_keys(&b)).map(|k| key_cap(k, theme))
+        };
+        let switch = |on: bool| {
+            div()
+                .w(px(30.))
+                .h(px(17.))
+                .p(px(2.))
+                .rounded_full()
+                .flex()
+                .when(on, |d| d.justify_end().bg(theme.caret))
+                .when(!on, |d| d.bg(theme.hairline))
+                .child(div().size(px(13.)).rounded_full().bg(if on { theme.background } else { theme.muted }))
+        };
+        let row = div().flex().items_center().gap(px(8.));
+        match quick {
+            Quick::Theme => row
+                .children(THEMES.into_iter().map(|t| {
+                    let current = t == settings.theme;
+                    div()
+                        .px(px(8.))
+                        .py(px(2.))
+                        .rounded(px(6.))
+                        .text_size(px(12.))
+                        .when(current, |d| d.bg(theme.hairline).text_color(theme.foreground))
+                        .when(!current, |d| d.text_color(theme.faint))
+                        .child(t.label())
+                }))
+                .into_any_element(),
+            Quick::TextSize => row
+                .text_size(px(12.))
+                .child(key_cap("−".into(), theme))
+                .child(
+                    div()
+                        .w(px(26.))
+                        .text_center()
+                        .text_color(theme.foreground)
+                        .child(format!("{}", settings.font_size)),
+                )
+                .child(key_cap("+".into(), theme))
+                .into_any_element(),
+            Quick::AllSettings => row.children(keys(&crate::workspace::OpenSettings)).into_any_element(),
+            _ => {
+                let on = match quick {
+                    Quick::Wrap => settings.word_wrap,
+                    Quick::Sidebar => settings.sidebar_visible,
+                    Quick::Terminal => self.terminal_open,
+                    Quick::Suggestions => settings.autocomplete,
+                    Quick::Fade => settings.fade_bars_while_typing,
+                    Quick::Ai => settings.ai.enabled,
+                    _ => false,
+                };
+                row.children(keys(quick.action(settings).as_ref())).child(switch(on)).into_any_element()
+            }
+        }
     }
 
-    fn render_item(&self, row: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_row(&self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>();
-        let Row::Item { item, highlights, show_category } = &self.rows[row] else { unreachable!() };
-        let choice = self.choices.iter().position(|&r| r == row).unwrap_or(0);
-        let selected = choice == self.selected;
+        let row = &self.rows[ix];
+        let selected = ix == self.selected;
         let highlight =
             HighlightStyle { color: Some(theme.caret), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
         let highlights_in = |text: &str, offset: usize| -> Vec<(Range<usize>, HighlightStyle)> {
-            highlights
+            row.highlights
                 .iter()
                 .filter_map(|&b| {
                     let b = b.checked_sub(offset)?;
@@ -506,82 +611,60 @@ impl Palette {
                 .collect()
         };
         let dim = if selected { theme.muted } else { theme.faint };
-        let (marker, label, details): (_, StyledText, Vec<gpui::AnyElement>) = match *item {
+        let accent = if selected { theme.caret } else { theme.faint };
+        let file_marker = || div().size(px(5.)).rounded(px(2.)).bg(accent).into_any_element();
+        let (marker, label, right): (AnyElement, AnyElement, Option<AnyElement>) = match row.item {
             Item::Command(i) => {
                 let command = &self.commands[i];
                 let label = command.label.to_string();
                 let marked = highlights_in(&label, 0);
-                let mut details = Vec::new();
-                if *show_category {
-                    details.push(div().text_color(dim).child(command.category.label()).into_any_element());
-                }
-                if let Some(keys) = &command.keys {
-                    details.push(
-                        div()
-                            .px(px(6.))
-                            .py(px(1.))
-                            .rounded(px(5.))
-                            .bg(theme.hairline)
-                            .text_color(theme.muted)
-                            .child(keys.clone())
-                            .into_any_element(),
-                    );
-                }
+                let right = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .when(row.show_category, |d| d.child(div().text_color(dim).child(command.category.label())))
+                    .children(command.keys.clone().map(|k| key_cap(k, theme)));
                 (
-                    div().text_size(px(13.)).text_color(if selected { theme.caret } else { theme.faint }).child("›"),
-                    StyledText::new(label).with_highlights(marked),
-                    details,
+                    div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
+                    StyledText::new(label).with_highlights(marked).into_any_element(),
+                    Some(right.into_any_element()),
+                )
+            }
+            Item::Quick(quick) => {
+                let label = quick.label().to_string();
+                let marked = highlights_in(&label, 0);
+                (
+                    div().size(px(5.)).rounded_full().border_1().border_color(accent).into_any_element(),
+                    StyledText::new(label).with_highlights(marked).into_any_element(),
+                    Some(self.quick_control(quick, window, cx)),
                 )
             }
             Item::File(_) | Item::RecentFile(_) => {
-                let file = match *item {
+                let file = match row.item {
                     Item::File(i) => &self.files[i],
                     Item::RecentFile(i) => &self.recent_files[i],
-                    Item::Command(_) => unreachable!(),
+                    _ => unreachable!(),
                 };
                 let name = file.relative[file.name_start..].to_string();
                 let marked = highlights_in(&name, file.name_start);
                 let folder = file.relative[..file.name_start].trim_end_matches(['/', '\\']).to_string();
                 (
-                    div().size(px(5.)).rounded(px(2.)).bg(if selected { theme.caret } else { theme.faint }),
-                    StyledText::new(name).with_highlights(marked),
-                    (!folder.is_empty())
-                        .then(|| div().text_color(dim).child(folder).into_any_element())
-                        .into_iter()
-                        .collect(),
+                    file_marker(),
+                    StyledText::new(name).with_highlights(marked).into_any_element(),
+                    (!folder.is_empty()).then(|| div().text_color(dim).child(folder).into_any_element()),
                 )
             }
+            Item::Line(line) => (
+                div().text_size(px(13.)).text_color(accent).child(":").into_any_element(),
+                div().child(format!("Go to line {line}")).into_any_element(),
+                None,
+            ),
         };
+        let separated = row.item == Item::Quick(Quick::AllSettings);
         div()
-            .id(row)
-            .h(px(ROW_HEIGHT))
+            .id(ix)
             .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .px(px(14.))
-            .rounded(px(9.))
-            .text_size(px(14.))
-            .text_color(theme.foreground)
-            .when(selected, |r| r.bg(theme.accent_soft))
-            .child(div().w(px(12.)).flex().justify_center().child(marker))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(label))
-            .child(div().flex_none().flex().items_center().gap(px(10.)).text_size(px(12.)).children(details))
-            .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
-                if this.selected != choice {
-                    this.selected = choice;
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.confirm_at(choice, cx)))
-            .into_any_element()
-    }
-
-    /// The single row shown in `:` and `?` modes.
-    fn render_prompt_row(&self, marker: &'static str, text: String, active: bool, cx: &App) -> gpui::AnyElement {
-        let theme = cx.global::<Theme>();
-        div()
-            .p(px(6.))
+            .when(separated, |d| d.mt(px(5.)).pt(px(5.)).border_t_1().border_color(theme.hairline))
             .child(
                 div()
                     .h(px(ROW_HEIGHT))
@@ -590,41 +673,69 @@ impl Palette {
                     .gap(px(12.))
                     .px(px(14.))
                     .rounded(px(9.))
-                    .bg(theme.accent_soft)
+                    .text_size(px(14.))
+                    .text_color(if separated { theme.muted } else { theme.foreground })
+                    .when(selected, |r| r.bg(theme.accent_soft))
+                    .child(div().w(px(12.)).flex().justify_center().child(marker))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(label))
+                    .children(right.map(|r| div().flex_none().text_size(px(12.)).child(r))),
+            )
+            .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                if this.selected != ix {
+                    this.selected = ix;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.confirm_at(ix, cx)))
+            .into_any_element()
+    }
+
+    /// The one line shown when there's no list: going to a line, asking, or nothing found.
+    fn render_message(&self, text: String, active: bool, cx: &App) -> AnyElement {
+        let theme = cx.global::<Theme>();
+        div()
+            .p(px(6.))
+            .child(
+                div()
+                    .h(px(ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .px(px(14.))
+                    .rounded(px(9.))
+                    .when(active, |d| d.bg(theme.accent_soft))
                     .text_size(px(14.))
                     .text_color(if active { theme.foreground } else { theme.faint })
-                    .child(div().w(px(12.)).text_color(theme.caret).child(marker))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(text)),
             )
             .into_any_element()
     }
 
-    /// The modes along the bottom: the current one lit, each one a click away.
-    fn render_modes(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.global::<Theme>().clone();
-        let current = self.mode;
-        div().flex().items_center().gap(px(4.)).children(Mode::ALL.into_iter().map(|mode| {
-            let active = mode == current;
-            let prefix = div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.caret.opacity(if active { 1. } else { 0.7 }))
-                .child(mode.prefix());
-            div()
-                .id(mode.label())
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .px(px(8.))
-                .py(px(3.))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .when(active, |d| d.bg(theme.accent_soft).text_color(theme.foreground))
-                .when(!active, |d| d.hover(|d| d.text_color(theme.muted)))
-                .when(!mode.prefix().is_empty(), |d| d.child(prefix))
-                .child(mode.label())
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.switch_to(mode, window, cx)))
-        }))
+    /// What Enter does right now, shown at the end of the field.
+    fn hint(&self) -> &'static str {
+        match self.kind {
+            PaletteKind::Files => "↵ open",
+            PaletteKind::Line => "↵ go",
+            PaletteKind::Ask => "↵ ask",
+            PaletteKind::Quick => match self.selected_item() {
+                Some(Item::Quick(q)) if q.is_choice() => "←→ change",
+                Some(Item::Quick(Quick::AllSettings)) | Some(Item::Command(_)) => "↵ run",
+                Some(Item::Quick(_)) => "↵ switch",
+                _ => "",
+            },
+        }
     }
+}
+
+fn key_cap(keys: String, theme: &Theme) -> AnyElement {
+    div()
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(px(5.))
+        .bg(theme.hairline)
+        .text_size(px(11.))
+        .text_color(theme.muted)
+        .child(keys)
+        .into_any_element()
 }
 
 /// Every file in the project, respecting `.gitignore`, sorted by path.
@@ -697,92 +808,68 @@ impl Render for Palette {
             window.request_animation_frame();
         }
         let eased = 1. - (1. - t).powi(3);
-        let ai = cx.global::<crate::settings::Settings>().ai.provider;
-        let list = match self.mode {
-            Mode::Line => {
+        let list = match self.kind {
+            PaletteKind::Line => {
                 let text = match (self.line_target(), self.line_count) {
-                    (Some(n), Some(total)) if n > total => format!("Go to line {n} (the file has {total})"),
-                    (Some(n), _) => format!("Go to line {n}"),
-                    (None, Some(total)) => format!("Type a line number, 1 to {total}"),
-                    (None, None) => "Type a line number".to_string(),
+                    (Some(n), Some(total)) if n > total => format!("Line {n} (the file has {total})"),
+                    (Some(n), _) => format!("Line {n}"),
+                    (None, Some(total)) => format!("A line number, 1 to {total}"),
+                    (None, None) => "A line number".to_string(),
                 };
-                self.render_prompt_row(":", text, self.line_target().is_some(), cx)
+                Some(self.render_message(text, self.line_target().is_some(), cx))
             }
-            Mode::Ask => {
-                let (marker, text, active) = if ai == crate::ai::ProviderId::Off {
-                    ("!", "AI is off. Choose a provider first: type “>use”.".to_string(), false)
-                } else if self.rest.is_empty() {
-                    ("?", format!("Ask {} about this file…", ai.label()), false)
+            PaletteKind::Ask => {
+                let provider = cx.global::<Settings>().ai.active();
+                let text = if self.query.is_empty() {
+                    format!("{} answers questions about the open file", provider.label())
                 } else {
-                    ("?", format!("Ask {}: {}", ai.label(), self.rest), true)
+                    format!("Ask {}: {}", provider.label(), self.query)
                 };
-                self.render_prompt_row(marker, text, active, cx)
+                Some(self.render_message(text, !self.query.is_empty(), cx))
             }
-            Mode::Files | Mode::Commands if self.choices.is_empty() => {
-                let theme = cx.global::<Theme>();
-                let message = match self.mode {
-                    Mode::Files if self.files.is_empty() && self.rest.is_empty() => "Looking for files…",
-                    Mode::Files => "No matching files or commands",
-                    _ => "No matching commands",
+            _ if self.rows.is_empty() => {
+                let text = match self.kind {
+                    PaletteKind::Files if !self.files_loaded => "Looking for files…".to_string(),
+                    PaletteKind::Files if self.query.is_empty() => "No files in this folder".to_string(),
+                    PaletteKind::Files => format!("No file named “{}”", self.query),
+                    _ => format!("Nothing called “{}”", self.query),
                 };
-                div()
-                    .h(px(ROW_HEIGHT * 2.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(13.))
-                    .text_color(theme.faint)
-                    .child(message)
-                    .into_any_element()
+                Some(self.render_message(text, false, cx))
             }
-            Mode::Files | Mode::Commands => {
-                let rows: Vec<gpui::AnyElement> = (0..self.rows.len())
-                    .map(|i| match &self.rows[i] {
-                        Row::Header(label) => self.render_header(label, i == 0, cx),
-                        Row::Item { .. } => self.render_item(i, cx),
-                    })
-                    .collect();
-                div()
-                    .id("palette-results")
-                    .max_h(px(LIST_HEIGHT))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .p(px(6.))
-                    .flex()
-                    .flex_col()
-                    .children(rows)
-                    .into_any_element()
+            _ => {
+                let rows: Vec<AnyElement> = (0..self.rows.len()).map(|i| self.render_row(i, window, cx)).collect();
+                Some(
+                    div()
+                        .id("palette-results")
+                        .max_h(px(LIST_HEIGHT))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .p(px(6.))
+                        .flex()
+                        .flex_col()
+                        .children(rows)
+                        .into_any_element(),
+                )
             }
         };
-        let enter_hint = match self.mode {
-            Mode::Files => "↵ open",
-            Mode::Commands => "↵ run",
-            Mode::Line => "↵ go",
-            Mode::Ask => "↵ ask",
-        };
-        let modes = self.render_modes(cx);
+        let hint = self.hint();
+        let mut context = KeyContext::new_with_defaults();
+        context.add("Palette");
+        if matches!(self.selected_item(), Some(Item::Quick(q)) if q.is_choice()) {
+            context.add("adjusting");
+        }
         let theme = cx.global::<Theme>();
-        let footer = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px(px(12.))
-            .py(px(8.))
-            .border_t_1()
-            .border_color(theme.hairline)
-            .text_size(px(12.))
-            .text_color(theme.faint)
-            .child(modes)
-            .child(div().flex().gap(px(14.)).pr(px(8.)).child(enter_hint).child("esc close"));
         div()
-            .key_context("Palette")
+            .key_context(context)
             // Clicks inside the palette shouldn't reach the backdrop, which closes it.
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::dismiss))
-            .w(px(640.))
+            .on_action(cx.listener(Self::adjust_left))
+            .on_action(cx.listener(Self::adjust_right))
+            .w(px(600.))
             .max_w_full()
             .mt(px(-8. * (1. - eased)))
             .opacity(eased)
@@ -796,16 +883,17 @@ impl Render for Palette {
             .shadow_lg()
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
                     .px(px(20.))
                     .py(px(14.))
-                    .border_b_1()
-                    .border_color(theme.hairline)
-                    .text_size(px(17.))
-                    .line_height(px(26.))
-                    .child(self.input.clone()),
+                    .text_size(px(16.))
+                    .line_height(px(24.))
+                    .child(div().flex_1().min_w_0().child(self.input.clone()))
+                    .child(div().flex_none().text_size(px(12.)).text_color(theme.faint).child(hint)),
             )
-            .child(list)
-            .child(footer)
+            .children(list.map(|l| div().border_t_1().border_color(theme.hairline).child(l)))
     }
 }
 
@@ -814,59 +902,72 @@ mod tests {
     use super::*;
     use gpui::{AppContext as _, TestAppContext};
 
-    actions!(test, [One, Two, Three]);
+    actions!(test, [One, Two]);
 
-    fn palette(cx: &mut TestAppContext, query: &str) -> Entity<Palette> {
+    fn palette(cx: &mut TestAppContext, kind: PaletteKind) -> Entity<Palette> {
+        cx.update(|cx| cx.set_global(Settings::default()));
         let commands = vec![
-            Command { category: Category::Edit, label: "Undo".into(), action: Box::new(One), keys: None },
+            Command { category: Category::Lines, label: "Duplicate Line".into(), action: Box::new(One), keys: None },
             Command { category: Category::File, label: "Save".into(), action: Box::new(Two), keys: None },
-            Command { category: Category::Ai, label: "Use NVIDIA".into(), action: Box::new(Three), keys: None },
+            Command {
+                category: Category::View,
+                label: "Wrap Lines".into(),
+                action: Box::new(crate::menus::ToggleWordWrap),
+                keys: None,
+            },
         ];
         let options = PaletteOptions {
+            kind,
             commands,
             root: PathBuf::from("/nonexistent"),
             recent_files: Vec::new(),
-            recent_commands: vec![One.name()],
+            recent_commands: Vec::new(),
             line_count: Some(10),
-            query: query.into(),
+            terminal_open: false,
         };
         cx.new(|cx| Palette::new(options, cx))
     }
 
-    fn rows(cx: &mut TestAppContext, palette: &Entity<Palette>) -> Vec<String> {
-        palette.read_with(cx, |p, _| {
+    fn type_query(cx: &mut TestAppContext, p: &Entity<Palette>, text: &str) {
+        let input = p.read_with(cx, |p, _| p.input.clone());
+        input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    fn items(cx: &mut TestAppContext, p: &Entity<Palette>) -> Vec<String> {
+        p.read_with(cx, |p, _| {
             p.rows
                 .iter()
-                .map(|r| match r {
-                    Row::Header(h) => format!("# {h}"),
-                    Row::Item { item: Item::Command(i), .. } => p.commands[*i].label.to_string(),
-                    Row::Item { .. } => "file".into(),
+                .map(|r| match r.item {
+                    Item::Command(i) => p.commands[i].label.to_string(),
+                    Item::Quick(q) => format!("quick: {}", q.label()),
+                    Item::Line(n) => format!("line {n}"),
+                    _ => "file".into(),
                 })
                 .collect()
         })
     }
 
     #[gpui::test]
-    fn commands_are_grouped_with_recent_ones_first(cx: &mut TestAppContext) {
-        let p = palette(cx, ">");
-        assert_eq!(rows(cx, &p), ["# Recently used", "Undo", "# File", "Save", "# Edit", "Undo", "# AI", "Use NVIDIA"]);
-        // The category counts when searching: "ai use" finds the AI command.
-        p.update(cx, |p, cx| p.set_query(">ai use", cx));
-        assert_eq!(rows(cx, &p), ["Use NVIDIA"]);
+    fn quick_settings_first_then_commands_when_typing(cx: &mut TestAppContext) {
+        let p = palette(cx, PaletteKind::Quick);
+        assert_eq!(items(cx, &p).len(), Quick::ALL.len());
+        type_query(cx, &p, "dup");
+        assert_eq!(items(cx, &p), ["Duplicate Line"]);
+        // A command a quick setting covers isn't listed twice.
+        type_query(cx, &p, "wrap");
+        assert_eq!(items(cx, &p), ["quick: Wrap lines"]);
     }
 
     #[gpui::test]
-    fn a_file_search_with_no_files_falls_back_to_commands(cx: &mut TestAppContext) {
-        let p = palette(cx, "save");
-        assert_eq!(rows(cx, &p), ["# No files match · commands", "Save"]);
+    fn colon_and_a_number_in_files_goes_to_a_line(cx: &mut TestAppContext) {
+        let p = palette(cx, PaletteKind::Files);
+        type_query(cx, &p, ":42");
+        assert_eq!(items(cx, &p), ["line 42"]);
     }
 
     #[test]
-    fn the_first_character_picks_the_mode() {
-        assert_eq!(Mode::of("main.rs"), (Mode::Files, "main.rs"));
-        assert_eq!(Mode::of(">save"), (Mode::Commands, "save"));
-        assert_eq!(Mode::of(":42"), (Mode::Line, "42"));
-        assert_eq!(Mode::of("?why"), (Mode::Ask, "why"));
-        assert_eq!(Mode::of(""), (Mode::Files, ""));
+    fn themes_cycle_both_ways() {
+        assert_eq!(next_theme(ThemeName::Oled, 1), ThemeName::Graphite);
+        assert_eq!(next_theme(ThemeName::Oled, -1), ThemeName::Paper);
     }
 }

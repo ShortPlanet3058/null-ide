@@ -78,6 +78,10 @@ impl Editor {
     }
 
     pub(super) fn open_inline_assist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // AI switched off: no AI anywhere, not even a card saying so.
+        if !cx.global::<crate::settings::Settings>().ai.enabled {
+            return;
+        }
         self.close_completion(cx);
         self.close_hover(cx);
         let lines = self.assist_lines();

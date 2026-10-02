@@ -96,7 +96,7 @@ pub fn set(cx: &mut App) {
         Menu {
             name: "View".into(),
             items: vec![
-                MenuItem::action("Commands…", ShowCommands),
+                MenuItem::action("Quick Settings and Commands…", ShowCommands),
                 MenuItem::action("Go to File…", TogglePalette),
                 MenuItem::action("Go to Line…", GoToLine),
                 MenuItem::separator(),
