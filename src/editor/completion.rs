@@ -78,7 +78,7 @@ fn is_word_char(c: char) -> bool {
 impl Editor {
     /// After typing `text`: open, refresh or close the list.
     pub(super) fn completion_after_typing(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.lsp.is_none() || !self.selection.is_empty() {
+        if self.lsp.is_none() || !self.selection.is_empty() || self.multi_cursor() {
             return self.close_completion(cx);
         }
         let Some(last) = text.chars().last() else { return };
@@ -244,6 +244,7 @@ impl Editor {
         for (range, text) in edits {
             self.buffer.replace(range, &text);
         }
+        self.single_cursor();
         self.selection = Selection::caret(landing);
         self.marked = None;
         self.goal_column = None;

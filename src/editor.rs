@@ -2,9 +2,11 @@ mod assist;
 mod changes;
 mod commands;
 mod completion;
+mod cursors;
 mod intel;
 
 pub use completion::CompletionMenu;
+pub use cursors::Cursor;
 pub use intel::HoverCard;
 
 use crate::buffer::Buffer;
@@ -18,8 +20,8 @@ use crate::search::SearchQuery;
 use crate::settings::Settings;
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, HighlightStyle, KeyBinding, KeyContext, KeyDownEvent, ModifiersChangedEvent, MouseButton,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, HighlightStyle, KeyBinding, KeyContext, KeyDownEvent, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, ShapedLine, StyledText,
     Subscription, Task, UTF16Selection, Window, actions, anchored, deferred, div, point, prelude::*, px, size,
 };
@@ -85,6 +87,10 @@ actions!(
         DuplicateLineDown,
         DeleteLine,
         SelectLine,
+        AddNextOccurrence,
+        SelectAllOccurrences,
+        AddCursorAbove,
+        AddCursorBelow,
     ]
 );
 
@@ -136,6 +142,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-shift-down", DuplicateLineDown, ctx),
         KeyBinding::new("secondary-shift-k", DeleteLine, ctx),
         KeyBinding::new("secondary-l", SelectLine, ctx),
+        KeyBinding::new("secondary-d", AddNextOccurrence, ctx),
+        KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
+        KeyBinding::new("secondary-alt-up", AddCursorAbove, ctx),
+        KeyBinding::new("secondary-alt-down", AddCursorBelow, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -214,6 +224,7 @@ enum EditKind {
 struct Snapshot {
     text: Rope,
     selection: Selection,
+    extra: Vec<Selection>,
 }
 
 pub enum EditorEvent {
@@ -289,8 +300,14 @@ pub struct Editor {
     path: Option<PathBuf>,
     highlighter: Option<Highlighter>,
     pub spans: Vec<Span>,
+    /// The main cursor: the one the view follows. Any others are in `extra`.
     pub selection: Selection,
     goal_column: Option<usize>,
+    pub extra: Vec<Cursor>,
+    batch: Option<cursors::Batch>,
+    /// The word ⌘D picked from a bare caret: its occurrences must be whole words too.
+    word_pick: Option<Range<usize>>,
+    occurrence_whole_word: bool,
     pub marked: Option<Range<usize>>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
@@ -351,6 +368,10 @@ impl Editor {
             spans: Vec::new(),
             selection: Selection::caret(0),
             goal_column: None,
+            extra: Vec::new(),
+            batch: None,
+            word_pick: None,
+            occurrence_whole_word: false,
             marked: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -427,6 +448,7 @@ impl Editor {
         self.record_undo(EditKind::Other);
         self.buffer.replace(0..self.buffer.len_chars(), &text);
         self.buffer.mark_saved();
+        self.single_cursor();
         self.selection = Selection::caret(self.buffer.offset(line, column));
         self.text_changed(cx);
         cx.notify();
@@ -481,6 +503,11 @@ impl Editor {
 
     /// Call after every change to the text.
     fn text_changed(&mut self, cx: &mut Context<Self>) {
+        // Running once per cursor: catch up once at the end.
+        if let Some(batch) = &mut self.batch {
+            batch.changed = true;
+            return;
+        }
         self.rehighlight();
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
@@ -530,6 +557,7 @@ impl Editor {
 
     fn select_current_match(&mut self, cx: &mut Context<Self>) {
         let Some(range) = self.search.as_ref().and_then(|s| s.matches.get(s.current?)).cloned() else { return };
+        self.single_cursor();
         self.selection = Selection { anchor: range.start, head: range.end };
         self.goal_column = None;
         self.touch(cx);
@@ -597,6 +625,7 @@ impl Editor {
         for (range, new_text) in edits.iter().rev() {
             self.buffer.replace(range.clone(), new_text);
         }
+        self.single_cursor();
         self.selection = Selection::caret(edits[0].0.start);
         self.marked = None;
         self.text_changed(cx);
@@ -624,6 +653,7 @@ impl Editor {
     pub fn reveal_match(&mut self, line: usize, columns: Range<usize>, query: SearchQuery, cx: &mut Context<Self>) {
         let start = self.buffer.offset(line, columns.start);
         let end = self.buffer.offset(line, columns.end);
+        self.single_cursor();
         self.selection = Selection { anchor: start, head: end };
         self.set_search(query, cx);
     }
@@ -660,6 +690,9 @@ impl Editor {
     fn escape(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
         if self.hover.is_some() {
             self.close_hover(cx);
+        } else if !self.extra.is_empty() {
+            self.single_cursor();
+            cx.notify();
         } else if self.find_bar.is_some() || self.search.is_some() {
             self.close_find(window, cx);
         } else if !self.selection.is_empty() {
@@ -812,100 +845,148 @@ impl Editor {
     }
 
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
-        let target =
-            if self.selection.is_empty() { self.left_of(self.selection.head) } else { self.selection.range().start };
-        self.move_head(target, false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            let target = if this.selection.is_empty() {
+                this.left_of(this.selection.head)
+            } else {
+                this.selection.range().start
+            };
+            this.move_head(target, false, cx);
+        });
     }
 
     fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
-        let target =
-            if self.selection.is_empty() { self.right_of(self.selection.head) } else { self.selection.range().end };
-        self.move_head(target, false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            let target =
+                if this.selection.is_empty() { this.right_of(this.selection.head) } else { this.selection.range().end };
+            this.move_head(target, false, cx);
+        });
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(-1, false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_vertically(-1, false, cx);
+        });
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(1, false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_vertically(1, false, cx);
+        });
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.left_of(self.selection.head), true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.left_of(this.selection.head), true, cx);
+        });
     }
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.right_of(self.selection.head), true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.right_of(this.selection.head), true, cx);
+        });
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(-1, true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_vertically(-1, true, cx);
+        });
     }
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(1, true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_vertically(1, true, cx);
+        });
     }
 
     fn move_word_left(&mut self, _: &MoveWordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.word_left_of(self.selection.head), false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.word_left_of(this.selection.head), false, cx);
+        });
     }
 
     fn move_word_right(&mut self, _: &MoveWordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.word_right_of(self.selection.head), false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.word_right_of(this.selection.head), false, cx);
+        });
     }
 
     fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.word_left_of(self.selection.head), true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.word_left_of(this.selection.head), true, cx);
+        });
     }
 
     fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.word_right_of(self.selection.head), true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.word_right_of(this.selection.head), true, cx);
+        });
     }
 
     fn move_line_start(&mut self, _: &MoveLineStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.line_start_smart(self.selection.head), false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.line_start_smart(this.selection.head), false, cx);
+        });
     }
 
     fn move_line_end(&mut self, _: &MoveLineEnd, _: &mut Window, cx: &mut Context<Self>) {
-        let (line, _) = self.caret_point();
-        self.move_head(self.buffer.offset(line, usize::MAX), false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            let (line, _) = this.caret_point();
+            this.move_head(this.buffer.offset(line, usize::MAX), false, cx);
+        });
     }
 
     fn select_line_start(&mut self, _: &SelectLineStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.line_start_smart(self.selection.head), true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.line_start_smart(this.selection.head), true, cx);
+        });
     }
 
     fn select_line_end(&mut self, _: &SelectLineEnd, _: &mut Window, cx: &mut Context<Self>) {
-        let (line, _) = self.caret_point();
-        self.move_head(self.buffer.offset(line, usize::MAX), true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            let (line, _) = this.caret_point();
+            this.move_head(this.buffer.offset(line, usize::MAX), true, cx);
+        });
     }
 
     fn move_doc_start(&mut self, _: &MoveDocStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(0, false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(0, false, cx);
+        });
     }
 
     fn move_doc_end(&mut self, _: &MoveDocEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.buffer.len_chars(), false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.buffer.len_chars(), false, cx);
+        });
     }
 
     fn select_doc_start(&mut self, _: &SelectDocStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(0, true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(0, true, cx);
+        });
     }
 
     fn select_doc_end(&mut self, _: &SelectDocEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_head(self.buffer.len_chars(), true, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_head(this.buffer.len_chars(), true, cx);
+        });
     }
 
     fn page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(-self.page_lines(), false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_vertically(-this.page_lines(), false, cx);
+        });
     }
 
     fn page_down(&mut self, _: &PageDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(self.page_lines(), false, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.move_vertically(this.page_lines(), false, cx);
+        });
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.single_cursor();
         self.selection = Selection { anchor: 0, head: self.buffer.len_chars() };
         self.last_activity = Instant::now();
         cx.notify();
@@ -914,16 +995,27 @@ impl Editor {
     // ---------- editing ----------
 
     fn record_undo(&mut self, kind: EditKind) {
+        // A command run on every cursor is a single undo step.
+        if self.batch.as_ref().is_some_and(|b| b.recorded) {
+            return;
+        }
         let now = Instant::now();
         let grouped = matches!(self.last_edit, Some((last, at)) if last == kind && kind != EditKind::Other && now - at < UNDO_GROUP);
         if !grouped {
-            self.undo_stack.push(Snapshot { text: self.buffer.rope().clone(), selection: self.selection });
+            let (selection, extra) = match &mut self.batch {
+                Some(batch) => (batch.before[0], batch.before[1..].to_vec()),
+                None => (self.selection, self.extra.iter().map(|c| c.selection).collect()),
+            };
+            self.undo_stack.push(Snapshot { text: self.buffer.rope().clone(), selection, extra });
             if self.undo_stack.len() > 1000 {
                 self.undo_stack.remove(0);
             }
         }
         self.redo_stack.clear();
         self.last_edit = Some((kind, now));
+        if let Some(batch) = &mut self.batch {
+            batch.recorded = true;
+        }
     }
 
     fn edit(&mut self, range: Range<usize>, text: &str, kind: EditKind, cx: &mut Context<Self>) {
@@ -949,64 +1041,77 @@ impl Editor {
     }
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        if self.empty_pair_around_caret() {
-            let head = self.selection.head;
-            return self.edit(head - 1..head + 1, "", EditKind::Deleting, cx);
-        }
-        self.delete_or(
-            |this| {
+        self.for_each_cursor(cx, |this, cx| {
+            if this.empty_pair_around_caret() {
                 let head = this.selection.head;
-                let (line, col) = this.buffer.point(head);
-                let before = this.buffer.line_text(line).chars().take(col).collect::<String>();
-                if col > 0 && before.chars().all(|c| c == ' ') {
-                    let stop = (col - 1) / TAB_SIZE * TAB_SIZE;
-                    return head - (col - stop)..head;
-                }
-                this.left_of(head)..head
-            },
-            cx,
-        );
+                return this.edit(head - 1..head + 1, "", EditKind::Deleting, cx);
+            }
+            this.delete_or(
+                |this| {
+                    let head = this.selection.head;
+                    let (line, col) = this.buffer.point(head);
+                    let before = this.buffer.line_text(line).chars().take(col).collect::<String>();
+                    if col > 0 && before.chars().all(|c| c == ' ') {
+                        let stop = (col - 1) / TAB_SIZE * TAB_SIZE;
+                        return head - (col - stop)..head;
+                    }
+                    this.left_of(head)..head
+                },
+                cx,
+            );
+        });
     }
 
     fn backspace_word(&mut self, _: &BackspaceWord, _: &mut Window, cx: &mut Context<Self>) {
-        self.delete_or(|this| this.word_left_of(this.selection.head)..this.selection.head, cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.delete_or(|this| this.word_left_of(this.selection.head)..this.selection.head, cx);
+        });
     }
 
     fn backspace_line(&mut self, _: &BackspaceLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.delete_or(
-            |this| {
-                let (line, _) = this.caret_point();
-                this.buffer.line_to_char(line)..this.selection.head
-            },
-            cx,
-        );
+        self.for_each_cursor(cx, |this, cx| {
+            this.delete_or(
+                |this| {
+                    let (line, _) = this.caret_point();
+                    this.buffer.line_to_char(line)..this.selection.head
+                },
+                cx,
+            );
+        });
     }
 
     fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        self.delete_or(|this| this.selection.head..this.right_of(this.selection.head), cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.delete_or(|this| this.selection.head..this.right_of(this.selection.head), cx);
+        });
     }
 
     fn delete_word(&mut self, _: &DeleteWord, _: &mut Window, cx: &mut Context<Self>) {
-        self.delete_or(|this| this.selection.head..this.word_right_of(this.selection.head), cx);
+        self.for_each_cursor(cx, |this, cx| {
+            this.delete_or(|this| this.selection.head..this.word_right_of(this.selection.head), cx);
+        });
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
-        let range = self.selection.range();
-        let (line, _) = self.buffer.point(range.start);
-        let indent: String = self.buffer.line_text(line).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-        let before = range.start.checked_sub(1).and_then(|i| self.buffer.char_at(i));
-        let after = self.buffer.char_at(range.end);
-        let opens = matches!(before, Some('{' | '(' | '['));
-        let inner = format!("{indent}{}", if opens { " ".repeat(TAB_SIZE) } else { String::new() });
-        if opens && matches!((before, after), (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']')))
-        {
-            let text = format!("\n{inner}\n{indent}");
-            let caret = range.start + 1 + inner.chars().count();
-            self.edit(range, &text, EditKind::Other, cx);
-            self.selection = Selection::caret(caret);
-        } else {
-            self.edit(range, &format!("\n{inner}"), EditKind::Other, cx);
-        }
+        self.for_each_cursor(cx, |this, cx| {
+            let range = this.selection.range();
+            let (line, _) = this.buffer.point(range.start);
+            let indent: String = this.buffer.line_text(line).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            let before = range.start.checked_sub(1).and_then(|i| this.buffer.char_at(i));
+            let after = this.buffer.char_at(range.end);
+            let opens = matches!(before, Some('{' | '(' | '['));
+            let inner = format!("{indent}{}", if opens { " ".repeat(TAB_SIZE) } else { String::new() });
+            if opens
+                && matches!((before, after), (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']')))
+            {
+                let text = format!("\n{inner}\n{indent}");
+                let caret = range.start + 1 + inner.chars().count();
+                this.edit(range, &text, EditKind::Other, cx);
+                this.selection = Selection::caret(caret);
+            } else {
+                this.edit(range, &format!("\n{inner}"), EditKind::Other, cx);
+            }
+        });
     }
 
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
@@ -1014,6 +1119,12 @@ impl Editor {
     }
 
     pub(crate) fn tab_key(&mut self, cx: &mut Context<Self>) {
+        if self.multi_cursor() && self.batch.is_none() {
+            if self.all_selections().iter().any(|s| !s.is_empty()) {
+                self.merge_cursors_on_shared_lines();
+            }
+            return self.for_each_cursor(cx, |this, cx| this.tab_key(cx));
+        }
         // With anything selected, Tab indents the selected lines (Shift+Tab outdents).
         // This is the easy way on every keyboard layout; Cmd+] / Cmd+[ need [ and ],
         // which on many non-US Mac keyboards take several keys already.
@@ -1027,22 +1138,22 @@ impl Editor {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selection.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.buffer.slice(self.selection.range())));
-        }
+        self.copy_selections(cx);
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selection.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.buffer.slice(self.selection.range())));
-            self.edit(self.selection.range(), "", EditKind::Other, cx);
+        if self.copy_selections(cx) {
+            self.for_each_cursor(cx, |this, cx| {
+                if !this.selection.is_empty() {
+                    this.edit(this.selection.range(), "", EditKind::Other, cx);
+                }
+            });
         }
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let text = text.replace("\r\n", "\n");
-            self.edit(self.selection.range(), &text, EditKind::Other, cx);
+            self.paste_text(text.replace("\r\n", "\n"), cx);
         }
     }
 
@@ -1061,9 +1172,11 @@ impl Editor {
             (&mut self.redo_stack, &mut self.undo_stack)
         };
         let Some(snapshot) = from.pop() else { return };
-        to.push(Snapshot { text: self.buffer.rope().clone(), selection: self.selection });
+        let extra = self.extra.iter().map(|c| c.selection).collect();
+        to.push(Snapshot { text: self.buffer.rope().clone(), selection: self.selection, extra });
         self.buffer.restore(snapshot.text);
         self.selection = snapshot.selection;
+        self.extra = snapshot.extra.into_iter().map(|selection| Cursor { selection, goal: None }).collect();
         self.last_edit = None;
         self.marked = None;
         self.text_changed(cx);
@@ -1275,6 +1388,9 @@ impl Editor {
             return;
         }
         let offset = self.offset_at(event.position);
+        // Cmd+Shift+click (Ctrl+Shift elsewhere) adds a cursor, or removes the one clicked.
+        // Not Alt+click: holding Alt opens the info card.
+        let add_cursor = event.modifiers.secondary() && event.modifiers.shift;
         let unit = match event.click_count {
             2 => DragUnit::Word(self.word_at(offset)),
             3 => DragUnit::Line(self.line_range(offset)),
@@ -1284,13 +1400,17 @@ impl Editor {
             DragUnit::Word(range) | DragUnit::Line(range) => {
                 self.selection = Selection { anchor: range.start, head: range.end }
             }
+            DragUnit::Char if add_cursor => self.toggle_cursor_at(offset),
             DragUnit::Char if event.modifiers.shift => self.selection.head = offset,
             DragUnit::Char => self.selection = Selection::caret(offset),
+        }
+        if !(add_cursor || event.modifiers.shift) {
+            self.single_cursor();
         }
         self.goal_column = None;
         self.dragging = Some(unit);
         self.touch(cx);
-        if event.modifiers.secondary() && event.click_count == 1 {
+        if event.modifiers.secondary() && !add_cursor && event.click_count == 1 {
             self.dragging = None;
             self.go_to_definition_at(offset, cx);
         }
@@ -1370,7 +1490,8 @@ impl Editor {
 
     fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.alt_held = event.modifiers.alt;
-        self.secondary_held = event.modifiers.secondary();
+        // With Shift too it's Cmd+Shift+click (add a cursor), so no link underline.
+        self.secondary_held = event.modifiers.secondary() && !event.modifiers.shift;
         if !self.alt_held {
             self.hover_suppressed = false;
         }
@@ -1405,40 +1526,65 @@ impl Editor {
         self.accept_completion(selected, cx);
     }
 
+    /// Runs a line command on each cursor's lines, once per line.
+    fn on_each_cursors_lines(&mut self, cx: &mut Context<Self>, f: impl FnMut(&mut Self, &mut Context<Self>)) {
+        self.merge_cursors_on_shared_lines();
+        self.for_each_cursor(cx, f);
+    }
+
     fn toggle_comment_action(&mut self, _: &ToggleComment, _: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_comment(cx);
+        self.on_each_cursors_lines(cx, |this, cx| this.toggle_comment(cx));
     }
 
     fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
-        self.indent_lines(cx);
+        self.on_each_cursors_lines(cx, |this, cx| this.indent_lines(cx));
     }
 
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
-        self.outdent_lines(cx);
+        self.on_each_cursors_lines(cx, |this, cx| this.outdent_lines(cx));
     }
 
+    // Moving lines works on the main cursor only: with several, the blocks would trip over each other.
     fn move_line_up(&mut self, _: &MoveLineUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.single_cursor();
         self.move_lines(false, cx);
     }
 
     fn move_line_down(&mut self, _: &MoveLineDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.single_cursor();
         self.move_lines(true, cx);
     }
 
     fn duplicate_line_up(&mut self, _: &DuplicateLineUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.duplicate_lines(false, cx);
+        self.on_each_cursors_lines(cx, |this, cx| this.duplicate_lines(false, cx));
     }
 
     fn duplicate_line_down(&mut self, _: &DuplicateLineDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.duplicate_lines(true, cx);
+        self.on_each_cursors_lines(cx, |this, cx| this.duplicate_lines(true, cx));
     }
 
     fn delete_line(&mut self, _: &DeleteLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.delete_lines(cx);
+        self.on_each_cursors_lines(cx, |this, cx| this.delete_lines(cx));
     }
 
     fn select_line_action(&mut self, _: &SelectLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_line(cx);
+        self.for_each_cursor(cx, |this, cx| this.select_line(cx));
+    }
+
+    fn add_next_occurrence_action(&mut self, _: &AddNextOccurrence, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_next_occurrence(cx);
+    }
+
+    fn select_all_occurrences_action(&mut self, _: &SelectAllOccurrences, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_all_occurrences(cx);
+    }
+
+    fn add_cursor_above(&mut self, _: &AddCursorAbove, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_cursor_vertically(false, cx);
+    }
+
+    fn add_cursor_below(&mut self, _: &AddCursorBelow, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_cursor_vertically(true, cx);
     }
 
     fn inline_assist(&mut self, _: &InlineAssist, window: &mut Window, cx: &mut Context<Self>) {
@@ -1578,10 +1724,29 @@ impl EntityInputHandler for Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let explicit = range_utf16.is_some();
         let range = range_utf16
             .map(|r| self.buffer.utf16_to_char(r.start)..self.buffer.utf16_to_char(r.end))
             .or(self.marked.clone())
             .unwrap_or(self.selection.range());
+        // With several cursors, plain typing (and finishing an accent) goes to all of them.
+        if !self.extra.is_empty() && (!explicit || range == self.selection.range() || self.marked.is_some()) {
+            let marked = self.marked.take();
+            let text = text.to_string();
+            return self.for_each_cursor(cx, |this, cx| {
+                let range = match &marked {
+                    Some(m) if this.on_primary_cursor() => m.clone(),
+                    _ => this.selection.range(),
+                };
+                let mut chars = text.chars();
+                if let (Some(c), None, None) = (chars.next(), chars.next(), &marked)
+                    && this.type_pair_char(c, cx)
+                {
+                    return;
+                }
+                this.edit(range, &text, EditKind::Typing, cx);
+            });
+        }
         let mut chars = text.chars();
         if let (Some(c), None, None) = (chars.next(), chars.next(), &self.marked)
             && range == self.selection.range()
@@ -1720,6 +1885,10 @@ impl Render for Editor {
             .on_action(cx.listener(Self::duplicate_line_down))
             .on_action(cx.listener(Self::delete_line))
             .on_action(cx.listener(Self::select_line_action))
+            .on_action(cx.listener(Self::add_next_occurrence_action))
+            .on_action(cx.listener(Self::select_all_occurrences_action))
+            .on_action(cx.listener(Self::add_cursor_above))
+            .on_action(cx.listener(Self::add_cursor_below))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))

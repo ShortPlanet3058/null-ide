@@ -727,6 +727,10 @@ impl Workspace {
                 ("Select Line".into(), Box::new(crate::editor::SelectLine)),
                 ("Indent Selected Lines (Tab)".into(), Box::new(crate::editor::Indent)),
                 ("Outdent Selected Lines (Shift+Tab)".into(), Box::new(crate::editor::Outdent)),
+                ("Add Next Occurrence".into(), Box::new(crate::editor::AddNextOccurrence)),
+                ("Select All Occurrences".into(), Box::new(crate::editor::SelectAllOccurrences)),
+                ("Add Cursor Above".into(), Box::new(crate::editor::AddCursorAbove)),
+                ("Add Cursor Below".into(), Box::new(crate::editor::AddCursorBelow)),
                 ("AI: Edit with AI…".into(), Box::new(crate::editor::InlineAssist)),
                 ("Replace…".into(), Box::new(DeployReplace)),
             ]);
@@ -1281,7 +1285,10 @@ impl Render for Workspace {
                 (
                     vec![
                         path.unwrap_or_else(|| "untitled".into()),
-                        format!("Ln {}, Col {}", line + 1, col + 1),
+                        match editor.extra.len() {
+                            0 => format!("Ln {}, Col {}", line + 1, col + 1),
+                            n => format!("{} cursors · Esc for one", n + 1),
+                        },
                         "Spaces: 4".into(),
                         editor.language_name().into(),
                     ],

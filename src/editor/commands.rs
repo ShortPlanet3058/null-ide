@@ -169,6 +169,7 @@ impl Editor {
     }
 
     pub fn go_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.single_cursor();
         let line = line.saturating_sub(1).min(self.buffer.len_lines().saturating_sub(1));
         let text = self.buffer.line_text(line);
         let indent = text.len() - text.trim_start().len();

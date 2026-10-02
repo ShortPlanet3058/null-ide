@@ -46,6 +46,8 @@ pub struct Prepaint {
     bracket_boxes: Vec<Bounds<Pixels>>,
     marked: Vec<Bounds<Pixels>>,
     caret: Option<(Bounds<Pixels>, f32)>,
+    /// The other cursors, drawn without the glide.
+    extra_carets: Vec<Bounds<Pixels>>,
 }
 
 impl IntoElement for EditorElement {
@@ -308,7 +310,10 @@ impl Element for EditorElement {
                 }
                 rects
             };
-            let selection = range_rects(selection_range.clone());
+            let mut selection = range_rects(selection_range.clone());
+            for cursor in &editor.extra {
+                selection.extend(range_rects(cursor.selection.range()));
+            }
             // The bracket next to the caret and its partner get a thin outline.
             let bracket_boxes: Vec<Bounds<Pixels>> = editor
                 .matching_brackets()
@@ -437,6 +442,18 @@ impl Element for EditorElement {
                 }
             };
             let caret_height = line_height * 0.8;
+            let extra_carets = editor
+                .extra
+                .iter()
+                .map(|c| editor.buffer.point(c.selection.head))
+                .filter(|(line, _)| visible.contains(line))
+                .map(|(line, col)| {
+                    Bounds::new(
+                        point(origin.x + x_of(line, col) - px(1.), row_top(line) + (line_height - caret_height) / 2.),
+                        size(px(2.), caret_height),
+                    )
+                })
+                .collect();
             let caret = Some((
                 Bounds::new(
                     point(origin.x + visual.x - px(1.), origin.y + visual.y + (line_height - caret_height) / 2.),
@@ -528,6 +545,7 @@ impl Element for EditorElement {
                 bracket_boxes,
                 marked,
                 caret,
+                extra_carets,
             }
         })
     }
@@ -590,6 +608,10 @@ impl Element for EditorElement {
                 && opacity > 0.
             {
                 window.paint_quad(fill(rect, theme.caret.opacity(opacity)).corner_radii(px(1.)));
+            }
+            let opacity = prepaint.caret.map_or(1., |(_, o)| o);
+            for rect in &prepaint.extra_carets {
+                window.paint_quad(fill(*rect, theme.caret.opacity(opacity)).corner_radii(px(1.)));
             }
         });
         if let Some((thumb, emphasis)) = prepaint.scroll_thumb {
