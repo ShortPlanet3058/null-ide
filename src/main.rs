@@ -22,6 +22,7 @@ mod project_index;
 mod project_search;
 mod search;
 mod servers;
+mod session;
 mod settings;
 mod settings_panel;
 mod terminal;
@@ -36,7 +37,7 @@ use gpui::{
     App, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size,
 };
 use menus::Quit;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use workspace::Workspace;
 
 /// `null` opens the current folder, `null <folder>` opens that folder, and
@@ -44,13 +45,37 @@ use workspace::Workspace;
 /// when it lives elsewhere).
 fn resolve_args() -> (PathBuf, Option<PathBuf>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some(arg) = std::env::args().nth(1) else { return (cwd, None) };
+    let Some(arg) = std::env::args().nth(1) else {
+        // Opened from the Finder (or the Dock), there's no folder to go by: the last project.
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let from_finder = cwd == Path::new("/") || Some(&cwd) == home.as_ref();
+        if from_finder && let Some(last) = session::last_project() {
+            return (last, None);
+        }
+        return (cwd, None);
+    };
     let path = cwd.join(arg);
     if path.is_dir() {
         return (path, None);
     }
     let root = if path.starts_with(&cwd) { cwd } else { path.parent().map(PathBuf::from).unwrap_or(cwd) };
     (root, Some(path))
+}
+
+/// The window where it was last time, if that's still on a screen; centred otherwise.
+fn window_bounds(saved: Option<session::WindowState>, cx: &App) -> WindowBounds {
+    let centered = || Bounds::centered(None, size(px(1280.), px(800.)), cx);
+    let Some(saved) = saved else { return WindowBounds::Windowed(centered()) };
+    let bounds =
+        Bounds::new(point(px(saved.x), px(saved.y)), size(px(saved.width.max(480.)), px(saved.height.max(320.))));
+    // At least its title bar must be on some display, or it would open out of reach.
+    let title_bar = Bounds::new(bounds.origin, size(bounds.size.width, px(40.)));
+    let visible = cx.displays().iter().any(|d| d.bounds().intersects(&title_bar));
+    match (visible, saved.maximized) {
+        (false, _) => WindowBounds::Windowed(centered()),
+        (true, true) => WindowBounds::Maximized(bounds),
+        (true, false) => WindowBounds::Windowed(bounds),
+    }
 }
 
 fn main() {
@@ -68,9 +93,9 @@ fn main() {
         })
         .detach();
 
-        let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+        let session = session::Session::load(&root);
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(window_bounds(session.window, cx)),
             titlebar: Some(TitlebarOptions {
                 title: Some("Null".into()),
                 appears_transparent: true,
@@ -82,9 +107,10 @@ fn main() {
         cx.open_window(options, |window, cx| {
             cx.new(|cx| {
                 let mut workspace = Workspace::new(root, window, cx);
-                match file {
-                    Some(file) => workspace.open_file(file, window, cx),
-                    None => window.focus(&workspace.focus_handle(cx)),
+                window.focus(&workspace.focus_handle(cx));
+                workspace.restore_session(session, window, cx);
+                if let Some(file) = file {
+                    workspace.open_file(file, window, cx);
                 }
                 if !cx.global::<settings::Settings>().welcomed {
                     workspace.show_welcome(window, cx);

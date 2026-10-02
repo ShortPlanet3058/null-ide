@@ -70,6 +70,13 @@ doesn't need Xcode's separate Metal Toolchain download.
 - Feature branches — branch off `dev`, named `feature/<topic>`, `fix/<topic>`, etc.,
   and open a pull request back into `dev`.
 
+## Sessions
+
+Null reopens each project as you left it: the same tabs, each with its caret and scroll,
+the folders open in the tree, the terminal, and the window's place. Opened from the Finder
+or the Dock, it comes back to the last project. Sessions are small files in Null's own folder
+(`~/Library/Application Support/Null/sessions` on macOS; `NULL_DATA_DIR` overrides it).
+
 ## Code intelligence
 
 Completions, errors, info on hover and go to definition come from language servers. Null

@@ -1680,6 +1680,27 @@ impl Editor {
         self.open_inline_assist(false, window, cx);
     }
 
+    /// Where the caret is and the first line shown, for the session.
+    pub fn view_state(&self) -> (usize, usize, usize) {
+        let (line, column) = self.caret_point();
+        let top_row = (self.scroll.y / f32::from(self.line_height())).round().max(0.) as usize;
+        (line, column, self.wrap.line_of_row(top_row))
+    }
+
+    /// Puts the caret and the view back as they were, without scrolling there visibly.
+    pub fn restore_view(&mut self, line: usize, column: usize, top_line: usize, cx: &mut Context<Self>) {
+        self.single_cursor();
+        self.selection = Selection::caret(self.buffer.offset(line, column));
+        self.goal_column = None;
+        // Before its first frame, the editor's rows aren't laid out yet.
+        self.wrap.update(&self.buffer, self.wrap.width(), &self.block_specs());
+        let top = self.wrap.first_row(top_line.min(self.buffer.len_lines().saturating_sub(1))) as f32;
+        self.scroll.y = top * f32::from(self.line_height());
+        self.scroll.target_y = self.scroll.y;
+        self.caret.placed = false;
+        cx.notify();
+    }
+
     /// Opens the ⌘I field to ask about the code at the caret.
     pub fn ask_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_inline_assist(true, window, cx);
