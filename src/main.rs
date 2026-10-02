@@ -22,6 +22,7 @@ mod palette;
 mod project_search;
 mod search;
 mod settings;
+mod settings_panel;
 mod terminal;
 mod text_input;
 mod theme;
@@ -65,6 +66,7 @@ fn main() {
         ask::bind_keys(cx);
         key_prompt::bind_keys(cx);
         text_input::bind_keys(cx);
+        settings_panel::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         menus::set(cx);

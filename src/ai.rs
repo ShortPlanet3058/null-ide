@@ -63,7 +63,7 @@ impl ProviderId {
         }
     }
 
-    fn default_base_url(self) -> Option<&'static str> {
+    pub fn default_base_url(self) -> Option<&'static str> {
         match self {
             ProviderId::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
             ProviderId::Ollama => Some("http://localhost:11434/v1"),
@@ -72,7 +72,7 @@ impl ProviderId {
         }
     }
 
-    fn default_model(self) -> Option<&'static str> {
+    pub fn default_model(self) -> Option<&'static str> {
         match self {
             ProviderId::Nvidia => Some("nvidia/nemotron-3-super-120b-a12b"),
             ProviderId::Ollama => Some("qwen2.5-coder:7b"),

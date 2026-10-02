@@ -20,8 +20,18 @@ cargo run -- path/to/folder    # open another folder
 cargo run -- path/to/file.rs   # open a file
 ```
 
-Settings live in `~/.config/null/settings.json` (`%APPDATA%\Null\settings.json` on
-Windows). Open it from the command palette with “Open Settings File”, or with ⌘, / Ctrl+,.
+Settings open with ⌘, / Ctrl+,. They're saved in `~/.config/null/settings.json`
+(`%APPDATA%\Null\settings.json` on Windows), which can also be edited by hand
+(“Edit as JSON…” in Settings).
+
+One palette does everything; the first character picks what it searches:
+
+| Type | Does | Shortcut |
+|---|---|---|
+| a name | open a file (recent ones first) | ⌘P |
+| `>` | run a command, grouped by category | ⌘⇧P |
+| `:` | go to a line | ⌃G |
+| `?` | ask the AI about the open file | |
 
 Shaders are compiled when the app starts (GPUI's `runtime_shaders` feature), so the build
 doesn't need Xcode's separate Metal Toolchain download.
@@ -60,8 +70,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 ## AI (optional, off by default)
 
 AI only appears when you call it: Cmd/Ctrl+I to change the code at the caret (shown as a
-diff you accept or reject), or `?` in the command palette to ask about the open file.
-Choose where answers come from in the palette (“AI: Use …”):
+diff you accept or reject), or `?` in the palette to ask about the open file.
+Choose where answers come from in Settings → AI:
 
 | Provider | Needs |
 |---|---|
@@ -72,17 +82,17 @@ Choose where answers come from in the palette (“AI: Use …”):
 | Claude Code | the `claude` CLI, signed in (uses your Claude plan) |
 | Codex | the `codex` CLI, signed in (uses your ChatGPT plan) |
 
-API keys are stored in the system keychain (“AI: Set API Key…”), or read from
+API keys are stored in the system keychain (Settings → AI → API key), or read from
 `NVIDIA_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`; they never go in the settings
 file. Claude Code and Codex run with every tool disabled, so they can only answer; Null
-applies changes itself. Models and endpoints can be changed under `"ai"` in settings.
+applies changes itself. Models and addresses can be changed in Settings → AI.
 
 ## Fonts
 
 Null ships with [Geist Mono](https://github.com/vercel/geist-font) for code and
 [Instrument Sans](https://github.com/Instrument/instrument-sans) for the interface, both under
 the SIL Open Font License 1.1 (see `assets/fonts/*/OFL.txt`). Any installed font can be used
-instead through `code_font` and `ui_font` in the settings file.
+instead: pick one in Settings → Appearance, or set `code_font` and `ui_font` in the JSON.
 
 ## License
 

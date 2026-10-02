@@ -11,6 +11,7 @@ use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
 use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteOptions, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
+use crate::settings_panel::{SettingsPanel, SettingsPanelEvent, Shortcut};
 use crate::terminal::{Shell, TerminalEvent, TerminalView};
 use crate::theme::{Theme, ThemeName};
 use gpui::{
@@ -33,6 +34,7 @@ actions!(
         ShowCommands,
         AskAi,
         OpenSettings,
+        OpenSettingsFile,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
@@ -163,6 +165,7 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    settings_panel: Option<(Entity<SettingsPanel>, Subscription)>,
     /// Files whose tabs were closed, most recent last, for Cmd+Shift+T.
     recently_closed: Vec<PathBuf>,
     /// Files activated lately, most recent first, for the palette.
@@ -242,6 +245,7 @@ impl Workspace {
             chrome: Transition::new(true),
             last_mouse: None,
             palette: None,
+            settings_panel: None,
             ready_since: None,
             branch: None,
             branch_task: None,
@@ -718,6 +722,7 @@ impl Workspace {
                 Box::new(ToggleAutocomplete),
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
+            (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
         ];
         if self.active.is_some() {
             commands.extend([
@@ -776,7 +781,10 @@ impl Workspace {
             }
             return;
         }
-        self.focus_before_palette = window.focused(cx);
+        // The palette replaces the Settings window, if it's open.
+        if self.settings_panel.take().is_none() {
+            self.focus_before_palette = window.focused(cx);
+        }
         let active_path = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let options = PaletteOptions {
             commands: self.commands(window, cx),
@@ -837,8 +845,11 @@ impl Workspace {
         self.open_palette(":", window, cx);
     }
 
+    /// Closes whichever floating layer is open (the palette or the Settings window)
+    /// and puts focus back where it was.
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
+        self.settings_panel = None;
         let fallback = self.active_editor().map(|e| e.focus_handle(cx)).unwrap_or(self.focus_handle.clone());
         window.focus(&self.focus_before_palette.take().unwrap_or(fallback));
         cx.notify();
@@ -1151,7 +1162,36 @@ impl Workspace {
         settings::update(cx, |s| s.theme = ThemeName::Paper);
     }
 
+    /// ⌘, opens the Settings window, or closes it.
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_panel.is_some() {
+            return self.close_palette(window, cx);
+        }
+        if self.palette.is_some() {
+            self.palette = None;
+        } else {
+            self.focus_before_palette = window.focused(cx);
+        }
+        let shortcuts = self
+            .commands(window, cx)
+            .into_iter()
+            .filter_map(|c| Some(Shortcut { category: c.category, label: c.label, keys: c.keys? }))
+            .collect();
+        let panel = cx.new(|cx| SettingsPanel::new(shortcuts, cx));
+        let subscription = cx.subscribe_in(&panel, window, |this, _, event, window, cx| match event {
+            SettingsPanelEvent::Closed => this.close_palette(window, cx),
+            SettingsPanelEvent::Run(action) => {
+                let action = action.boxed_clone();
+                this.close_palette(window, cx);
+                window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
+            }
+        });
+        window.focus(&panel.focus_handle(cx));
+        self.settings_panel = Some((panel, subscription));
+        cx.notify();
+    }
+
+    fn open_settings_file(&mut self, _: &OpenSettingsFile, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = Settings::ensure_file(cx) {
             self.open_file(path, window, cx);
         }
@@ -1357,6 +1397,8 @@ impl Render for Workspace {
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
         let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
+        } else if let Some((panel, _)) = &self.settings_panel {
+            Some(panel.clone().into_any_element())
         } else if let Some((ask, _)) = &self.ask {
             Some(ask.clone().into_any_element())
         } else {
@@ -1455,6 +1497,7 @@ impl Render for Workspace {
             .font_family(cx.global::<Fonts>().ui.clone())
             .relative()
             .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(Self::open_settings_file))
             .on_action(cx.listener(Self::show_commands))
             .on_action(cx.listener(Self::ask_ai))
             .on_action(cx.listener(Self::open))
