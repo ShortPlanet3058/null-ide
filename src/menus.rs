@@ -72,7 +72,7 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                 MenuItem::submenu(Menu {
                     name: "Cursors".into(),
                     items: vec![
-                        // Alt+click in the text adds (or removes) a cursor too.
+                        // Cmd+Shift+click in the text adds (or removes) a cursor too.
                         MenuItem::action("Add Next Occurrence", AddNextOccurrence),
                         MenuItem::action("Select All Occurrences", SelectAllOccurrences),
                         MenuItem::action("Add Cursor Above", AddCursorAbove),

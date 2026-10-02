@@ -153,7 +153,7 @@ impl Editor {
 
     // ---------- adding cursors ----------
 
-    /// Alt+click: adds a cursor there, or removes the one already there.
+    /// Cmd+Shift+click: adds a cursor there, or removes the one already there.
     pub(super) fn toggle_cursor_at(&mut self, offset: usize) {
         if !self.extra.is_empty() {
             if let Some(i) =
@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn alt_click_toggles_cursors_and_they_merge(cx: &mut TestAppContext) {
+    fn cmd_shift_click_toggles_cursors_and_they_merge(cx: &mut TestAppContext) {
         let (e, cx) = editor(cx, "abc\nabc\n");
         e.update(cx, |e, _| {
             e.selection = Selection::caret(0);

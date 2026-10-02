@@ -1388,6 +1388,9 @@ impl Editor {
             return;
         }
         let offset = self.offset_at(event.position);
+        // Cmd+Shift+click (Ctrl+Shift elsewhere) adds a cursor, or removes the one clicked.
+        // Not Alt+click: holding Alt opens the info card.
+        let add_cursor = event.modifiers.secondary() && event.modifiers.shift;
         let unit = match event.click_count {
             2 => DragUnit::Word(self.word_at(offset)),
             3 => DragUnit::Line(self.line_range(offset)),
@@ -1397,18 +1400,17 @@ impl Editor {
             DragUnit::Word(range) | DragUnit::Line(range) => {
                 self.selection = Selection { anchor: range.start, head: range.end }
             }
+            DragUnit::Char if add_cursor => self.toggle_cursor_at(offset),
             DragUnit::Char if event.modifiers.shift => self.selection.head = offset,
-            // Alt+click adds a cursor (or removes the one clicked).
-            DragUnit::Char if event.modifiers.alt => self.toggle_cursor_at(offset),
             DragUnit::Char => self.selection = Selection::caret(offset),
         }
-        if !(event.modifiers.alt || event.modifiers.shift) {
+        if !(add_cursor || event.modifiers.shift) {
             self.single_cursor();
         }
         self.goal_column = None;
         self.dragging = Some(unit);
         self.touch(cx);
-        if event.modifiers.secondary() && event.click_count == 1 {
+        if event.modifiers.secondary() && !add_cursor && event.click_count == 1 {
             self.dragging = None;
             self.go_to_definition_at(offset, cx);
         }
@@ -1488,7 +1490,8 @@ impl Editor {
 
     fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.alt_held = event.modifiers.alt;
-        self.secondary_held = event.modifiers.secondary();
+        // With Shift too it's Cmd+Shift+click (add a cursor), so no link underline.
+        self.secondary_held = event.modifiers.secondary() && !event.modifiers.shift;
         if !self.alt_held {
             self.hover_suppressed = false;
         }
