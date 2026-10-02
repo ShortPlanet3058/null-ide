@@ -19,66 +19,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// How to start the server for one language.
-struct ServerConfig {
-    name: &'static str,
-    /// The language, as people call it.
-    label: &'static str,
-    language_id: &'static str,
-    program: &'static str,
-    args: &'static [&'static str],
-}
-
-const SERVERS: &[(&[&str], ServerConfig)] = &[
-    (
-        &["rs"],
-        ServerConfig { name: "rust-analyzer", label: "Rust", language_id: "rust", program: "rust-analyzer", args: &[] },
-    ),
-    (
-        &["ts", "tsx", "js", "jsx", "mjs", "cjs"],
-        ServerConfig {
-            name: "typescript-language-server",
-            label: "TypeScript",
-            language_id: "typescript",
-            program: "typescript-language-server",
-            args: &["--stdio"],
-        },
-    ),
-    (
-        &["py"],
-        ServerConfig {
-            name: "pyright",
-            label: "Python",
-            language_id: "python",
-            program: "pyright-langserver",
-            args: &["--stdio"],
-        },
-    ),
-    (&["go"], ServerConfig { name: "gopls", label: "Go", language_id: "go", program: "gopls", args: &[] }),
-];
+type ServerConfig = crate::servers::Server;
 
 fn config_for(path: &Path) -> Option<&'static ServerConfig> {
-    let ext = path.extension()?.to_str()?;
-    SERVERS.iter().find(|(exts, _)| exts.contains(&ext)).map(|(_, config)| config)
-}
-
-/// Finds `program` on PATH, or in the usual install folders when Null was
-/// started from the Finder with a minimal PATH.
-fn find_program(program: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let extra = [
-        home.as_ref().map(|h| h.join(".cargo/bin")),
-        home.as_ref().map(|h| h.join("go/bin")),
-        Some(PathBuf::from("/opt/homebrew/bin")),
-        Some(PathBuf::from("/usr/local/bin")),
-    ];
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .unwrap_or_default()
-        .into_iter()
-        .chain(extra.into_iter().flatten())
-        .map(|dir| dir.join(program))
-        .find(|candidate| candidate.is_file())
+    crate::servers::for_path(path)
 }
 
 /// Work for a server that's still starting up.
@@ -93,13 +37,28 @@ enum ServerState {
     Running {
         server: Arc<LanguageServer>,
     },
+    /// Not installed.
+    Missing,
+    Installing,
+    InstallFailed(String),
+    /// Installed, but it failed to start.
     Unavailable,
 }
 
 /// Whether code intelligence is usable for a file yet.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Readiness {
-    /// The server isn't installed or failed to start.
+    /// The server isn't installed: Null can install it, or says what's needed.
+    Missing {
+        server: &'static ServerConfig,
+    },
+    Installing {
+        server: &'static ServerConfig,
+    },
+    InstallFailed {
+        server: &'static ServerConfig,
+    },
+    /// Installed, but it failed to start.
     Unavailable {
         program: &'static str,
     },
@@ -122,12 +81,16 @@ struct Progress {
 
 pub enum LspEvent {
     DiagnosticsChanged,
+    /// A server finished installing (its name), or failed to (why).
+    Installed(Result<&'static str, String>),
 }
 
 /// The language servers for one project, and what they've reported.
 pub struct LspStore {
     root: PathBuf,
     servers: HashMap<&'static str, ServerState>,
+    /// Open files and their text, to hand to a server installed after they were opened.
+    documents: HashMap<PathBuf, String>,
     diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
     /// Work servers report, by progress token.
     progress: HashMap<String, Progress>,
@@ -141,6 +104,7 @@ impl LspStore {
         Self {
             root,
             servers: HashMap::new(),
+            documents: HashMap::new(),
             diagnostics: HashMap::new(),
             progress: HashMap::new(),
             _tasks: Vec::new(),
@@ -159,6 +123,9 @@ impl LspStore {
         let config = config_for(path)?;
         Some(match self.servers.get(config.name) {
             None | Some(ServerState::Starting { .. }) => Readiness::Starting,
+            Some(ServerState::Missing) => Readiness::Missing { server: config },
+            Some(ServerState::Installing) => Readiness::Installing { server: config },
+            Some(ServerState::InstallFailed(_)) => Readiness::InstallFailed { server: config },
             Some(ServerState::Unavailable) => Readiness::Unavailable { program: config.program },
             Some(ServerState::Running { .. }) => {
                 let work: Vec<&Progress> = self.progress.values().filter(|p| p.server == config.name).collect();
@@ -169,6 +136,57 @@ impl LspStore {
                 }
             }
         })
+    }
+
+    /// Whether a server is being installed, or why its last install failed.
+    pub fn install_state(&self, name: &str) -> Option<Result<(), &str>> {
+        match self.servers.get(name)? {
+            ServerState::Installing => Some(Ok(())),
+            ServerState::InstallFailed(message) => Some(Err(message)),
+            _ => None,
+        }
+    }
+
+    /// Installs the server for `path` in the background, then starts it for every open
+    /// file it serves.
+    pub fn install(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Some(config) = config_for(path) {
+            self.install_server(config, cx);
+        }
+    }
+
+    pub fn install_server(&mut self, config: &'static ServerConfig, cx: &mut Context<Self>) {
+        if matches!(self.servers.get(config.name), Some(ServerState::Installing | ServerState::Running { .. })) {
+            return;
+        }
+        self.servers.insert(config.name, ServerState::Installing);
+        cx.notify();
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { crate::servers::install(config) }).await;
+            this.update(cx, |this, cx| {
+                cx.emit(LspEvent::Installed(result.clone().map(|()| config.name)));
+                match result {
+                    Ok(()) => {
+                        this.servers.remove(config.name);
+                        let open: Vec<(PathBuf, String)> = this
+                            .documents
+                            .iter()
+                            .filter(|(p, _)| config_for(p).is_some_and(|c| c.name == config.name))
+                            .map(|(p, t)| (p.clone(), t.clone()))
+                            .collect();
+                        for (path, text) in open {
+                            this.open(&path, text, cx);
+                        }
+                    }
+                    Err(message) => {
+                        this.servers.insert(config.name, ServerState::InstallFailed(message));
+                    }
+                }
+                cx.emit(LspEvent::DiagnosticsChanged);
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     pub fn has_server_for(&self, path: &Path) -> bool {
@@ -198,10 +216,7 @@ impl LspStore {
     }
 
     fn start(&mut self, config: &'static ServerConfig, cx: &mut Context<Self>) -> ServerState {
-        let Some(program) = find_program(config.program) else {
-            eprintln!("null: {} isn't installed, so there's no code intelligence for it", config.name);
-            return ServerState::Unavailable;
-        };
+        let Some(program) = crate::servers::find(config) else { return ServerState::Missing };
         let (server, mut messages) = match LanguageServer::spawn(&program, config.args, &self.root) {
             Ok(started) => started,
             Err(err) => {
@@ -330,12 +345,14 @@ impl LspStore {
     }
 
     pub fn open(&mut self, path: &Path, text: String, cx: &mut Context<Self>) {
-        let (Some(uri), Some(config)) = (uri_for(path), config_for(path)) else { return };
+        let (Some(uri), Some(_)) = (uri_for(path), config_for(path)) else { return };
+        self.documents.insert(path.to_path_buf(), text.clone());
+        let language_id = crate::servers::language_id(path);
         self.with_server(
             path,
             move |server| {
                 server.notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
-                    text_document: TextDocumentItem { uri, language_id: config.language_id.into(), version: 0, text },
+                    text_document: TextDocumentItem { uri, language_id: language_id.into(), version: 0, text },
                 })
             },
             cx,
@@ -345,6 +362,9 @@ impl LspStore {
     /// Sends the whole new text. Simple, and fast enough for files people edit by hand.
     pub fn change(&mut self, path: &Path, text: String, version: i32, cx: &mut Context<Self>) {
         let Some(uri) = uri_for(path) else { return };
+        if let Some(document) = self.documents.get_mut(path) {
+            *document = text.clone();
+        }
         self.with_server(
             path,
             move |server| {
@@ -373,6 +393,7 @@ impl LspStore {
 
     pub fn close(&mut self, path: &Path, cx: &mut Context<Self>) {
         let Some(uri) = uri_for(path) else { return };
+        self.documents.remove(path);
         self.with_server(
             path,
             move |server| {

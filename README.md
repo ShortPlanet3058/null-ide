@@ -70,6 +70,25 @@ doesn't need Xcode's separate Metal Toolchain download.
 - Feature branches — branch off `dev`, named `feature/<topic>`, `fix/<topic>`, etc.,
   and open a pull request back into `dev`.
 
+## Code intelligence
+
+Completions, errors, info on hover and go to definition come from language servers. Null
+knows which one each language needs, finds it if it's installed (Xcode's clangd and
+sourcekit-lsp included), and otherwise offers to install it with one click, from the status
+bar or Settings → Languages, into its own folder rather than the system.
+
+| Language | Server | Installed with |
+|---|---|---|
+| Rust | rust-analyzer | rustup |
+| Python | pyright | npm (needs Node.js) |
+| TypeScript, JavaScript | typescript-language-server | npm |
+| C, C++, Objective-C | clangd | comes with Xcode's command line tools |
+| Go | gopls | go |
+| Swift | sourcekit-lsp | comes with Xcode |
+| Shell | bash-language-server | npm |
+| HTML, CSS, JSON | vscode-langservers-extracted | npm |
+| YAML | yaml-language-server | npm |
+
 ## AI (optional, off by default)
 
 AI is a tool: it shows up only when you call it, right in the code, and a switch (⌘K or

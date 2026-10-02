@@ -683,29 +683,9 @@ fn claude_api(
     Ok(())
 }
 
-/// Folders a command line tool may be in: the PATH, then where installers usually put
-/// them (an app opened from the Finder doesn't get the terminal's PATH).
-fn cli_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs: Vec<std::path::PathBuf> =
-        std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-        for dir in [".local/bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", "bin"] {
-            dirs.push(home.join(dir));
-        }
-        // Node versions installed with nvm.
-        if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
-            dirs.extend(versions.flatten().map(|v| v.path().join("bin")));
-        }
-    }
-    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(std::path::PathBuf::from));
-    dirs
-}
-
 /// Where a command line tool is installed, if it is.
 pub fn find_cli(name: &str) -> Option<std::path::PathBuf> {
-    let names: Vec<String> =
-        if cfg!(windows) { vec![format!("{name}.exe"), format!("{name}.cmd")] } else { vec![name.to_string()] };
-    cli_dirs().into_iter().flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>()).find(|p| p.is_file())
+    crate::tools::find(name)
 }
 
 /// How to get a subscription's command line tool, for when it's missing.
@@ -726,7 +706,7 @@ fn spawn_cli(program: &str, args: &[String], input: &str) -> Result<std::process
     let path = find_cli(program)
         .ok_or_else(|| format!("`{program}` isn't installed. {}", install_hint(id).unwrap_or_default()))?;
     // Tools installed with npm start with `#!/usr/bin/env node`: give them a PATH that finds node.
-    let search_path = std::env::join_paths(cli_dirs()).unwrap_or_default();
+    let search_path = crate::tools::search_path();
     let mut command = Command::new(&path);
     command.env("PATH", search_path);
     // Claude Code bills an ANTHROPIC_API_KEY over the person's plan when one is set: this
