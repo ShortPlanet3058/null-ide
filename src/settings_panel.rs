@@ -134,7 +134,8 @@ impl SettingsPanel {
             input.set_placeholder(address_hint);
             input.set_text(&address, cx);
         });
-        self.has_key = provider.uses_api_key().then(|| ai::api_key(provider).is_some());
+        // Never read the keychain just to show this: it can make macOS ask for permission.
+        self.has_key = provider.uses_api_key().then(|| ai::known_key(provider)).flatten();
     }
 
     fn close(&mut self, _: &CloseSettings, _: &mut Window, cx: &mut Context<Self>) {
@@ -526,9 +527,13 @@ impl SettingsPanel {
             if matches!(current, ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible) {
                 rows.push(Self::row("Address", None, Self::field(&self.address, &theme), &theme));
             }
-            if let Some(has_key) = self.has_key {
-                let status = if has_key { "Saved in the keychain" } else { "Not set yet" };
-                let label = if has_key { "Change…" } else { "Set API Key…" };
+            if current.uses_api_key() {
+                let (status, label) = match self.has_key {
+                    Some(true) => ("Saved in the keychain", "Change…"),
+                    Some(false) => ("Not set yet", "Set API Key…"),
+                    // Not read yet this session (reading it can ask for permission).
+                    None => ("Kept in the system keychain", "Set API Key…"),
+                };
                 rows.push(Self::row(
                     "API key",
                     Some(status),
@@ -546,6 +551,12 @@ impl SettingsPanel {
                     &theme,
                 ));
             }
+            rows.push(Self::row(
+                "Suggest code as you type",
+                Some("Faint text at the caret when you pause; ⇥ takes it. Best with a fast model (Ollama, NVIDIA)"),
+                Self::toggle("ai-completions", s.ai.completions, &theme, cx, |s| s.ai.completions = !s.ai.completions),
+                &theme,
+            ));
             rows.push(Self::row(
                 "Ask and edit",
                 Some("⌘I edits the selection with AI; “Ask About This File” in ⌘K asks about it"),

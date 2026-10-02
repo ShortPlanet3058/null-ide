@@ -1,5 +1,4 @@
 use crate::ai::ProviderId;
-use crate::ask::{AskContext, AskEvent, AskPanel};
 use crate::editor::{Editor, EditorEvent, GoToDefinition, Redo, Save, SelectAll, ShowInfo, Undo};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::find_bar::{DeployFind, DeployReplace};
@@ -180,7 +179,6 @@ pub struct Workspace {
     _watcher: Option<notify::RecommendedWatcher>,
     watch_task: Option<Task<()>>,
     /// The AI answer panel, while open.
-    ask: Option<(Entity<AskPanel>, Subscription)>,
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
@@ -261,7 +259,6 @@ impl Workspace {
             recent_commands: Vec::new(),
             _watcher: None,
             watch_task: None,
-            ask: None,
             key_prompt: None,
             notice: None,
             notice_task: None,
@@ -817,11 +814,6 @@ impl Workspace {
                     editor.update(cx, |editor, cx| editor.go_to_line(line, cx));
                 }
             }
-            PaletteEvent::Ask(question) => {
-                let question = question.clone();
-                this.close_palette(window, cx);
-                this.open_ask(question, window, cx);
-            }
             PaletteEvent::Run(action) => {
                 let action = action.boxed_clone();
                 this.remember_command(action.name());
@@ -859,8 +851,8 @@ impl Workspace {
     }
 
     fn ask_ai(&mut self, _: &AskAi, window: &mut Window, cx: &mut Context<Self>) {
-        if cx.global::<Settings>().ai.enabled {
-            self.open_palette(PaletteKind::Ask, window, cx);
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| editor.ask_inline(window, cx));
         }
     }
 
@@ -988,7 +980,7 @@ impl Workspace {
 
     fn use_ai(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
         settings::update(cx, |s| s.ai.provider = provider);
-        let hint = if provider.uses_api_key() && crate::ai::api_key(provider).is_none() {
+        let hint = if provider.uses_api_key() && crate::ai::known_key(provider) == Some(false) {
             " Add a key with “AI: Set API Key”."
         } else {
             ""
@@ -1045,27 +1037,6 @@ impl Workspace {
         });
         window.focus(&prompt.focus_handle(cx));
         self.key_prompt = Some((prompt, subscription));
-        cx.notify();
-    }
-
-    fn open_ask(&mut self, question: String, window: &mut Window, cx: &mut Context<Self>) {
-        let context = self.active_editor().map(|editor| {
-            let editor = editor.read(cx);
-            AskContext {
-                path: editor.path().map(Path::to_path_buf),
-                language: editor.language_name(),
-                text: editor.buffer.to_string(),
-                selection: editor.selected_text(),
-            }
-        });
-        self.focus_before_palette = self.active_editor().map(|e| e.focus_handle(cx));
-        let panel = cx.new(|cx| AskPanel::new(context, question, cx));
-        let subscription = cx.subscribe_in(&panel, window, |this, _, AskEvent::Closed, window, cx| {
-            this.ask = None;
-            this.close_palette(window, cx);
-        });
-        window.focus(&panel.focus_handle(cx));
-        self.ask = Some((panel, subscription));
         cx.notify();
     }
 
@@ -1449,8 +1420,6 @@ impl Render for Workspace {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
             Some(panel.clone().into_any_element())
-        } else if let Some((ask, _)) = &self.ask {
-            Some(ask.clone().into_any_element())
         } else {
             self.key_prompt.as_ref().map(|(prompt, _)| prompt.clone().into_any_element())
         };
@@ -1617,7 +1586,6 @@ impl Render for Workspace {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                                this.ask = None;
                                 this.key_prompt = None;
                                 this.close_palette(window, cx);
                             }),

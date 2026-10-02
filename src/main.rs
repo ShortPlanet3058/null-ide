@@ -1,5 +1,4 @@
 mod ai;
-mod ask;
 mod assets;
 mod buffer;
 mod editor;
@@ -11,7 +10,6 @@ mod fs_ops;
 mod fuzzy;
 mod git;
 mod highlight;
-mod inline_assist;
 mod key_prompt;
 mod keymap;
 mod languages;

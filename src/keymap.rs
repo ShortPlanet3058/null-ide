@@ -97,12 +97,11 @@ pub fn register(keymap: Keymap, cx: &mut App) {
     crate::file_tree::bind_keys(cx);
     crate::find_bar::bind_keys(cx);
     crate::terminal::bind_keys(cx);
-    crate::inline_assist::bind_keys(cx);
-    crate::ask::bind_keys(cx);
     crate::key_prompt::bind_keys(cx);
     crate::text_input::bind_keys(cx);
     crate::settings_panel::bind_keys(cx);
     crate::welcome::bind_keys(cx);
+    crate::editor::bind_ai_keys(cx);
     // After the text field's keys, so ←→ can change a choice in the palette.
     crate::palette::bind_keys(cx);
     cx.bind_keys(keymap.overrides());

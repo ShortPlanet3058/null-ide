@@ -103,13 +103,15 @@ pub struct AiSettings {
     /// The master switch: when off, no AI appears anywhere, whatever the provider.
     pub enabled: bool,
     pub provider: ProviderId,
+    /// Ghost completions: the AI's guess at what comes next, shown faintly at the caret.
+    pub completions: bool,
     #[serde(flatten)]
     pub providers: HashMap<String, ProviderSettings>,
 }
 
 impl Default for AiSettings {
     fn default() -> Self {
-        Self { enabled: true, provider: ProviderId::Off, providers: HashMap::new() }
+        Self { enabled: true, provider: ProviderId::Off, completions: false, providers: HashMap::new() }
     }
 }
 
@@ -142,19 +144,50 @@ impl AiSettings {
 
 const KEYCHAIN_SERVICE: &str = "Null IDE";
 
-/// The provider's key: the keychain first, then its usual environment variable.
+/// Keys read from the keychain this session, by provider. Reading the keychain can make
+/// macOS ask for permission (always, for a freshly built unsigned binary), so it's read
+/// at most once per launch, and only when a request needs the key.
+static KEYS: std::sync::Mutex<Option<HashMap<&'static str, Option<String>>>> = std::sync::Mutex::new(None);
+
+fn env_key(id: ProviderId) -> Option<String> {
+    id.key_env().and_then(|v| std::env::var(v).ok()).filter(|k| !k.trim().is_empty())
+}
+
+/// The provider's key: its usual environment variable first, then the keychain.
 pub fn api_key(id: ProviderId) -> Option<String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, id.key())
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .or_else(|| id.key_env().and_then(|v| std::env::var(v).ok()))
-        .filter(|k| !k.trim().is_empty())
+    if let Some(key) = env_key(id) {
+        return Some(key);
+    }
+    let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    keys.get_or_insert_with(HashMap::new)
+        .entry(id.key())
+        .or_insert_with(|| {
+            keyring::Entry::new(KEYCHAIN_SERVICE, id.key())
+                .ok()
+                .and_then(|e| e.get_password().ok())
+                .filter(|k| !k.trim().is_empty())
+        })
+        .clone()
+}
+
+/// Whether a key is known to be set, without touching the keychain: None when it
+/// hasn't been read yet this session.
+pub fn known_key(id: ProviderId) -> Option<bool> {
+    if env_key(id).is_some() {
+        return Some(true);
+    }
+    let keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    keys.as_ref().and_then(|k| k.get(id.key())).map(Option::is_some)
 }
 
 pub fn store_api_key(id: ProviderId, key: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, id.key()).map_err(|e| e.to_string())?;
-    if key.trim().is_empty() { entry.delete_credential().or(Ok(())) } else { entry.set_password(key.trim()) }
-        .map_err(|e: keyring::Error| e.to_string())
+    let key = key.trim();
+    if key.is_empty() { entry.delete_credential().or(Ok(())) } else { entry.set_password(key) }
+        .map_err(|e: keyring::Error| e.to_string())?;
+    let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    keys.get_or_insert_with(HashMap::new).insert(id.key(), (!key.is_empty()).then(|| key.to_string()));
+    Ok(())
 }
 
 pub struct Prompt {

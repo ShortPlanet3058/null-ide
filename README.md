@@ -72,9 +72,17 @@ doesn't need Xcode's separate Metal Toolchain download.
 
 ## AI (optional, off by default)
 
-AI only appears when you call it: Cmd/Ctrl+I to change the code at the caret (shown as a
-diff you accept or reject), or “Ask About This File” in ⌘K. With AI switched off (in ⌘K
-or Settings), none of it shows.
+AI is a tool: it shows up only when you call it, right in the code, and a switch (⌘K or
+Settings) turns it off entirely.
+
+- **⌘I** opens a one-line field between your lines. Describe a small change (or press Enter
+  on an error to fix it): it's written into the file as a diff, with removed lines struck
+  through and new ones tinted. ⇥ keeps it, Esc undoes it, ⌘I adjusts it.
+- **Questions** (typed in ⌘I, or “Ask About This File” in ⌘K) get a short note under the code
+  they're about. Esc closes it.
+- **Suggestions while typing** (Settings → AI, off by default): pause at the end of a line and
+  the AI's guess shows faintly after the caret; ⇥ takes it.
+
 Choose where answers come from in Settings → AI:
 
 | Provider | Needs |
@@ -86,9 +94,10 @@ Choose where answers come from in Settings → AI:
 | Claude Code | the `claude` CLI, signed in (uses your Claude plan) |
 | Codex | the `codex` CLI, signed in (uses your ChatGPT plan) |
 
-API keys are stored in the system keychain (Settings → AI → API key), or read from
-`NVIDIA_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`; they never go in the settings
-file. Claude Code and Codex run with every tool disabled, so they can only answer; Null
+API keys are read from `NVIDIA_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` when set,
+otherwise from the system keychain (Settings → AI → API key), at most once per launch; they
+never go in the settings file. (A development build is a new binary each time, so macOS asks
+before letting it read the keychain; set the environment variable to avoid that.) Claude Code and Codex run with every tool disabled, so they can only answer; Null
 applies changes itself. Models and addresses can be changed in Settings → AI.
 
 ## Fonts

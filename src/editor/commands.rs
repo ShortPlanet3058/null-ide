@@ -445,7 +445,7 @@ mod editor_tests {
     fn up_and_down_move_by_wrapped_rows(cx: &mut TestAppContext) {
         let e = editor(cx, &format!("{}\nend\n", "word ".repeat(10)), "x.md");
         e.update(cx, |e, cx| {
-            e.wrap.update(&e.buffer, Some(20));
+            e.wrap.update(&e.buffer, Some(20), &[]);
             e.selection = Selection::caret(2);
             e.move_vertically(1, false, cx);
             // Same column, one row down, still on the first line.
