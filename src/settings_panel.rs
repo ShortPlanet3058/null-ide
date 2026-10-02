@@ -465,6 +465,12 @@ impl SettingsPanel {
             ),
             Self::heading("Code intelligence", &theme),
             Self::row(
+                "Format on save",
+                Some("Tidies the file with its language server on ⌘S. ⌥⇧F formats any time"),
+                Self::toggle("format-on-save", s.format_on_save, &theme, cx, |s| s.format_on_save = !s.format_on_save),
+                &theme,
+            ),
+            Self::row(
                 "Suggestions while typing",
                 Some("From the language server. ⌃Space asks for them either way"),
                 Self::toggle("autocomplete", s.autocomplete, &theme, cx, |s| s.autocomplete = !s.autocomplete),

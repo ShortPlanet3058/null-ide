@@ -89,6 +89,11 @@ bar or Settings → Languages, into its own folder rather than the system.
 | HTML, CSS, JSON | vscode-langservers-extracted | npm |
 | YAML | yaml-language-server | npm |
 
+With a server running: ⌘R (or F2) renames a symbol everywhere, right where it's written;
+⇧F12 lists where it's used (⌘-clicking a definition does too); ⌥⇧F formats the file, and
+"Format on save" does it on ⌘S; ⌘⇧M, or the error count in the status bar, lists every
+problem found.
+
 ## AI (optional, off by default)
 
 AI is a tool: it shows up only when you call it, right in the code, and a switch (⌘K or

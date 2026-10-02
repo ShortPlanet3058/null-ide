@@ -5,11 +5,13 @@ mod completion;
 mod cursors;
 mod ghost;
 mod intel;
+mod refactor;
 
 pub use assist::{Block, BlockKind};
 pub use completion::CompletionMenu;
 pub use cursors::Cursor;
 pub use intel::HoverCard;
+pub use refactor::{FindReferences, FormatDocument, RenameSymbol, apply_edits};
 
 use crate::buffer::Buffer;
 use crate::element::{EditorElement, RowLayout};
@@ -101,6 +103,10 @@ pub const TAB_SIZE: usize = 4;
 const UNDO_GROUP: Duration = Duration::from_millis(1000);
 
 /// The keys for the AI's field and changes; registered after every other part's keys.
+pub fn bind_refactor_keys(cx: &mut App) {
+    refactor::bind_keys(cx);
+}
+
 pub fn bind_ai_keys(cx: &mut App) {
     assist::bind_keys(cx);
     ghost::bind_keys(cx);
@@ -249,6 +255,16 @@ pub enum EditorEvent {
         path: PathBuf,
         range: lsp_types::Range,
     },
+    /// Rename the symbol at `position` everywhere: the workspace applies it to every file.
+    Rename {
+        position: lsp_types::Position,
+        new_name: String,
+    },
+    /// Show where the symbol at `position` is used.
+    FindReferences {
+        position: lsp_types::Position,
+        name: String,
+    },
 }
 
 impl EventEmitter<EditorEvent> for Editor {}
@@ -373,6 +389,8 @@ pub struct Editor {
     ghost: Option<ghost::Ghost>,
     ghost_task: Option<Task<()>>,
     ghost_cache: Vec<(String, Vec<String>)>,
+    renaming: Option<refactor::Renaming>,
+    format_task: Option<Task<()>>,
     /// Rows between the lines for those, rebuilt as they change.
     pub blocks: Vec<Block>,
 }
@@ -442,6 +460,8 @@ impl Editor {
             ghost: None,
             ghost_task: None,
             ghost_cache: Vec::new(),
+            renaming: None,
+            format_task: None,
             blocks: Vec::new(),
         };
         editor.rehighlight();
@@ -1227,7 +1247,7 @@ impl Editor {
     }
 
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
-        self.save_to_disk(cx);
+        self.save_from_keyboard(cx);
     }
 
     /// Writes the buffer to its file. Returns false if there's no file or writing failed.
@@ -1952,6 +1972,9 @@ impl Render for Editor {
             .on_action(cx.listener(Self::undo_change_action))
             .on_action(cx.listener(Self::close_note_action))
             .on_action(cx.listener(Self::accept_ghost_action))
+            .on_action(cx.listener(Self::rename_symbol))
+            .on_action(cx.listener(Self::find_references))
+            .on_action(cx.listener(Self::format_document))
             .on_action(cx.listener(Self::accept_ghost_word))
             .on_action(cx.listener(Self::accept_ghost_line))
             .on_action(cx.listener(Self::next_ghost))
@@ -1979,6 +2002,7 @@ impl Render for Editor {
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(EditorElement::new(cx.entity()));
         let hover = self.render_hover(cx);
+        let rename = self.render_rename(cx);
         let completions = self.render_completions(cx);
         let ai_blocks = self.render_ai_blocks(cx);
         div()
@@ -1989,6 +2013,7 @@ impl Render for Editor {
             .child(text)
             .when_some(find_bar, |editor, bar| editor.child(div().absolute().top(px(8.)).right(px(16.)).child(bar)))
             .children(hover)
+            .children(rename)
             .children(completions)
             .children(ai_blocks)
     }

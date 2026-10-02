@@ -108,7 +108,7 @@ impl Editor {
     }
 
     /// Why hover and go to definition can't answer yet, in words.
-    fn not_ready_message(&self, cx: &App) -> Option<String> {
+    pub(super) fn not_ready_message(&self, cx: &App) -> Option<String> {
         let label = LspStore::language_label(self.path.as_ref()?).unwrap_or("Code");
         match self.readiness(cx)? {
             Readiness::Ready { .. } => None,
@@ -131,7 +131,7 @@ impl Editor {
     }
 
     /// Shows a short message in the hover card spot for a few seconds.
-    fn show_notice(&mut self, offset: usize, message: String, cx: &mut Context<Self>) {
+    pub(super) fn show_notice(&mut self, offset: usize, message: String, cx: &mut Context<Self>) {
         let word = self.word_at(offset);
         self.hover_word = Some(word.clone());
         self.hover = Some(HoverCard {
@@ -333,7 +333,15 @@ impl Editor {
             };
             let Some(target) = path_for(&location.uri) else { return };
             this.update(cx, |this, cx| {
-                if this.path.as_deref() == Some(target.as_path()) {
+                let here = this.path.as_deref() == Some(target.as_path());
+                // Already at the definition: show where it's used instead, as other editors do.
+                let at_definition = here && {
+                    let range = this.offset_from_lsp(location.range.start)..this.offset_from_lsp(location.range.end);
+                    range.contains(&offset) || range.end == offset
+                };
+                if at_definition {
+                    this.find_references_at(offset, cx);
+                } else if here {
                     this.select_lsp_range(location.range, cx);
                 } else {
                     cx.emit(EditorEvent::GoTo { path: target, range: location.range });
