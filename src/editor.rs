@@ -1010,8 +1010,14 @@ impl Editor {
     }
 
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
-        // Tab with several lines selected indents them, as everywhere.
-        if self.selected_lines().len() > 1 {
+        self.tab_key(cx);
+    }
+
+    pub(crate) fn tab_key(&mut self, cx: &mut Context<Self>) {
+        // With anything selected, Tab indents the selected lines (Shift+Tab outdents).
+        // This is the easy way on every keyboard layout; Cmd+] / Cmd+[ need [ and ],
+        // which on many non-US Mac keyboards take several keys already.
+        if !self.selection.is_empty() {
             return self.indent_lines(cx);
         }
         let range = self.selection.range();

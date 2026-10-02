@@ -725,8 +725,8 @@ impl Workspace {
                 ("Duplicate Line".into(), Box::new(crate::editor::DuplicateLineDown)),
                 ("Delete Line".into(), Box::new(crate::editor::DeleteLine)),
                 ("Select Line".into(), Box::new(crate::editor::SelectLine)),
-                ("Indent".into(), Box::new(crate::editor::Indent)),
-                ("Outdent".into(), Box::new(crate::editor::Outdent)),
+                ("Indent Selected Lines (Tab)".into(), Box::new(crate::editor::Indent)),
+                ("Outdent Selected Lines (Shift+Tab)".into(), Box::new(crate::editor::Outdent)),
                 ("AI: Edit with AI…".into(), Box::new(crate::editor::InlineAssist)),
                 ("Replace…".into(), Box::new(DeployReplace)),
             ]);

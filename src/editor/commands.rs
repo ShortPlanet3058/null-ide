@@ -424,6 +424,23 @@ mod editor_tests {
     }
 
     #[gpui::test]
+    fn tab_indents_any_selection_and_shift_tab_outdents(cx: &mut TestAppContext) {
+        let e = editor(cx, "x = 1\ny = 2\n", "x.py");
+        // Part of a single line selected: Tab indents that line instead of replacing the text.
+        select(cx, &e, 0, 1);
+        e.update(cx, |e, cx| e.tab_key(cx));
+        assert_eq!(text(cx, &e), "    x = 1\ny = 2\n");
+        // Shift+Tab outdents the caret's line even with nothing selected.
+        select(cx, &e, 6, 6);
+        e.update(cx, |e, cx| e.outdent_lines(cx));
+        assert_eq!(text(cx, &e), "x = 1\ny = 2\n");
+        // With no selection, Tab still inserts spaces at the caret.
+        select(cx, &e, 1, 1);
+        e.update(cx, |e, cx| e.tab_key(cx));
+        assert_eq!(text(cx, &e), "x    = 1\ny = 2\n");
+    }
+
+    #[gpui::test]
     fn brackets_and_quotes_close_themselves(cx: &mut TestAppContext) {
         let e = editor(cx, "", "x.rs");
         e.update(cx, |e, cx| assert!(e.type_pair_char('(', cx)));
