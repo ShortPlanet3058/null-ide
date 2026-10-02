@@ -339,6 +339,7 @@ impl Editor {
     pub fn select_lsp_range(&mut self, range: lsp_types::Range, cx: &mut Context<Self>) {
         let start = self.offset_from_lsp(range.start);
         let end = self.offset_from_lsp(range.end);
+        self.single_cursor();
         self.selection = Selection { anchor: start, head: end };
         self.goal_column = None;
         self.touch(cx);

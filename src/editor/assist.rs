@@ -110,6 +110,7 @@ impl Editor {
         self.record_undo(EditKind::Other);
         let end = self.buffer.replace(range.clone(), &text);
         // Select what changed, so it's easy to see (and to adjust).
+        self.single_cursor();
         self.selection = Selection { anchor: range.start, head: end };
         self.goal_column = None;
         self.text_changed(cx);

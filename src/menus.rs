@@ -1,12 +1,13 @@
 use crate::editor::{
-    Copy, Cut, DeleteLine, DuplicateLineDown, GoToDefinition, Indent, MoveLineDown, MoveLineUp, Outdent, Paste, Redo,
-    Save, SelectAll, SelectLine, ShowInfo, ToggleComment, Undo,
+    AddCursorAbove, AddCursorBelow, AddNextOccurrence, Copy, Cut, DeleteLine, DuplicateLineDown, GoToDefinition,
+    Indent, MoveLineDown, MoveLineUp, Outdent, Paste, Redo, Save, SelectAll, SelectAllOccurrences, SelectLine,
+    ShowInfo, ToggleComment, Undo,
 };
 use crate::find_bar::{DeployFind, DeployReplace, FindNext, FindPrevious};
 use crate::workspace::{
-    CloseAllTabs, CloseTab, DecreaseFontSize, GoToLine, IncreaseFontSize, NewUntitled, NextTab, Open, OpenSettings, PreviousTab,
-    ReopenClosedTab, ResetFontSize, SaveAll, SaveAs, SearchProject, TogglePalette, ToggleSidebar, ToggleTerminal,
-    UseGraphiteTheme, UseOledTheme, UsePaperTheme,
+    CloseAllTabs, CloseTab, DecreaseFontSize, GoToLine, IncreaseFontSize, NewUntitled, NextTab, Open, OpenSettings,
+    PreviousTab, ReopenClosedTab, ResetFontSize, SaveAll, SaveAs, SearchProject, TogglePalette, ToggleSidebar,
+    ToggleTerminal, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
 };
 use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
 
@@ -66,6 +67,16 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                         MenuItem::action("Delete Line", DeleteLine),
                         MenuItem::action("Select Line", SelectLine),
                         MenuItem::action("Go to Line…", GoToLine),
+                    ],
+                }),
+                MenuItem::submenu(Menu {
+                    name: "Cursors".into(),
+                    items: vec![
+                        // Alt+click in the text adds (or removes) a cursor too.
+                        MenuItem::action("Add Next Occurrence", AddNextOccurrence),
+                        MenuItem::action("Select All Occurrences", SelectAllOccurrences),
+                        MenuItem::action("Add Cursor Above", AddCursorAbove),
+                        MenuItem::action("Add Cursor Below", AddCursorBelow),
                     ],
                 }),
                 MenuItem::separator(),
