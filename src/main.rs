@@ -29,6 +29,7 @@ mod terminal;
 mod text_input;
 mod theme;
 mod tools;
+mod ui;
 mod welcome;
 mod workspace;
 mod wrap;
@@ -84,7 +85,16 @@ fn main() {
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         settings::init(cx);
         keymap::register(cx.global::<settings::Settings>().keymap, cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // ⌘Q with no window focused still asks about unsaved changes, in the main window.
+        cx.on_action(|_: &Quit, cx| {
+            let workspace = cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>());
+            match workspace {
+                Some(handle) => {
+                    handle.update(cx, |workspace, window, cx| workspace.quit(&Quit, window, cx)).ok();
+                }
+                None => cx.quit(),
+            }
+        });
         menus::set(cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {

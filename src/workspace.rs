@@ -12,6 +12,7 @@ use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::settings_panel::{SettingsPanel, SettingsPanelEvent, Shortcut};
 use crate::terminal::{Shell, TerminalEvent, TerminalView};
+use crate::ui;
 use crate::theme::{Theme, ThemeName};
 use crate::welcome::{Welcome, WelcomeEvent};
 use gpui::{
@@ -198,6 +199,8 @@ pub struct Workspace {
     watch_task: Option<Task<()>>,
     index_task: Option<Task<()>>,
     session_task: Option<Task<()>>,
+    /// The tab strip, scrolled so the current tab is always in view.
+    tab_scroll: gpui::ScrollHandle,
     /// The window's place on screen, for the session.
     window_state: Option<crate::session::WindowState>,
     reindex_task: Option<Task<()>>,
@@ -293,6 +296,7 @@ impl Workspace {
             watch_task: None,
             index_task: None,
             session_task: None,
+            tab_scroll: gpui::ScrollHandle::new(),
             window_state: None,
             reindex_task: None,
             key_prompt: None,
@@ -361,10 +365,6 @@ impl Workspace {
     /// Opens the project as it was: its tabs (caret and scroll included), folders and terminal.
     pub fn restore_session(&mut self, session: crate::session::Session, window: &mut Window, cx: &mut Context<Self>) {
         self.tree.update(cx, |tree, cx| tree.expand_folders(&session.expanded, cx));
-        for path in session.recent_files.iter().rev() {
-            self.recent_files.retain(|p| p != path);
-            self.recent_files.insert(0, path.clone());
-        }
         self.window_state = session.window;
         for tab in &session.tabs {
             self.open_file(tab.path.clone(), window, cx);
@@ -374,6 +374,11 @@ impl Workspace {
         }
         if let Some(active) = session.active.and_then(|i| session.tabs.get(i)) {
             self.open_file(active.path.clone(), window, cx);
+        }
+        // Opening the tabs moved each to the front of the recent files: put the saved order back.
+        for path in session.recent_files.iter().rev() {
+            self.recent_files.retain(|p| p != path);
+            self.recent_files.insert(0, path.clone());
         }
         if session.terminal_open && !self.terminal_open.on {
             self.toggle_terminal(&ToggleTerminal, window, cx);
@@ -564,13 +569,16 @@ impl Workspace {
         let subscriptions = [
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
-                EditorEvent::Edited if cx.global::<Settings>().fade_bars_while_typing => {
-                    this.chrome.set(false, FADE_IN, FADE_OUT);
+                EditorEvent::Edited => {
+                    if cx.global::<Settings>().fade_bars_while_typing {
+                        this.chrome.set(false, FADE_IN, FADE_OUT);
+                    }
+                    this.refresh_title(window, cx);
                     cx.notify();
                 }
-                EditorEvent::Edited => {}
                 // Hand edits to the settings file take effect when saved.
                 EditorEvent::Saved => {
+                    this.refresh_title(window, cx);
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
                     }
@@ -647,58 +655,58 @@ impl Workspace {
         self.activate(ix, window, cx);
     }
 
-    /// Opens a folder as the project, or a file in a tab.
+    /// Opens a folder as the project (its tabs replace these, after asking about unsaved
+    /// changes), or a file in a tab.
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
-            // The project being left keeps its session; its tabs give way to the new one's,
-            // unless some have unsaved changes.
+            // The project being left keeps its session.
             self.save_session(cx);
-            let all_saved = self.tabs.iter().all(|t| !t.editor.read(cx).buffer.is_dirty());
-            if all_saved {
-                while !self.tabs.is_empty() {
-                    self.remove_tab(self.tabs.len() - 1, window, cx);
-                }
-            }
-            self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
-            // Language servers work per project: restart them for the new folder.
-            let root = path.clone();
-            self.lsp.update(cx, |lsp, _| {
-                lsp.shutdown();
-                *lsp = LspStore::new(root);
-            });
-            for tab in &self.tabs {
-                tab.editor.update(cx, |editor, cx| editor.reattach_lsp(cx));
-            }
-            self.refresh_git(cx);
-            self.watch(path.clone(), cx);
-            self.tree.update(cx, |tree, cx| tree.set_root(path.clone(), cx));
-            self.build_index(cx);
-            let mut session = crate::session::Session::load(&path);
-            if !all_saved {
-                session.tabs.clear();
-                session.active = None;
-            }
-            session.window = self.window_state;
-            self.restore_session(session, window, cx);
-            let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
-            self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
-            self.schedule_session_save(cx);
+            self.confirm_unsaved(CloseAction::SwitchProject(path), window, cx);
         } else {
             self.open_file(path, window, cx);
         }
     }
 
+    fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
+        // Language servers work per project: restart them for the new folder.
+        let root = path.clone();
+        self.lsp.update(cx, |lsp, _| {
+            lsp.shutdown();
+            *lsp = LspStore::new(root);
+        });
+        self.recent_files.clear();
+        self.recently_closed.clear();
+        self.refresh_git(cx);
+        self.watch(path.clone(), cx);
+        self.tree.update(cx, |tree, cx| tree.set_root(path.clone(), cx));
+        self.build_index(cx);
+        let mut session = crate::session::Session::load(&path);
+        session.window = self.window_state;
+        self.restore_session(session, window, cx);
+        self.schedule_session_save(cx);
+    }
+
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_tab(ix, true, window, cx);
+    }
+
+    /// Makes tab `ix` the current one; `focus` also moves the keyboard to it.
+    fn show_tab(&mut self, ix: usize, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix) else { return };
         self.active = Some(ix);
-        let editor = self.tabs[ix].editor.read(cx);
+        let editor = tab.editor.read(cx);
         let path = editor.path().map(Path::to_path_buf);
         if let Some(path) = &path {
             self.recent_files.retain(|p| p != path);
             self.recent_files.insert(0, path.clone());
             self.recent_files.truncate(50);
         }
-        window.set_window_title(&editor.file_name());
-        window.focus(&editor.focus_handle(cx));
+        if focus {
+            window.focus(&editor.focus_handle(cx));
+        }
+        self.refresh_title(window, cx);
+        self.tab_scroll.scroll_to_item(ix);
         self.share_open_files(cx);
         self.schedule_session_save(cx);
         self.tree.update(cx, |tree, cx| tree.set_active(path, cx));
@@ -706,52 +714,51 @@ impl Workspace {
     }
 
     fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
         self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
+        // Focus follows to the next tab only if it was in the tab being closed (deleting a
+        // file from the tree keeps the keyboard in the tree).
+        let had_focus = tab.editor.focus_handle(cx).contains_focused(window, cx);
         if let Some(path) = tab.editor.read(cx).path() {
             self.recently_closed.push(path.to_path_buf());
         }
         tab.editor.update(cx, |editor, cx| editor.release_lsp(cx));
         if self.tabs.is_empty() {
             self.active = None;
-            window.set_window_title("Null");
-            window.focus(&self.focus_handle);
+            self.refresh_title(window, cx);
+            if had_focus {
+                window.focus(&self.focus_handle);
+            }
             self.tree.update(cx, |tree, cx| tree.set_active(None, cx));
             cx.notify();
         } else {
             let active = self.active.unwrap_or(0);
-            let next = if active > ix || active == self.tabs.len() { active - 1 } else { active };
-            self.activate(next.min(self.tabs.len() - 1), window, cx);
+            let next = if active > ix || active == self.tabs.len() { active.saturating_sub(1) } else { active };
+            self.show_tab(next.min(self.tabs.len() - 1), had_focus, window, cx);
         }
     }
 
+    /// "file — project" in the title bar, and the close button's unsaved dot.
+    fn refresh_title(&self, window: &mut Window, cx: &App) {
+        let project = self.tree.read(cx).root().file_name().map(|n| n.to_string_lossy().into_owned());
+        let editor = self.active_editor().map(|e| e.read(cx));
+        let title = match (editor.map(|e| e.file_name()), project) {
+            (Some(file), Some(project)) => format!("{file} — {project}"),
+            (Some(file), None) => file,
+            (None, Some(project)) => project,
+            (None, None) => "Null".into(),
+        };
+        window.set_window_title(&title);
+        window.set_window_edited(self.tabs.iter().any(|t| t.editor.read(cx).buffer.is_dirty()));
+    }
+
     fn close_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let editor = self.tabs[ix].editor.clone();
-        if !editor.read(cx).buffer.is_dirty() {
-            self.remove_tab(ix, window, cx);
-            return;
-        }
-        let message = format!("Save changes to {}?", editor.read(cx).file_name());
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &message,
-            Some("Your changes will be lost if you don't save them."),
-            &["Save", "Don't Save", "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(choice) = answer.await else { return };
-            this.update_in(cx, |this, window, cx| {
-                if choice == 2 || (choice == 0 && !editor.update(cx, |editor, cx| editor.save_to_disk(cx))) {
-                    return;
-                }
-                if let Some(ix) = this.tabs.iter().position(|tab| tab.editor == editor) {
-                    this.remove_tab(ix, window, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        // The index can be out of date (a click on a tab already gone).
+        let Some(editor) = self.tabs.get(ix).map(|t| t.editor.clone()) else { return };
+        self.confirm_unsaved(CloseAction::CloseTabs(vec![editor]), window, cx);
     }
 
     /// Asks before discarding unsaved changes. Returns true when `action` can go ahead
@@ -783,13 +790,14 @@ impl Workspace {
                 if choice == 2 {
                     return;
                 }
-                if choice == 0 {
-                    let saved = dirty.iter().all(|editor| editor.update(cx, |editor, cx| editor.save_to_disk(cx)));
-                    if !saved {
-                        return;
-                    }
+                if choice == 1 {
+                    return this.finish_close(action, window, cx);
                 }
-                this.finish_close(action, window, cx);
+                // Save: files with a name right away, then ask where to put each untitled one.
+                let (named, untitled): (Vec<_>, Vec<_>) = dirty.into_iter().partition(|e| e.read(cx).path().is_some());
+                if named.iter().all(|editor| editor.update(cx, |editor, cx| editor.save_to_disk(cx))) {
+                    this.save_untitled_then(untitled, action, window, cx);
+                }
             })
             .ok();
         })
@@ -797,9 +805,49 @@ impl Workspace {
         false
     }
 
+    /// Asks where to save each untitled file in turn, then goes on with `action`.
+    /// Cancelling any of them stops there, so nothing unsaved is lost.
+    fn save_untitled_then(
+        &mut self,
+        mut pending: Vec<Entity<Editor>>,
+        action: CloseAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = pending.first().cloned() else { return self.finish_close(action, window, cx) };
+        // Show which file the dialog is about.
+        if let Some(ix) = self.tabs.iter().position(|t| t.editor == editor) {
+            self.activate(ix, window, cx);
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        let answer = cx.prompt_for_new_path(&root, None);
+        let lsp = self.lsp.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                let saved = editor.update(cx, |editor, cx| {
+                    editor.set_path(path, Some(lsp), cx);
+                    editor.save_to_disk(cx)
+                });
+                if saved {
+                    pending.remove(0);
+                    this.save_untitled_then(pending, action, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn finish_close(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             CloseAction::Quit => cx.quit(),
+            CloseAction::SwitchProject(path) => {
+                while !self.tabs.is_empty() {
+                    self.remove_tab(self.tabs.len() - 1, window, cx);
+                }
+                self.switch_project(path, window, cx);
+            }
             CloseAction::CloseWindow => window.remove_window(),
             CloseAction::CloseTabs(editors) => {
                 for editor in editors {
@@ -887,10 +935,9 @@ impl Workspace {
         .detach();
     }
 
-    fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm_unsaved(CloseAction::Quit, window, cx) {
-            cx.quit();
-        }
+    /// Quits, after asking about unsaved changes (finishing the close quits).
+    pub fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_unsaved(CloseAction::Quit, window, cx);
     }
 
     fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
@@ -1048,8 +1095,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.palette = None;
+        // Replacing a list keeps the way back to where the keyboard was before it.
+        let replacing = self.palette.take().is_some();
+        let saved = self.focus_before_palette.clone();
         self.open_palette_with(PaletteKind::Locations, Some(title), locations, window, cx);
+        if replacing {
+            self.focus_before_palette = saved;
+        }
     }
 
     fn open_palette_with(
@@ -1060,6 +1112,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.welcome.is_some() {
+            return;
+        }
         if let Some((palette, _)) = &self.palette {
             if palette.read(cx).kind() == kind {
                 return self.close_palette(window, cx);
@@ -1160,6 +1215,9 @@ impl Workspace {
     }
 
     fn go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_editor().is_none() {
+            return self.show_notice("Open a file to go to one of its lines".into(), cx);
+        }
         self.open_palette(PaletteKind::Line, window, cx);
     }
 
@@ -1357,7 +1415,7 @@ impl Workspace {
             let root = self.tree.read(cx).root().to_path_buf();
             let shell = match Shell::start(root) {
                 Ok(shell) => shell,
-                Err(err) => return eprintln!("null: couldn't start a terminal: {err}"),
+                Err(err) => return self.show_notice(format!("Couldn't start a terminal: {err}"), cx),
             };
             let terminal = cx.new(|cx| TerminalView::new(shell, cx));
             let subscription = cx.subscribe_in(&terminal, window, |this, _, event, window, cx| match event {
@@ -1461,6 +1519,9 @@ impl Workspace {
 
     /// ⌘, opens the Settings window, or closes it.
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if self.welcome.is_some() {
+            return;
+        }
         if self.settings_panel.is_some() {
             return self.close_palette(window, cx);
         }
@@ -1701,53 +1762,110 @@ impl Workspace {
         }
     }
 
+    /// Each tab's name, with its folder added where two tabs share a name (mod.rs · a).
+    fn tab_labels(&self, cx: &App) -> Vec<(String, Option<String>)> {
+        let names: Vec<(String, Option<PathBuf>)> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let editor = t.editor.read(cx);
+                (editor.file_name(), editor.path().map(Path::to_path_buf))
+            })
+            .collect();
+        names
+            .iter()
+            .map(|(name, path)| {
+                let shared = names.iter().filter(|(other, _)| other == name).count() > 1;
+                let folder = path
+                    .as_ref()
+                    .filter(|_| shared)
+                    .and_then(|p| p.parent()?.file_name())
+                    .map(|f| f.to_string_lossy().into_owned());
+                (name.clone(), folder)
+            })
+            .collect()
+    }
+
     fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.global::<Theme>();
+        let theme = cx.global::<Theme>().clone();
+        let labels = self.tab_labels(cx);
         div()
             .id("tabs")
             .flex()
             .gap(px(2.))
             .min_w_0()
             .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll)
             .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
                 let editor = tab.editor.read(cx);
                 let active = self.active == Some(ix);
                 let dirty = editor.buffer.is_dirty();
                 let group = format!("tab-{ix}");
+                // Unsaved: a small dot, which turns into the close button under the pointer.
                 let close = div()
                     .id(("close", ix))
+                    .relative()
                     .size(px(16.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .text_size(px(14.))
-                    .text_color(if active || dirty { theme.muted } else { gpui::transparent_black() })
-                    .group_hover(group.clone(), |s| s.text_color(theme.muted))
-                    .hover(|s| s.bg(theme.faint.opacity(0.4)).text_color(theme.foreground))
-                    .child(if dirty { "●" } else { "×" })
+                    .flex_none()
+                    .rounded(px(ui::R_KEY))
+                    .hover(|s| s.bg(theme.hairline))
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(!dirty, |d| d.invisible())
+                            .group_hover(group.clone(), |s| s.invisible())
+                            .child(div().size(px(7.)).rounded_full().bg(theme.muted)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(dirty || !active, |d| d.invisible())
+                            .group_hover(group.clone(), |s| s.visible())
+                            .child(svg().path("icons/x.svg").size(px(10.)).text_color(theme.muted)),
+                    )
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         this.close_tab_at(ix, window, cx);
                     }));
+                let (name, folder) = labels[ix].clone();
                 div()
                     .id(("tab", ix))
                     .group(group)
                     .h(px(28.))
+                    .max_w(px(220.))
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap(px(8.))
                     .pl(px(12.))
                     .pr(px(6.))
-                    .rounded(px(7.))
-                    .text_size(px(12.5))
+                    .rounded(px(ui::R_CONTROL))
+                    .text_size(px(ui::T_MD))
                     .text_color(if active { theme.foreground } else { theme.muted })
                     .when(active, |tab| tab.bg(theme.hairline))
                     .when(!active, |tab| tab.hover(|s| s.bg(theme.hairline.opacity(0.6))))
-                    .child(editor.file_name())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .gap(px(6.))
+                            .child(div().min_w_0().truncate().child(name))
+                            .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
+                    )
                     .child(close)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(ix, window, cx)))
+                    // Middle-click closes, as in browsers.
+                    .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.close_tab_at(ix, window, cx)
+                    }))
             }))
             .into_any_element()
     }
@@ -1787,6 +1905,8 @@ enum CloseAction {
     Quit,
     CloseWindow,
     CloseTabs(Vec<Entity<Editor>>),
+    /// Open another folder as the project: every tab closes first.
+    SwitchProject(PathBuf),
 }
 
 impl Focusable for Workspace {
@@ -2027,6 +2147,10 @@ impl Render for Workspace {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                // The welcome is closed by its own button, not by clicking around it.
+                                if this.welcome.is_some() {
+                                    return;
+                                }
                                 this.key_prompt = None;
                                 this.close_palette(window, cx);
                             }),
