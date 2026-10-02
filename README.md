@@ -84,7 +84,10 @@ Settings) turns it off entirely.
   dimmed code it replaces.
 - **Suggestions while typing** (Settings → AI, off by default): names from the file appear
   the moment you type two letters, then the AI's guess when you pause, streamed in; ⇥ takes
-  it, typing along keeps it. A separate fast model can be set for these.
+  it, typing along keeps it. They come from a code model made to fill in the middle
+  (StarCoder2 on NVIDIA, Qwen2.5-Coder on Ollama; changeable in Settings → AI), which sees the
+  file and the files it includes or imports, and can write a whole body after `{` or `:`.
+  `NULL_AI_LOG=<file>` logs how long each request takes.
 
 Choose where answers come from in Settings → AI:
 

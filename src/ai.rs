@@ -135,6 +135,10 @@ impl AiSettings {
     /// The model for suggestions while typing: the one set for them, else a fast default.
     pub fn completion_model(&self, id: ProviderId) -> Option<String> {
         self.providers.get(id.key()).and_then(|p| p.completion_model.clone()).filter(|m| !m.is_empty()).or(match id {
+            // Code models trained to fill in the middle: fast, and they continue the code
+            // instead of talking about it.
+            ProviderId::Nvidia => Some("bigcode/starcoder2-15b".into()),
+            ProviderId::Ollama => Some("qwen2.5-coder:1.5b".into()),
             ProviderId::Claude => Some("claude-haiku-4-5-20251001".into()),
             _ => None,
         })
@@ -517,6 +521,195 @@ fn codex(model: Option<String>, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) 
     }
     on_text(&answer);
     finish_cli("codex", child)
+}
+
+// ---------- fill in the middle ----------
+
+/// The code around the caret, for a model trained to write what goes between.
+pub struct Fim {
+    pub prefix: String,
+    pub suffix: String,
+    pub max_tokens: u32,
+}
+
+/// How a code model expects the text before and after the gap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FimFormat {
+    StarCoder,
+    /// CodeGemma and Qwen2.5-Coder.
+    Pipes,
+    DeepSeek,
+    CodeLlama,
+    Codestral,
+}
+
+impl FimFormat {
+    fn for_model(model: &str) -> Option<Self> {
+        let m = model.to_lowercase();
+        Some(if m.contains("starcoder") || m.contains("santacoder") {
+            FimFormat::StarCoder
+        } else if m.contains("codegemma") || (m.contains("qwen") && m.contains("coder")) {
+            FimFormat::Pipes
+        } else if m.contains("deepseek-coder") {
+            FimFormat::DeepSeek
+        } else if m.contains("codellama") {
+            FimFormat::CodeLlama
+        } else if m.contains("codestral") {
+            FimFormat::Codestral
+        } else {
+            return None;
+        })
+    }
+
+    fn prompt(self, prefix: &str, suffix: &str) -> String {
+        match self {
+            FimFormat::StarCoder => format!("<fim_prefix>{prefix}<fim_suffix>{suffix}<fim_middle>"),
+            FimFormat::Pipes => format!("<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>"),
+            FimFormat::DeepSeek => format!("<｜fim▁begin｜>{prefix}<｜fim▁hole｜>{suffix}<｜fim▁end｜>"),
+            FimFormat::CodeLlama => format!("<PRE> {prefix} <SUF>{suffix} <MID>"),
+            FimFormat::Codestral => format!("[SUFFIX]{suffix}[PREFIX]{prefix}"),
+        }
+    }
+}
+
+/// Markers code models end a fill with, or start the next file with.
+const FIM_STOPS: [&str; 4] = ["<|endoftext|>", "<file_sep>", "<|file_separator|>", "<EOT>"];
+
+/// Whether suggestions can use a fill-in-the-middle model with these settings.
+pub fn fim_available(settings: &AiSettings) -> bool {
+    let id = settings.active();
+    match id {
+        ProviderId::Ollama => true,
+        ProviderId::Nvidia | ProviderId::OpenaiCompatible => {
+            settings.completion_model(id).is_some_and(|m| FimFormat::for_model(&m).is_some())
+        }
+        _ => false,
+    }
+}
+
+/// Like [`stream`], for a fill: the text that goes between `prefix` and `suffix`.
+pub fn stream_fim(settings: AiSettings, fim: Fim) -> futures::channel::mpsc::UnboundedReceiver<AiEvent> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    std::thread::Builder::new()
+        .name("ai-fill".into())
+        .spawn(move || {
+            let started = std::time::Instant::now();
+            let text_tx = tx.clone();
+            let mut first = None;
+            let result = fill(&settings, &fim, &mut |text| {
+                first.get_or_insert_with(|| started.elapsed());
+                text_tx.unbounded_send(AiEvent::Text(text.to_string())).ok();
+            });
+            log_request(&settings, "fill", started, first, &result);
+            tx.unbounded_send(match result {
+                Ok(()) => AiEvent::Done,
+                Err(message) => AiEvent::Failed(message),
+            })
+            .ok();
+        })
+        .ok();
+    rx
+}
+
+/// With `NULL_AI_LOG=<file>`, one line per request: how long until the first text, how long in all.
+pub fn log_request(
+    settings: &AiSettings,
+    kind: &str,
+    started: std::time::Instant,
+    first: Option<std::time::Duration>,
+    result: &Result<(), String>,
+) {
+    let Some(path) = std::env::var_os("NULL_AI_LOG") else { return };
+    let id = settings.active();
+    let model = settings.completion_model(id).or_else(|| settings.model(id)).unwrap_or_default();
+    let line = format!(
+        "{kind} {} {model}: first text {}, total {:.0?}{}\n",
+        id.key(),
+        first.map_or("never".to_string(), |d| format!("{d:.0?}")),
+        started.elapsed(),
+        result.as_ref().err().map(|e| format!(", failed: {e}")).unwrap_or_default(),
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        file.write_all(line.as_bytes()).ok();
+    }
+}
+
+fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
+    let id = settings.active();
+    let model = settings.completion_model(id).ok_or("No model for suggestions")?;
+    let base = settings.base_url(id).unwrap_or_default();
+    match id {
+        // Ollama formats the fill itself, from the model's own template.
+        ProviderId::Ollama => {
+            let host = base.trim_end_matches('/').trim_end_matches("/v1").to_string();
+            let body = json!({
+                "model": model,
+                "prompt": fim.prefix,
+                "suffix": fim.suffix,
+                "stream": true,
+                "options": { "num_predict": fim.max_tokens, "temperature": 0.2, "stop": FIM_STOPS },
+            });
+            let response = agent()
+                .post(&format!("{host}/api/generate"))
+                .send_json(&body)
+                .map_err(|e| format!("Couldn't reach Ollama at {host}. Is it running? ({e})"))?;
+            let status = response.status().as_u16();
+            let mut body = response.into_body();
+            if status >= 400 {
+                return Err(error_message(status, &body.read_to_string().unwrap_or_default()));
+            }
+            for line in BufReader::new(body.into_reader()).lines() {
+                let line = line.map_err(|e| format!("The connection dropped: {e}"))?;
+                let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
+                if let Some(text) = event["response"].as_str() {
+                    on_text(text);
+                }
+                if event["done"].as_bool() == Some(true) {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        ProviderId::Nvidia | ProviderId::OpenaiCompatible => {
+            let format = FimFormat::for_model(&model).ok_or("Not a fill-in-the-middle model")?;
+            let key = api_key(id);
+            if key.is_none() && id == ProviderId::Nvidia {
+                return Err(missing_key(id));
+            }
+            let body = json!({
+                "model": model,
+                "prompt": format.prompt(&fim.prefix, &fim.suffix),
+                "max_tokens": fim.max_tokens,
+                "temperature": 0.2,
+                "stream": true,
+                "stop": FIM_STOPS,
+            });
+            let mut request = agent()
+                .post(&format!("{}/completions", base.trim_end_matches('/')))
+                .header("Content-Type", "application/json");
+            if let Some(key) = &key {
+                request = request.header("Authorization", &format!("Bearer {key}"));
+            }
+            let response = request.send_json(&body).map_err(|e| format!("Couldn't reach {}: {e}", id.label()))?;
+            let status = response.status().as_u16();
+            let mut body = response.into_body();
+            if status >= 400 {
+                return Err(error_message(status, &body.read_to_string().unwrap_or_default()));
+            }
+            read_sse(body.into_reader(), |data| {
+                if data == "[DONE]" {
+                    return false;
+                }
+                if let Ok(event) = serde_json::from_str::<Value>(data)
+                    && let Some(text) = event["choices"][0]["text"].as_str()
+                {
+                    on_text(text);
+                }
+                true
+            })
+        }
+        _ => Err("Not a fill-in-the-middle provider".into()),
+    }
 }
 
 #[cfg(test)]

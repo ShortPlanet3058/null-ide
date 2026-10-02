@@ -32,6 +32,9 @@ const MAX_LINES: usize = 6;
 /// The file sent to the AI is cut to about this many characters around the caret.
 const CONTEXT_BEFORE: usize = 12_000;
 const CONTEXT_AFTER: usize = 3_000;
+/// Files the current one includes or imports, given to the AI: at most this many, cut to this size.
+const RELATED_FILES: usize = 4;
+const RELATED_CHARS: usize = 4_000;
 /// Names suggested from the file need at least this much typed.
 const MIN_PREFIX: usize = 2;
 
@@ -98,6 +101,54 @@ fn best_name(text: &str, prefix: &str, near: usize) -> Option<String> {
         .into_iter()
         .max_by_key(|(_, (count, distance, defined))| (*defined, *count, std::cmp::Reverse(*distance)))
         .map(|(word, _)| word.to_string())
+}
+
+/// Models whose fill requests failed this session: suggestions use chat for them instead.
+static FILL_FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn fill_key(settings: &ai::AiSettings) -> String {
+    let id = settings.active();
+    format!("{}:{}", id.key(), settings.completion_model(id).unwrap_or_default())
+}
+
+fn fill_failed(settings: &ai::AiSettings) -> bool {
+    FILL_FAILED.lock().is_ok_and(|f| f.contains(&fill_key(settings)))
+}
+
+fn mark_fill_failed(settings: &ai::AiSettings) {
+    if let Ok(mut failed) = FILL_FAILED.lock() {
+        failed.push(fill_key(settings));
+    }
+}
+
+/// The suggestion's lines: at most a few, no trailing blank ones, and stopping where
+/// it starts repeating the code that already follows the caret.
+fn shape_suggestion(completion: &str, suffix: &str, block: bool) -> Vec<String> {
+    let following: Vec<&str> = suffix.lines().skip(1).map(str::trim).filter(|l| !l.is_empty()).take(2).collect();
+    let all: Vec<&str> = completion.lines().collect();
+    let repeats_from = |i: usize| {
+        let rest: Vec<&str> = all[i..].iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        match (following.as_slice(), rest.as_slice()) {
+            ([first, second], [a, b, ..]) => a == first && b == second,
+            ([first, ..], [a]) => a == first,
+            ([first], [a, ..]) => a == first && first.len() > 2,
+            _ => false,
+        }
+    };
+    let mut lines: Vec<String> = Vec::new();
+    for (i, line) in all.iter().enumerate() {
+        if i > 0 && repeats_from(i) {
+            break;
+        }
+        lines.push(line.trim_end().to_string());
+        if lines.len() >= if block { MAX_LINES + 2 } else { MAX_LINES } {
+            break;
+        }
+    }
+    while lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
 }
 
 /// Removes what the AI repeated of the line before the caret, and what's already after it.
@@ -230,29 +281,46 @@ impl Editor {
             to -= 1;
         }
         let path = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into());
-        // A new block (after `:` or `{`, or on an empty line) can take a few lines; otherwise just this one.
+        let related = self.related_files();
+        let suffix_text = text[caret_byte..to].to_string();
+        // Code models fill the gap between what's before and after the caret: the best
+        // suggestions, and quick. Other models get a chat prompt instead.
+        let use_fill = ai::fim_available(&ai_settings) && !fill_failed(&ai_settings);
+        let comment = self.language().and_then(|l| l.line_comment).unwrap_or("//");
+        let fill = ai::Fim {
+            prefix: format!(
+                "{}{comment} {path}\n{}",
+                related.iter().map(|(name, body)| format!("{comment} {name}\n{body}\n\n")).collect::<String>(),
+                &text[from..caret_byte]
+            ),
+            suffix: suffix_text.clone(),
+            max_tokens: 160,
+        };
+        // A new block (after `:` or `{`, or on an empty line) can take a few lines.
         let block = before.trim().is_empty() || before.trim_end().ends_with([':', '{', '(', '[']);
-        let request = Prompt {
+        let context: String = related
+            .iter()
+            .map(|(name, body)| format!("Another file of the project, {name}:\n<file>\n{body}\n</file>\n\n"))
+            .collect();
+        let chat = Prompt {
             system: format!(
                 "You are the code completion in a code editor. The person is typing at <CURSOR>. Reply with \
                  only the characters that come next, continuing exactly from the cursor, as if you were \
                  typing them. Never repeat anything that is already before the cursor, not even part of the \
-                 current word. Use names that exist in the file. {} No explanation, no markdown, no fences. If \
-                 nothing obvious comes next, reply with nothing.",
-                if block {
-                    format!("You may write up to {MAX_LINES} lines, ending at a natural point.")
-                } else {
-                    "Finish the current line only.".to_string()
-                }
+                 current word. Finish the line, and when the code clearly goes on (a function body, the rest \
+                 of a block) write up to {MAX_LINES} lines, ending at a natural point. Use names from the \
+                 project, and well-known idioms. No explanation, no markdown, no fences. If nothing obvious \
+                 comes next, reply with nothing."
             ),
             user: format!(
-                "File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {before:?}",
+                "{context}File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {before:?}",
                 self.language_name(),
                 &text[from..caret_byte],
-                &text[caret_byte..to],
+                &suffix_text,
             ),
-            model: ai_settings.completion_model(provider),
-            max_tokens: Some(if block { 160 } else { 60 }),
+            // A fill-only code model can't chat; the usual model does it then.
+            model: ai_settings.completion_model(provider).filter(|_| !ai::fim_available(&ai_settings)),
+            max_tokens: Some(160),
         };
         self.ghost_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PAUSE).await;
@@ -262,7 +330,12 @@ impl Editor {
             if !still_there {
                 return;
             }
-            let mut events = ai::stream(ai_settings, request);
+            let started = std::time::Instant::now();
+            let mut events = if use_fill {
+                ai::stream_fim(ai_settings.clone(), fill)
+            } else {
+                ai::stream(ai_settings.clone(), chat)
+            };
             let mut answer = String::new();
             while let Some(event) = events.next().await {
                 let done = match event {
@@ -271,33 +344,100 @@ impl Editor {
                         false
                     }
                     AiEvent::Done => true,
-                    AiEvent::Failed(_) => return,
+                    AiEvent::Failed(message) => {
+                        if use_fill {
+                            // That model or endpoint can't fill: use the chat model from now on.
+                            mark_fill_failed(&ai_settings);
+                        } else {
+                            ai::log_request(&ai_settings, "chat", started, None, &Err(message));
+                        }
+                        return;
+                    }
                 };
-                // Show it as it comes, once there's a full line or it's done.
+                // Show it as it comes, a line at a time.
                 if !done && !answer.contains('\n') {
                     continue;
                 }
                 let current = answer.clone();
+                let suffix = suffix_text.clone();
                 let keep_going = this
                     .update(cx, |this, cx| {
                         if this.selection.head != offset || this.buffer.version() != version {
                             return false;
                         }
-                        let completion = trim_overlap(&before, &after, &ai::strip_code_fence(&current));
-                        let max = if block { MAX_LINES } else { 1 };
-                        let lines: Vec<String> = completion.trim_end().lines().take(max).map(str::to_string).collect();
+                        let completion = if use_fill { current.clone() } else { ai::strip_code_fence(&current) };
+                        let completion = trim_overlap(&before, &after, &completion);
+                        let lines = shape_suggestion(&completion, &suffix, block);
                         // Keep the file's suggestion if the AI has nothing better.
                         if lines.iter().any(|l| !l.trim().is_empty()) {
                             this.set_ghost(lines, cx);
                         }
-                        !done && (block || !current.contains('\n'))
+                        !done
                     })
                     .unwrap_or(false);
                 if !keep_going {
                     break;
                 }
             }
+            if !use_fill {
+                ai::log_request(&ai_settings, "chat", started, None, &Ok(()));
+            }
         }));
+    }
+
+    /// Files the current one pulls in (includes, imports, modules), so suggestions know
+    /// their names: the start of each, a few at most.
+    fn related_files(&self) -> Vec<(String, String)> {
+        let Some(path) = &self.path else { return Vec::new() };
+        let Some(dir) = path.parent() else { return Vec::new() };
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        // A C file's own header.
+        if matches!(path.extension().and_then(|e| e.to_str()), Some("c" | "cpp" | "cc")) {
+            candidates.push(path.with_extension("h"));
+        }
+        let text = self.buffer.to_string();
+        for line in text.lines().take(200) {
+            let line = line.trim();
+            let quoted = |l: &str| l.split(['"', '\'']).nth(1).map(str::to_string);
+            if let Some(rest) = line.strip_prefix("#include") {
+                if let Some(name) = quoted(rest) {
+                    for base in [dir.to_path_buf(), dir.join("include"), dir.join("../include")] {
+                        candidates.push(base.join(&name));
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("from ").or_else(|| line.strip_prefix("import ")) {
+                let module = rest.split_whitespace().next().unwrap_or("").trim_start_matches('.');
+                if !module.is_empty() {
+                    candidates.push(dir.join(format!("{}.py", module.replace('.', "/"))));
+                }
+            } else if let Some(name) = line.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')) {
+                candidates.push(dir.join(format!("{name}.rs")));
+                candidates.push(dir.join(name).join("mod.rs"));
+            } else if (line.starts_with("import ") || line.contains("require("))
+                && let Some(name) = quoted(line).filter(|n| n.starts_with('.'))
+            {
+                for ext in ["ts", "tsx", "js", "jsx"] {
+                    candidates.push(dir.join(format!("{name}.{ext}")));
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        candidates
+            .into_iter()
+            .filter(|p| p != path && p.is_file())
+            .filter_map(|p| p.canonicalize().ok())
+            .filter(|p| seen.insert(p.clone()))
+            .take(RELATED_FILES)
+            .filter_map(|p| {
+                let body = std::fs::read_to_string(&p).ok()?;
+                let mut end = body.len().min(RELATED_CHARS);
+                while !body.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let name = p.strip_prefix(dir.canonicalize().ok()?).unwrap_or(&p).display().to_string();
+                Some((name, body[..end].to_string()))
+            })
+            .collect()
     }
 
     fn accept_ghost(&mut self, _: &AcceptGhost, _: &mut Window, cx: &mut Context<Self>) {
@@ -347,5 +487,16 @@ mod tests {
         assert_eq!(trim_overlap("print(av", ")", "erage(xs)"), "erage(xs)");
         // A plain continuation is left alone.
         assert_eq!(trim_overlap("x = ", "", "len(xs)"), "len(xs)");
+    }
+
+    #[test]
+    fn suggestions_stop_before_repeating_what_follows() {
+        let suffix = "\n}\n\nint main(void)";
+        let completion = "\n    write(1, &c, 1);\n}\n\nint main(void)";
+        // The closing brace is already there: not suggested twice.
+        assert_eq!(shape_suggestion(completion, suffix, true), ["", "    write(1, &c, 1);"]);
+        // A brace that isn't there yet stays.
+        assert_eq!(shape_suggestion("\n    write(1, &c, 1);\n}", "", true), ["", "    write(1, &c, 1);", "}"]);
+        assert_eq!(shape_suggestion("x + 1\n\n\n", "", false), ["x + 1"]);
     }
 }
