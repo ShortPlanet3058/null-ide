@@ -2,6 +2,7 @@
 //! The JSON file stays one click away for anything not shown here.
 
 use crate::ai::{self, ProviderId};
+use crate::keymap::Keymap;
 use crate::palette::Category;
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -42,11 +43,11 @@ impl Section {
     }
 }
 
-/// A shortcut to list in the Keyboard section.
+/// A command to list in the Keyboard section, with whatever key the preset gives it.
 pub struct Shortcut {
     pub category: Category,
     pub label: SharedString,
-    pub keys: String,
+    pub action: Box<dyn Action>,
 }
 
 pub enum SettingsPanelEvent {
@@ -547,7 +548,7 @@ impl SettingsPanel {
             }
             rows.push(Self::row(
                 "Ask and edit",
-                Some("⌘I edits the selection with AI; ? in the palette asks about the file"),
+                Some("⌘I edits the selection with AI; “Ask About This File” in ⌘K asks about it"),
                 div(),
                 &theme,
             ));
@@ -555,23 +556,36 @@ impl SettingsPanel {
         rows
     }
 
-    fn keyboard(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn keyboard(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.global::<Theme>().clone();
+        let current = cx.global::<Settings>().keymap;
+        let presets = Keymap::ALL.into_iter().map(|k| (k, k.label().to_string())).collect();
         let mut rows = vec![
-            div()
-                .pt(px(12.))
-                .text_size(px(12.))
-                .text_color(theme.faint)
-                .child("Every shortcut, by category. Changing them is coming later.")
-                .into_any_element(),
+            Self::heading("Shortcuts", &theme),
+            Self::row(
+                "Keys from",
+                Some(current.summary()),
+                Self::choices("keymap", presets, current, &theme, cx, |_, keymap, cx| {
+                    settings::update(cx, |s| s.keymap = keymap)
+                }),
+                &theme,
+            ),
         ];
+        let keys_of = |s: &Shortcut| {
+            window.highest_precedence_binding_for_action(s.action.as_ref()).map(|b| crate::palette::format_keys(&b))
+        };
         for category in Category::ALL {
-            let members: Vec<&Shortcut> = self.shortcuts.iter().filter(|s| s.category == category).collect();
+            let members: Vec<(&Shortcut, String)> = self
+                .shortcuts
+                .iter()
+                .filter(|s| s.category == category)
+                .filter_map(|s| Some((s, keys_of(s)?)))
+                .collect();
             if members.is_empty() {
                 continue;
             }
             rows.push(Self::heading(category.label(), &theme));
-            for shortcut in members {
+            for (shortcut, keys) in members {
                 rows.push(
                     div()
                         .flex()
@@ -589,7 +603,7 @@ impl SettingsPanel {
                                 .bg(theme.hairline)
                                 .text_size(px(12.))
                                 .text_color(theme.muted)
-                                .child(shortcut.keys.clone()),
+                                .child(keys),
                         )
                         .into_any_element(),
                 );
@@ -606,7 +620,7 @@ impl Focusable for SettingsPanel {
 }
 
 impl Render for SettingsPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The provider can change elsewhere (the palette); keep the fields in step.
         if cx.global::<Settings>().ai.provider != self.fields_for {
             self.fill_provider_fields(cx);
@@ -616,7 +630,7 @@ impl Render for SettingsPanel {
             Section::Appearance => self.appearance(cx),
             Section::Editor => self.editor(cx),
             Section::Ai => self.ai(cx),
-            Section::Keyboard => self.keyboard(cx),
+            Section::Keyboard => self.keyboard(window, cx),
         };
         let current = self.section;
         let sidebar = div()
@@ -719,7 +733,11 @@ mod tests {
                     cx.set_global(settings);
                     cx.set_global(Theme::oled());
                 });
-                let shortcuts = vec![Shortcut { category: Category::File, label: "Save".into(), keys: "⌘S".into() }];
+                let shortcuts = vec![Shortcut {
+                    category: Category::File,
+                    label: "Save".into(),
+                    action: Box::new(crate::editor::Save),
+                }];
                 let (panel, cx) = cx.add_window_view(|_, cx| SettingsPanel::new(shortcuts, cx));
                 panel.update(cx, |panel, cx| {
                     panel.section = section;

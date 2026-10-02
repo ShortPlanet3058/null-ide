@@ -33,6 +33,9 @@ Getting around:
 | ⌘, | all settings |
 | ⌃G | go to a line |
 
+Coming from another editor? Pick its shortcuts (VS Code, JetBrains, Sublime Text or Zed) on
+the welcome screen or in Settings → Keyboard.
+
 Shaders are compiled when the app starts (GPUI's `runtime_shaders` feature), so the build
 doesn't need Xcode's separate Metal Toolchain download.
 
