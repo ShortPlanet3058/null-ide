@@ -466,6 +466,42 @@ impl SettingsPanel {
         ]
     }
 
+    /// Recommended models as chips under a model field; a click fills the field.
+    fn model_chips(
+        id: &'static str,
+        recommended: &'static [ai::Recommended],
+        current: Option<String>,
+        input: &Entity<TextInput>,
+        theme: &Theme,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .gap(px(6.))
+            .pt(px(6.))
+            .children(recommended.iter().enumerate().map(|(i, r)| {
+                let active = current.as_deref() == Some(r.model);
+                let input = input.clone();
+                div()
+                    .id((id, i))
+                    .flex()
+                    .gap(px(5.))
+                    .px(px(8.))
+                    .py(px(2.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .text_size(px(11.))
+                    .cursor_pointer()
+                    .when(active, |d| d.border_color(theme.caret).text_color(theme.foreground))
+                    .when(!active, |d| d.border_color(theme.hairline).text_color(theme.muted))
+                    .child(r.model)
+                    .child(div().text_color(theme.faint).child(r.note))
+                    .on_click(move |_, _, cx| input.update(cx, |input, cx| input.set_text(r.model, cx)))
+            }))
+            .into_any_element()
+    }
+
     fn ai(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = cx.global::<Settings>().clone();
         let theme = cx.global::<Theme>().clone();
@@ -479,130 +515,193 @@ impl SettingsPanel {
         if !s.ai.enabled {
             return vec![Self::heading("AI", &theme), switch];
         }
-        let providers = [
-            (ProviderId::ClaudeCode, "Your Claude subscription, through the claude command line tool"),
-            (ProviderId::Codex, "Your ChatGPT subscription, through the codex command line tool"),
-            (ProviderId::Claude, "The Anthropic API, with an API key"),
-            (ProviderId::Nvidia, "NVIDIA's hosted models, with an API key"),
-            (ProviderId::Ollama, "Models running on this computer with Ollama. No key needed"),
-            (ProviderId::OpenaiCompatible, "Any service with an OpenAI-style API"),
+        let groups: [(&str, &[ProviderId]); 3] = [
+            ("Your subscriptions", &[ProviderId::ClaudeCode, ProviderId::Codex]),
+            (
+                "Free to start",
+                &[
+                    ProviderId::Mistral,
+                    ProviderId::Groq,
+                    ProviderId::Gemini,
+                    ProviderId::OpenRouter,
+                    ProviderId::Nvidia,
+                    ProviderId::Ollama,
+                ],
+            ),
+            ("Paid per use", &[ProviderId::Claude, ProviderId::OpenaiCompatible]),
         ];
-        let list =
-            div().flex().flex_col().gap(px(4.)).py(px(8.)).children(providers.into_iter().map(|(id, detail)| {
-                let active = id == current;
-                div()
-                    .id(id.key())
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .rounded(px(9.))
-                    .cursor_pointer()
-                    .when(active, |d| d.bg(theme.accent_soft))
-                    .when(!active, |d| d.hover(|d| d.bg(theme.hairline.opacity(0.5))))
-                    .child(
-                        div()
-                            .size(px(14.))
-                            .rounded_full()
-                            .border_2()
-                            .border_color(if active { theme.caret } else { theme.faint })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(active, |d| d.child(div().size(px(6.)).rounded_full().bg(theme.caret))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(div().text_size(px(14.)).text_color(theme.foreground).child(id.label()))
-                            .child(div().text_size(px(12.)).text_color(theme.faint).child(detail)),
-                    )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_provider(id, cx)))
-            }));
-        let mut rows = vec![Self::heading("AI", &theme), switch, Self::heading("Provider", &theme)];
+        let mut rows = vec![Self::heading("AI", &theme), switch];
         if current == ProviderId::Off {
             rows.push(
                 div()
-                    .pt(px(6.))
+                    .pt(px(10.))
                     .text_size(px(12.))
                     .text_color(theme.muted)
                     .child("Choose where answers come from.")
                     .into_any_element(),
             );
         }
-        rows.push(list.into_any_element());
-        if current != ProviderId::Off {
-            rows.push(Self::heading(&format!("{} options", current.label()), &theme));
-            if matches!(
-                current,
-                ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible | ProviderId::Claude
-            ) {
-                rows.push(Self::row(
-                    "Model",
-                    Some("Leave empty for the default"),
-                    Self::field(&self.model, &theme),
-                    &theme,
-                ));
-            }
-            if matches!(current, ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible) {
-                rows.push(Self::row("Address", None, Self::field(&self.address, &theme), &theme));
-            }
-            if current.uses_api_key() {
-                let (status, label) = match self.has_key {
-                    Some(true) => ("Saved in the keychain", "Change…"),
-                    Some(false) => ("Not set yet", "Set API Key…"),
-                    // Not read yet this session (reading it can ask for permission).
-                    None => ("Kept in the system keychain", "Set API Key…"),
-                };
-                rows.push(Self::row(
-                    "API key",
-                    Some(status),
-                    Self::button("api-key", label, &theme).on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                        cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::SetApiKey)))
-                    })),
-                    &theme,
-                ));
-            }
-            if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
-                rows.push(Self::row(
-                    "Model",
-                    Some("Uses the model chosen in the command line tool itself"),
-                    div(),
-                    &theme,
-                ));
-            }
+        for (title, ids) in groups {
+            rows.push(Self::heading(title, &theme));
+            rows.push(
+                // Two columns, so the chosen provider's options stay close.
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(4.))
+                    .pt(px(4.))
+                    .children(ids.iter().map(|&id| {
+                        let active = id == current;
+                        div()
+                            .id(id.key())
+                            .w(px(255.))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .px(px(10.))
+                            .py(px(6.))
+                            .rounded(px(9.))
+                            .cursor_pointer()
+                            .when(active, |d| d.bg(theme.accent_soft))
+                            .when(!active, |d| d.hover(|d| d.bg(theme.hairline.opacity(0.5))))
+                            .child(
+                                div()
+                                    .size(px(14.))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(if active { theme.caret } else { theme.faint })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(active, |d| d.child(div().size(px(6.)).rounded_full().bg(theme.caret))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().text_size(px(14.)).text_color(theme.foreground).child(id.label()))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .line_height(px(15.))
+                                            .text_color(theme.faint)
+                                            .child(id.description()),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_provider(id, cx)))
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if current == ProviderId::Off {
+            return rows;
+        }
+        rows.push(Self::heading(&format!("{} options", current.label()), &theme));
+        if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
+            let program = if current == ProviderId::ClaudeCode { "claude" } else { "codex" };
+            let (status, detail) = match ai::find_cli(program) {
+                Some(path) => ("Installed".to_string(), path.display().to_string()),
+                None => ("Not installed".to_string(), ai::install_hint(current).unwrap_or_default().to_string()),
+            };
             rows.push(Self::row(
-                "Suggest code as you type",
-                Some("Names from the file at once, then the AI's guess when you pause; ⇥ takes it"),
-                Self::toggle("ai-completions", s.ai.completions, &theme, cx, |s| s.ai.completions = !s.ai.completions),
-                &theme,
-            ));
-            if s.ai.completions {
-                if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
-                    rows.push(Self::row(
-                        "Suggestions from the AI",
-                        Some("The command line tools take seconds to start, too slow for this: suggestions come from names in the file only"),
-                        div(),
-                        &theme,
-                    ));
-                } else {
-                    rows.push(Self::row(
-                        "Model for suggestions",
-                        Some("A small, fast model makes suggestions appear sooner"),
-                        Self::field(&self.completion_model, &theme),
-                        &theme,
-                    ));
-                }
-            }
-            rows.push(Self::row(
-                "Ask and edit",
-                Some("⌘I edits the selection with AI; “Ask About This File” in ⌘K asks about it"),
-                div(),
+                &format!("`{program}` command"),
+                Some(&detail),
+                div().text_size(px(13.)).text_color(theme.muted).child(status),
                 &theme,
             ));
         }
+        if current.uses_api_key() {
+            let get = current.key_url().map(|u| format!(" · get one at {u}")).unwrap_or_default();
+            let (status, label) = match self.has_key {
+                Some(true) => (format!("Saved in the keychain{get}"), "Change…"),
+                Some(false) => (format!("Not set yet{get}"), "Set API Key…"),
+                // Not read yet this session (reading it can ask for permission).
+                None => (format!("Kept in the system keychain{get}"), "Set API Key…"),
+            };
+            rows.push(Self::row(
+                "API key",
+                Some(&status),
+                Self::button("api-key", label, &theme).on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                    cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::SetApiKey)))
+                })),
+                &theme,
+            ));
+        }
+        let model = s.ai.model(current);
+        rows.push(Self::row(
+            "Model",
+            Some(if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
+                "For edits and answers. Empty: the one chosen in the tool"
+            } else {
+                "For edits and answers. Empty: the first one below"
+            }),
+            div().flex().flex_col().items_end().child(Self::field(&self.model, &theme)).child(Self::model_chips(
+                "model",
+                current.recommended(),
+                model,
+                &self.model,
+                &theme,
+            )),
+            &theme,
+        ));
+        if !current.efforts().is_empty() {
+            let effort = s.ai.effort(current);
+            let options = current.efforts().iter().map(|e| (*e, e.label().to_string())).collect();
+            let key = current.key();
+            rows.push(Self::row(
+                "Thinking",
+                Some("More is slower, and better on hard questions. Suggestions always use the least"),
+                Self::choices("effort", options, effort, &theme, cx, move |_, effort, cx| {
+                    settings::update(cx, |s| s.ai.providers.entry(key.into()).or_default().effort = Some(effort))
+                }),
+                &theme,
+            ));
+        }
+        if matches!(current, ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible) {
+            rows.push(Self::row("Address", None, Self::field(&self.address, &theme), &theme));
+        }
+        rows.push(Self::heading("Suggestions while typing", &theme));
+        rows.push(Self::row(
+            "Suggest code as you type",
+            Some("Names from the file at once, then the AI's guess when you pause; ⇥ takes it"),
+            Self::toggle("ai-completions", s.ai.completions, &theme, cx, |s| s.ai.completions = !s.ai.completions),
+            &theme,
+        ));
+        if s.ai.completions {
+            if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
+                rows.push(Self::row(
+                    "From the AI",
+                    Some("Command line tools take seconds to start, too slow for this: names from the file only. A free Mistral key gives the best suggestions"),
+                    div(),
+                    &theme,
+                ));
+            } else {
+                rows.push(Self::row(
+                    "Model for suggestions",
+                    Some("A code model that fills in the middle is best: fast, and it continues your code"),
+                    div().flex().flex_col().items_end().child(Self::field(&self.completion_model, &theme)).child(
+                        Self::model_chips(
+                            "suggestion-model",
+                            current.recommended_for_suggestions(),
+                            s.ai.completion_model(current),
+                            &self.completion_model,
+                            &theme,
+                        ),
+                    ),
+                    &theme,
+                ));
+            }
+        }
+        rows.push(Self::row(
+            "Ask and edit",
+            Some("⌘I edits the code at the caret; a question there, or “Ask About This File” in ⌘K, gets a note"),
+            div(),
+            &theme,
+        ));
         rows
     }
 

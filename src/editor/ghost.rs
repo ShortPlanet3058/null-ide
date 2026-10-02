@@ -321,6 +321,8 @@ impl Editor {
             // A fill-only code model can't chat; the usual model does it then.
             model: ai_settings.completion_model(provider).filter(|_| !ai::fim_available(&ai_settings)),
             max_tokens: Some(160),
+            // Thinking makes suggestions arrive too late to help: the least the provider allows.
+            effort: provider.efforts().iter().copied().find(|e| *e != ai::Effort::Auto),
         };
         self.ghost_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PAUSE).await;

@@ -91,16 +91,25 @@ Settings) turns it off entirely.
 
 Choose where answers come from in Settings → AI:
 
-| Provider | Needs |
-|---|---|
-| NVIDIA | an NVIDIA API key |
-| Ollama | Ollama running locally |
-| OpenAI-compatible | any compatible endpoint (`base_url` + `model` in settings), key optional |
-| Claude API | an Anthropic API key |
-| Claude Code | the `claude` CLI, signed in (uses your Claude plan) |
-| Codex | the `codex` CLI, signed in (uses your ChatGPT plan) |
+| Provider | Cost | Needs |
+|---|---|---|
+| Claude Code | your Claude plan (Pro or Max) | the `claude` command, signed in |
+| Codex | your ChatGPT plan | the `codex` command, signed in |
+| Mistral | free tier | a key from console.mistral.ai (Codestral gives the best suggestions) |
+| Groq | free tier | a key from console.groq.com |
+| Gemini | free on Flash models | a key from aistudio.google.com |
+| OpenRouter | free `:free` models | a key from openrouter.ai |
+| NVIDIA | free credits | a key from build.nvidia.com |
+| Ollama | free, local | Ollama running on this computer |
+| Claude API | paid per use | a key from console.anthropic.com |
+| OpenAI | paid per use | a key from platform.openai.com (or any compatible server) |
 
-API keys are read from `NVIDIA_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` when set,
+Each provider comes with recommended models (one click in Settings → AI) and a thinking
+level: quick by default, more for harder questions. Suggestions while typing always use the
+least thinking, and their own model, a fill-in-the-middle code model where there is one.
+
+API keys are read from the provider's usual variable (`MISTRAL_API_KEY`, `GROQ_API_KEY`,
+`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `NVIDIA_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) when set,
 otherwise from the system keychain (Settings → AI → API key), at most once per launch; they
 never go in the settings file. (A development build is a new binary each time, so macOS asks
 before letting it read the keychain; set the environment variable to avoid that.) Claude Code and Codex run with every tool disabled, so they can only answer; Null

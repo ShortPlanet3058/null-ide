@@ -21,6 +21,17 @@ pub enum ProviderId {
     Claude,
     ClaudeCode,
     Codex,
+    Mistral,
+    Groq,
+    Gemini,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
+}
+
+/// A model worth picking, with what it's good for.
+pub struct Recommended {
+    pub model: &'static str,
+    pub note: &'static str,
 }
 
 impl ProviderId {
@@ -29,10 +40,31 @@ impl ProviderId {
             ProviderId::Off => "Off",
             ProviderId::Nvidia => "NVIDIA",
             ProviderId::Ollama => "Ollama",
-            ProviderId::OpenaiCompatible => "OpenAI-compatible",
+            ProviderId::OpenaiCompatible => "OpenAI",
             ProviderId::Claude => "Claude API",
             ProviderId::ClaudeCode => "Claude Code",
             ProviderId::Codex => "Codex",
+            ProviderId::Mistral => "Mistral",
+            ProviderId::Groq => "Groq",
+            ProviderId::Gemini => "Gemini",
+            ProviderId::OpenRouter => "OpenRouter",
+        }
+    }
+
+    /// One line on what it is and what it costs.
+    pub fn description(self) -> &'static str {
+        match self {
+            ProviderId::Off => "No AI.",
+            ProviderId::ClaudeCode => "Your Claude plan (Pro or Max), through the claude command line tool",
+            ProviderId::Codex => "Your ChatGPT plan, through the codex command line tool",
+            ProviderId::Claude => "The Anthropic API, paid per use, with an API key",
+            ProviderId::OpenaiCompatible => "The OpenAI API, or any server that speaks it, with an API key",
+            ProviderId::Mistral => "Free tier · Codestral makes the best suggestions while typing",
+            ProviderId::Groq => "Free tier · very fast open models",
+            ProviderId::Gemini => "Free tier on the Flash models",
+            ProviderId::OpenRouter => "Free models (marked :free) and many paid ones, one key",
+            ProviderId::Nvidia => "Free credits · NVIDIA's hosted open models",
+            ProviderId::Ollama => "Models running on this computer. Free, private, no key",
         }
     }
 
@@ -46,12 +78,43 @@ impl ProviderId {
             ProviderId::Claude => "claude",
             ProviderId::ClaudeCode => "claude_code",
             ProviderId::Codex => "codex",
+            ProviderId::Mistral => "mistral",
+            ProviderId::Groq => "groq",
+            ProviderId::Gemini => "gemini",
+            ProviderId::OpenRouter => "openrouter",
+        }
+    }
+
+    /// The thinking levels this provider can be asked for (none: it can't be told).
+    pub fn efforts(self) -> &'static [Effort] {
+        use Effort::*;
+        match self {
+            ProviderId::Off | ProviderId::Ollama | ProviderId::Mistral => &[],
+            // Nemotron's thinking is on or off.
+            ProviderId::Nvidia => &[Off, Medium],
+            // Opus 5.5 always thinks a little; "low" is the least.
+            ProviderId::Claude => &[Low, Medium, High],
+            ProviderId::Groq => &[Low, Medium, High],
+            ProviderId::Gemini => &[Off, Low, Medium, High],
+            ProviderId::OpenRouter => &[Auto, Off, Low, Medium, High],
+            ProviderId::OpenaiCompatible | ProviderId::ClaudeCode | ProviderId::Codex => &[Auto, Low, Medium, High],
+        }
+    }
+
+    /// Quick enough for small edits and short answers; raise it in Settings for harder work.
+    pub fn default_effort(self) -> Effort {
+        match self {
+            // NVIDIA's thinking can turn a one-second edit into a thirty-second one.
+            ProviderId::Nvidia | ProviderId::Gemini => Effort::Off,
+            ProviderId::OpenaiCompatible => Effort::Auto,
+            ProviderId::Off | ProviderId::Ollama | ProviderId::Mistral => Effort::Auto,
+            _ => Effort::Low,
         }
     }
 
     /// Whether this provider takes an API key (Ollama and the CLIs don't).
     pub fn uses_api_key(self) -> bool {
-        matches!(self, ProviderId::Nvidia | ProviderId::OpenaiCompatible | ProviderId::Claude)
+        !matches!(self, ProviderId::Off | ProviderId::Ollama | ProviderId::ClaudeCode | ProviderId::Codex)
     }
 
     fn key_env(self) -> Option<&'static str> {
@@ -59,6 +122,24 @@ impl ProviderId {
             ProviderId::Nvidia => Some("NVIDIA_API_KEY"),
             ProviderId::OpenaiCompatible => Some("OPENAI_API_KEY"),
             ProviderId::Claude => Some("ANTHROPIC_API_KEY"),
+            ProviderId::Mistral => Some("MISTRAL_API_KEY"),
+            ProviderId::Groq => Some("GROQ_API_KEY"),
+            ProviderId::Gemini => Some("GEMINI_API_KEY"),
+            ProviderId::OpenRouter => Some("OPENROUTER_API_KEY"),
+            _ => None,
+        }
+    }
+
+    /// Where to get a key, for the key prompt.
+    pub fn key_url(self) -> Option<&'static str> {
+        match self {
+            ProviderId::Nvidia => Some("build.nvidia.com"),
+            ProviderId::OpenaiCompatible => Some("platform.openai.com/api-keys"),
+            ProviderId::Claude => Some("console.anthropic.com"),
+            ProviderId::Mistral => Some("console.mistral.ai"),
+            ProviderId::Groq => Some("console.groq.com/keys"),
+            ProviderId::Gemini => Some("aistudio.google.com/apikey"),
+            ProviderId::OpenRouter => Some("openrouter.ai/keys"),
             _ => None,
         }
     }
@@ -68,17 +149,129 @@ impl ProviderId {
             ProviderId::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
             ProviderId::Ollama => Some("http://localhost:11434/v1"),
             ProviderId::OpenaiCompatible => Some("https://api.openai.com/v1"),
+            ProviderId::Mistral => Some("https://api.mistral.ai/v1"),
+            ProviderId::Groq => Some("https://api.groq.com/openai/v1"),
+            ProviderId::Gemini => Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+            ProviderId::OpenRouter => Some("https://openrouter.ai/api/v1"),
             _ => None,
         }
     }
 
     pub fn default_model(self) -> Option<&'static str> {
         match self {
-            ProviderId::Nvidia => Some("nvidia/nemotron-3-super-120b-a12b"),
-            ProviderId::Ollama => Some("qwen2.5-coder:7b"),
-            ProviderId::Claude => Some("claude-opus-5-5"),
-            // The CLIs use whatever model the person picked in them.
-            _ => None,
+            // The command line tools use the model chosen in them, unless one is set here.
+            ProviderId::ClaudeCode | ProviderId::Codex => None,
+            _ => self.recommended().first().map(|r| r.model),
+        }
+    }
+
+    /// Models worth picking for answers and edits, the default first.
+    pub fn recommended(self) -> &'static [Recommended] {
+        match self {
+            ProviderId::Off => &[],
+            ProviderId::Claude => &[
+                Recommended { model: "claude-opus-5-5", note: "strongest" },
+                Recommended { model: "claude-sonnet-5-5", note: "balanced" },
+                Recommended { model: "claude-haiku-4-5", note: "fastest" },
+            ],
+            ProviderId::ClaudeCode => &[
+                Recommended { model: "sonnet", note: "balanced" },
+                Recommended { model: "opus", note: "strongest" },
+                Recommended { model: "haiku", note: "fastest" },
+            ],
+            ProviderId::Codex | ProviderId::OpenaiCompatible => &[
+                Recommended { model: "gpt-6.1-sol", note: "balanced" },
+                Recommended { model: "gpt-6-astra", note: "strongest" },
+                Recommended { model: "gpt-6-luna", note: "fastest" },
+            ],
+            ProviderId::Mistral => &[
+                Recommended { model: "mistral-medium-latest", note: "strongest" },
+                Recommended { model: "mistral-small-latest", note: "fast" },
+            ],
+            ProviderId::Groq => &[
+                Recommended { model: "openai/gpt-oss-120b", note: "strongest" },
+                Recommended { model: "llama-3.3-70b-versatile", note: "balanced" },
+                Recommended { model: "openai/gpt-oss-20b", note: "fastest" },
+            ],
+            ProviderId::Gemini => &[
+                Recommended { model: "gemini-3.8-flash", note: "balanced, free" },
+                Recommended { model: "gemini-3.1-pro-preview", note: "strongest, paid" },
+                Recommended { model: "gemini-3.5-flash-lite", note: "fastest, free" },
+            ],
+            ProviderId::OpenRouter => &[
+                Recommended { model: "qwen/qwen3.8-27b:free", note: "free" },
+                Recommended { model: "nvidia/nemotron-3-super-120b-a12b:free", note: "free" },
+                Recommended { model: "poolside/laguna-s-2.1:free", note: "free, for code" },
+            ],
+            ProviderId::Nvidia => &[
+                Recommended { model: "nvidia/nemotron-3-super-120b-a12b", note: "balanced" },
+                Recommended { model: "deepseek-ai/deepseek-v4.1-flash", note: "fast" },
+                Recommended { model: "mistralai/codestral-22b-instruct-v0.1", note: "for code" },
+            ],
+            ProviderId::Ollama => &[
+                Recommended { model: "qwen2.5-coder:7b", note: "for code" },
+                Recommended { model: "qwen2.5-coder:14b", note: "stronger, slower" },
+            ],
+        }
+    }
+
+    /// Models worth picking for suggestions while typing, the default first. Fill-in-the-middle
+    /// code models where the provider has them: fast, and they continue the code.
+    pub fn recommended_for_suggestions(self) -> &'static [Recommended] {
+        match self {
+            ProviderId::Nvidia => &[
+                Recommended { model: "bigcode/starcoder2-15b", note: "fills in code" },
+                Recommended { model: "google/codegemma-7b", note: "fills in code, faster" },
+            ],
+            ProviderId::Ollama => &[
+                Recommended { model: "qwen2.5-coder:1.5b", note: "fills in code" },
+                Recommended { model: "qwen2.5-coder:7b", note: "better, slower" },
+            ],
+            ProviderId::Mistral => &[Recommended { model: "codestral-latest", note: "fills in code" }],
+            ProviderId::Claude => &[Recommended { model: "claude-haiku-4-5", note: "fastest" }],
+            ProviderId::Groq => &[
+                Recommended { model: "llama-3.1-8b-instant", note: "fastest" },
+                Recommended { model: "openai/gpt-oss-20b", note: "smarter" },
+            ],
+            ProviderId::Gemini => &[Recommended { model: "gemini-3.5-flash-lite", note: "fastest" }],
+            ProviderId::OpenRouter => &[Recommended { model: "cohere/north-mini-code:free", note: "free, for code" }],
+            ProviderId::OpenaiCompatible => &[Recommended { model: "gpt-6-luna", note: "fastest" }],
+            ProviderId::Off | ProviderId::ClaudeCode | ProviderId::Codex => &[],
+        }
+    }
+}
+
+/// How much a model thinks before answering: more is slower and, for hard
+/// questions, better. Not every provider has every level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    /// Send nothing: the model decides.
+    Auto,
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl Effort {
+    pub fn label(self) -> &'static str {
+        match self {
+            Effort::Auto => "Model's default",
+            Effort::Off => "Off",
+            Effort::Low => "Low",
+            Effort::Medium => "Medium",
+            Effort::High => "High",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Effort::Auto => "auto",
+            Effort::Off => "off",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
         }
     }
 }
@@ -94,8 +287,10 @@ pub struct ProviderSettings {
     /// A faster model for suggestions while typing; the usual one when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_model: Option<String>,
-    /// Let reasoning models think before answering. Slower; off by default on NVIDIA,
-    /// where it can turn a one-second edit into a thirty-second one.
+    /// How much the model thinks first; the provider's default when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+    /// The older on/off switch for thinking, still read from existing settings files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
 }
@@ -134,18 +329,21 @@ impl AiSettings {
 
     /// The model for suggestions while typing: the one set for them, else a fast default.
     pub fn completion_model(&self, id: ProviderId) -> Option<String> {
-        self.providers.get(id.key()).and_then(|p| p.completion_model.clone()).filter(|m| !m.is_empty()).or(match id {
-            // Code models trained to fill in the middle: fast, and they continue the code
-            // instead of talking about it.
-            ProviderId::Nvidia => Some("bigcode/starcoder2-15b".into()),
-            ProviderId::Ollama => Some("qwen2.5-coder:1.5b".into()),
-            ProviderId::Claude => Some("claude-haiku-4-5-20251001".into()),
-            _ => None,
-        })
+        self.providers
+            .get(id.key())
+            .and_then(|p| p.completion_model.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| id.recommended_for_suggestions().first().map(|r| r.model.to_string()))
     }
 
-    fn reasoning(&self, id: ProviderId) -> bool {
-        self.providers.get(id.key()).and_then(|p| p.reasoning).unwrap_or(false)
+    /// How much the model thinks: the level set for this provider (if it offers it),
+    /// else its default.
+    pub fn effort(&self, id: ProviderId) -> Effort {
+        let saved = self.providers.get(id.key());
+        saved
+            .and_then(|p| p.effort.or(p.reasoning.map(|on| if on { Effort::Medium } else { Effort::Off })))
+            .filter(|e| id.efforts().contains(e))
+            .unwrap_or(id.default_effort())
     }
 
     fn base_url(&self, id: ProviderId) -> Option<String> {
@@ -213,6 +411,8 @@ pub struct Prompt {
     pub model: Option<String>,
     /// Caps the answer's length, which also makes it come back sooner.
     pub max_tokens: Option<u32>,
+    /// A different thinking level than the provider's (the least, for suggestions).
+    pub effort: Option<Effort>,
 }
 
 pub enum AiEvent {
@@ -258,32 +458,46 @@ pub fn strip_code_fence(text: &str) -> String {
 /// Asks the configured provider and calls `on_text` as the answer arrives.
 /// Blocking: run it off the UI thread. Errors are written for people, not logs.
 pub fn ask(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let mut first = None;
+    let result = ask_inner(settings, prompt, &mut |text| {
+        first.get_or_insert_with(|| started.elapsed());
+        on_text(text)
+    });
+    log_request(settings, "ask", started, first, &result);
+    result
+}
+
+fn ask_inner(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
     let id = settings.active();
+    let effort = prompt.effort.filter(|e| id.efforts().contains(e)).unwrap_or(settings.effort(id));
+    let model = prompt.model.clone().or_else(|| settings.model(id));
     match id {
-        ProviderId::Off => Err("AI is off. Choose a provider with “AI: Use …” in the command palette.".into()),
-        ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible => {
-            let base = settings.base_url(id).unwrap_or_default();
-            let model = prompt.model.clone().or_else(|| settings.model(id)).ok_or_else(|| {
-                format!("Set a model for {} in settings (\"ai\" → \"{}\" → \"model\").", id.label(), id.key())
-            })?;
-            let key = api_key(id);
-            if key.is_none() && id != ProviderId::Ollama && id != ProviderId::OpenaiCompatible {
-                return Err(missing_key(id));
-            }
-            openai_compatible(id, &base, &model, key.as_deref(), settings.reasoning(id), prompt, on_text)
-        }
+        ProviderId::Off => Err("AI is off. Turn it on in Settings → AI (⌘,).".into()),
         ProviderId::Claude => {
             let key = api_key(id).ok_or_else(|| missing_key(id))?;
-            let model = prompt.model.clone().or_else(|| settings.model(id)).unwrap_or_default();
-            claude_api(&model, &key, prompt, on_text)
+            claude_api(&model.unwrap_or_default(), &key, effort, prompt, on_text)
         }
-        ProviderId::ClaudeCode => claude_code(settings.model(id), prompt, on_text),
-        ProviderId::Codex => codex(settings.model(id), prompt, on_text),
+        ProviderId::ClaudeCode => claude_code(model, effort, prompt, on_text),
+        ProviderId::Codex => codex(model, effort, prompt, on_text),
+        _ => {
+            let base = settings.base_url(id).unwrap_or_default();
+            let model = model.ok_or_else(|| format!("Choose a model for {} in Settings → AI.", id.label()))?;
+            let key = api_key(id);
+            // A custom OpenAI-compatible server may not need a key; OpenAI's own does.
+            let keyless =
+                id == ProviderId::Ollama || (id == ProviderId::OpenaiCompatible && !base.contains("api.openai.com"));
+            if key.is_none() && !keyless {
+                return Err(missing_key(id));
+            }
+            openai_compatible(id, &base, &model, key.as_deref(), effort, prompt, on_text)
+        }
     }
 }
 
 fn missing_key(id: ProviderId) -> String {
-    format!("No API key for {}. Add one with “AI: Set API Key” in the command palette.", id.label())
+    let get = id.key_url().map(|u| format!(" (get one at {u})")).unwrap_or_default();
+    format!("No API key for {}{get}. Add it in Settings → AI.", id.label())
 }
 
 fn agent() -> ureq::Agent {
@@ -321,12 +535,52 @@ fn read_sse(reader: impl Read, mut on_data: impl FnMut(&str) -> bool) -> Result<
     Ok(())
 }
 
+/// The request for an OpenAI-style chat, with each service's own rules for length,
+/// temperature and thinking.
+fn chat_body(id: ProviderId, base: &str, model: &str, effort: Effort, prompt: &Prompt) -> Value {
+    let mut body = json!({
+        "model": model,
+        "stream": true,
+        "messages": [
+            { "role": "system", "content": prompt.system },
+            { "role": "user", "content": prompt.user },
+        ],
+    });
+    let max_tokens = prompt.max_tokens.unwrap_or(4096);
+    // OpenAI's own reasoning models reject `temperature` and the old `max_tokens`.
+    let openai = id == ProviderId::OpenaiCompatible && base.contains("api.openai.com");
+    if openai {
+        body["max_completion_tokens"] = json!(max_tokens);
+    } else {
+        body["max_tokens"] = json!(max_tokens);
+        if !matches!(id, ProviderId::OpenRouter | ProviderId::OpenaiCompatible) {
+            body["temperature"] = json!(0.2);
+        }
+    }
+    // Each service asks for thinking its own way; unknown fields can be refused, so
+    // nothing is sent where it isn't documented.
+    let level = |e: Effort, off: &'static str| if e == Effort::Off { off } else { e.key() };
+    match (id, effort) {
+        (_, Effort::Auto) => {}
+        (ProviderId::Nvidia, e) => body["chat_template_kwargs"] = json!({ "enable_thinking": e != Effort::Off }),
+        (ProviderId::OpenRouter, e) => body["reasoning"] = json!({ "effort": level(e, "none") }),
+        (ProviderId::Gemini, e) => body["reasoning_effort"] = json!(level(e, "minimal")),
+        // On Groq only the reasoning models take it, from "low".
+        (ProviderId::Groq, e) if model.contains("gpt-oss") || model.contains("qwen3") => {
+            body["reasoning_effort"] = json!(level(e, "low"))
+        }
+        (ProviderId::OpenaiCompatible, e) if e != Effort::Off => body["reasoning_effort"] = json!(e.key()),
+        _ => {}
+    }
+    body
+}
+
 fn openai_compatible(
     id: ProviderId,
     base: &str,
     model: &str,
     key: Option<&str>,
-    reasoning: bool,
+    effort: Effort,
     prompt: &Prompt,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
@@ -335,21 +589,7 @@ fn openai_compatible(
     if let Some(key) = key {
         request = request.header("Authorization", &format!("Bearer {key}"));
     }
-    let mut body = json!({
-        "model": model,
-        "stream": true,
-        "temperature": 0.2,
-        "max_tokens": prompt.max_tokens.unwrap_or(4096),
-        "messages": [
-            { "role": "system", "content": prompt.system },
-            { "role": "user", "content": prompt.user },
-        ],
-    });
-    // NVIDIA's hosted reasoning models think first unless told not to. Only NVIDIA
-    // gets this field: other OpenAI-compatible servers may reject unknown ones.
-    if id == ProviderId::Nvidia && !reasoning {
-        body["chat_template_kwargs"] = json!({ "enable_thinking": false });
-    }
+    let body = chat_body(id, base, model, effort, prompt);
     let response = request.send_json(&body).map_err(|e| {
         if id == ProviderId::Ollama {
             format!("Couldn't reach Ollama at {base}. Is it running? ({e})")
@@ -377,16 +617,33 @@ fn openai_compatible(
 
 /// Claude through the Messages API. Streams text; declined requests fall back to the
 /// model Anthropic recommends for that case instead of failing.
-fn claude_api(model: &str, key: &str, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
-    let body = json!({
+/// The request for Claude's Messages API.
+fn claude_body(model: &str, effort: Effort, prompt: &Prompt) -> Value {
+    let mut body = json!({
         "model": model,
         "max_tokens": prompt.max_tokens.unwrap_or(16000),
         "stream": true,
         "fallbacks": "default",
-        "output_config": { "effort": "medium" },
         "system": prompt.system,
         "messages": [{ "role": "user", "content": prompt.user }],
     });
+    // Opus and Sonnet take an effort level; Haiku 4.5 refuses the field (and thinks only
+    // when given a token budget, which suggestions don't want).
+    if !model.contains("haiku") && effort != Effort::Auto {
+        let level = if effort == Effort::Off { "low" } else { effort.key() };
+        body["output_config"] = json!({ "effort": level });
+    }
+    body
+}
+
+fn claude_api(
+    model: &str,
+    key: &str,
+    effort: Effort,
+    prompt: &Prompt,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    let body = claude_body(model, effort, prompt);
     let response = agent()
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", key)
@@ -424,20 +681,67 @@ fn claude_api(model: &str, key: &str, prompt: &Prompt, on_text: &mut dyn FnMut(&
     Ok(())
 }
 
+/// Folders a command line tool may be in: the PATH, then where installers usually put
+/// them (an app opened from the Finder doesn't get the terminal's PATH).
+fn cli_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> =
+        std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        for dir in [".local/bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", "bin"] {
+            dirs.push(home.join(dir));
+        }
+        // Node versions installed with nvm.
+        if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+            dirs.extend(versions.flatten().map(|v| v.path().join("bin")));
+        }
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(std::path::PathBuf::from));
+    dirs
+}
+
+/// Where a command line tool is installed, if it is.
+pub fn find_cli(name: &str) -> Option<std::path::PathBuf> {
+    let names: Vec<String> =
+        if cfg!(windows) { vec![format!("{name}.exe"), format!("{name}.cmd")] } else { vec![name.to_string()] };
+    cli_dirs().into_iter().flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>()).find(|p| p.is_file())
+}
+
+/// How to get a subscription's command line tool, for when it's missing.
+pub fn install_hint(id: ProviderId) -> Option<&'static str> {
+    match id {
+        ProviderId::ClaudeCode => Some(
+            "Install Claude Code with `curl -fsSL https://claude.ai/install.sh | bash`, then run `claude` once to sign in with your Claude plan.",
+        ),
+        ProviderId::Codex => Some(
+            "Install Codex with `npm install -g @openai/codex`, then run `codex` once to sign in with your ChatGPT plan.",
+        ),
+        _ => None,
+    }
+}
+
 fn spawn_cli(program: &str, args: &[String], input: &str) -> Result<std::process::Child, String> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!("`{program}` isn't installed, or isn't on the PATH Null was started with.")
-            } else {
-                format!("Couldn't start `{program}`: {e}")
-            }
-        })?;
+    let id = if program == "claude" { ProviderId::ClaudeCode } else { ProviderId::Codex };
+    let path = find_cli(program)
+        .ok_or_else(|| format!("`{program}` isn't installed. {}", install_hint(id).unwrap_or_default()))?;
+    // Tools installed with npm start with `#!/usr/bin/env node`: give them a PATH that finds node.
+    let search_path = std::env::join_paths(cli_dirs()).unwrap_or_default();
+    let mut command = Command::new(&path);
+    command.env("PATH", search_path);
+    // Claude Code bills an ANTHROPIC_API_KEY over the person's plan when one is set: this
+    // provider is about the plan.
+    if id == ProviderId::ClaudeCode {
+        command.env_remove("ANTHROPIC_API_KEY");
+    }
+    let mut child =
+        command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(
+            |e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    format!("`{program}` isn't installed, or isn't on the PATH Null was started with.")
+                } else {
+                    format!("Couldn't start `{program}`: {e}")
+                }
+            },
+        )?;
     let mut stdin = child.stdin.take().expect("stdin is piped");
     let input = input.to_owned();
     // Write on another thread so a large prompt can't deadlock against a full stdout pipe.
@@ -463,9 +767,16 @@ fn finish_cli(program: &str, mut child: std::process::Child) -> Result<(), Strin
 
 /// The person's own Claude Code, signed in with their Claude plan. All tools are
 /// switched off: it only answers, and Null applies any change itself.
-fn claude_code(model: Option<String>, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
+fn claude_code(
+    model: Option<String>,
+    effort: Effort,
+    prompt: &Prompt,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<(), String> {
     let mut args: Vec<String> = [
         "-p",
+        // Don't add Null's requests to the person's own Claude Code history.
+        "--no-session-persistence",
         "--tools",
         "",
         "--disallowedTools",
@@ -482,6 +793,9 @@ fn claude_code(model: Option<String>, prompt: &Prompt, on_text: &mut dyn FnMut(&
     args.push(prompt.system.clone());
     if let Some(model) = model {
         args.extend(["--model".into(), model]);
+    }
+    if !matches!(effort, Effort::Auto | Effort::Off) {
+        args.extend(["--effort".into(), effort.key().into()]);
     }
     let mut child = spawn_cli("claude", &args, &prompt.user)?;
     let stdout = child.stdout.take().expect("stdout is piped");
@@ -503,13 +817,16 @@ fn claude_code(model: Option<String>, prompt: &Prompt, on_text: &mut dyn FnMut(&
 
 /// The person's own Codex CLI, signed in with their ChatGPT plan, in a read-only
 /// sandbox so it can't change files.
-fn codex(model: Option<String>, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
+fn codex(model: Option<String>, effort: Effort, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
     let mut args: Vec<String> = ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral"]
         .iter()
         .map(|s| s.to_string())
         .collect();
     if let Some(model) = model {
         args.extend(["--model".into(), model]);
+    }
+    if !matches!(effort, Effort::Auto | Effort::Off) {
+        args.extend(["-c".into(), format!("model_reasoning_effort=\"{}\"", effort.key())]);
     }
     args.push("-".into());
     let input = format!("{}\n\n{}", prompt.system, prompt.user);
@@ -580,6 +897,7 @@ pub fn fim_available(settings: &AiSettings) -> bool {
     let id = settings.active();
     match id {
         ProviderId::Ollama => true,
+        ProviderId::Mistral => settings.completion_model(id).is_some_and(|m| m.contains("codestral")),
         ProviderId::Nvidia | ProviderId::OpenaiCompatible => {
             settings.completion_model(id).is_some_and(|m| FimFormat::for_model(&m).is_some())
         }
@@ -670,6 +988,41 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
             }
             Ok(())
         }
+        // Mistral has an endpoint just for this: the code before and after, as they are.
+        ProviderId::Mistral => {
+            let key = api_key(id).ok_or_else(|| missing_key(id))?;
+            let body = json!({
+                "model": model,
+                "prompt": fim.prefix,
+                "suffix": fim.suffix,
+                "max_tokens": fim.max_tokens,
+                "temperature": 0.2,
+                "stream": true,
+            });
+            let response = agent()
+                .post(&format!("{}/fim/completions", base.trim_end_matches('/')))
+                .header("Content-Type", "application/json")
+                .header("Authorization", &format!("Bearer {key}"))
+                .send_json(&body)
+                .map_err(|e| format!("Couldn't reach Mistral: {e}"))?;
+            let status = response.status().as_u16();
+            let mut body = response.into_body();
+            if status >= 400 {
+                return Err(error_message(status, &body.read_to_string().unwrap_or_default()));
+            }
+            read_sse(body.into_reader(), |data| {
+                if data == "[DONE]" {
+                    return false;
+                }
+                if let Ok(event) = serde_json::from_str::<Value>(data) {
+                    let choice = &event["choices"][0];
+                    if let Some(text) = choice["delta"]["content"].as_str().or(choice["text"].as_str()) {
+                        on_text(text);
+                    }
+                }
+                true
+            })
+        }
         ProviderId::Nvidia | ProviderId::OpenaiCompatible => {
             let format = FimFormat::for_model(&model).ok_or("Not a fill-in-the-middle model")?;
             let key = api_key(id);
@@ -709,6 +1062,69 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
             })
         }
         _ => Err("Not a fill-in-the-middle provider".into()),
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    fn prompt() -> Prompt {
+        Prompt { system: "s".into(), user: "u".into(), ..Default::default() }
+    }
+
+    /// What each service's docs say about length, temperature and thinking.
+    #[test]
+    fn chat_requests_follow_each_service() {
+        let openai =
+            chat_body(ProviderId::OpenaiCompatible, "https://api.openai.com/v1", "gpt-6.1-sol", Effort::Low, &prompt());
+        assert!(openai.get("temperature").is_none() && openai.get("max_tokens").is_none());
+        assert_eq!(openai["max_completion_tokens"], 4096);
+        assert_eq!(openai["reasoning_effort"], "low");
+
+        let auto = chat_body(ProviderId::OpenaiCompatible, "http://localhost:8000/v1", "m", Effort::Auto, &prompt());
+        assert!(auto.get("reasoning_effort").is_none());
+
+        let nvidia = chat_body(ProviderId::Nvidia, "", "nvidia/nemotron-3-super-120b-a12b", Effort::Off, &prompt());
+        assert_eq!(nvidia["chat_template_kwargs"]["enable_thinking"], false);
+
+        // Groq's non-reasoning models don't take the field.
+        let llama = chat_body(ProviderId::Groq, "", "llama-3.3-70b-versatile", Effort::Low, &prompt());
+        assert!(llama.get("reasoning_effort").is_none());
+        let oss = chat_body(ProviderId::Groq, "", "openai/gpt-oss-120b", Effort::Medium, &prompt());
+        assert_eq!(oss["reasoning_effort"], "medium");
+
+        assert_eq!(chat_body(ProviderId::Gemini, "", "g", Effort::Off, &prompt())["reasoning_effort"], "minimal");
+        assert_eq!(chat_body(ProviderId::OpenRouter, "", "o", Effort::Off, &prompt())["reasoning"]["effort"], "none");
+    }
+
+    #[test]
+    fn claude_requests_follow_each_model() {
+        assert_eq!(claude_body("claude-opus-5-5", Effort::High, &prompt())["output_config"]["effort"], "high");
+        // Haiku 4.5 refuses an effort level.
+        assert!(claude_body("claude-haiku-4-5", Effort::Low, &prompt()).get("output_config").is_none());
+        // No sampling settings: Opus 5.5 refuses them.
+        assert!(claude_body("claude-opus-5-5", Effort::Low, &prompt()).get("temperature").is_none());
+    }
+
+    #[test]
+    fn every_provider_has_a_default_model_and_valid_thinking_default() {
+        for id in [
+            ProviderId::Nvidia,
+            ProviderId::Ollama,
+            ProviderId::OpenaiCompatible,
+            ProviderId::Claude,
+            ProviderId::ClaudeCode,
+            ProviderId::Codex,
+            ProviderId::Mistral,
+            ProviderId::Groq,
+            ProviderId::Gemini,
+            ProviderId::OpenRouter,
+        ] {
+            assert!(id.default_model().is_some() || matches!(id, ProviderId::ClaudeCode | ProviderId::Codex), "{id:?}");
+            let efforts = id.efforts();
+            assert!(efforts.is_empty() || efforts.contains(&id.default_effort()), "{id:?}");
+        }
     }
 }
 
