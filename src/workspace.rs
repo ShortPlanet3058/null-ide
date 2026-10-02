@@ -14,6 +14,7 @@ use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::settings_panel::{SettingsPanel, SettingsPanelEvent, Shortcut};
 use crate::terminal::{Shell, TerminalEvent, TerminalView};
 use crate::theme::{Theme, ThemeName};
+use crate::welcome::{Welcome, WelcomeEvent};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
     MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Subscription, Task, Window,
@@ -167,6 +168,8 @@ pub struct Workspace {
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
     settings_panel: Option<(Entity<SettingsPanel>, Subscription)>,
+    /// The first-launch screen, until it's been seen.
+    welcome: Option<(Entity<Welcome>, Subscription)>,
     /// Files whose tabs were closed, most recent last, for Cmd+Shift+T.
     recently_closed: Vec<PathBuf>,
     /// Files activated lately, most recent first, for the palette.
@@ -247,6 +250,7 @@ impl Workspace {
             last_mouse: None,
             palette: None,
             settings_panel: None,
+            welcome: None,
             ready_since: None,
             branch: None,
             branch_task: None,
@@ -1206,7 +1210,7 @@ impl Workspace {
         let shortcuts = self
             .commands(window, cx)
             .into_iter()
-            .filter_map(|c| Some(Shortcut { category: c.category, label: c.label, keys: c.keys? }))
+            .map(|c| Shortcut { category: c.category, label: c.label, action: c.action })
             .collect();
         let panel = cx.new(|cx| SettingsPanel::new(shortcuts, cx));
         let subscription = cx.subscribe_in(&panel, window, |this, _, event, window, cx| match event {
@@ -1219,6 +1223,19 @@ impl Workspace {
         });
         window.focus(&panel.focus_handle(cx));
         self.settings_panel = Some((panel, subscription));
+        cx.notify();
+    }
+
+    /// The first-launch screen: look, shortcuts and AI.
+    pub fn show_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let welcome = cx.new(Welcome::new);
+        let subscription = cx.subscribe_in(&welcome, window, |this, _, WelcomeEvent::Finished, window, cx| {
+            this.welcome = None;
+            this.focus_main(window, cx);
+            cx.notify();
+        });
+        window.focus(&welcome.focus_handle(cx));
+        self.welcome = Some((welcome, subscription));
         cx.notify();
     }
 
@@ -1426,7 +1443,9 @@ impl Render for Workspace {
             None => div().size_full().child(self.render_empty(cx)),
         };
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
-        let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
+        let overlay: Option<AnyElement> = if let Some((welcome, _)) = &self.welcome {
+            Some(welcome.clone().into_any_element())
+        } else if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
             Some(panel.clone().into_any_element())

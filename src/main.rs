@@ -13,6 +13,7 @@ mod git;
 mod highlight;
 mod inline_assist;
 mod key_prompt;
+mod keymap;
 mod languages;
 mod lsp;
 mod lsp_store;
@@ -26,12 +27,12 @@ mod settings_panel;
 mod terminal;
 mod text_input;
 mod theme;
+mod welcome;
 mod workspace;
 mod wrap;
 
 use gpui::{
-    App, Application, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*,
-    px, size,
+    App, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size,
 };
 use menus::Quit;
 use std::path::PathBuf;
@@ -56,19 +57,7 @@ fn main() {
 
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         settings::init(cx);
-        editor::bind_keys(cx);
-        workspace::bind_keys(cx);
-        file_tree::bind_keys(cx);
-        find_bar::bind_keys(cx);
-        terminal::bind_keys(cx);
-        inline_assist::bind_keys(cx);
-        ask::bind_keys(cx);
-        key_prompt::bind_keys(cx);
-        text_input::bind_keys(cx);
-        // After the text field's keys, so ←→ can change a choice in the palette.
-        palette::bind_keys(cx);
-        settings_panel::bind_keys(cx);
-        cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+        keymap::register(cx.global::<settings::Settings>().keymap, cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         menus::set(cx);
         cx.on_window_closed(|cx| {
@@ -95,6 +84,9 @@ fn main() {
                 match file {
                     Some(file) => workspace.open_file(file, window, cx),
                     None => window.focus(&workspace.focus_handle(cx)),
+                }
+                if !cx.global::<settings::Settings>().welcomed {
+                    workspace.show_welcome(window, cx);
                 }
                 workspace
             })

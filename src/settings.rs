@@ -24,6 +24,10 @@ pub struct Settings {
     pub fade_bars_while_typing: bool,
     /// Wrap long lines to the width of the editor instead of scrolling sideways.
     pub word_wrap: bool,
+    /// Whose shortcuts to use: Null's own, or another editor's.
+    pub keymap: crate::keymap::Keymap,
+    /// Set once the first-launch welcome has been seen.
+    pub welcomed: bool,
     /// Show suggestions while typing. Ctrl+Space asks for them either way.
     pub autocomplete: bool,
     /// Where AI answers come from. Off until a provider is chosen.
@@ -40,6 +44,8 @@ impl Default for Settings {
             sidebar_visible: true,
             fade_bars_while_typing: false,
             word_wrap: false,
+            keymap: Default::default(),
+            welcomed: false,
             autocomplete: true,
             ai: Default::default(),
         }
@@ -131,6 +137,7 @@ fn apply(settings: Settings, cx: &mut App) {
     let old = cx.global::<Settings>();
     let theme_changed = settings.theme != old.theme;
     let fonts_changed = settings.code_font != old.code_font || settings.ui_font != old.ui_font;
+    let keymap = (settings.keymap != old.keymap).then_some(settings.keymap);
     if theme_changed {
         cx.set_global(Theme::named(settings.theme));
     }
@@ -138,6 +145,11 @@ fn apply(settings: Settings, cx: &mut App) {
         fonts::apply(&settings.code_font, &settings.ui_font, cx);
     }
     cx.set_global(settings);
+    // New keys right away; the menus show shortcuts, so they're rebuilt too.
+    if let Some(keymap) = keymap {
+        crate::keymap::register(keymap, cx);
+        crate::menus::set(cx);
+    }
     cx.refresh_windows();
 }
 
