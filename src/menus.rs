@@ -6,8 +6,8 @@ use crate::editor::{
 use crate::find_bar::{DeployFind, DeployReplace, FindNext, FindPrevious};
 use crate::workspace::{
     CloseAllTabs, CloseTab, DecreaseFontSize, GoToLine, IncreaseFontSize, NewUntitled, NextTab, Open, OpenSettings,
-    PreviousTab, ReopenClosedTab, ResetFontSize, SaveAll, SaveAs, SearchProject, TogglePalette, ToggleSidebar,
-    ToggleTerminal, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
+    PreviousTab, ReopenClosedTab, ResetFontSize, SaveAll, SaveAs, SearchProject, ShowCommands, TogglePalette,
+    ToggleSidebar, ToggleTerminal, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
 };
 use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
 
@@ -96,7 +96,9 @@ pub fn set(cx: &mut App) {
         Menu {
             name: "View".into(),
             items: vec![
-                MenuItem::action("Command Palette…", TogglePalette),
+                MenuItem::action("Commands…", ShowCommands),
+                MenuItem::action("Go to File…", TogglePalette),
+                MenuItem::action("Go to Line…", GoToLine),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Terminal", ToggleTerminal),
