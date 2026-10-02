@@ -12,8 +12,8 @@ use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::settings_panel::{SettingsPanel, SettingsPanelEvent, Shortcut};
 use crate::terminal::{Shell, TerminalEvent, TerminalView};
-use crate::ui;
 use crate::theme::{Theme, ThemeName};
+use crate::ui;
 use crate::welcome::{Welcome, WelcomeEvent};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
@@ -1863,9 +1863,10 @@ impl Workspace {
                     .child(close)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(ix, window, cx)))
                     // Middle-click closes, as in browsers.
-                    .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        this.close_tab_at(ix, window, cx)
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| this.close_tab_at(ix, window, cx)),
+                    )
             }))
             .into_any_element()
     }

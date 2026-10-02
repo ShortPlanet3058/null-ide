@@ -46,12 +46,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", ExpandOrOpen, tree),
         KeyBinding::new("left", Collapse, tree),
         KeyBinding::new("f2", Rename, tree),
-        KeyBinding::new("down", MenuNext, menu),
-        KeyBinding::new("up", MenuPrevious, menu),
-        KeyBinding::new("enter", MenuConfirm, menu),
-        KeyBinding::new("escape", MenuClose, menu),
         KeyBinding::new("enter", CommitEdit, edit),
         KeyBinding::new("escape", CancelEdit, edit),
+        // Arrows stay in the name being typed instead of moving through the tree.
+        KeyBinding::new("up", gpui::NoAction {}, edit),
+        KeyBinding::new("down", gpui::NoAction {}, edit),
     ];
     if cfg!(target_os = "macos") {
         // As in Finder: Return renames, Cmd+Down opens, Cmd+Backspace moves to the Trash.
@@ -64,6 +63,13 @@ pub fn bind_keys(cx: &mut App) {
     } else {
         keys.extend([KeyBinding::new("enter", Activate, tree), KeyBinding::new("delete", Trash, tree)]);
     }
+    // Last, so that with the menu open its keys win over the tree's (Return renames otherwise).
+    keys.extend([
+        KeyBinding::new("down", MenuNext, menu),
+        KeyBinding::new("up", MenuPrevious, menu),
+        KeyBinding::new("enter", MenuConfirm, menu),
+        KeyBinding::new("escape", MenuClose, menu),
+    ]);
     cx.bind_keys(keys);
 }
 
@@ -267,6 +273,7 @@ impl FileTree {
         }
         self.active = path;
         self.rebuild();
+        self.reveal_selected();
         cx.notify();
     }
 
@@ -294,7 +301,9 @@ impl FileTree {
         }
     }
 
-    fn read_dir(dir: &Path) -> Vec<Entry> {
+    /// The folder's entries, folders first. Everything inside an ignored folder is ignored
+    /// (dimmed) too: `node_modules/x` as well as `node_modules`.
+    fn read_dir(dir: &Path, inside_ignored: bool) -> Vec<Entry> {
         let visible: HashSet<PathBuf> = ignore::WalkBuilder::new(dir)
             .max_depth(Some(1))
             .hidden(false)
@@ -309,10 +318,12 @@ impl FileTree {
             .filter(|e| !ALWAYS_HIDDEN.contains(&e.file_name().to_string_lossy().as_ref()))
             .map(|e| {
                 let path = e.path();
+                // The entry's own type, without another look at the disk (links: what they point to).
+                let is_dir = e.file_type().is_ok_and(|t| t.is_dir() || (t.is_symlink() && path.is_dir()));
                 Entry {
                     name: e.file_name().to_string_lossy().into_owned().into(),
-                    is_dir: path.is_dir(),
-                    ignored: !visible.contains(&path),
+                    is_dir,
+                    ignored: inside_ignored || !visible.contains(&path),
                     path,
                 }
             })
@@ -341,15 +352,27 @@ impl FileTree {
     }
 
     fn push_children(&mut self, dir: &Path, depth: usize) {
-        let entries = self.children.entry(dir.to_path_buf()).or_insert_with(|| Self::read_dir(dir)).clone();
+        self.push_children_of(dir, depth, false);
+    }
+
+    fn push_children_of(&mut self, dir: &Path, depth: usize, inside_ignored: bool) {
+        let entries =
+            self.children.entry(dir.to_path_buf()).or_insert_with(|| Self::read_dir(dir, inside_ignored)).clone();
         for entry in entries {
             let expanded = entry.is_dir && self.expanded.contains(&entry.path);
-            let path = entry.path.clone();
+            let (path, ignored) = (entry.path.clone(), entry.ignored);
             self.rows.push(Row { kind: RowKind::Entry(entry), depth, expanded });
             if expanded {
                 self.push_new_item_row(&path, depth + 1);
-                self.push_children(&path, depth + 1);
+                self.push_children_of(&path, depth + 1, ignored);
             }
+        }
+    }
+
+    /// Scrolls the selected row into view, the least needed.
+    fn reveal_selected(&mut self) {
+        if let Some(ix) = self.selected_ix() {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
     }
 
@@ -419,7 +442,8 @@ impl FileTree {
         };
         let ix = entries[next];
         self.selected = self.entry_at(ix).map(|e| e.path.clone());
-        self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        // Moving down keeps the row at the bottom edge, moving up at the top: never a jump.
+        self.scroll.scroll_to_item(ix, if delta > 0 { ScrollStrategy::Bottom } else { ScrollStrategy::Top });
         cx.notify();
     }
 
@@ -449,6 +473,7 @@ impl FileTree {
         } else if let Some(parent) = entry.path.parent().filter(|p| *p != self.root) {
             // On a file or closed folder, Left goes up to the parent folder.
             self.selected = Some(parent.to_path_buf());
+            self.reveal_selected();
             cx.notify();
         }
     }
@@ -538,6 +563,7 @@ impl FileTree {
                 self.expand_to(&path);
                 self.selected = Some(path.clone());
                 self.rebuild();
+                self.reveal_selected();
                 window.focus(&self.focus_handle);
                 match from {
                     Some(from) if from != path => cx.emit(FileTreeEvent::Renamed { from, to: path }),
@@ -1021,7 +1047,7 @@ mod tests {
         std::fs::write(dir.join(".env"), "").unwrap();
         std::fs::write(dir.join("Cargo.toml"), "").unwrap();
 
-        let entries = FileTree::read_dir(&dir);
+        let entries = FileTree::read_dir(&dir, false);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_ref()).collect();
         assert_eq!(names, ["src", "target", ".env", ".gitignore", "Cargo.toml"]);
         let ignored = |name: &str| entries.iter().find(|e| e.name.as_ref() == name).unwrap().ignored;

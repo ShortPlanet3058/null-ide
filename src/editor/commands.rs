@@ -82,13 +82,20 @@ impl Editor {
 
     pub(super) fn indent_lines(&mut self, cx: &mut Context<Self>) {
         let lines = self.selected_lines();
+        let indented = lines.clone();
         let unit = " ".repeat(TAB_SIZE);
         let new_lines = self
             .line_texts(&lines)
             .into_iter()
             .map(|t| if t.trim().is_empty() { t } else { format!("{unit}{t}") })
             .collect();
-        self.rewrite_lines(lines, new_lines, |(l, c)| (l, c + TAB_SIZE), cx);
+        // A selection ending at the start of the next line keeps that end where it is.
+        self.rewrite_lines(
+            lines,
+            new_lines,
+            move |(l, c)| (l, if indented.contains(&l) { c + TAB_SIZE } else { c }),
+            cx,
+        );
     }
 
     pub(super) fn outdent_lines(&mut self, cx: &mut Context<Self>) {
@@ -115,7 +122,12 @@ impl Editor {
 
     pub(super) fn move_lines(&mut self, down: bool, cx: &mut Context<Self>) {
         let lines = self.selected_lines();
-        let total = self.buffer.len_lines();
+        // The empty "line" after a final line break isn't a line to swap with.
+        let total = self.buffer.len_lines()
+            - usize::from(self.buffer.len_lines() > 1 && self.buffer.line_len(self.buffer.len_lines() - 1) == 0);
+        if lines.end > total {
+            return;
+        }
         if (!down && lines.start == 0) || (down && lines.end >= total) {
             return;
         }
@@ -297,7 +309,12 @@ fn toggle_line_comments(lines: &[String], marker: &str) -> (Vec<String>, impl Fn
                 format!("{}{}", &line[..at], rest.strip_prefix(' ').unwrap_or(rest))
             } else {
                 shifts.push(marker.len() as isize + 1);
-                format!("{}{marker} {}", &line[..indent], &line[indent..])
+                // The common indentation, never cutting into a character (a non-breaking space...).
+                let mut at = indent.min(line.len() - line.trim_start().len());
+                while !line.is_char_boundary(at) {
+                    at -= 1;
+                }
+                format!("{}{marker} {}", &line[..at], &line[at..])
             }
         })
         .collect();

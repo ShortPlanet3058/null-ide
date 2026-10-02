@@ -229,7 +229,9 @@ impl Editor {
         let caret = self.selection.head;
         // The server's range was computed before the latest keystrokes: stretch it to the caret.
         let start = suggestion.range.map_or(menu.word_start, |r| self.offset_from_lsp(r.start).min(caret));
-        let mut edits: Vec<(Range<usize>, String)> = vec![(start..caret, suggestion.insert.clone())];
+        // Accepting in the middle of a word replaces the rest of it too (fo|obar → foobar).
+        let end = suggestion.range.map_or(caret, |r| self.offset_from_lsp(r.end).max(caret));
+        let mut edits: Vec<(Range<usize>, String)> = vec![(start..end, suggestion.insert.clone())];
         for edit in &suggestion.extra_edits {
             let range = self.offset_from_lsp(edit.range.start)..self.offset_from_lsp(edit.range.end);
             if range.end <= start || range.start >= caret {

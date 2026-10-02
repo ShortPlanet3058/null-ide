@@ -237,6 +237,8 @@ enum EditKind {
 
 struct Snapshot {
     text: Rope,
+    /// The buffer's version for this text: back to the saved one means saved.
+    version: u64,
     selection: Selection,
     extra: Vec<Selection>,
 }
@@ -348,6 +350,9 @@ pub struct Editor {
     /// Which screen rows each line takes; kept up to date when drawing.
     pub wrap: crate::wrap::WrapMap,
     pub autoscroll: bool,
+    /// Set by the mouse: bring the caret into view without the keyboard's margin, so a
+    /// click near an edge doesn't scroll the text under the pointer.
+    pub reveal_only: bool,
     dragging: Option<DragUnit>,
     pub font_size: Pixels,
     pub search: Option<SearchState>,
@@ -427,6 +432,7 @@ impl Editor {
             layout: None,
             wrap: Default::default(),
             autoscroll: false,
+            reveal_only: false,
             dragging: None,
             font_size: px(cx.global::<Settings>().font_size),
             search: None,
@@ -784,12 +790,18 @@ impl Editor {
         self.touch(cx);
     }
 
+    /// One character to the left, where a character is what people see as one: a flag,
+    /// an emoji with its skin tone, a letter with its accent.
     fn left_of(&self, offset: usize) -> usize {
         let (line, col) = self.buffer.point(offset);
         match (line, col) {
             (0, 0) => 0,
             (_, 0) => self.buffer.offset(line - 1, usize::MAX),
-            _ => offset - 1,
+            _ => {
+                let text = self.buffer.line_text(line);
+                let start = grapheme_columns(&text).into_iter().take_while(|&c| c < col).last().unwrap_or(col - 1);
+                offset - (col - start)
+            }
         }
     }
 
@@ -798,7 +810,9 @@ impl Editor {
         if col >= self.buffer.line_len(line) {
             if line + 1 < self.buffer.len_lines() { self.buffer.offset(line + 1, 0) } else { offset }
         } else {
-            offset + 1
+            let text = self.buffer.line_text(line);
+            let next = grapheme_columns(&text).into_iter().find(|&c| c > col).unwrap_or(col + 1);
+            offset + (next - col)
         }
     }
 
@@ -1031,15 +1045,20 @@ impl Editor {
         });
     }
 
+    /// Page Up and Down move the view by a page too, with the caret, not just the caret.
     fn page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
+        let page = self.page_lines();
+        self.scroll.target_y = (self.scroll.target_y - page as f32 * f32::from(self.line_height())).max(0.);
         self.for_each_cursor(cx, |this, cx| {
-            this.move_vertically(-this.page_lines(), false, cx);
+            this.move_vertically(-page, false, cx);
         });
     }
 
     fn page_down(&mut self, _: &PageDown, _: &mut Window, cx: &mut Context<Self>) {
+        let page = self.page_lines();
+        self.scroll.target_y += page as f32 * f32::from(self.line_height());
         self.for_each_cursor(cx, |this, cx| {
-            this.move_vertically(this.page_lines(), false, cx);
+            this.move_vertically(page, false, cx);
         });
     }
 
@@ -1064,7 +1083,12 @@ impl Editor {
                 Some(batch) => (batch.before[0], batch.before[1..].to_vec()),
                 None => (self.selection, self.extra.iter().map(|c| c.selection).collect()),
             };
-            self.undo_stack.push(Snapshot { text: self.buffer.rope().clone(), selection, extra });
+            self.undo_stack.push(Snapshot {
+                text: self.buffer.rope().clone(),
+                version: self.buffer.version(),
+                selection,
+                extra,
+            });
             if self.undo_stack.len() > 1000 {
                 self.undo_stack.remove(0);
             }
@@ -1152,9 +1176,15 @@ impl Editor {
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
         self.for_each_cursor(cx, |this, cx| {
-            let range = this.selection.range();
-            let (line, _) = this.buffer.point(range.start);
-            let indent: String = this.buffer.line_text(line).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            let mut range = this.selection.range();
+            let (line, col) = this.buffer.point(range.start);
+            let line_text = this.buffer.line_text(line);
+            // The indentation up to the caret only: Enter inside it doesn't double it.
+            let indent: String = line_text.chars().take(col).take_while(|c| *c == ' ' || *c == '\t').collect();
+            // On a line of only spaces, those spaces don't stay behind.
+            if line_text.chars().take(col).all(|c| c == ' ' || c == '\t') && col > 0 {
+                range.start = this.buffer.line_to_char(line);
+            }
             let before = range.start.checked_sub(1).and_then(|i| this.buffer.char_at(i));
             let after = this.buffer.char_at(range.end);
             // Python blocks open with a colon.
@@ -1203,20 +1233,28 @@ impl Editor {
         self.copy_selections(cx);
     }
 
+    /// With nothing selected, Cut takes the whole line, as Copy copies it.
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if self.copy_selections(cx) {
-            self.for_each_cursor(cx, |this, cx| {
-                if !this.selection.is_empty() {
-                    this.edit(this.selection.range(), "", EditKind::Other, cx);
-                }
-            });
+        let whole_lines = self.all_selections().iter().all(|s| s.is_empty());
+        if !self.copy_selections(cx) {
+            return;
         }
+        if whole_lines {
+            self.merge_cursors_on_shared_lines();
+            return self.for_each_cursor(cx, |this, cx| this.delete_lines(cx));
+        }
+        self.for_each_cursor(cx, |this, cx| {
+            if !this.selection.is_empty() {
+                this.edit(this.selection.range(), "", EditKind::Other, cx);
+            }
+        });
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.paste_text(text.replace("\r\n", "\n"), cx);
-        }
+        let Some(item) = cx.read_from_clipboard() else { return };
+        let Some(text) = item.text() else { return };
+        let kind = item.metadata().cloned().unwrap_or_default();
+        self.paste_text(text.replace("\r\n", "\n"), &kind, cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -1235,8 +1273,13 @@ impl Editor {
         };
         let Some(snapshot) = from.pop() else { return };
         let extra = self.extra.iter().map(|c| c.selection).collect();
-        to.push(Snapshot { text: self.buffer.rope().clone(), selection: self.selection, extra });
-        self.buffer.restore(snapshot.text);
+        to.push(Snapshot {
+            text: self.buffer.rope().clone(),
+            version: self.buffer.version(),
+            selection: self.selection,
+            extra,
+        });
+        self.buffer.restore_version(snapshot.text, snapshot.version);
         self.selection = snapshot.selection;
         self.extra = snapshot.extra.into_iter().map(|selection| Cursor { selection, goal: None }).collect();
         self.last_edit = None;
@@ -1499,6 +1542,7 @@ impl Editor {
         self.goal_column = None;
         self.dragging = Some(unit);
         self.touch(cx);
+        self.reveal_only = true;
         if event.modifiers.secondary() && !add_cursor && event.click_count == 1 {
             self.dragging = None;
             self.go_to_definition_at(offset, cx);
@@ -1517,15 +1561,45 @@ impl Editor {
         if self.alt_held || self.secondary_held || self.link_word.is_some() {
             self.update_hover(cx);
         }
-        if event.pressed_button != Some(MouseButton::Left) {
+        // Dragging is followed window-wide, from the element (see `drag_to`).
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.dragging.is_some() || self.scrollbar_drag.is_some()
+    }
+
+    /// The mouse moved while a selection or the scrollbar is being dragged, wherever it is
+    /// in the window. Past the top or bottom, the text scrolls, faster the further away.
+    pub fn drag_to(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.mouse_position = Some(position);
+        if self.scrollbar_drag.is_some() {
+            return self.scrollbar_drag_to(position, cx);
+        }
+        if self.dragging.is_none() {
             return;
         }
-        let offset = self.offset_at(event.position);
+        if let Some(layout) = &self.layout {
+            let (top, bottom) = (layout.text_bounds.top(), layout.text_bounds.bottom());
+            let past = if position.y < top {
+                position.y - top
+            } else if position.y > bottom {
+                position.y - bottom
+            } else {
+                px(0.)
+            };
+            if past != px(0.) {
+                let step = f32::from(past) * 0.25;
+                self.scroll.target_y = (self.scroll.target_y + step).max(0.);
+                self.scroll.y = self.scroll.target_y;
+            }
+        }
+        let offset = self.offset_at(position);
         let (origin, target) = match &self.dragging {
             None => return,
             Some(DragUnit::Char) => {
                 self.selection.head = offset;
                 self.touch(cx);
+                self.reveal_only = true;
                 return;
             }
             Some(DragUnit::Word(origin)) => (origin.clone(), self.word_at(offset)),
@@ -1538,6 +1612,18 @@ impl Editor {
             Selection { anchor: origin.start, head: target.end.max(origin.end) }
         };
         self.touch(cx);
+        self.reveal_only = true;
+    }
+
+    /// While dragging past an edge without moving, keeps scrolling.
+    pub fn continue_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        let (Some(position), Some(layout)) = (self.mouse_position, &self.layout) else { return false };
+        let outside = position.y < layout.text_bounds.top() || position.y > layout.text_bounds.bottom();
+        if self.dragging.is_some() && outside {
+            self.drag_to(position, cx);
+            return true;
+        }
+        false
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1774,10 +1860,27 @@ enum CharClass {
     Word,
     Space,
     Punct,
+    Newline,
+}
+
+/// The columns where each visible character (grapheme) starts, then the line's end.
+fn grapheme_columns(text: &str) -> Vec<usize> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut columns = Vec::new();
+    let mut col = 0;
+    for g in text.graphemes(true) {
+        columns.push(col);
+        col += g.chars().count();
+    }
+    columns.push(col);
+    columns
 }
 
 fn char_class(c: char) -> CharClass {
-    if c.is_alphanumeric() || c == '_' {
+    if c == '\n' || c == '\r' {
+        // Its own kind, so double-clicking spaces never reaches into the next line.
+        CharClass::Newline
+    } else if c.is_alphanumeric() || c == '_' {
         CharClass::Word
     } else if c.is_whitespace() {
         CharClass::Space
@@ -1884,6 +1987,15 @@ impl EntityInputHandler for Editor {
             .unwrap_or(self.selection.range());
         self.record_undo(EditKind::Typing);
         let end = self.buffer.replace(range.clone(), text);
+        // Other cursors after it move along with the text being composed.
+        let delta = (end - range.start) as isize - range.len() as isize;
+        for cursor in &mut self.extra {
+            for offset in [&mut cursor.selection.anchor, &mut cursor.selection.head] {
+                if *offset >= range.end {
+                    *offset = (*offset as isize + delta).max(0) as usize;
+                }
+            }
+        }
         self.marked = (!text.is_empty()).then_some(range.start..end);
         let utf16_to_chars = |u: usize| {
             let mut units = 0;

@@ -205,8 +205,13 @@ impl Element for EditorElement {
 
             // Vertical scroll: follow the caret after keyboard moves, then glide toward the target.
             let max_y = total_rows.saturating_sub(1) as f32 * lh;
+            // Dragging past an edge keeps scrolling, frame after frame.
+            if editor.continue_drag(cx) {
+                window.request_animation_frame();
+            }
             if editor.autoscroll {
-                let margin = (3. * lh).min(viewport_height / 3.);
+                // From the keyboard, keep a few lines of room; from the mouse, just reveal.
+                let margin = if editor.reveal_only { 0. } else { (3. * lh).min(viewport_height / 3.) };
                 let y = caret_row as f32 * lh + TOP_PADDING;
                 if y - margin < editor.scroll.target_y {
                     editor.scroll.target_y = y - margin;
@@ -359,6 +364,7 @@ impl Element for EditorElement {
             let widest = row_layouts.iter().map(|r| f32::from(r.x + r.shaped.width)).fold(caret_x, f32::max);
             editor.scroll.x = editor.scroll.x.clamp(0., (widest + cw * 4. - text_width).max(0.));
             editor.autoscroll = false;
+            editor.reveal_only = false;
 
             let origin = point(
                 text_bounds.left() + px(TEXT_PADDING - editor.scroll.x),
@@ -720,6 +726,15 @@ impl Element for EditorElement {
     ) {
         let focus_handle = self.editor.read(cx).focus_handle(cx);
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.editor.clone()), cx);
+        // A drag is followed everywhere in the window, not just over the editor.
+        if self.editor.read(cx).is_dragging() {
+            let editor = self.editor.clone();
+            window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Bubble && event.pressed_button == Some(gpui::MouseButton::Left) {
+                    editor.update(cx, |editor, cx| editor.drag_to(event.position, cx));
+                }
+            });
+        }
 
         let theme = cx.global::<Theme>().clone();
         let line_height = prepaint.line_height;
