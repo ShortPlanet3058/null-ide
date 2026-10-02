@@ -442,6 +442,23 @@ mod editor_tests {
     }
 
     #[gpui::test]
+    fn up_and_down_move_by_wrapped_rows(cx: &mut TestAppContext) {
+        let e = editor(cx, &format!("{}\nend\n", "word ".repeat(10)), "x.md");
+        e.update(cx, |e, cx| {
+            e.wrap.update(&e.buffer, Some(20));
+            e.selection = Selection::caret(2);
+            e.move_vertically(1, false, cx);
+            // Same column, one row down, still on the first line.
+            assert_eq!(e.caret_point(), (0, 22));
+            e.move_vertically(1, false, cx);
+            e.move_vertically(1, false, cx);
+            assert_eq!(e.caret_point(), (1, 2));
+            e.move_vertically(-1, false, cx);
+            assert_eq!(e.caret_point(), (0, 42));
+        });
+    }
+
+    #[gpui::test]
     fn brackets_and_quotes_close_themselves(cx: &mut TestAppContext) {
         let e = editor(cx, "", "x.rs");
         e.update(cx, |e, cx| assert!(e.type_pair_char('(', cx)));

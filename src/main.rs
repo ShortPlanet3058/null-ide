@@ -26,6 +26,7 @@ mod terminal;
 mod text_input;
 mod theme;
 mod workspace;
+mod wrap;
 
 use gpui::{
     App, Application, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*,
@@ -66,7 +67,7 @@ fn main() {
         text_input::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        menus::set(cx, cx.global::<settings::Settings>().fade_bars_while_typing);
+        menus::set(cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();

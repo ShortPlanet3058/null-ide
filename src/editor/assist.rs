@@ -128,7 +128,7 @@ impl Editor {
         let lines = card.read(cx).lines();
         let layout = self.layout.as_ref()?;
         // Sit just above the code it changes; slide below when there's no room above.
-        let top = layout.text_origin.y + layout.line_height * lines.start as f32;
+        let top = layout.text_origin.y + layout.line_height * self.wrap.first_row(lines.start) as f32;
         let x = layout.text_bounds.left() + px(8.);
         let (corner, y) = if top - layout.text_bounds.top() > px(160.) {
             (Corner::BottomLeft, top - px(6.))

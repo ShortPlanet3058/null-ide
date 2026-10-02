@@ -7,7 +7,7 @@ use crate::fonts::Fonts;
 use crate::git;
 use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
 use crate::lsp_store::{LspStore, Readiness};
-use crate::menus::{self, Quit, ToggleFadeWhileTyping};
+use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
 use crate::palette::{Command, Palette, PaletteEvent, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
@@ -75,6 +75,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("ctrl-g", GoToLine, ctx),
+        KeyBinding::new("alt-z", ToggleWordWrap, ctx),
         KeyBinding::new("secondary-n", NewUntitled, ctx),
         KeyBinding::new("secondary-shift-s", SaveAs, ctx),
         // Also here, not only in the editor: saving must work wherever the keyboard is
@@ -690,6 +691,7 @@ impl Workspace {
             ("AI: Set API Key…".into(), Box::new(SetApiKey)),
             ("AI: Turn Off".into(), Box::new(TurnOffAi)),
             (fade.into(), Box::new(ToggleFadeWhileTyping)),
+            (if settings.word_wrap { "Stop Wrapping Lines" } else { "Wrap Lines" }.into(), Box::new(ToggleWordWrap)),
             (theme_label(ThemeName::Oled), Box::new(UseOledTheme)),
             (theme_label(ThemeName::Graphite), Box::new(UseGraphiteTheme)),
             (theme_label(ThemeName::Paper), Box::new(UsePaperTheme)),
@@ -810,9 +812,14 @@ impl Workspace {
             self.chrome.set(true, FADE_IN, FADE_OUT);
         }
         for tab in &self.tabs {
-            tab.editor.update(cx, |editor, cx| editor.set_font_size(px(settings.font_size), cx));
+            tab.editor.update(cx, |editor, cx| {
+                editor.set_font_size(px(settings.font_size), cx);
+                // Wrapping on or off moves everything: keep the caret in view.
+                editor.autoscroll = true;
+                cx.notify();
+            });
         }
-        menus::set(cx, settings.fade_bars_while_typing);
+        menus::set(cx);
         cx.notify();
     }
 
@@ -887,6 +894,10 @@ impl Workspace {
 
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
+    }
+
+    fn toggle_word_wrap(&mut self, _: &ToggleWordWrap, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.word_wrap = !s.word_wrap);
     }
 
     fn use_ai(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
@@ -1410,6 +1421,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
+            .on_action(cx.listener(Self::toggle_word_wrap))
             .on_action(cx.listener(Self::toggle_autocomplete))
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::go_to_line))

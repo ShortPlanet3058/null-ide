@@ -1,7 +1,9 @@
 use crate::editor::{Editor, Layout, ScrollbarLayout};
 use crate::fonts::Fonts;
 use crate::highlight::{Span, spans_in};
+use crate::settings::Settings;
 use crate::theme::{Syntax, Theme};
+use crate::wrap::{Row, WrapMap};
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Focusable, Font, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, Pixels, Point, ShapedLine, Style, TextRun, UnderlineStyle, Window, fill,
@@ -18,6 +20,37 @@ const BLINK_DELAY: Duration = Duration::from_millis(500);
 const TOP_PADDING: f32 = 8.;
 const TEXT_PADDING: f32 = 8.;
 const GUTTER_PADDING: f32 = 16.;
+/// Width of the scrollbar along the right edge.
+const BAR: f32 = 10.;
+
+/// One row of text as drawn last frame.
+pub struct RowLayout {
+    pub row: Row,
+    /// The row's text (part of a line when it wraps).
+    pub text: String,
+    pub shaped: ShapedLine,
+    /// Where the text starts: past the indent on a continuation row.
+    pub x: Pixels,
+}
+
+/// The row a (line, column) is on, and its x position from the text's left edge.
+pub fn position(
+    rows: &[RowLayout],
+    first_row: usize,
+    wrap: &WrapMap,
+    char_width: Pixels,
+    line: usize,
+    col: usize,
+) -> (usize, Pixels) {
+    let (row, display_col) = wrap.to_display(line, col);
+    match row.checked_sub(first_row).and_then(|i| rows.get(i)) {
+        Some(r) if r.row.line == line => {
+            let col = col.saturating_sub(r.row.cols.start);
+            (row, r.x + r.shaped.x_for_index(byte_of_column(&r.text, col)))
+        }
+        _ => (row, char_width * display_col as f32),
+    }
+}
 
 /// Draws an [`Editor`]: gutter, current line, selection, text and caret.
 pub struct EditorElement {
@@ -159,12 +192,21 @@ impl Element for EditorElement {
                 Bounds::from_corners(point(bounds.left() + gutter_width, bounds.top()), bounds.bottom_right());
             let viewport_height = f32::from(bounds.size.height);
             let (caret_line, caret_col) = editor.caret_point();
+            let text_width = f32::from(text_bounds.size.width) - TEXT_PADDING;
+            let cw = f32::from(char_width);
+
+            // Word wrap: rows as wide as the text area (clear of the scrollbar), in characters.
+            let wrap_width =
+                cx.global::<Settings>().word_wrap.then(|| ((text_width - BAR - cw) / cw).floor().max(1.) as usize);
+            editor.wrap.update(&editor.buffer, wrap_width);
+            let total_rows = editor.wrap.rows();
+            let (caret_row, _) = editor.wrap.to_display(caret_line, caret_col);
 
             // Vertical scroll: follow the caret after keyboard moves, then glide toward the target.
-            let max_y = total_lines.saturating_sub(1) as f32 * lh;
+            let max_y = total_rows.saturating_sub(1) as f32 * lh;
             if editor.autoscroll {
                 let margin = (3. * lh).min(viewport_height / 3.);
-                let y = caret_line as f32 * lh + TOP_PADDING;
+                let y = caret_row as f32 * lh + TOP_PADDING;
                 if y - margin < editor.scroll.target_y {
                     editor.scroll.target_y = y - margin;
                 } else if y + lh + margin > editor.scroll.target_y + viewport_height {
@@ -184,16 +226,21 @@ impl Element for EditorElement {
                 editor.scroll.last_tick = None;
             }
 
+            // Rows on screen, and the lines they belong to.
             let first = ((editor.scroll.y - TOP_PADDING) / lh).floor().max(0.) as usize;
             let count = (viewport_height / lh).ceil() as usize + 2;
-            let visible = first.min(total_lines)..(first + count).min(total_lines);
-
-            let texts: Vec<String> = visible.clone().map(|l| editor.buffer.line_text(l)).collect();
+            let visible = first.min(total_rows)..(first + count).min(total_rows);
+            let rows: Vec<Row> = visible.clone().map(|r| editor.wrap.row(r, &editor.buffer)).collect();
+            let lines_shown = match (rows.first(), rows.last()) {
+                (Some(a), Some(b)) => a.line..b.line + 1,
+                _ => 0..0,
+            };
+            let texts: Vec<String> = lines_shown.clone().map(|l| editor.buffer.line_text(l)).collect();
 
             // Errors and warnings get a wavy underline and color their line number.
             // Hints and notes only show in the hover card, to keep the code calm.
-            let mut underlines: Vec<Vec<(Range<usize>, Hsla)>> = vec![Vec::new(); visible.len()];
-            let mut flagged: Vec<Option<Hsla>> = vec![None; visible.len()];
+            let mut underlines: Vec<Vec<(Range<usize>, Hsla)>> = vec![Vec::new(); lines_shown.len()];
+            let mut flagged: Vec<Option<Hsla>> = vec![None; lines_shown.len()];
             for problem in editor.problems(cx) {
                 let color = match problem.severity {
                     DiagnosticSeverity::ERROR => theme.error,
@@ -202,8 +249,8 @@ impl Element for EditorElement {
                 };
                 let (start_line, start_col) = editor.buffer.point(problem.range.start);
                 let (end_line, end_col) = editor.buffer.point(problem.range.end);
-                for line in start_line.max(visible.start)..=end_line.min(visible.end.saturating_sub(1)) {
-                    let i = line - visible.start;
+                for line in start_line.max(lines_shown.start)..=end_line.min(lines_shown.end.saturating_sub(1)) {
+                    let i = line - lines_shown.start;
                     let text = &texts[i];
                     let from = if line == start_line { start_col } else { 0 };
                     let mut to = if line == end_line { end_col } else { text.chars().count() };
@@ -217,37 +264,44 @@ impl Element for EditorElement {
                 }
             }
 
-            let shaped: Vec<ShapedLine> = visible
-                .clone()
-                .zip(&texts)
-                .enumerate()
-                .map(|(i, (line, text))| {
-                    let runs =
-                        runs_for(text, editor.buffer.line_to_byte(line), &editor.spans, &underlines[i], &theme, &font);
-                    shape(text.clone(), &runs)
+            let row_layouts: Vec<RowLayout> = rows
+                .into_iter()
+                .map(|row| {
+                    let i = row.line - lines_shown.start;
+                    let line_text = &texts[i];
+                    let (b0, b1) = (byte_of_column(line_text, row.cols.start), byte_of_column(line_text, row.cols.end));
+                    let text = line_text[b0..b1].to_string();
+                    let row_underlines: Vec<(Range<usize>, Hsla)> = underlines[i]
+                        .iter()
+                        .filter_map(|(r, color)| {
+                            let (start, end) = (r.start.max(b0), r.end.min(b1));
+                            (start < end).then(|| (start - b0..end - b0, *color))
+                        })
+                        .collect();
+                    let line_byte = editor.buffer.line_to_byte(row.line) + b0;
+                    let runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
+                    let shaped = shape(text.clone(), &runs);
+                    RowLayout { x: char_width * row.indent as f32, row, text, shaped }
                 })
                 .collect();
-            let x_of = |line: usize, col: usize| -> Pixels {
-                if visible.contains(&line) {
-                    let i = line - visible.start;
-                    shaped[i].x_for_index(byte_of_column(&texts[i], col))
-                } else {
-                    char_width * col as f32
-                }
-            };
+            let wrap = &editor.wrap;
+            let pos = |line: usize, col: usize| position(&row_layouts, visible.start, wrap, char_width, line, col);
+            let row_of_line = |line: usize| wrap.first_row(line);
 
-            // Horizontal scroll: keep the caret in view, never scroll past the longest visible line.
-            let text_width = f32::from(text_bounds.size.width) - TEXT_PADDING;
-            let caret_x = f32::from(x_of(caret_line, caret_col));
-            let cw = f32::from(char_width);
-            if editor.autoscroll {
+            // Horizontal scroll: keep the caret in view, never scroll past the longest visible
+            // row. Nothing to scroll when lines wrap.
+            let (_, caret_x) = pos(caret_line, caret_col);
+            let caret_x = f32::from(caret_x);
+            if wrap.is_on() {
+                editor.scroll.x = 0.;
+            } else if editor.autoscroll {
                 if caret_x < editor.scroll.x + cw * 2. {
                     editor.scroll.x = caret_x - cw * 4.;
                 } else if caret_x > editor.scroll.x + text_width - cw * 4. {
                     editor.scroll.x = caret_x - text_width + cw * 8.;
                 }
             }
-            let widest = shaped.iter().map(|s| f32::from(s.width)).fold(caret_x, f32::max);
+            let widest = row_layouts.iter().map(|r| f32::from(r.x + r.shaped.width)).fold(caret_x, f32::max);
             editor.scroll.x = editor.scroll.x.clamp(0., (widest + cw * 4. - text_width).max(0.));
             editor.autoscroll = false;
 
@@ -255,56 +309,70 @@ impl Element for EditorElement {
                 text_bounds.left() + px(TEXT_PADDING - editor.scroll.x),
                 bounds.top() + px(TOP_PADDING - editor.scroll.y),
             );
-            let row_top = |line: usize| origin.y + line_height * line as f32;
+            let row_top = |row: usize| origin.y + line_height * row as f32;
+            // The rows a range of lines takes, clipped to the screen.
+            let rows_of = |lines: Range<usize>| {
+                row_of_line(lines.start).max(visible.start)..row_of_line(lines.end).min(visible.end)
+            };
 
             let selection_range = editor.selection.range();
             // While the Cmd+I card is open, the code it changes is tinted, with a bar in the gutter.
-            let assist_band =
-                editor.assist_target(cx).filter(|l| l.end > visible.start && l.start < visible.end).map(|l| {
-                    Bounds::from_corners(
-                        point(bounds.left() + gutter_width - px(9.), row_top(l.start.max(visible.start))),
-                        point(bounds.right(), row_top(l.end.min(visible.end))),
-                    )
-                });
-            let current_line = editor
-                .selection
-                .is_empty()
-                .then(|| Bounds::new(point(bounds.left(), row_top(caret_line)), size(bounds.size.width, line_height)));
+            let assist_band = editor.assist_target(cx).map(rows_of).filter(|r| !r.is_empty()).map(|r| {
+                Bounds::from_corners(
+                    point(bounds.left() + gutter_width - px(9.), row_top(r.start)),
+                    point(bounds.right(), row_top(r.end)),
+                )
+            });
+            let caret_rows = row_of_line(caret_line)..row_of_line(caret_line + 1);
+            let current_line = editor.selection.is_empty().then(|| {
+                Bounds::new(
+                    point(bounds.left(), row_top(caret_rows.start)),
+                    size(bounds.size.width, line_height * caret_rows.len() as f32),
+                )
+            });
 
-            let numbers = visible
-                .clone()
-                .map(|line| {
+            // Line numbers go on a line's first row only.
+            let numbers = row_layouts
+                .iter()
+                .zip(visible.clone())
+                .filter(|(r, _)| r.row.cols.start == 0)
+                .map(|(r, row)| {
+                    let line = r.row.line;
                     let label = (line + 1).to_string();
-                    let color = flagged[line - visible.start].unwrap_or(if line == caret_line {
+                    let color = flagged[line - lines_shown.start].unwrap_or(if line == caret_line {
                         theme.muted
                     } else {
                         theme.faint
                     });
                     let shaped = shape(label.clone(), &[run(label.len(), &font, color)]);
                     let x = bounds.left() + gutter_width - px(GUTTER_PADDING) - shaped.width;
-                    (shaped, point(x, row_top(line)))
+                    (shaped, point(x, row_top(row)))
                 })
                 .collect();
 
-            // Rectangles covering a char range on the visible lines, one per line.
+            // Rectangles covering a char range on the visible rows, one per row.
             let range_rects = |range: std::ops::Range<usize>| -> Vec<Bounds<Pixels>> {
                 let mut rects = Vec::new();
-                if range.is_empty() || visible.is_empty() {
+                if range.is_empty() || row_layouts.is_empty() {
                     return rects;
                 }
                 let (start_line, start_col) = editor.buffer.point(range.start);
                 let (end_line, end_col) = editor.buffer.point(range.end);
-                for line in start_line.max(visible.start)..=end_line.min(visible.end - 1) {
-                    let x0 = if line == start_line { x_of(line, start_col) } else { px(0.) };
-                    let x1 = if line == end_line {
-                        x_of(line, end_col)
+                let (start_row, x_start) = pos(start_line, start_col);
+                let (end_row, x_end) = pos(end_line, end_col);
+                for row in start_row.max(visible.start)..=end_row.min(visible.end - 1) {
+                    let r = &row_layouts[row - visible.start];
+                    let x0 = if row == start_row { x_start } else { r.x };
+                    let x1 = if row == end_row {
+                        x_end
                     } else {
-                        shaped[line - visible.start].width + char_width * 0.6
+                        // A selected line break shows as a little extra past the end.
+                        r.x + r.shaped.width + if r.row.last { char_width * 0.6 } else { px(0.) }
                     };
                     if x1 > x0 {
                         rects.push(Bounds::from_corners(
-                            point(origin.x + x0, row_top(line)),
-                            point(origin.x + x1, row_top(line) + line_height),
+                            point(origin.x + x0, row_top(row)),
+                            point(origin.x + x1, row_top(row) + line_height),
                         ));
                     }
                 }
@@ -322,49 +390,54 @@ impl Element for EditorElement {
                 .flatten()
                 .flat_map(|offset| range_rects(offset..offset + 1))
                 .collect();
-            // A thin underline under the word that Cmd/Ctrl+click would follow.
-            let link: Vec<Bounds<Pixels>> = editor
-                .link_word
-                .clone()
-                .map(range_rects)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| Bounds::new(point(r.left(), r.bottom() - line_height * 0.18), size(r.size.width, px(1.))))
-                .collect();
+            // A thin line under a range of text.
+            let underline = |range: Range<usize>, at: f32| -> Vec<Bounds<Pixels>> {
+                range_rects(range)
+                    .into_iter()
+                    .map(|r| Bounds::new(point(r.left(), r.top() + line_height * at), size(r.size.width, px(1.))))
+                    .collect()
+            };
+            // The word that Cmd/Ctrl+click would follow.
+            let link = editor.link_word.clone().map(|r| underline(r, 0.82)).unwrap_or_default();
 
-            // Search matches on screen; the current one is drawn with an outline.
             // Changes since the last commit: a bar beside the line numbers, or a small
             // notch between lines where something was deleted.
             let marker_x = bounds.left() + gutter_width - px(9.);
             let git_marks: Vec<(Bounds<Pixels>, Hsla)> = editor
                 .git_hunks
                 .iter()
-                .filter(|h| h.lines.end >= visible.start && h.lines.start <= visible.end)
-                .map(|h| match h.change {
-                    crate::git::Change::Deleted => (
-                        Bounds::new(point(marker_x - px(2.), row_top(h.lines.start) - px(1.5)), size(px(7.), px(3.))),
-                        theme.git_deleted,
-                    ),
+                .filter_map(|h| match h.change {
+                    crate::git::Change::Deleted => {
+                        let row = row_of_line(h.lines.start);
+                        (row >= visible.start && row <= visible.end).then(|| {
+                            (
+                                Bounds::new(point(marker_x - px(2.), row_top(row) - px(1.5)), size(px(7.), px(3.))),
+                                theme.git_deleted,
+                            )
+                        })
+                    }
                     change => {
                         let color =
                             if change == crate::git::Change::Added { theme.git_added } else { theme.git_modified };
-                        let top = row_top(h.lines.start.max(visible.start));
-                        let bottom = row_top(h.lines.end.min(visible.end));
-                        (
-                            Bounds::from_corners(
-                                point(marker_x, top + px(2.)),
-                                point(marker_x + px(3.), bottom - px(2.)),
-                            ),
-                            color,
-                        )
+                        let rows = rows_of(h.lines.clone());
+                        (!rows.is_empty()).then(|| {
+                            (
+                                Bounds::from_corners(
+                                    point(marker_x, row_top(rows.start) + px(2.)),
+                                    point(marker_x + px(3.), row_top(rows.end) - px(2.)),
+                                ),
+                                color,
+                            )
+                        })
                     }
                 })
                 .collect();
 
+            // Search matches on screen; the current one is drawn with an outline.
             let mut matches = Vec::new();
             if let Some(search) = &editor.search {
-                let first_char = editor.buffer.line_to_char(visible.start);
-                let last_char = editor.buffer.line_to_char(visible.end);
+                let first_char = editor.buffer.line_to_char(lines_shown.start);
+                let last_char = editor.buffer.line_to_char(lines_shown.end);
                 let first = search.matches.partition_point(|m| m.end <= first_char);
                 for (i, m) in search.matches.iter().enumerate().skip(first) {
                     if m.start > last_char {
@@ -375,20 +448,73 @@ impl Element for EditorElement {
                 }
             }
 
-            let mut marked = Vec::new();
-            if let Some(range) = editor.marked.clone() {
-                let (line, start_col) = editor.buffer.point(range.start);
-                let (_, end_col) = editor.buffer.point(range.end);
-                if visible.contains(&line) {
-                    let x0 = x_of(line, start_col);
-                    let x1 = x_of(line, end_col);
-                    let y = row_top(line) + line_height * 0.85;
-                    marked.push(Bounds::new(point(origin.x + x0, y), size(x1 - x0, px(1.))));
+            // Text being composed (an accent, or an input method) is underlined.
+            let marked = editor.marked.clone().map(|r| underline(r, 0.85)).unwrap_or_default();
+
+            let caret_height = line_height * 0.8;
+            let caret_rect = |row: usize, x: Pixels| {
+                Bounds::new(
+                    point(origin.x + x - px(1.), row_top(row) + (line_height - caret_height) / 2.),
+                    size(px(2.), caret_height),
+                )
+            };
+            let extra_carets: Vec<Bounds<Pixels>> = editor
+                .extra
+                .iter()
+                .map(|c| editor.buffer.point(c.selection.head))
+                .map(|(line, col)| pos(line, col))
+                .filter(|(row, _)| visible.contains(row))
+                .map(|(row, x)| caret_rect(row, x))
+                .collect();
+            let lines = row_layouts
+                .iter()
+                .zip(visible.clone())
+                .map(|(r, row)| (r.shaped.clone(), point(origin.x + r.x, row_top(row))))
+                .collect();
+            let scroll_row = |line: usize| row_of_line(line);
+            let mut scroll_marks: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+            let scrollbar = (max_y > 0.).then(|| {
+                let track = Bounds::from_corners(point(bounds.right() - px(BAR), bounds.top()), bounds.bottom_right());
+                let track_h = f32::from(track.size.height);
+                let thumb_h = (track_h * viewport_height / (viewport_height + max_y)).max(28.).min(track_h);
+                let thumb_top = track.top() + px((editor.scroll.y / max_y) * (track_h - thumb_h));
+                let thumb = Bounds::new(point(track.left(), thumb_top), size(px(BAR), px(thumb_h)));
+                ScrollbarLayout { track, thumb, max_scroll: max_y }
+            });
+            // Marks on the scrollbar for errors, search matches and changed lines,
+            // so they can be found in long files.
+            if let Some(bar) = &scrollbar {
+                let total = total_rows.max(1) as f32;
+                let mark = |line: usize, x: f32, w: f32, color: Hsla| {
+                    let y = bar.track.top() + bar.track.size.height * (scroll_row(line) as f32 / total);
+                    (Bounds::new(point(bar.track.left() + px(x), y), size(px(w), px(2.))), color)
+                };
+                for hunk in &editor.git_hunks {
+                    let color = match hunk.change {
+                        crate::git::Change::Added => theme.git_added,
+                        crate::git::Change::Modified => theme.git_modified,
+                        crate::git::Change::Deleted => theme.git_deleted,
+                    };
+                    scroll_marks.push(mark(hunk.lines.start, 0., 3., color));
+                }
+                if let Some(search) = &editor.search {
+                    for m in search.matches.iter().take(2000) {
+                        scroll_marks.push(mark(editor.buffer.point(m.start).0, 3., 4., theme.caret.opacity(0.8)));
+                    }
+                }
+                for problem in editor.problems(cx) {
+                    let color = match problem.severity {
+                        DiagnosticSeverity::ERROR => theme.error,
+                        DiagnosticSeverity::WARNING => theme.warning,
+                        _ => continue,
+                    };
+                    scroll_marks.push(mark(editor.buffer.point(problem.range.start).0, 6., 4., color));
                 }
             }
+            let (_, caret_x) = pos(caret_line, caret_col);
 
             // Caret: glide toward its new position, then blink softly once idle.
-            let target = point(px(caret_x), line_height * caret_line as f32);
+            let target = point(caret_x, line_height * caret_row as f32);
             let motion = &mut editor.caret;
             if !motion.placed {
                 (motion.from, motion.to, motion.visual, motion.placed) = (target, target, target, true);
@@ -441,19 +567,6 @@ impl Element for EditorElement {
                     }
                 }
             };
-            let caret_height = line_height * 0.8;
-            let extra_carets = editor
-                .extra
-                .iter()
-                .map(|c| editor.buffer.point(c.selection.head))
-                .filter(|(line, _)| visible.contains(line))
-                .map(|(line, col)| {
-                    Bounds::new(
-                        point(origin.x + x_of(line, col) - px(1.), row_top(line) + (line_height - caret_height) / 2.),
-                        size(px(2.), caret_height),
-                    )
-                })
-                .collect();
             let caret = Some((
                 Bounds::new(
                     point(origin.x + visual.x - px(1.), origin.y + visual.y + (line_height - caret_height) / 2.),
@@ -462,51 +575,6 @@ impl Element for EditorElement {
                 opacity,
             ));
 
-            let lines = visible
-                .clone()
-                .zip(shaped.iter().cloned())
-                .map(|(line, s)| (s, point(origin.x, row_top(line))))
-                .collect();
-            // Scrollbar: a thin thumb at the right edge, with marks for errors, search
-            // matches and changed lines so they can be found in long files.
-            const BAR: f32 = 10.;
-            let scrollbar = (max_y > 0.).then(|| {
-                let track = Bounds::from_corners(point(bounds.right() - px(BAR), bounds.top()), bounds.bottom_right());
-                let track_h = f32::from(track.size.height);
-                let thumb_h = (track_h * viewport_height / (viewport_height + max_y)).max(28.).min(track_h);
-                let thumb_top = track.top() + px((editor.scroll.y / max_y) * (track_h - thumb_h));
-                let thumb = Bounds::new(point(track.left(), thumb_top), size(px(BAR), px(thumb_h)));
-                ScrollbarLayout { track, thumb, max_scroll: max_y }
-            });
-            let mut scroll_marks: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
-            if let Some(bar) = &scrollbar {
-                let total = total_lines.max(1) as f32;
-                let mark = |line: usize, x: f32, w: f32, color: Hsla| {
-                    let y = bar.track.top() + bar.track.size.height * (line as f32 / total);
-                    (Bounds::new(point(bar.track.left() + px(x), y), size(px(w), px(2.))), color)
-                };
-                for hunk in &editor.git_hunks {
-                    let color = match hunk.change {
-                        crate::git::Change::Added => theme.git_added,
-                        crate::git::Change::Modified => theme.git_modified,
-                        crate::git::Change::Deleted => theme.git_deleted,
-                    };
-                    scroll_marks.push(mark(hunk.lines.start, 0., 3., color));
-                }
-                if let Some(search) = &editor.search {
-                    for m in search.matches.iter().take(2000) {
-                        scroll_marks.push(mark(editor.buffer.point(m.start).0, 3., 4., theme.caret.opacity(0.8)));
-                    }
-                }
-                for problem in editor.problems(cx) {
-                    let color = match problem.severity {
-                        DiagnosticSeverity::ERROR => theme.error,
-                        DiagnosticSeverity::WARNING => theme.warning,
-                        _ => continue,
-                    };
-                    scroll_marks.push(mark(editor.buffer.point(problem.range.start).0, 6., 4., color));
-                }
-            }
             let thumb_emphasis = if editor.scrollbar_dragging() {
                 0.9
             } else if editor.over_scrollbar() {
@@ -520,8 +588,8 @@ impl Element for EditorElement {
                 text_bounds,
                 line_height,
                 char_width,
-                visible_lines: visible,
-                shaped,
+                first_row: visible.start,
+                rows: row_layouts,
                 scrollbar: scrollbar.as_ref().map(|b| ScrollbarLayout {
                     track: b.track,
                     thumb: b.thumb,

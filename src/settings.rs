@@ -22,6 +22,8 @@ pub struct Settings {
     pub sidebar_visible: bool,
     /// Dim the title bar, sidebar and status bar while typing.
     pub fade_bars_while_typing: bool,
+    /// Wrap long lines to the width of the editor instead of scrolling sideways.
+    pub word_wrap: bool,
     /// Show suggestions while typing. Ctrl+Space asks for them either way.
     pub autocomplete: bool,
     /// Where AI answers come from. Off until a provider is chosen.
@@ -37,6 +39,7 @@ impl Default for Settings {
             font_size: DEFAULT_FONT_SIZE,
             sidebar_visible: true,
             fade_bars_while_typing: false,
+            word_wrap: false,
             autocomplete: true,
             ai: Default::default(),
         }
