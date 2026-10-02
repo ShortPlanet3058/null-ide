@@ -7,6 +7,7 @@
 //!   the line) and streams in as it arrives.
 //!
 //! Typing the characters a suggestion shows keeps it, so it never flickers away.
+//! ⇥ takes it all, ⌥→ the next word, ⌘→ the rest of the line; ⌥⇥ shows another option.
 //! Off unless switched on in Settings → AI.
 
 use super::{EditKind, Editor};
@@ -17,12 +18,18 @@ use gpui::{App, Context, KeyBinding, Window, actions};
 use std::collections::HashMap;
 use std::time::Duration;
 
-actions!(ghost, [AcceptGhost, DismissGhost]);
+actions!(ghost, [AcceptGhost, AcceptGhostWord, AcceptGhostLine, NextGhost, PreviousGhost, DismissGhost]);
 
 pub fn bind_keys(cx: &mut App) {
+    let ctx = Some("Editor && ai_ghost");
     cx.bind_keys([
-        KeyBinding::new("tab", AcceptGhost, Some("Editor && ai_ghost")),
-        KeyBinding::new("escape", DismissGhost, Some("Editor && ai_ghost")),
+        KeyBinding::new("tab", AcceptGhost, ctx),
+        KeyBinding::new("alt-right", AcceptGhostWord, ctx),
+        KeyBinding::new("secondary-right", AcceptGhostLine, ctx),
+        // ⌥⇥ rather than ⌥] : brackets take several keys on many layouts.
+        KeyBinding::new("alt-tab", NextGhost, ctx),
+        KeyBinding::new("alt-shift-tab", PreviousGhost, ctx),
+        KeyBinding::new("escape", DismissGhost, ctx),
     ]);
 }
 
@@ -33,8 +40,12 @@ const MAX_LINES: usize = 6;
 const CONTEXT_BEFORE: usize = 12_000;
 const CONTEXT_AFTER: usize = 3_000;
 /// Files the current one includes or imports, given to the AI: at most this many, cut to this size.
-const RELATED_FILES: usize = 4;
-const RELATED_CHARS: usize = 4_000;
+const RELATED_FILES: usize = 3;
+const RELATED_CHARS: usize = 3_000;
+/// Other open tabs, cut to this size.
+const OPEN_FILE_CHARS: usize = 2_000;
+/// Suggestions remembered by where they were made, so deleting back brings one at once.
+const CACHE_SIZE: usize = 60;
 /// Names suggested from the file need at least this much typed.
 const MIN_PREFIX: usize = 2;
 
@@ -43,6 +54,72 @@ pub(super) struct Ghost {
     pub(super) offset: usize,
     pub(super) version: u64,
     pub(super) lines: Vec<String>,
+    /// The options seen so far here (⌥⇥ goes through them, then asks for more).
+    alternatives: Vec<Vec<String>>,
+    current: usize,
+    /// How to ask for another option.
+    request: Option<std::rc::Rc<SuggestionRequest>>,
+}
+
+impl Ghost {
+    pub(super) fn new(offset: usize, version: u64, lines: Vec<String>) -> Self {
+        Self { offset, version, alternatives: vec![lines.clone()], lines, current: 0, request: None }
+    }
+}
+
+/// A question for the AI about one spot, kept to ask again for another option.
+pub(super) struct SuggestionRequest {
+    offset: usize,
+    version: u64,
+    /// The current line before and after the caret, and the text after it.
+    before: String,
+    after: String,
+    suffix: String,
+    block: bool,
+    single_line: bool,
+    use_fill: bool,
+    fill: ai::Fim,
+    chat: Prompt,
+    ai_settings: ai::AiSettings,
+    cache_key: String,
+}
+
+/// The start of a suggestion up to the end of its next word (or its next line break,
+/// with the indentation after it).
+fn next_word(text: &str) -> &str {
+    if let Some(rest) = text.strip_prefix('\n') {
+        let indent = rest.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+        return &text[..1 + indent];
+    }
+    let mut end = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some(&(i, c)) = chars.peek() {
+        if c == ' ' || c == '\t' {
+            end = i + c.len_utf8();
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    let Some(&(start, first)) = chars.peek() else { return &text[..end] };
+    let word = is_ident(first);
+    for (i, c) in chars {
+        if c.is_whitespace() || is_ident(c) != word || (!word && i > start) {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    &text[..end]
+}
+
+/// The start of a suggestion up to the end of its line (or the whole next line, when
+/// it starts with a line break).
+fn next_line(text: &str) -> &str {
+    let start = usize::from(text.starts_with('\n'));
+    match text[start..].find('\n') {
+        Some(i) => &text[..start + i],
+        None => text,
+    }
 }
 
 fn is_ident(c: char) -> bool {
@@ -201,11 +278,8 @@ impl Editor {
     }
 
     fn set_ghost(&mut self, lines: Vec<String>, cx: &mut Context<Self>) {
-        self.ghost = (!lines.iter().all(|l| l.is_empty())).then(|| Ghost {
-            offset: self.selection.head,
-            version: self.buffer.version(),
-            lines,
-        });
+        self.ghost = (!lines.iter().all(|l| l.is_empty()))
+            .then(|| Ghost::new(self.selection.head, self.buffer.version(), lines));
         self.rebuild_blocks();
         cx.notify();
     }
@@ -222,12 +296,13 @@ impl Editor {
         .then(|| {
             let mut lines = ghost.lines.clone();
             lines[0] = first[text.len()..].to_string();
-            Ghost { offset: ghost.offset + text.chars().count(), version: 0, lines }
+            Ghost::new(ghost.offset + text.chars().count(), 0, lines)
         })
     }
 
-    /// After typing: suggest at once from the file, then ask the AI after a pause.
-    /// `kept` is a suggestion that what was typed matched, which then stays as it is.
+    /// After typing: suggest at once from the file (or from what was suggested here
+    /// before), then ask the AI after a pause. `kept` is a suggestion that what was
+    /// typed matched, which then stays as it is.
     pub(super) fn schedule_ghost(&mut self, kept: Option<Ghost>, cx: &mut Context<Self>) {
         self.ghost_task = None;
         let ai_settings = cx.global::<Settings>().ai.clone();
@@ -243,16 +318,23 @@ impl Editor {
             self.rebuild_blocks();
             return cx.notify();
         }
-        // Only at the end of a line (closing brackets after the caret are fine).
         let (line, col) = self.buffer.point(self.selection.head);
         let line_text = self.buffer.line_text(line);
         let split = line_text.char_indices().nth(col).map_or(line_text.len(), |(b, _)| b);
         let (before, after) = (line_text[..split].to_string(), line_text[split..].to_string());
-        if !after.chars().all(|c| c.is_whitespace() || matches!(c, ')' | ']' | '}' | ';' | ',' | '"' | '\'' | ':')) {
+        // Not in the middle of a word.
+        if after.chars().next().is_some_and(is_ident) {
             return;
         }
+        // Mid-line (more than closing brackets after the caret): one line, from a model that sees both sides.
+        let mid_line =
+            !after.chars().all(|c| c.is_whitespace() || matches!(c, ')' | ']' | '}' | ';' | ',' | '"' | '\'' | ':'));
 
-        // 1. A name from the file, right away.
+        // 1. Something known right away: what was suggested here before, or a name from the file.
+        let key = self.ghost_cache_key();
+        if let Some(lines) = self.ghost_cache.iter().rev().find(|(k, _)| *k == key).map(|(_, l)| l.clone()) {
+            return self.set_ghost(lines, cx);
+        }
         let word = typed_word(&before);
         if word.chars().count() >= MIN_PREFIX
             && let Some(name) = best_name(&self.buffer.to_string(), word, self.selection.head)
@@ -268,8 +350,37 @@ impl Editor {
         if matches!(provider, ProviderId::Off | ProviderId::ClaudeCode | ProviderId::Codex) {
             return;
         }
+        let use_fill = ai::fim_available(&ai_settings) && !fill_failed(&ai_settings);
+        if mid_line && !use_fill {
+            return;
+        }
+        let request =
+            std::rc::Rc::new(self.suggestion_request(ai_settings, use_fill, before, after, mid_line, key, cx));
+        self.request_suggestion(request, false, cx);
+    }
+
+    /// The text before and after the caret, cut to size, for the cache.
+    fn ghost_cache_key(&self) -> String {
         let offset = self.selection.head;
-        let version = self.buffer.version();
+        let start = offset.saturating_sub(400);
+        let end = (offset + 120).min(self.buffer.len_chars());
+        format!("{}\u{0}{}", self.buffer.slice(start..offset), self.buffer.slice(offset..end))
+    }
+
+    /// Everything the AI gets: the file around the caret, what the project defines, the
+    /// files this one includes or imports, and the other open tabs.
+    fn suggestion_request(
+        &self,
+        ai_settings: ai::AiSettings,
+        use_fill: bool,
+        before: String,
+        after: String,
+        single_line: bool,
+        cache_key: String,
+        cx: &App,
+    ) -> SuggestionRequest {
+        let provider = ai_settings.active();
+        let offset = self.selection.head;
         let text = self.buffer.to_string();
         let caret_byte = self.buffer.rope().char_to_byte(offset);
         let mut from = caret_byte.saturating_sub(CONTEXT_BEFORE);
@@ -280,28 +391,44 @@ impl Editor {
         while !text.is_char_boundary(to) {
             to -= 1;
         }
+        let path_buf = self.path.clone().unwrap_or_default();
         let path = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into());
-        let related = self.related_files();
-        let suffix_text = text[caret_byte..to].to_string();
-        // Code models fill the gap between what's before and after the caret: the best
-        // suggestions, and quick. Other models get a chat prompt instead.
-        let use_fill = ai::fim_available(&ai_settings) && !fill_failed(&ai_settings);
         let comment = self.language().and_then(|l| l.line_comment).unwrap_or("//");
-        let fill = ai::Fim {
-            prefix: format!(
-                "{}{comment} {path}\n{}",
-                related.iter().map(|(name, body)| format!("{comment} {name}\n{body}\n\n")).collect::<String>(),
-                &text[from..caret_byte]
-            ),
-            suffix: suffix_text.clone(),
-            max_tokens: 160,
+
+        let related = self.related_files();
+        let mut others: Vec<(String, String)> = related.clone();
+        let mut outline = String::new();
+        if let Some(project) = cx.try_global::<crate::project_index::ProjectContext>() {
+            outline = crate::project_index::outline_for(&project.definitions, &path_buf, &project.root, comment);
+            for (open, body) in &project.open_files {
+                let name = open.strip_prefix(&project.root).unwrap_or(open).display().to_string();
+                if *open != path_buf && !others.iter().any(|(n, _)| *n == name) {
+                    others.push((name, body.chars().take(OPEN_FILE_CHARS).collect()));
+                }
+            }
+        }
+        let suffix = text[caret_byte..to].to_string();
+        let files: String = others.iter().map(|(name, body)| format!("{comment} File: {name}\n{body}\n\n")).collect();
+        let outline_block = if outline.is_empty() {
+            String::new()
+        } else {
+            format!("{comment} Defined elsewhere in the project:\n{outline}\n")
         };
-        // A new block (after `:` or `{`, or on an empty line) can take a few lines.
-        let block = before.trim().is_empty() || before.trim_end().ends_with([':', '{', '(', '[']);
-        let context: String = related
+        let fill = ai::Fim {
+            prefix: format!("{outline_block}{files}{comment} File: {path}\n{}", &text[from..caret_byte]),
+            suffix: suffix.clone(),
+            max_tokens: if single_line { 48 } else { 160 },
+            temperature: 0.2,
+        };
+        let chat_context: String = others
             .iter()
             .map(|(name, body)| format!("Another file of the project, {name}:\n<file>\n{body}\n</file>\n\n"))
             .collect();
+        let chat_outline = if outline.is_empty() {
+            String::new()
+        } else {
+            format!("Defined elsewhere in the project:\n{outline}\n\n")
+        };
         let chat = Prompt {
             system: format!(
                 "You are the code completion in a code editor. The person is typing at <CURSOR>. Reply with \
@@ -313,19 +440,44 @@ impl Editor {
                  comes next, reply with nothing."
             ),
             user: format!(
-                "{context}File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {before:?}",
+                "{chat_outline}{chat_context}File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {before:?}",
                 self.language_name(),
                 &text[from..caret_byte],
-                &suffix_text,
+                &suffix,
             ),
             // A fill-only code model can't chat; the usual model does it then.
             model: ai_settings.completion_model(provider).filter(|_| !ai::fim_available(&ai_settings)),
             max_tokens: Some(160),
             // Thinking makes suggestions arrive too late to help: the least the provider allows.
             effort: provider.efforts().iter().copied().find(|e| *e != ai::Effort::Auto),
+            temperature: None,
         };
+        let block = before.trim().is_empty() || before.trim_end().ends_with([':', '{', '(', '[']);
+        SuggestionRequest {
+            offset,
+            version: self.buffer.version(),
+            before,
+            after,
+            suffix,
+            block,
+            single_line,
+            use_fill,
+            fill,
+            chat,
+            ai_settings,
+            cache_key,
+        }
+    }
+
+    /// Asks the AI. As a first suggestion it waits for the typing to pause and shows the
+    /// answer as it streams; as another option (⌥⇥) it asks for something different and
+    /// adds it to the ones already seen.
+    fn request_suggestion(&mut self, request: std::rc::Rc<SuggestionRequest>, another: bool, cx: &mut Context<Self>) {
         self.ghost_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(PAUSE).await;
+            if !another {
+                cx.background_executor().timer(PAUSE).await;
+            }
+            let (offset, version) = (request.offset, request.version);
             let still_there = this
                 .update(cx, |this, _| this.selection.head == offset && this.buffer.version() == version)
                 .unwrap_or(false);
@@ -333,10 +485,19 @@ impl Editor {
                 return;
             }
             let started = std::time::Instant::now();
-            let mut events = if use_fill {
-                ai::stream_fim(ai_settings.clone(), fill)
+            let settings = request.ai_settings.clone();
+            let mut events = if request.use_fill {
+                let mut fill = request.fill.clone();
+                if another {
+                    fill.temperature = 0.8;
+                }
+                ai::stream_fim(settings.clone(), fill)
             } else {
-                ai::stream(ai_settings.clone(), chat)
+                let mut chat = request.chat.clone();
+                if another {
+                    chat.temperature = Some(0.8);
+                }
+                ai::stream(settings.clone(), chat)
             };
             let mut answer = String::new();
             while let Some(event) = events.next().await {
@@ -347,32 +508,47 @@ impl Editor {
                     }
                     AiEvent::Done => true,
                     AiEvent::Failed(message) => {
-                        if use_fill {
+                        if request.use_fill {
                             // That model or endpoint can't fill: use the chat model from now on.
-                            mark_fill_failed(&ai_settings);
+                            mark_fill_failed(&settings);
                         } else {
-                            ai::log_request(&ai_settings, "chat", started, None, &Err(message));
+                            ai::log_request(&settings, "chat", started, None, &Err(message));
                         }
                         return;
                     }
                 };
-                // Show it as it comes, a line at a time.
-                if !done && !answer.contains('\n') {
+                // Show it as it comes, a line at a time (another option only once complete).
+                if !done && (another || !answer.contains('\n')) {
                     continue;
                 }
                 let current = answer.clone();
-                let suffix = suffix_text.clone();
+                let request = request.clone();
                 let keep_going = this
                     .update(cx, |this, cx| {
-                        if this.selection.head != offset || this.buffer.version() != version {
+                        if this.selection.head != request.offset || this.buffer.version() != request.version {
                             return false;
                         }
-                        let completion = if use_fill { current.clone() } else { ai::strip_code_fence(&current) };
-                        let completion = trim_overlap(&before, &after, &completion);
-                        let lines = shape_suggestion(&completion, &suffix, block);
-                        // Keep the file's suggestion if the AI has nothing better.
-                        if lines.iter().any(|l| !l.trim().is_empty()) {
-                            this.set_ghost(lines, cx);
+                        let completion =
+                            if request.use_fill { current.clone() } else { ai::strip_code_fence(&current) };
+                        let completion = trim_overlap(&request.before, &request.after, &completion);
+                        let mut lines = shape_suggestion(&completion, &request.suffix, request.block);
+                        if request.single_line {
+                            lines.truncate(1);
+                        }
+                        if lines.iter().all(|l| l.trim().is_empty()) {
+                            // Keep the file's suggestion when the AI has nothing better.
+                            return !done;
+                        }
+                        if another {
+                            this.add_alternative(lines, cx);
+                        } else {
+                            this.set_ghost(lines.clone(), cx);
+                            if let Some(ghost) = &mut this.ghost {
+                                ghost.request = Some(request.clone());
+                            }
+                            if done {
+                                this.remember_suggestion(request.cache_key.clone(), lines);
+                            }
                         }
                         !done
                     })
@@ -381,10 +557,30 @@ impl Editor {
                     break;
                 }
             }
-            if !use_fill {
-                ai::log_request(&ai_settings, "chat", started, None, &Ok(()));
+            if !request.use_fill {
+                ai::log_request(&settings, "chat", started, None, &Ok(()));
             }
         }));
+    }
+
+    fn remember_suggestion(&mut self, key: String, lines: Vec<String>) {
+        self.ghost_cache.retain(|(k, _)| *k != key);
+        self.ghost_cache.push((key, lines));
+        if self.ghost_cache.len() > CACHE_SIZE {
+            self.ghost_cache.remove(0);
+        }
+    }
+
+    fn add_alternative(&mut self, lines: Vec<String>, cx: &mut Context<Self>) {
+        let Some(ghost) = &mut self.ghost else { return };
+        if ghost.alternatives.contains(&lines) {
+            return;
+        }
+        ghost.alternatives.push(lines.clone());
+        ghost.current = ghost.alternatives.len() - 1;
+        ghost.lines = lines;
+        self.rebuild_blocks();
+        cx.notify();
     }
 
     /// Files the current one pulls in (includes, imports, modules), so suggestions know
@@ -450,6 +646,54 @@ impl Editor {
         self.rebuild_blocks();
     }
 
+    /// Takes the first part of the suggestion; the rest stays suggested.
+    fn accept_part(&mut self, take: fn(&str) -> &str, cx: &mut Context<Self>) {
+        let Some(ghost) = self.ghost.take() else { return };
+        let text = ghost.lines.join("\n");
+        let piece = take(&text).to_string();
+        let rest = text[piece.len()..].to_string();
+        self.ghost_task = None;
+        self.edit(ghost.offset..ghost.offset, &piece, EditKind::Typing, cx);
+        if !rest.is_empty() {
+            let lines = rest.split('\n').map(str::to_string).collect();
+            self.ghost = Some(Ghost::new(ghost.offset + piece.chars().count(), self.buffer.version(), lines));
+        }
+        self.rebuild_blocks();
+        cx.notify();
+    }
+
+    pub(super) fn accept_ghost_word(&mut self, _: &AcceptGhostWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.accept_part(next_word, cx);
+    }
+
+    pub(super) fn accept_ghost_line(&mut self, _: &AcceptGhostLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.accept_part(next_line, cx);
+    }
+
+    /// ⌥⇥: the next option seen here, or a new one from the AI.
+    pub(super) fn next_ghost(&mut self, _: &NextGhost, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(ghost) = &mut self.ghost else { return };
+        if ghost.current + 1 < ghost.alternatives.len() {
+            ghost.current += 1;
+            ghost.lines = ghost.alternatives[ghost.current].clone();
+            self.rebuild_blocks();
+            return cx.notify();
+        }
+        if let Some(request) = ghost.request.clone() {
+            self.request_suggestion(request, true, cx);
+        }
+    }
+
+    pub(super) fn previous_ghost(&mut self, _: &PreviousGhost, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(ghost) = &mut self.ghost else { return };
+        if ghost.current > 0 {
+            ghost.current -= 1;
+            ghost.lines = ghost.alternatives[ghost.current].clone();
+            self.rebuild_blocks();
+            cx.notify();
+        }
+    }
+
     fn dismiss_ghost(&mut self, _: &DismissGhost, _: &mut Window, cx: &mut Context<Self>) {
         self.ghost = None;
         self.ghost_task = None;
@@ -489,6 +733,16 @@ mod tests {
         assert_eq!(trim_overlap("print(av", ")", "erage(xs)"), "erage(xs)");
         // A plain continuation is left alone.
         assert_eq!(trim_overlap("x = ", "", "len(xs)"), "len(xs)");
+    }
+
+    #[test]
+    fn takes_a_suggestion_a_word_or_a_line_at_a_time() {
+        assert_eq!(next_word("_moving_average(xs)"), "_moving_average");
+        assert_eq!(next_word("(xs)"), "(");
+        assert_eq!(next_word(" + 1"), " +");
+        assert_eq!(next_word("\n    write(1)"), "\n    ");
+        assert_eq!(next_line("x + 1\nreturn"), "x + 1");
+        assert_eq!(next_line("\n    write(1, &c, 1);\n}"), "\n    write(1, &c, 1);");
     }
 
     #[test]

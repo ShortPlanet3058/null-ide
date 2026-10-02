@@ -83,8 +83,10 @@ Settings) turns it off entirely.
 - **⌘I writes in place**: the new code appears line by line as it's written, over the
   dimmed code it replaces.
 - **Suggestions while typing** (Settings → AI, off by default): names from the file appear
-  the moment you type two letters, then the AI's guess when you pause, streamed in; ⇥ takes
-  it, typing along keeps it. They come from a code model made to fill in the middle
+  the moment you type two letters, then the AI's guess when you pause, streamed in. ⇥ takes
+  it, ⌥→ takes the next word, ⌘→ the rest of the line, ⌥⇥ shows another option; typing along
+  keeps it, and deleting back brings an earlier one straight back. It knows what the whole
+  project defines (a local index, no AI) and the other open files. They come from a code model made to fill in the middle
   (StarCoder2 on NVIDIA, Qwen2.5-Coder on Ollama; changeable in Settings → AI), which sees the
   file and the files it includes or imports, and can write a whole body after `{` or `:`.
   `NULL_AI_LOG=<file>` logs how long each request takes.
