@@ -8,9 +8,10 @@ use crate::git;
 use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
 use crate::lsp_store::{LspStore, Readiness};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
-use crate::palette::{Command, Palette, PaletteEvent, format_keys};
+use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
+use crate::settings_panel::{SettingsPanel, SettingsPanelEvent, Shortcut};
 use crate::terminal::{Shell, TerminalEvent, TerminalView};
 use crate::theme::{Theme, ThemeName};
 use gpui::{
@@ -30,7 +31,11 @@ actions!(
         NextTab,
         PreviousTab,
         TogglePalette,
+        ShowCommands,
+        AskAi,
+        ToggleAi,
         OpenSettings,
+        OpenSettingsFile,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
@@ -62,9 +67,9 @@ actions!(
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Workspace");
     let mut keys = vec![
-        KeyBinding::new("secondary-k", TogglePalette, ctx),
         KeyBinding::new("secondary-p", TogglePalette, ctx),
-        KeyBinding::new("secondary-shift-p", TogglePalette, ctx),
+        KeyBinding::new("secondary-k", ShowCommands, ctx),
+        KeyBinding::new("secondary-shift-p", ShowCommands, ctx),
         KeyBinding::new("secondary-o", Open, ctx),
         KeyBinding::new("secondary-w", CloseTab, ctx),
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
@@ -161,8 +166,13 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    settings_panel: Option<(Entity<SettingsPanel>, Subscription)>,
     /// Files whose tabs were closed, most recent last, for Cmd+Shift+T.
     recently_closed: Vec<PathBuf>,
+    /// Files activated lately, most recent first, for the palette.
+    recent_files: Vec<PathBuf>,
+    /// Actions run from the palette lately, most recent first.
+    recent_commands: Vec<&'static str>,
     /// Watches the project folder so the tree and open files follow changes made elsewhere.
     _watcher: Option<notify::RecommendedWatcher>,
     watch_task: Option<Task<()>>,
@@ -236,12 +246,15 @@ impl Workspace {
             chrome: Transition::new(true),
             last_mouse: None,
             palette: None,
+            settings_panel: None,
             ready_since: None,
             branch: None,
             branch_task: None,
             terminal: None,
             terminal_open: Transition::new(false),
             recently_closed: Vec::new(),
+            recent_files: Vec::new(),
+            recent_commands: Vec::new(),
             _watcher: None,
             watch_task: None,
             ask: None,
@@ -433,6 +446,11 @@ impl Workspace {
         self.active = Some(ix);
         let editor = self.tabs[ix].editor.read(cx);
         let path = editor.path().map(Path::to_path_buf);
+        if let Some(path) = &path {
+            self.recent_files.retain(|p| p != path);
+            self.recent_files.insert(0, path.clone());
+            self.recent_files.truncate(50);
+        }
         window.set_window_title(&editor.file_name());
         window.focus(&editor.focus_handle(cx));
         self.tree.update(cx, |tree, cx| tree.set_active(path, cx));
@@ -659,88 +677,98 @@ impl Workspace {
         }
     }
 
-    /// Every command the palette offers right now, with its shortcut.
+    /// Every command the palette offers right now, by category, with its shortcut.
     fn commands(&self, window: &Window, cx: &App) -> Vec<Command> {
+        use Category::*;
         let settings = cx.global::<Settings>();
-        let fade =
-            if settings.fade_bars_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
-        let ai_label = |id: ProviderId| {
-            let current = if settings.ai.provider == id { " (current)" } else { "" };
-            format!("AI: Use {}{current}", id.label())
-        };
-        let theme_label = |name: ThemeName| {
-            let current = if settings.theme == name { " (current)" } else { "" };
-            format!("Theme: {}{current}", name.label())
-        };
-        let mut commands: Vec<(String, Box<dyn Action>)> = vec![
-            ("New File".into(), Box::new(NewUntitled)),
-            ("New File in Project…".into(), Box::new(crate::file_tree::NewFile)),
-            ("New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
-            ("Open File or Folder…".into(), Box::new(Open)),
-            ("Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
-            ("Toggle Sidebar".into(), Box::new(ToggleSidebar)),
-            ("Search in Project".into(), Box::new(SearchProject)),
-            ("Show Files".into(), Box::new(ShowFiles)),
-            ("Toggle Terminal".into(), Box::new(ToggleTerminal)),
-            (ai_label(ProviderId::Nvidia), Box::new(UseNvidia)),
-            (ai_label(ProviderId::Ollama), Box::new(UseOllama)),
-            (ai_label(ProviderId::OpenaiCompatible), Box::new(UseOpenAiCompatible)),
-            (ai_label(ProviderId::Claude), Box::new(UseClaudeApi)),
-            (ai_label(ProviderId::ClaudeCode), Box::new(UseClaudeCode)),
-            (ai_label(ProviderId::Codex), Box::new(UseCodex)),
-            ("AI: Set API Key…".into(), Box::new(SetApiKey)),
-            ("AI: Turn Off".into(), Box::new(TurnOffAi)),
-            (fade.into(), Box::new(ToggleFadeWhileTyping)),
-            (if settings.word_wrap { "Stop Wrapping Lines" } else { "Wrap Lines" }.into(), Box::new(ToggleWordWrap)),
-            (theme_label(ThemeName::Oled), Box::new(UseOledTheme)),
-            (theme_label(ThemeName::Graphite), Box::new(UseGraphiteTheme)),
-            (theme_label(ThemeName::Paper), Box::new(UsePaperTheme)),
-            ("Bigger Text".into(), Box::new(IncreaseFontSize)),
-            ("Smaller Text".into(), Box::new(DecreaseFontSize)),
-            ("Actual Size".into(), Box::new(ResetFontSize)),
-            ("Open Settings File".into(), Box::new(OpenSettings)),
+        let current = |on: bool| if on { " (current)" } else { "" };
+        let ai_label = |id: ProviderId| format!("Use {}{}", id.label(), current(settings.ai.provider == id));
+        let theme_label = |name: ThemeName| format!("{} Theme{}", name.label(), current(settings.theme == name));
+        let toggle = |on: bool, stop: &str, start: &str| if on { stop.to_string() } else { start.to_string() };
+        let mut commands: Vec<(Category, String, Box<dyn Action>)> = vec![
+            (File, "New File".into(), Box::new(NewUntitled)),
+            (File, "New File in Project…".into(), Box::new(crate::file_tree::NewFile)),
+            (File, "New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
+            (File, "Open File or Folder…".into(), Box::new(Open)),
+            (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
+            (Go, "Go to File…".into(), Box::new(TogglePalette)),
+            (Go, "Search in Project…".into(), Box::new(SearchProject)),
+            (View, "Show Files".into(), Box::new(ShowFiles)),
+            (View, toggle(settings.word_wrap, "Stop Wrapping Lines", "Wrap Lines"), Box::new(ToggleWordWrap)),
             (
-                if settings.autocomplete { "Turn Off Autocomplete" } else { "Turn On Autocomplete" }.into(),
+                View,
+                toggle(settings.fade_bars_while_typing, "Stop Fading Bars While Typing", "Fade Bars While Typing"),
+                Box::new(ToggleFadeWhileTyping),
+            ),
+            (Appearance, theme_label(ThemeName::Oled), Box::new(UseOledTheme)),
+            (Appearance, theme_label(ThemeName::Graphite), Box::new(UseGraphiteTheme)),
+            (Appearance, theme_label(ThemeName::Paper), Box::new(UsePaperTheme)),
+            (Appearance, "Bigger Text".into(), Box::new(IncreaseFontSize)),
+            (Appearance, "Smaller Text".into(), Box::new(DecreaseFontSize)),
+            (Appearance, "Actual Size".into(), Box::new(ResetFontSize)),
+            (
+                Edit,
+                toggle(settings.autocomplete, "Turn Off Autocomplete", "Turn On Autocomplete"),
                 Box::new(ToggleAutocomplete),
             ),
+            (App, "Settings…".into(), Box::new(OpenSettings)),
+            (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
+            (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
+            (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
         ];
         if self.active.is_some() {
             commands.extend([
-                ("Save".into(), Box::new(Save) as Box<dyn Action>),
-                ("Save As…".into(), Box::new(SaveAs)),
-                ("Save All".into(), Box::new(SaveAll)),
-                ("Close Tab".into(), Box::new(CloseTab)),
-                ("Close All Tabs".into(), Box::new(CloseAllTabs)),
-                ("Close Other Tabs".into(), Box::new(CloseOtherTabs)),
-                ("Next Tab".into(), Box::new(NextTab)),
-                ("Previous Tab".into(), Box::new(PreviousTab)),
-                ("Undo".into(), Box::new(Undo)),
-                ("Redo".into(), Box::new(Redo)),
-                ("Select All".into(), Box::new(SelectAll)),
-                ("Find…".into(), Box::new(DeployFind)),
-                ("Go to Definition".into(), Box::new(GoToDefinition)),
-                ("Show Info at Cursor".into(), Box::new(ShowInfo)),
-                ("Go to Line…".into(), Box::new(GoToLine)),
-                ("Toggle Comment".into(), Box::new(crate::editor::ToggleComment)),
-                ("Move Line Up".into(), Box::new(crate::editor::MoveLineUp)),
-                ("Move Line Down".into(), Box::new(crate::editor::MoveLineDown)),
-                ("Duplicate Line".into(), Box::new(crate::editor::DuplicateLineDown)),
-                ("Delete Line".into(), Box::new(crate::editor::DeleteLine)),
-                ("Select Line".into(), Box::new(crate::editor::SelectLine)),
-                ("Indent Selected Lines (Tab)".into(), Box::new(crate::editor::Indent)),
-                ("Outdent Selected Lines (Shift+Tab)".into(), Box::new(crate::editor::Outdent)),
-                ("Add Next Occurrence".into(), Box::new(crate::editor::AddNextOccurrence)),
-                ("Select All Occurrences".into(), Box::new(crate::editor::SelectAllOccurrences)),
-                ("Add Cursor Above".into(), Box::new(crate::editor::AddCursorAbove)),
-                ("Add Cursor Below".into(), Box::new(crate::editor::AddCursorBelow)),
-                ("AI: Edit with AI…".into(), Box::new(crate::editor::InlineAssist)),
-                ("Replace…".into(), Box::new(DeployReplace)),
+                (File, "Save".into(), Box::new(Save) as Box<dyn Action>),
+                (File, "Save As…".into(), Box::new(SaveAs)),
+                (File, "Save All".into(), Box::new(SaveAll)),
+                (File, "Close Tab".into(), Box::new(CloseTab)),
+                (File, "Close All Tabs".into(), Box::new(CloseAllTabs)),
+                (File, "Close Other Tabs".into(), Box::new(CloseOtherTabs)),
+                (Edit, "Undo".into(), Box::new(Undo)),
+                (Edit, "Redo".into(), Box::new(Redo)),
+                (Edit, "Select All".into(), Box::new(SelectAll)),
+                (Edit, "Find…".into(), Box::new(DeployFind)),
+                (Edit, "Replace…".into(), Box::new(DeployReplace)),
+                (Lines, "Toggle Comment".into(), Box::new(crate::editor::ToggleComment)),
+                (Lines, "Indent (Tab on a selection)".into(), Box::new(crate::editor::Indent)),
+                (Lines, "Outdent (Shift+Tab)".into(), Box::new(crate::editor::Outdent)),
+                (Lines, "Move Line Up".into(), Box::new(crate::editor::MoveLineUp)),
+                (Lines, "Move Line Down".into(), Box::new(crate::editor::MoveLineDown)),
+                (Lines, "Duplicate Line".into(), Box::new(crate::editor::DuplicateLineDown)),
+                (Lines, "Delete Line".into(), Box::new(crate::editor::DeleteLine)),
+                (Lines, "Select Line".into(), Box::new(crate::editor::SelectLine)),
+                (Cursors, "Add Next Occurrence".into(), Box::new(crate::editor::AddNextOccurrence)),
+                (Cursors, "Select All Occurrences".into(), Box::new(crate::editor::SelectAllOccurrences)),
+                (Cursors, "Add Cursor Above".into(), Box::new(crate::editor::AddCursorAbove)),
+                (Cursors, "Add Cursor Below".into(), Box::new(crate::editor::AddCursorBelow)),
+                (Go, "Go to Line…".into(), Box::new(GoToLine)),
+                (Go, "Go to Definition".into(), Box::new(GoToDefinition)),
+                (Go, "Show Info at Cursor".into(), Box::new(ShowInfo)),
+                (Go, "Next Tab".into(), Box::new(NextTab)),
+                (Go, "Previous Tab".into(), Box::new(PreviousTab)),
             ]);
         }
-        commands.push(("Quit Null".into(), Box::new(Quit)));
+        // With AI switched off, nothing about it shows up.
+        if settings.ai.enabled {
+            commands.extend([
+                (Ai, "Ask About This File…".into(), Box::new(AskAi) as Box<dyn Action>),
+                (Ai, ai_label(ProviderId::Nvidia), Box::new(UseNvidia)),
+                (Ai, ai_label(ProviderId::Ollama), Box::new(UseOllama)),
+                (Ai, ai_label(ProviderId::OpenaiCompatible), Box::new(UseOpenAiCompatible)),
+                (Ai, ai_label(ProviderId::Claude), Box::new(UseClaudeApi)),
+                (Ai, ai_label(ProviderId::ClaudeCode), Box::new(UseClaudeCode)),
+                (Ai, ai_label(ProviderId::Codex), Box::new(UseCodex)),
+                (Ai, "Set API Key…".into(), Box::new(SetApiKey)),
+            ]);
+            if self.active.is_some() {
+                commands.push((Ai, "Edit with AI…".into(), Box::new(crate::editor::InlineAssist)));
+            }
+        }
+        commands.push((App, "Quit Null".into(), Box::new(Quit)));
         commands
             .into_iter()
-            .map(|(label, action)| Command {
+            .map(|(category, label, action)| Command {
+                category,
                 label: label.into(),
                 keys: window.highest_precedence_binding_for_action(action.as_ref()).map(|b| format_keys(&b)),
                 action,
@@ -748,16 +776,30 @@ impl Workspace {
             .collect()
     }
 
-    fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() {
-            self.close_palette(window, cx);
-            return;
+    /// Opens the palette of that kind. Pressing the same shortcut again closes it;
+    /// another one switches to that kind.
+    pub fn open_palette(&mut self, kind: PaletteKind, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((palette, _)) = &self.palette {
+            if palette.read(cx).kind() == kind {
+                return self.close_palette(window, cx);
+            }
+            self.palette = None;
+        } else if self.settings_panel.take().is_none() {
+            // The palette replaces the Settings window, if it's open.
+            self.focus_before_palette = window.focused(cx);
         }
-        self.focus_before_palette = window.focused(cx);
-        let commands = self.commands(window, cx);
-        let root = self.tree.read(cx).root().to_path_buf();
-        let palette = cx.new(|cx| Palette::new(commands, root, cx));
-        let subscription = cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
+        let active_path = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        let options = PaletteOptions {
+            kind,
+            commands: if kind == PaletteKind::Quick { self.commands(window, cx) } else { Vec::new() },
+            root: self.tree.read(cx).root().to_path_buf(),
+            recent_files: self.recent_files.iter().filter(|p| Some(*p) != active_path.as_ref()).cloned().collect(),
+            recent_commands: self.recent_commands.clone(),
+            line_count: self.active_editor().map(|e| e.read(cx).buffer.len_lines()),
+            terminal_open: self.terminal_open.on,
+        };
+        let palette = cx.new(|cx| Palette::new(options, cx));
+        let subscription = cx.subscribe_in(&palette, window, |this, palette, event, window, cx| match event {
             PaletteEvent::Dismissed => this.close_palette(window, cx),
             PaletteEvent::OpenFile(path) => {
                 let path = path.clone();
@@ -778,9 +820,23 @@ impl Workspace {
             }
             PaletteEvent::Run(action) => {
                 let action = action.boxed_clone();
+                this.remember_command(action.name());
                 this.close_palette(window, cx);
                 // Run once focus is back where it was, so editor commands reach the editor.
                 window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
+            }
+            PaletteEvent::Apply(action) => {
+                // A quick setting: change it and stay in the palette to see the effect.
+                let action = action.boxed_clone();
+                let palette = palette.clone();
+                let workspace = cx.entity();
+                window.defer(cx, move |window, cx| {
+                    window.dispatch_action(action, cx);
+                    // Opening the terminal takes focus; give it back to the palette.
+                    window.focus(&palette.focus_handle(cx));
+                    let open = workspace.read(cx).terminal_open.on;
+                    palette.update(cx, |palette, cx| palette.set_terminal_open(open, cx));
+                });
             }
         });
         window.focus(&palette.focus_handle(cx));
@@ -788,17 +844,43 @@ impl Workspace {
         cx.notify();
     }
 
-    fn go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_none() {
-            self.toggle_palette(&TogglePalette, window, cx);
-        }
-        if let Some((palette, _)) = &self.palette {
-            palette.update(cx, |palette, cx| palette.set_query(":", cx));
+    fn remember_command(&mut self, name: &'static str) {
+        self.recent_commands.retain(|n| *n != name);
+        self.recent_commands.insert(0, name);
+        self.recent_commands.truncate(20);
+    }
+
+    fn show_commands(&mut self, _: &ShowCommands, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(PaletteKind::Quick, window, cx);
+    }
+
+    fn ask_ai(&mut self, _: &AskAi, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.global::<Settings>().ai.enabled {
+            self.open_palette(PaletteKind::Ask, window, cx);
         }
     }
 
+    fn toggle_ai(&mut self, _: &ToggleAi, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.ai.enabled = !s.ai.enabled);
+        let ai = &cx.global::<Settings>().ai;
+        if ai.enabled && ai.provider == ProviderId::Off {
+            self.show_notice("AI is on. Choose where answers come from in Settings → AI (⌘,).".into(), cx);
+        }
+    }
+
+    fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(PaletteKind::Files, window, cx);
+    }
+
+    fn go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(PaletteKind::Line, window, cx);
+    }
+
+    /// Closes whichever floating layer is open (the palette or the Settings window)
+    /// and puts focus back where it was.
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
+        self.settings_panel = None;
         let fallback = self.active_editor().map(|e| e.focus_handle(cx)).unwrap_or(self.focus_handle.clone());
         window.focus(&self.focus_before_palette.take().unwrap_or(fallback));
         cx.notify();
@@ -1111,7 +1193,36 @@ impl Workspace {
         settings::update(cx, |s| s.theme = ThemeName::Paper);
     }
 
+    /// ⌘, opens the Settings window, or closes it.
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_panel.is_some() {
+            return self.close_palette(window, cx);
+        }
+        if self.palette.is_some() {
+            self.palette = None;
+        } else {
+            self.focus_before_palette = window.focused(cx);
+        }
+        let shortcuts = self
+            .commands(window, cx)
+            .into_iter()
+            .filter_map(|c| Some(Shortcut { category: c.category, label: c.label, keys: c.keys? }))
+            .collect();
+        let panel = cx.new(|cx| SettingsPanel::new(shortcuts, cx));
+        let subscription = cx.subscribe_in(&panel, window, |this, _, event, window, cx| match event {
+            SettingsPanelEvent::Closed => this.close_palette(window, cx),
+            SettingsPanelEvent::Run(action) => {
+                let action = action.boxed_clone();
+                this.close_palette(window, cx);
+                window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
+            }
+        });
+        window.focus(&panel.focus_handle(cx));
+        self.settings_panel = Some((panel, subscription));
+        cx.notify();
+    }
+
+    fn open_settings_file(&mut self, _: &OpenSettingsFile, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = Settings::ensure_file(cx) {
             self.open_file(path, window, cx);
         }
@@ -1317,12 +1428,14 @@ impl Render for Workspace {
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
         let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
+        } else if let Some((panel, _)) = &self.settings_panel {
+            Some(panel.clone().into_any_element())
         } else if let Some((ask, _)) = &self.ask {
             Some(ask.clone().into_any_element())
         } else {
             self.key_prompt.as_ref().map(|(prompt, _)| prompt.clone().into_any_element())
         };
-        let ai_provider = cx.global::<Settings>().ai.provider;
+        let ai_provider = cx.global::<Settings>().ai.active();
         let theme = cx.global::<Theme>();
 
         let titlebar = div()
@@ -1385,7 +1498,7 @@ impl Render for Workspace {
                         .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
                         .child(format!("AI · {}", ai_provider.label()))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.toggle_palette(&TogglePalette, window, cx)
+                            this.open_settings(&OpenSettings, window, cx)
                         })),
                 )
             })
@@ -1415,6 +1528,10 @@ impl Render for Workspace {
             .font_family(cx.global::<Fonts>().ui.clone())
             .relative()
             .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(Self::open_settings_file))
+            .on_action(cx.listener(Self::show_commands))
+            .on_action(cx.listener(Self::toggle_ai))
+            .on_action(cx.listener(Self::ask_ai))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -1473,6 +1590,7 @@ impl Render for Workspace {
                         .size_full()
                         .flex()
                         .justify_center()
+                        .items_start()
                         .px(px(16.))
                         .pt(px(88.))
                         .bg(theme.scrim)

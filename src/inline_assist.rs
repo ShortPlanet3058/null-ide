@@ -73,10 +73,8 @@ impl InlineAssist {
                 cx.notify();
             }
         });
-        let state = match cx.global::<Settings>().ai.provider {
-            ai::ProviderId::Off => {
-                State::Failed("AI is off. Choose where answers come from in the command palette: “AI: Use …”.".into())
-            }
+        let state = match cx.global::<Settings>().ai.active() {
+            ai::ProviderId::Off => State::Failed("Choose where AI answers come from in Settings → AI (⌘,).".into()),
             _ => State::Asking,
         };
         Self {

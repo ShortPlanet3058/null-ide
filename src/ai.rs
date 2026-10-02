@@ -63,7 +63,7 @@ impl ProviderId {
         }
     }
 
-    fn default_base_url(self) -> Option<&'static str> {
+    pub fn default_base_url(self) -> Option<&'static str> {
         match self {
             ProviderId::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
             ProviderId::Ollama => Some("http://localhost:11434/v1"),
@@ -72,7 +72,7 @@ impl ProviderId {
         }
     }
 
-    fn default_model(self) -> Option<&'static str> {
+    pub fn default_model(self) -> Option<&'static str> {
         match self {
             ProviderId::Nvidia => Some("nvidia/nemotron-3-super-120b-a12b"),
             ProviderId::Ollama => Some("qwen2.5-coder:7b"),
@@ -97,15 +97,28 @@ pub struct ProviderSettings {
     pub reasoning: Option<bool>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiSettings {
+    /// The master switch: when off, no AI appears anywhere, whatever the provider.
+    pub enabled: bool,
     pub provider: ProviderId,
     #[serde(flatten)]
     pub providers: HashMap<String, ProviderSettings>,
 }
 
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self { enabled: true, provider: ProviderId::Off, providers: HashMap::new() }
+    }
+}
+
 impl AiSettings {
+    /// The provider to use, or Off when AI is switched off.
+    pub fn active(&self) -> ProviderId {
+        if self.enabled { self.provider } else { ProviderId::Off }
+    }
+
     pub fn model(&self, id: ProviderId) -> Option<String> {
         self.providers
             .get(id.key())
@@ -192,7 +205,7 @@ pub fn strip_code_fence(text: &str) -> String {
 /// Asks the configured provider and calls `on_text` as the answer arrives.
 /// Blocking: run it off the UI thread. Errors are written for people, not logs.
 pub fn ask(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
-    let id = settings.provider;
+    let id = settings.active();
     match id {
         ProviderId::Off => Err("AI is off. Choose a provider with “AI: Use …” in the command palette.".into()),
         ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible => {

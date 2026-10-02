@@ -1,0 +1,733 @@
+//! The Settings window (⌘,): every setting with a real control, in a few sections.
+//! The JSON file stays one click away for anything not shown here.
+
+use crate::ai::{self, ProviderId};
+use crate::palette::Category;
+use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
+use crate::text_input::{TextInput, TextInputEvent};
+use crate::theme::{Syntax, Theme, ThemeName};
+use gpui::{
+    Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
+    KeyBinding, SharedString, Subscription, Window, actions, div, prelude::*, px,
+};
+
+actions!(settings_panel, [CloseSettings]);
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("escape", CloseSettings, Some("SettingsPanel"))]);
+}
+
+const CODE_FONTS: &[&str] = &["Geist Mono", "SF Mono", "Menlo", "JetBrains Mono", "Fira Code", "Cascadia Code"];
+const UI_FONTS: &[(&str, &str)] =
+    &[("Instrument Sans", "Instrument Sans"), (".SystemUIFont", "System"), ("Inter", "Inter")];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Appearance,
+    Editor,
+    Ai,
+    Keyboard,
+}
+
+impl Section {
+    const ALL: [Section; 4] = [Section::Appearance, Section::Editor, Section::Ai, Section::Keyboard];
+
+    fn label(self) -> &'static str {
+        match self {
+            Section::Appearance => "Appearance",
+            Section::Editor => "Editor",
+            Section::Ai => "AI",
+            Section::Keyboard => "Keyboard",
+        }
+    }
+}
+
+/// A shortcut to list in the Keyboard section.
+pub struct Shortcut {
+    pub category: Category,
+    pub label: SharedString,
+    pub keys: String,
+}
+
+pub enum SettingsPanelEvent {
+    Closed,
+    /// Run a command after closing, like setting an API key or opening the JSON file.
+    Run(Box<dyn Action>),
+}
+
+pub struct SettingsPanel {
+    focus_handle: FocusHandle,
+    section: Section,
+    shortcuts: Vec<Shortcut>,
+    installed_fonts: Vec<String>,
+    model: Entity<TextInput>,
+    address: Entity<TextInput>,
+    /// The provider the two fields above were filled for.
+    fields_for: ProviderId,
+    /// Whether that provider's key is set. Checked once, since it reads the keychain.
+    has_key: Option<bool>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<SettingsPanelEvent> for SettingsPanel {}
+
+impl SettingsPanel {
+    pub fn new(shortcuts: Vec<Shortcut>, cx: &mut Context<Self>) -> Self {
+        let model = cx.new(|cx| TextInput::new("Model", cx));
+        let address = cx.new(|cx| TextInput::new("Address", cx));
+        let subscriptions = vec![
+            cx.subscribe(&model, |this, input, TextInputEvent::Changed, cx| {
+                let text = input.read(cx).text().trim().to_string();
+                let provider = this.fields_for;
+                let value = (!text.is_empty()).then_some(text);
+                settings::update(cx, |s| {
+                    // Don't add an empty entry just for showing the field.
+                    if value.is_some() || s.ai.providers.contains_key(provider.key()) {
+                        s.ai.providers.entry(provider.key().into()).or_default().model = value;
+                    }
+                });
+            }),
+            cx.subscribe(&address, |this, input, TextInputEvent::Changed, cx| {
+                let text = input.read(cx).text().trim().to_string();
+                let provider = this.fields_for;
+                let value = (!text.is_empty()).then_some(text);
+                settings::update(cx, |s| {
+                    if value.is_some() || s.ai.providers.contains_key(provider.key()) {
+                        s.ai.providers.entry(provider.key().into()).or_default().base_url = value;
+                    }
+                });
+            }),
+        ];
+        let installed_fonts = cx.text_system().all_font_names();
+        let mut panel = Self {
+            focus_handle: cx.focus_handle(),
+            section: Section::Appearance,
+            shortcuts,
+            installed_fonts,
+            model,
+            address,
+            fields_for: ProviderId::Off,
+            has_key: None,
+            _subscriptions: subscriptions,
+        };
+        panel.fill_provider_fields(cx);
+        panel
+    }
+
+    /// Shows the current provider's model and address in the fields.
+    fn fill_provider_fields(&mut self, cx: &mut Context<Self>) {
+        let ai = cx.global::<Settings>().ai.clone();
+        let provider = ai.provider;
+        self.fields_for = provider;
+        let saved = ai.providers.get(provider.key()).cloned().unwrap_or_default();
+        let model = saved.model.unwrap_or_default();
+        let address = saved.base_url.unwrap_or_default();
+        let model_hint = provider.default_model().map_or("Model".to_string(), |m| format!("Model (default: {m})"));
+        let address_hint = provider.default_base_url().map_or("Address".to_string(), |u| format!("Address ({u})"));
+        // Filling the fields saves them straight back, unchanged: `fields_for` is already this provider.
+        self.model.update(cx, |input, cx| {
+            input.set_placeholder(model_hint);
+            input.set_text(&model, cx);
+        });
+        self.address.update(cx, |input, cx| {
+            input.set_placeholder(address_hint);
+            input.set_text(&address, cx);
+        });
+        self.has_key = provider.uses_api_key().then(|| ai::api_key(provider).is_some());
+    }
+
+    fn close(&mut self, _: &CloseSettings, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(SettingsPanelEvent::Closed);
+    }
+
+    fn set_provider(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.ai.provider = provider);
+        self.fill_provider_fields(cx);
+        cx.notify();
+    }
+
+    // ---------- controls ----------
+
+    /// A setting: its name and a line of explanation on the left, the control on the right.
+    fn row(title: &str, detail: Option<&str>, control: impl IntoElement, theme: &Theme) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(24.))
+            .py(px(12.))
+            .border_b_1()
+            .border_color(theme.hairline)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .min_w_0()
+                    .child(div().text_size(px(14.)).text_color(theme.foreground).child(title.to_string()))
+                    .children(detail.map(|d| div().text_size(px(12.)).text_color(theme.faint).child(d.to_string()))),
+            )
+            .child(div().flex_none().child(control))
+            .into_any_element()
+    }
+
+    fn toggle(
+        id: &'static str,
+        on: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+        change: impl Fn(&mut Settings) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .w(px(36.))
+            .h(px(20.))
+            .p(px(2.))
+            .rounded_full()
+            .cursor_pointer()
+            .flex()
+            .when(on, |d| d.justify_end().bg(theme.caret))
+            .when(!on, |d| d.bg(theme.hairline))
+            .child(div().size(px(16.)).rounded_full().bg(if on { theme.background } else { theme.muted }))
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, &change)))
+            .into_any_element()
+    }
+
+    /// A row of choices, the current one lit.
+    fn choices<T: Copy + PartialEq + 'static>(
+        id: &'static str,
+        options: Vec<(T, String)>,
+        current: T,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+        pick: impl Fn(&mut Self, T, &mut Context<Self>) + Clone + 'static,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(8.))
+            .bg(theme.hairline.opacity(0.5))
+            .children(options.into_iter().enumerate().map(|(i, (value, label))| {
+                let active = value == current;
+                let pick = pick.clone();
+                div()
+                    .id((id, i))
+                    .px(px(10.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.raised).text_color(theme.foreground).shadow_sm())
+                    .when(!active, |d| d.text_color(theme.muted).hover(|d| d.text_color(theme.foreground)))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| pick(this, value, cx)))
+            }))
+            .into_any_element()
+    }
+
+    fn button(id: &'static str, label: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .px(px(12.))
+            .py(px(5.))
+            .rounded(px(7.))
+            .border_1()
+            .border_color(theme.hairline)
+            .text_size(px(13.))
+            .text_color(theme.foreground)
+            .cursor_pointer()
+            .hover(|d| d.bg(theme.accent_soft))
+            .child(label.to_string())
+    }
+
+    fn field(input: &Entity<TextInput>, theme: &Theme) -> AnyElement {
+        div()
+            .w(px(300.))
+            .px(px(10.))
+            .py(px(6.))
+            .rounded(px(7.))
+            .border_1()
+            .border_color(theme.hairline)
+            .bg(theme.background)
+            .text_size(px(13.))
+            .child(input.clone())
+            .into_any_element()
+    }
+
+    fn heading(text: &str, theme: &Theme) -> AnyElement {
+        div()
+            .pt(px(18.))
+            .pb(px(2.))
+            .text_size(px(11.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.faint)
+            .child(text.to_uppercase())
+            .into_any_element()
+    }
+
+    // ---------- sections ----------
+
+    /// A small preview of a theme: its background with a few lines of colored "code".
+    fn theme_card(&self, name: ThemeName, current: ThemeName, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.global::<Theme>().clone();
+        let preview = Theme::named(name);
+        let active = name == current;
+        let bar = |w: f32, color: Hsla| div().h(px(5.)).w(px(w)).rounded(px(2.)).bg(color);
+        div()
+            .id(name.label())
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .cursor_pointer()
+            .child(
+                div()
+                    .w(px(132.))
+                    .h(px(78.))
+                    .p(px(12.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.))
+                    .rounded(px(10.))
+                    .bg(preview.background)
+                    .border_2()
+                    .border_color(if active { theme.caret } else { theme.hairline })
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(5.))
+                            .child(bar(22., preview.syntax(Syntax::Keyword)))
+                            .child(bar(40., preview.syntax(Syntax::Function))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(5.))
+                            .pl(px(10.))
+                            .child(bar(30., preview.foreground))
+                            .child(bar(36., preview.syntax(Syntax::String))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(5.))
+                            .pl(px(10.))
+                            .child(bar(18., preview.syntax(Syntax::Comment)))
+                            .child(bar(2., preview.caret)),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(if active { theme.foreground } else { theme.muted })
+                    .child(name.label()),
+            )
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.theme = name)))
+            .into_any_element()
+    }
+
+    fn appearance(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let s = cx.global::<Settings>().clone();
+        let theme = cx.global::<Theme>().clone();
+        let cards: Vec<AnyElement> = [ThemeName::Oled, ThemeName::Graphite, ThemeName::Paper]
+            .into_iter()
+            .map(|name| self.theme_card(name, s.theme, cx))
+            .collect();
+        let size = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                Self::button("smaller", "−", &theme)
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.font_size -= 1.))),
+            )
+            .child(
+                div()
+                    .w(px(44.))
+                    .text_center()
+                    .text_size(px(13.))
+                    .text_color(theme.foreground)
+                    .child(format!("{}", s.font_size)),
+            )
+            .child(
+                Self::button("bigger", "+", &theme)
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.font_size += 1.))),
+            )
+            .when(s.font_size != DEFAULT_FONT_SIZE, |d| {
+                d.child(Self::button("actual-size", "Reset", &theme).on_click(
+                    cx.listener(|_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.font_size = DEFAULT_FONT_SIZE)),
+                ))
+            });
+        let installed = |name: &str| name == ".SystemUIFont" || self.installed_fonts.iter().any(|f| f == name);
+        let mut code_fonts: Vec<(String, String)> =
+            CODE_FONTS.iter().filter(|f| installed(f)).map(|f| (f.to_string(), f.to_string())).collect();
+        if !code_fonts.iter().any(|(f, _)| *f == s.code_font) {
+            code_fonts.push((s.code_font.clone(), s.code_font.clone()));
+        }
+        let mut ui_fonts: Vec<(String, String)> =
+            UI_FONTS.iter().filter(|(f, _)| installed(f)).map(|(f, l)| (f.to_string(), l.to_string())).collect();
+        if !ui_fonts.iter().any(|(f, _)| *f == s.ui_font) {
+            ui_fonts.push((s.ui_font.clone(), s.ui_font.clone()));
+        }
+        let code_index = code_fonts.iter().position(|(f, _)| *f == s.code_font).unwrap_or(0);
+        let ui_index = ui_fonts.iter().position(|(f, _)| *f == s.ui_font).unwrap_or(0);
+        let code_options = code_fonts.iter().enumerate().map(|(i, (_, l))| (i, l.clone())).collect();
+        let ui_options = ui_fonts.iter().enumerate().map(|(i, (_, l))| (i, l.clone())).collect();
+        vec![
+            Self::heading("Theme", &theme),
+            div().flex().gap(px(16.)).py(px(12.)).children(cards).into_any_element(),
+            Self::heading("Text", &theme),
+            Self::row("Text size", Some("Also ⌘+ and ⌘−"), size, &theme),
+            Self::row(
+                "Code font",
+                None,
+                Self::choices("code-font", code_options, code_index, &theme, cx, move |_, i, cx| {
+                    let font = code_fonts[i].0.clone();
+                    settings::update(cx, |s| s.code_font = font);
+                }),
+                &theme,
+            ),
+            Self::row(
+                "Interface font",
+                None,
+                Self::choices("ui-font", ui_options, ui_index, &theme, cx, move |_, i, cx| {
+                    let font = ui_fonts[i].0.clone();
+                    settings::update(cx, |s| s.ui_font = font);
+                }),
+                &theme,
+            ),
+            Self::heading("Window", &theme),
+            Self::row(
+                "Show the sidebar",
+                Some("⌘B shows and hides it"),
+                Self::toggle("sidebar", s.sidebar_visible, &theme, cx, |s| s.sidebar_visible = !s.sidebar_visible),
+                &theme,
+            ),
+            Self::row(
+                "Fade bars while typing",
+                Some("Dims the title bar, sidebar and status bar so only the code stands out"),
+                Self::toggle("fade", s.fade_bars_while_typing, &theme, cx, |s| {
+                    s.fade_bars_while_typing = !s.fade_bars_while_typing
+                }),
+                &theme,
+            ),
+        ]
+    }
+
+    fn editor(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let s = cx.global::<Settings>().clone();
+        let theme = cx.global::<Theme>().clone();
+        vec![
+            Self::heading("Text", &theme),
+            Self::row(
+                "Wrap long lines",
+                Some("Fit lines to the window instead of scrolling sideways. ⌥Z"),
+                Self::toggle("wrap", s.word_wrap, &theme, cx, |s| s.word_wrap = !s.word_wrap),
+                &theme,
+            ),
+            Self::row(
+                "Indentation",
+                Some("Tab inserts spaces; Tab and ⇧Tab indent selected lines"),
+                div().text_size(px(13.)).text_color(theme.muted).child("4 spaces"),
+                &theme,
+            ),
+            Self::heading("Code intelligence", &theme),
+            Self::row(
+                "Suggestions while typing",
+                Some("From the language server. ⌃Space asks for them either way"),
+                Self::toggle("autocomplete", s.autocomplete, &theme, cx, |s| s.autocomplete = !s.autocomplete),
+                &theme,
+            ),
+        ]
+    }
+
+    fn ai(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let s = cx.global::<Settings>().clone();
+        let theme = cx.global::<Theme>().clone();
+        let current = s.ai.provider;
+        let switch = Self::row(
+            "Use AI",
+            Some("When off, AI shows up nowhere and nothing leaves your machine"),
+            Self::toggle("ai-enabled", s.ai.enabled, &theme, cx, |s| s.ai.enabled = !s.ai.enabled),
+            &theme,
+        );
+        if !s.ai.enabled {
+            return vec![Self::heading("AI", &theme), switch];
+        }
+        let providers = [
+            (ProviderId::ClaudeCode, "Your Claude subscription, through the claude command line tool"),
+            (ProviderId::Codex, "Your ChatGPT subscription, through the codex command line tool"),
+            (ProviderId::Claude, "The Anthropic API, with an API key"),
+            (ProviderId::Nvidia, "NVIDIA's hosted models, with an API key"),
+            (ProviderId::Ollama, "Models running on this computer with Ollama. No key needed"),
+            (ProviderId::OpenaiCompatible, "Any service with an OpenAI-style API"),
+        ];
+        let list =
+            div().flex().flex_col().gap(px(4.)).py(px(8.)).children(providers.into_iter().map(|(id, detail)| {
+                let active = id == current;
+                div()
+                    .id(id.key())
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(9.))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.accent_soft))
+                    .when(!active, |d| d.hover(|d| d.bg(theme.hairline.opacity(0.5))))
+                    .child(
+                        div()
+                            .size(px(14.))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(if active { theme.caret } else { theme.faint })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(active, |d| d.child(div().size(px(6.)).rounded_full().bg(theme.caret))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(px(14.)).text_color(theme.foreground).child(id.label()))
+                            .child(div().text_size(px(12.)).text_color(theme.faint).child(detail)),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_provider(id, cx)))
+            }));
+        let mut rows = vec![Self::heading("AI", &theme), switch, Self::heading("Provider", &theme)];
+        if current == ProviderId::Off {
+            rows.push(
+                div()
+                    .pt(px(6.))
+                    .text_size(px(12.))
+                    .text_color(theme.muted)
+                    .child("Choose where answers come from.")
+                    .into_any_element(),
+            );
+        }
+        rows.push(list.into_any_element());
+        if current != ProviderId::Off {
+            rows.push(Self::heading(&format!("{} options", current.label()), &theme));
+            if matches!(
+                current,
+                ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible | ProviderId::Claude
+            ) {
+                rows.push(Self::row(
+                    "Model",
+                    Some("Leave empty for the default"),
+                    Self::field(&self.model, &theme),
+                    &theme,
+                ));
+            }
+            if matches!(current, ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible) {
+                rows.push(Self::row("Address", None, Self::field(&self.address, &theme), &theme));
+            }
+            if let Some(has_key) = self.has_key {
+                let status = if has_key { "Saved in the keychain" } else { "Not set yet" };
+                let label = if has_key { "Change…" } else { "Set API Key…" };
+                rows.push(Self::row(
+                    "API key",
+                    Some(status),
+                    Self::button("api-key", label, &theme).on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                        cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::SetApiKey)))
+                    })),
+                    &theme,
+                ));
+            }
+            if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
+                rows.push(Self::row(
+                    "Model",
+                    Some("Uses the model chosen in the command line tool itself"),
+                    div(),
+                    &theme,
+                ));
+            }
+            rows.push(Self::row(
+                "Ask and edit",
+                Some("⌘I edits the selection with AI; ? in the palette asks about the file"),
+                div(),
+                &theme,
+            ));
+        }
+        rows
+    }
+
+    fn keyboard(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.global::<Theme>().clone();
+        let mut rows = vec![
+            div()
+                .pt(px(12.))
+                .text_size(px(12.))
+                .text_color(theme.faint)
+                .child("Every shortcut, by category. Changing them is coming later.")
+                .into_any_element(),
+        ];
+        for category in Category::ALL {
+            let members: Vec<&Shortcut> = self.shortcuts.iter().filter(|s| s.category == category).collect();
+            if members.is_empty() {
+                continue;
+            }
+            rows.push(Self::heading(category.label(), &theme));
+            for shortcut in members {
+                rows.push(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .py(px(7.))
+                        .border_b_1()
+                        .border_color(theme.hairline)
+                        .text_size(px(13.))
+                        .child(div().text_color(theme.foreground).child(shortcut.label.clone()))
+                        .child(
+                            div()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(5.))
+                                .bg(theme.hairline)
+                                .text_size(px(12.))
+                                .text_color(theme.muted)
+                                .child(shortcut.keys.clone()),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        rows
+    }
+}
+
+impl Focusable for SettingsPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for SettingsPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The provider can change elsewhere (the palette); keep the fields in step.
+        if cx.global::<Settings>().ai.provider != self.fields_for {
+            self.fill_provider_fields(cx);
+        }
+        let theme = cx.global::<Theme>().clone();
+        let content = match self.section {
+            Section::Appearance => self.appearance(cx),
+            Section::Editor => self.editor(cx),
+            Section::Ai => self.ai(cx),
+            Section::Keyboard => self.keyboard(cx),
+        };
+        let current = self.section;
+        let sidebar = div()
+            .w(px(190.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .p(px(12.))
+            .border_r_1()
+            .border_color(theme.hairline)
+            .child(
+                div()
+                    .px(px(10.))
+                    .pt(px(6.))
+                    .pb(px(14.))
+                    .text_size(px(17.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .child("Settings"),
+            )
+            .children(Section::ALL.into_iter().map(|section| {
+                let active = section == current;
+                div()
+                    .id(section.label())
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(7.))
+                    .text_size(px(14.))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.accent_soft).text_color(theme.foreground))
+                    .when(!active, |d| d.text_color(theme.muted).hover(|d| d.text_color(theme.foreground)))
+                    .child(section.label())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.section = section;
+                        cx.notify();
+                    }))
+            }))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("edit-json")
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(7.))
+                    .text_size(px(12.))
+                    .text_color(theme.faint)
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(theme.foreground))
+                    .child("Edit as JSON…")
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                        cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::OpenSettingsFile)))
+                    })),
+            );
+        div()
+            .key_context("SettingsPanel")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::close))
+            // Clicks inside shouldn't reach the backdrop, which closes it.
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .w(px(780.))
+            .h(px(540.))
+            .max_w_full()
+            .flex()
+            .overflow_hidden()
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.hairline)
+            .bg(theme.raised)
+            .shadow_lg()
+            .child(sidebar)
+            .child(
+                div()
+                    .id("settings-content")
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .px(px(28.))
+                    .pb(px(24.))
+                    .flex()
+                    .flex_col()
+                    .children(content),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    /// Every section draws, with and without an AI provider. (Only reads settings: nothing is saved.)
+    #[gpui::test]
+    fn every_section_renders(cx: &mut TestAppContext) {
+        for provider in [ProviderId::Off, ProviderId::Ollama, ProviderId::ClaudeCode] {
+            for section in Section::ALL {
+                cx.update(|cx| {
+                    let mut settings = Settings::default();
+                    settings.ai.provider = provider;
+                    cx.set_global(settings);
+                    cx.set_global(Theme::oled());
+                });
+                let shortcuts = vec![Shortcut { category: Category::File, label: "Save".into(), keys: "⌘S".into() }];
+                let (panel, cx) = cx.add_window_view(|_, cx| SettingsPanel::new(shortcuts, cx));
+                panel.update(cx, |panel, cx| {
+                    panel.section = section;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                panel.read_with(cx, |panel, _| assert!(panel.section == section));
+            }
+        }
+    }
+}
