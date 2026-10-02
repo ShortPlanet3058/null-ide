@@ -1692,6 +1692,8 @@ impl Editor {
         self.single_cursor();
         self.selection = Selection::caret(self.buffer.offset(line, column));
         self.goal_column = None;
+        // Before its first frame, the editor's rows aren't laid out yet.
+        self.wrap.update(&self.buffer, self.wrap.width(), &self.block_specs());
         let top = self.wrap.first_row(top_line.min(self.buffer.len_lines().saturating_sub(1))) as f32;
         self.scroll.y = top * f32::from(self.line_height());
         self.scroll.target_y = self.scroll.y;
