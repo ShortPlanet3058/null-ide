@@ -1,5 +1,6 @@
 mod assist;
 mod changes;
+mod commands;
 mod completion;
 mod intel;
 
@@ -75,6 +76,15 @@ actions!(
         ConfirmCompletion,
         CancelCompletion,
         InlineAssist,
+        ToggleComment,
+        Indent,
+        Outdent,
+        MoveLineUp,
+        MoveLineDown,
+        DuplicateLineUp,
+        DuplicateLineDown,
+        DeleteLine,
+        SelectLine,
     ]
 );
 
@@ -116,6 +126,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-i", ShowInfo, ctx),
         KeyBinding::new("ctrl-space", ShowCompletions, ctx),
         KeyBinding::new("secondary-i", InlineAssist, ctx),
+        KeyBinding::new("secondary-/", ToggleComment, ctx),
+        KeyBinding::new("secondary-]", Indent, ctx),
+        KeyBinding::new("secondary-[", Outdent, ctx),
+        KeyBinding::new("shift-tab", Outdent, ctx),
+        KeyBinding::new("alt-up", MoveLineUp, ctx),
+        KeyBinding::new("alt-down", MoveLineDown, ctx),
+        KeyBinding::new("alt-shift-up", DuplicateLineUp, ctx),
+        KeyBinding::new("alt-shift-down", DuplicateLineDown, ctx),
+        KeyBinding::new("secondary-shift-k", DeleteLine, ctx),
+        KeyBinding::new("secondary-l", SelectLine, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -223,6 +243,15 @@ pub struct Layout {
     pub char_width: Pixels,
     pub visible_lines: Range<usize>,
     pub shaped: Vec<ShapedLine>,
+    /// None when everything fits and there's nothing to scroll.
+    pub scrollbar: Option<ScrollbarLayout>,
+}
+
+pub struct ScrollbarLayout {
+    pub track: Bounds<Pixels>,
+    pub thumb: Bounds<Pixels>,
+    /// How far the view can scroll, in pixels.
+    pub max_scroll: f32,
 }
 
 pub struct Scroll {
@@ -298,6 +327,8 @@ pub struct Editor {
     pub link_word: Option<Range<usize>>,
     mouse_position: Option<Point<Pixels>>,
     definition_task: Option<Task<()>>,
+    /// While dragging the scrollbar: where on the thumb it was grabbed.
+    scrollbar_drag: Option<Pixels>,
     pub completion: Option<CompletionMenu>,
     completion_task: Option<Task<()>>,
     /// The file as last committed, to mark changed lines in the gutter.
@@ -356,6 +387,7 @@ impl Editor {
             link_word: None,
             mouse_position: None,
             definition_task: None,
+            scrollbar_drag: None,
             completion: None,
             completion_task: None,
             git_base: None,
@@ -437,6 +469,10 @@ impl Editor {
     /// Zero-based line and column of the caret.
     pub fn caret_point(&self) -> (usize, usize) {
         self.buffer.point(self.selection.head)
+    }
+
+    pub fn scrollbar_dragging(&self) -> bool {
+        self.scrollbar_drag.is_some()
     }
 
     pub fn line_height(&self) -> Pixels {
@@ -913,6 +949,10 @@ impl Editor {
     }
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        if self.empty_pair_around_caret() {
+            let head = self.selection.head;
+            return self.edit(head - 1..head + 1, "", EditKind::Deleting, cx);
+        }
         self.delete_or(
             |this| {
                 let head = this.selection.head;
@@ -970,6 +1010,16 @@ impl Editor {
     }
 
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        self.tab_key(cx);
+    }
+
+    pub(crate) fn tab_key(&mut self, cx: &mut Context<Self>) {
+        // With anything selected, Tab indents the selected lines (Shift+Tab outdents).
+        // This is the easy way on every keyboard layout; Cmd+] / Cmd+[ need [ and ],
+        // which on many non-US Mac keyboards take several keys already.
+        if !self.selection.is_empty() {
+            return self.indent_lines(cx);
+        }
         let range = self.selection.range();
         let (_, col) = self.buffer.point(range.start);
         let spaces = TAB_SIZE - col % TAB_SIZE;
@@ -1221,6 +1271,9 @@ impl Editor {
         window.focus(&self.focus_handle);
         self.close_hover(cx);
         self.close_completion(cx);
+        if self.scrollbar_mouse_down(event.position, cx) {
+            return;
+        }
         let offset = self.offset_at(event.position);
         let unit = match event.click_count {
             2 => DragUnit::Word(self.word_at(offset)),
@@ -1244,7 +1297,14 @@ impl Editor {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let was_over_scrollbar = self.over_scrollbar();
         self.mouse_position = Some(event.position);
+        if self.scrollbar_drag.is_some() && event.pressed_button == Some(MouseButton::Left) {
+            return self.scrollbar_drag_to(event.position, cx);
+        }
+        if was_over_scrollbar != self.over_scrollbar() {
+            cx.notify();
+        }
         if self.alt_held || self.secondary_held || self.link_word.is_some() {
             self.update_hover(cx);
         }
@@ -1271,8 +1331,41 @@ impl Editor {
         self.touch(cx);
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.dragging = None;
+        if self.scrollbar_drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn over_scrollbar(&self) -> bool {
+        let (Some(layout), Some(position)) = (&self.layout, self.mouse_position) else { return false };
+        layout.scrollbar.as_ref().is_some_and(|s| s.track.contains(&position))
+    }
+
+    /// A press on the scrollbar: grab the thumb, or jump to where the track was clicked.
+    fn scrollbar_mouse_down(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some(bar) = self.layout.as_ref().and_then(|l| l.scrollbar.as_ref()) else { return false };
+        if !bar.track.contains(&position) {
+            return false;
+        }
+        let grab =
+            if bar.thumb.contains(&position) { position.y - bar.thumb.top() } else { bar.thumb.size.height / 2. };
+        self.scrollbar_drag = Some(grab);
+        self.scrollbar_drag_to(position, cx);
+        true
+    }
+
+    fn scrollbar_drag_to(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let (Some(grab), Some(bar)) = (self.scrollbar_drag, self.layout.as_ref().and_then(|l| l.scrollbar.as_ref()))
+        else {
+            return;
+        };
+        let travel = f32::from(bar.track.size.height - bar.thumb.size.height).max(1.);
+        let fraction = (f32::from(position.y - grab - bar.track.top()) / travel).clamp(0., 1.);
+        self.scroll.y = fraction * bar.max_scroll;
+        self.scroll.target_y = self.scroll.y;
+        cx.notify();
     }
 
     fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1310,6 +1403,42 @@ impl Editor {
     fn confirm_completion(&mut self, _: &ConfirmCompletion, _: &mut Window, cx: &mut Context<Self>) {
         let selected = self.completion.as_ref().map_or(0, |m| m.selected);
         self.accept_completion(selected, cx);
+    }
+
+    fn toggle_comment_action(&mut self, _: &ToggleComment, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_comment(cx);
+    }
+
+    fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
+        self.indent_lines(cx);
+    }
+
+    fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
+        self.outdent_lines(cx);
+    }
+
+    fn move_line_up(&mut self, _: &MoveLineUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_lines(false, cx);
+    }
+
+    fn move_line_down(&mut self, _: &MoveLineDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_lines(true, cx);
+    }
+
+    fn duplicate_line_up(&mut self, _: &DuplicateLineUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.duplicate_lines(false, cx);
+    }
+
+    fn duplicate_line_down(&mut self, _: &DuplicateLineDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.duplicate_lines(true, cx);
+    }
+
+    fn delete_line(&mut self, _: &DeleteLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.delete_lines(cx);
+    }
+
+    fn select_line_action(&mut self, _: &SelectLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_line(cx);
     }
 
     fn inline_assist(&mut self, _: &InlineAssist, window: &mut Window, cx: &mut Context<Self>) {
@@ -1453,6 +1582,13 @@ impl EntityInputHandler for Editor {
             .map(|r| self.buffer.utf16_to_char(r.start)..self.buffer.utf16_to_char(r.end))
             .or(self.marked.clone())
             .unwrap_or(self.selection.range());
+        let mut chars = text.chars();
+        if let (Some(c), None, None) = (chars.next(), chars.next(), &self.marked)
+            && range == self.selection.range()
+            && self.type_pair_char(c, cx)
+        {
+            return;
+        }
         self.edit(range, text, EditKind::Typing, cx);
         self.completion_after_typing(text, cx);
     }
@@ -1575,6 +1711,15 @@ impl Render for Editor {
             .on_action(cx.listener(Self::confirm_completion))
             .on_action(cx.listener(Self::cancel_completion))
             .on_action(cx.listener(Self::inline_assist))
+            .on_action(cx.listener(Self::toggle_comment_action))
+            .on_action(cx.listener(Self::indent))
+            .on_action(cx.listener(Self::outdent))
+            .on_action(cx.listener(Self::move_line_up))
+            .on_action(cx.listener(Self::move_line_down))
+            .on_action(cx.listener(Self::duplicate_line_up))
+            .on_action(cx.listener(Self::duplicate_line_down))
+            .on_action(cx.listener(Self::delete_line))
+            .on_action(cx.listener(Self::select_line_action))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))

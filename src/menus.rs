@@ -1,7 +1,10 @@
-use crate::editor::{Copy, Cut, GoToDefinition, Paste, Redo, Save, SelectAll, ShowInfo, Undo};
+use crate::editor::{
+    Copy, Cut, DeleteLine, DuplicateLineDown, GoToDefinition, Indent, MoveLineDown, MoveLineUp, Outdent, Paste, Redo,
+    Save, SelectAll, SelectLine, ShowInfo, ToggleComment, Undo,
+};
 use crate::find_bar::{DeployFind, DeployReplace, FindNext, FindPrevious};
 use crate::workspace::{
-    CloseAllTabs, CloseTab, DecreaseFontSize, IncreaseFontSize, NewUntitled, NextTab, Open, OpenSettings, PreviousTab,
+    CloseAllTabs, CloseTab, DecreaseFontSize, GoToLine, IncreaseFontSize, NewUntitled, NextTab, Open, OpenSettings, PreviousTab,
     ReopenClosedTab, ResetFontSize, SaveAll, SaveAs, SearchProject, TogglePalette, ToggleSidebar, ToggleTerminal,
     UseGraphiteTheme, UseOledTheme, UsePaperTheme,
 };
@@ -48,6 +51,23 @@ pub fn set(cx: &mut App, fade_while_typing: bool) {
                 MenuItem::action("Copy", Copy),
                 MenuItem::action("Paste", Paste),
                 MenuItem::action("Select All", SelectAll),
+                MenuItem::separator(),
+                MenuItem::submenu(Menu {
+                    name: "Lines".into(),
+                    items: vec![
+                        // Tab / Shift+Tab work on any selection; the menu shows the other shortcut.
+                        MenuItem::action("Indent (Tab on a selection)", Indent),
+                        MenuItem::action("Outdent (Shift+Tab)", Outdent),
+                        MenuItem::action("Toggle Comment", ToggleComment),
+                        MenuItem::separator(),
+                        MenuItem::action("Move Line Up", MoveLineUp),
+                        MenuItem::action("Move Line Down", MoveLineDown),
+                        MenuItem::action("Duplicate Line", DuplicateLineDown),
+                        MenuItem::action("Delete Line", DeleteLine),
+                        MenuItem::action("Select Line", SelectLine),
+                        MenuItem::action("Go to Line…", GoToLine),
+                    ],
+                }),
                 MenuItem::separator(),
                 MenuItem::action("Find…", DeployFind),
                 MenuItem::action("Find Next", FindNext),

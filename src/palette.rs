@@ -63,6 +63,8 @@ pub enum PaletteEvent {
     Run(Box<dyn Action>),
     /// Typed after a `?`: a question for the AI.
     Ask(String),
+    /// Typed after a `:`: a line number to jump to.
+    GoToLine(usize),
 }
 
 /// Search across the project's files and every command, from one field.
@@ -76,12 +78,21 @@ pub struct Palette {
     opened_at: Instant,
     /// Set while the query starts with `?`.
     question: Option<String>,
+    /// Set while the query starts with `:`; None inside when it isn't a number yet.
+    line: Option<Option<usize>>,
     _subscription: Subscription,
 }
 
 impl EventEmitter<PaletteEvent> for Palette {}
 
 impl Palette {
+    pub fn set_query(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.set_text(text, cx);
+            input.select_range(text.len()..text.len(), cx);
+        });
+    }
+
     pub fn new(commands: Vec<Command>, root: PathBuf, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextInput::new("Search files and commands, or type ? to ask AI", cx));
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_matches(cx));
@@ -103,6 +114,7 @@ impl Palette {
             scroll: UniformListScrollHandle::new(),
             opened_at: Instant::now(),
             question: None,
+            line: None,
             _subscription: subscription,
         };
         palette.update_matches(cx);
@@ -111,6 +123,15 @@ impl Palette {
 
     fn update_matches(&mut self, cx: &mut Context<Self>) {
         let query = self.input.read(cx).text().to_string();
+        // A leading `:` jumps to a line.
+        if let Some(line) = query.strip_prefix(':') {
+            self.line = Some(line.trim().parse().ok());
+            self.question = None;
+            self.matches.clear();
+            cx.notify();
+            return;
+        }
+        self.line = None;
         // A leading `?` turns the palette into a question box.
         if let Some(question) = query.strip_prefix('?') {
             self.question = Some(question.trim().to_string());
@@ -189,6 +210,12 @@ impl Palette {
     }
 
     fn confirm_at(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(line) = self.line {
+            if let Some(line) = line {
+                cx.emit(PaletteEvent::GoToLine(line));
+            }
+            return;
+        }
         if let Some(question) = &self.question {
             if !question.is_empty()
                 && cx.global::<crate::settings::Settings>().ai.provider != crate::ai::ProviderId::Off
@@ -352,11 +379,34 @@ impl Render for Palette {
             .border_color(theme.hairline)
             .text_size(px(12.))
             .text_color(theme.faint)
-            .when(self.question.is_none(), |f| f.child("↑↓ to move").child("↵ to open"))
+            .when(self.question.is_none() && self.line.is_none(), |f| f.child("↑↓ to move").child("↵ to open"))
             .when(self.question.is_some(), |f| f.child("↵ to ask"))
+            .when(self.line.is_some(), |f| f.child("↵ to go"))
             .child("Esc to close");
         let ai = cx.global::<crate::settings::Settings>().ai.provider;
-        let list = if let Some(question) = &self.question {
+        let list = if let Some(line) = self.line {
+            let text = match line {
+                Some(n) => format!("Go to line {n}"),
+                None => "Type a line number".to_string(),
+            };
+            div()
+                .p(px(6.))
+                .child(
+                    div()
+                        .h(px(ROW_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .px(px(14.))
+                        .rounded(px(9.))
+                        .bg(theme.accent_soft)
+                        .text_size(px(14.))
+                        .text_color(if line.is_some() { theme.foreground } else { theme.faint })
+                        .child(div().w(px(12.)).text_color(theme.caret).child(":"))
+                        .child(text),
+                )
+                .into_any_element()
+        } else if let Some(question) = &self.question {
             let (marker, text, color) = if ai == crate::ai::ProviderId::Off {
                 ("!", "AI is off. Choose a provider first: type “AI: Use”.".to_string(), theme.muted)
             } else if question.is_empty() {

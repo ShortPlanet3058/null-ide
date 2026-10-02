@@ -1,4 +1,4 @@
-use crate::editor::{Editor, Layout};
+use crate::editor::{Editor, Layout, ScrollbarLayout};
 use crate::fonts::Fonts;
 use crate::highlight::{Span, spans_in};
 use crate::theme::{Syntax, Theme};
@@ -41,6 +41,9 @@ pub struct Prepaint {
     link: Vec<Bounds<Pixels>>,
     git_marks: Vec<(Bounds<Pixels>, Hsla)>,
     assist_band: Option<Bounds<Pixels>>,
+    scroll_thumb: Option<(Bounds<Pixels>, f32)>,
+    scroll_marks: Vec<(Bounds<Pixels>, Hsla)>,
+    bracket_boxes: Vec<Bounds<Pixels>>,
     marked: Vec<Bounds<Pixels>>,
     caret: Option<(Bounds<Pixels>, f32)>,
 }
@@ -306,6 +309,14 @@ impl Element for EditorElement {
                 rects
             };
             let selection = range_rects(selection_range.clone());
+            // The bracket next to the caret and its partner get a thin outline.
+            let bracket_boxes: Vec<Bounds<Pixels>> = editor
+                .matching_brackets()
+                .map(|(a, b)| [a, b])
+                .into_iter()
+                .flatten()
+                .flat_map(|offset| range_rects(offset..offset + 1))
+                .collect();
             // A thin underline under the word that Cmd/Ctrl+click would follow.
             let link: Vec<Bounds<Pixels>> = editor
                 .link_word
@@ -439,6 +450,54 @@ impl Element for EditorElement {
                 .zip(shaped.iter().cloned())
                 .map(|(line, s)| (s, point(origin.x, row_top(line))))
                 .collect();
+            // Scrollbar: a thin thumb at the right edge, with marks for errors, search
+            // matches and changed lines so they can be found in long files.
+            const BAR: f32 = 10.;
+            let scrollbar = (max_y > 0.).then(|| {
+                let track = Bounds::from_corners(point(bounds.right() - px(BAR), bounds.top()), bounds.bottom_right());
+                let track_h = f32::from(track.size.height);
+                let thumb_h = (track_h * viewport_height / (viewport_height + max_y)).max(28.).min(track_h);
+                let thumb_top = track.top() + px((editor.scroll.y / max_y) * (track_h - thumb_h));
+                let thumb = Bounds::new(point(track.left(), thumb_top), size(px(BAR), px(thumb_h)));
+                ScrollbarLayout { track, thumb, max_scroll: max_y }
+            });
+            let mut scroll_marks: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+            if let Some(bar) = &scrollbar {
+                let total = total_lines.max(1) as f32;
+                let mark = |line: usize, x: f32, w: f32, color: Hsla| {
+                    let y = bar.track.top() + bar.track.size.height * (line as f32 / total);
+                    (Bounds::new(point(bar.track.left() + px(x), y), size(px(w), px(2.))), color)
+                };
+                for hunk in &editor.git_hunks {
+                    let color = match hunk.change {
+                        crate::git::Change::Added => theme.git_added,
+                        crate::git::Change::Modified => theme.git_modified,
+                        crate::git::Change::Deleted => theme.git_deleted,
+                    };
+                    scroll_marks.push(mark(hunk.lines.start, 0., 3., color));
+                }
+                if let Some(search) = &editor.search {
+                    for m in search.matches.iter().take(2000) {
+                        scroll_marks.push(mark(editor.buffer.point(m.start).0, 3., 4., theme.caret.opacity(0.8)));
+                    }
+                }
+                for problem in editor.problems(cx) {
+                    let color = match problem.severity {
+                        DiagnosticSeverity::ERROR => theme.error,
+                        DiagnosticSeverity::WARNING => theme.warning,
+                        _ => continue,
+                    };
+                    scroll_marks.push(mark(editor.buffer.point(problem.range.start).0, 6., 4., color));
+                }
+            }
+            let thumb_emphasis = if editor.scrollbar_dragging() {
+                0.9
+            } else if editor.over_scrollbar() {
+                0.65
+            } else {
+                0.35
+            };
+
             editor.layout = Some(Layout {
                 text_origin: origin,
                 text_bounds,
@@ -446,6 +505,11 @@ impl Element for EditorElement {
                 char_width,
                 visible_lines: visible,
                 shaped,
+                scrollbar: scrollbar.as_ref().map(|b| ScrollbarLayout {
+                    track: b.track,
+                    thumb: b.thumb,
+                    max_scroll: b.max_scroll,
+                }),
             });
 
             Prepaint {
@@ -459,6 +523,9 @@ impl Element for EditorElement {
                 link,
                 git_marks,
                 assist_band,
+                scroll_thumb: scrollbar.map(|b| (b.thumb, thumb_emphasis)),
+                scroll_marks,
+                bracket_boxes,
                 marked,
                 caret,
             }
@@ -505,6 +572,14 @@ impl Element for EditorElement {
             for (line, origin) in &prepaint.lines {
                 line.paint(*origin, line_height, window, cx).ok();
             }
+            for rect in &prepaint.bracket_boxes {
+                window.paint_quad(
+                    fill(*rect, gpui::transparent_black())
+                        .border_widths(px(1.))
+                        .border_color(theme.muted)
+                        .corner_radii(px(2.)),
+                );
+            }
             for rect in &prepaint.link {
                 window.paint_quad(fill(*rect, theme.foreground));
             }
@@ -517,5 +592,15 @@ impl Element for EditorElement {
                 window.paint_quad(fill(rect, theme.caret.opacity(opacity)).corner_radii(px(1.)));
             }
         });
+        if let Some((thumb, emphasis)) = prepaint.scroll_thumb {
+            let thumb = Bounds::new(
+                point(thumb.left() + px(2.), thumb.top() + px(2.)),
+                size(px(6.), thumb.size.height - px(4.)),
+            );
+            window.paint_quad(fill(thumb, theme.muted.opacity(emphasis)).corner_radii(px(3.)));
+        }
+        for (mark, color) in &prepaint.scroll_marks {
+            window.paint_quad(fill(*mark, *color));
+        }
     }
 }

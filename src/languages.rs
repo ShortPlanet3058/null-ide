@@ -18,6 +18,8 @@ pub struct Language {
     injections: &'static str,
     /// How a line comment starts, for toggling comments. None when there is only a block form.
     pub line_comment: Option<&'static str>,
+    /// How a block comment opens and closes, for languages without line comments.
+    pub block_comment: Option<(&'static str, &'static str)>,
     config: OnceLock<Option<HighlightConfiguration>>,
 }
 
@@ -31,13 +33,14 @@ macro_rules! language {
             highlights: &[$($query),+],
             injections: $injections,
             line_comment: $comment,
+            block_comment: None,
             config: OnceLock::new(),
         }
     };
 }
 
 static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
-    vec![
+    let mut languages = vec![
         language!(
             "Rust",
             ["rs"],
@@ -153,7 +156,15 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             "",
             Some("#")
         ),
-    ]
+    ];
+    for language in &mut languages {
+        language.block_comment = match language.name {
+            "HTML" | "Markdown" => Some(("<!--", "-->")),
+            "CSS" => Some(("/*", "*/")),
+            _ => None,
+        };
+    }
+    languages
 });
 
 /// The language of a file, from its name or extension.

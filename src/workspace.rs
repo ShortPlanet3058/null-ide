@@ -41,6 +41,7 @@ actions!(
         ShowFiles,
         ToggleAutocomplete,
         ToggleTerminal,
+        GoToLine,
         NewUntitled,
         SaveAs,
         SaveAll,
@@ -73,6 +74,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-f", SearchProject, ctx),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
+        KeyBinding::new("ctrl-g", GoToLine, ctx),
         KeyBinding::new("secondary-n", NewUntitled, ctx),
         KeyBinding::new("secondary-shift-s", SaveAs, ctx),
         // Also here, not only in the editor: saving must work wherever the keyboard is
@@ -716,6 +718,15 @@ impl Workspace {
                 ("Find…".into(), Box::new(DeployFind)),
                 ("Go to Definition".into(), Box::new(GoToDefinition)),
                 ("Show Info at Cursor".into(), Box::new(ShowInfo)),
+                ("Go to Line…".into(), Box::new(GoToLine)),
+                ("Toggle Comment".into(), Box::new(crate::editor::ToggleComment)),
+                ("Move Line Up".into(), Box::new(crate::editor::MoveLineUp)),
+                ("Move Line Down".into(), Box::new(crate::editor::MoveLineDown)),
+                ("Duplicate Line".into(), Box::new(crate::editor::DuplicateLineDown)),
+                ("Delete Line".into(), Box::new(crate::editor::DeleteLine)),
+                ("Select Line".into(), Box::new(crate::editor::SelectLine)),
+                ("Indent Selected Lines (Tab)".into(), Box::new(crate::editor::Indent)),
+                ("Outdent Selected Lines (Shift+Tab)".into(), Box::new(crate::editor::Outdent)),
                 ("AI: Edit with AI…".into(), Box::new(crate::editor::InlineAssist)),
                 ("Replace…".into(), Box::new(DeployReplace)),
             ]);
@@ -747,6 +758,13 @@ impl Workspace {
                 this.close_palette(window, cx);
                 this.open_file(path, window, cx);
             }
+            PaletteEvent::GoToLine(line) => {
+                let line = *line;
+                this.close_palette(window, cx);
+                if let Some(editor) = this.active_editor() {
+                    editor.update(cx, |editor, cx| editor.go_to_line(line, cx));
+                }
+            }
             PaletteEvent::Ask(question) => {
                 let question = question.clone();
                 this.close_palette(window, cx);
@@ -762,6 +780,15 @@ impl Workspace {
         window.focus(&palette.focus_handle(cx));
         self.palette = Some((palette, subscription));
         cx.notify();
+    }
+
+    fn go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_none() {
+            self.toggle_palette(&TogglePalette, window, cx);
+        }
+        if let Some((palette, _)) = &self.palette {
+            palette.update(cx, |palette, cx| palette.set_query(":", cx));
+        }
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1378,6 +1405,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_fade_while_typing))
             .on_action(cx.listener(Self::toggle_autocomplete))
             .on_action(cx.listener(Self::toggle_terminal))
+            .on_action(cx.listener(Self::go_to_line))
             .on_action(cx.listener(Self::new_untitled))
             .on_action(cx.listener(Self::save_as))
             .on_action(cx.listener(Self::save_active))
