@@ -4,7 +4,9 @@ use gpui::{Context, EventEmitter, Task};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit, Initialized,
 };
-use lsp_types::request::{Completion, GotoDefinition, HoverRequest, Initialize, Shutdown};
+use lsp_types::request::{
+    Completion, Formatting, GotoDefinition, HoverRequest, Initialize, References, Rename, Shutdown,
+};
 use lsp_types::{
     ClientCapabilities, CompletionClientCapabilities, CompletionContext, CompletionItem, CompletionItemCapability,
     CompletionParams, CompletionResponse, CompletionTriggerKind, Diagnostic, DidChangeTextDocumentParams,
@@ -252,6 +254,9 @@ impl LspStore {
                         ..Default::default()
                     }),
                     publish_diagnostics: Some(PublishDiagnosticsClientCapabilities::default()),
+                    rename: Some(lsp_types::RenameClientCapabilities::default()),
+                    references: Some(Default::default()),
+                    formatting: Some(Default::default()),
                     completion: Some(CompletionClientCapabilities {
                         // Plain text only: Null doesn't do snippet placeholders yet.
                         completion_item: Some(CompletionItemCapability {
@@ -476,6 +481,77 @@ impl LspStore {
                 None => Vec::new(),
             }
         }
+    }
+
+    /// Every place the symbol at `position` is used, its declaration included.
+    pub fn references(
+        &self,
+        path: &Path,
+        position: Position,
+    ) -> impl Future<Output = Vec<lsp_types::Location>> + use<> {
+        let request = self.server_for(path).zip(Self::position_params(path, position)).map(|(server, params)| {
+            server.request::<References>(lsp_types::ReferenceParams {
+                text_document_position: params,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: lsp_types::ReferenceContext { include_declaration: true },
+            })
+        });
+        async move {
+            let Some(request) = request else { return Vec::new() };
+            request.await.ok().flatten().unwrap_or_default()
+        }
+    }
+
+    /// The edits renaming the symbol at `position` to `new_name` takes, in every file.
+    pub fn rename(
+        &self,
+        path: &Path,
+        position: Position,
+        new_name: String,
+    ) -> impl Future<Output = Result<lsp_types::WorkspaceEdit, String>> + use<> {
+        let request = self.server_for(path).zip(Self::position_params(path, position)).map(|(server, params)| {
+            server.request::<Rename>(lsp_types::RenameParams {
+                text_document_position: params,
+                new_name,
+                work_done_progress_params: Default::default(),
+            })
+        });
+        async move {
+            let Some(request) = request else { return Err("No language server for this file.".into()) };
+            match request.await {
+                Ok(Some(edit)) => Ok(edit),
+                Ok(None) => Err("This can't be renamed.".into()),
+                Err(err) => Err(err.to_string()),
+            }
+        }
+    }
+
+    /// The edits that format the whole file.
+    pub fn format(&self, path: &Path, tab_size: u32) -> impl Future<Output = Vec<lsp_types::TextEdit>> + use<> {
+        let request = self.server_for(path).zip(uri_for(path)).map(|(server, uri)| {
+            server.request::<Formatting>(lsp_types::DocumentFormattingParams {
+                text_document: TextDocumentIdentifier { uri },
+                options: lsp_types::FormattingOptions {
+                    tab_size,
+                    insert_spaces: true,
+                    trim_trailing_whitespace: Some(true),
+                    insert_final_newline: Some(true),
+                    trim_final_newlines: Some(true),
+                    ..Default::default()
+                },
+                work_done_progress_params: Default::default(),
+            })
+        });
+        async move {
+            let Some(request) = request else { return Vec::new() };
+            request.await.ok().flatten().unwrap_or_default()
+        }
+    }
+
+    /// Every problem the servers have reported, by file.
+    pub fn all_diagnostics(&self) -> impl Iterator<Item = (&PathBuf, &Diagnostic)> {
+        self.diagnostics.iter().flat_map(|(path, list)| list.iter().map(move |d| (path, d)))
     }
 
     /// Stops every server politely.

@@ -54,6 +54,26 @@ pub enum PaletteKind {
     Files,
     Quick,
     Line,
+    /// Places in the code: where a symbol is used, or the problems found.
+    Locations,
+}
+
+/// What a place in the list is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocationKind {
+    Reference,
+    Error,
+    Warning,
+}
+
+/// A place in the code, with the text to show for it.
+#[derive(Clone, Debug)]
+pub struct Location {
+    pub path: PathBuf,
+    pub position: lsp_types::Position,
+    /// The line's code for a reference, the message for a problem.
+    pub text: String,
+    pub kind: LocationKind,
 }
 
 impl PaletteKind {
@@ -62,6 +82,7 @@ impl PaletteKind {
             PaletteKind::Files => "Go to file",
             PaletteKind::Quick => "Quick settings and commands",
             PaletteKind::Line => "Go to line",
+            PaletteKind::Locations => "Filter",
         }
     }
 }
@@ -225,6 +246,9 @@ pub struct PaletteOptions {
     /// Lines in the current file, for going to a line.
     pub line_count: Option<usize>,
     pub terminal_open: bool,
+    /// For a list of places: what it is ("Problems", "References to x") and the places.
+    pub title: Option<String>,
+    pub locations: Vec<Location>,
 }
 
 struct FileEntry {
@@ -250,6 +274,7 @@ enum Item {
     Quick(Quick),
     /// ":42" typed in ⌘P.
     Line(usize),
+    Location(usize),
 }
 
 struct Row {
@@ -267,6 +292,7 @@ pub enum PaletteEvent {
     /// Change a setting and stay open, so its effect shows at once.
     Apply(Box<dyn Action>),
     GoToLine(usize),
+    OpenLocation(PathBuf, lsp_types::Position),
 }
 
 pub struct Palette {
@@ -279,6 +305,9 @@ pub struct Palette {
     recent_commands: Vec<&'static str>,
     line_count: Option<usize>,
     terminal_open: bool,
+    title: Option<String>,
+    locations: Vec<Location>,
+    root: PathBuf,
     rows: Vec<Row>,
     selected: usize,
     scroll: ScrollHandle,
@@ -292,7 +321,8 @@ impl EventEmitter<PaletteEvent> for Palette {}
 impl Palette {
     pub fn new(options: PaletteOptions, cx: &mut Context<Self>) -> Self {
         let kind = options.kind;
-        let input = cx.new(|cx| TextInput::new(kind.placeholder(), cx));
+        let placeholder = options.title.clone().unwrap_or_else(|| kind.placeholder().to_string());
+        let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_rows(cx));
         if kind == PaletteKind::Files {
             let root = options.root.clone();
@@ -324,6 +354,9 @@ impl Palette {
             recent_commands: options.recent_commands,
             line_count: options.line_count,
             terminal_open: options.terminal_open,
+            title: options.title,
+            locations: options.locations,
+            root: options.root.clone(),
             rows: Vec::new(),
             selected: 0,
             scroll: ScrollHandle::new(),
@@ -353,6 +386,7 @@ impl Palette {
             PaletteKind::Files => self.file_rows(&query),
             PaletteKind::Quick => self.quick_rows(&query),
             PaletteKind::Line => {}
+            PaletteKind::Locations => self.location_rows(&query),
         }
         self.selected = 0;
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
@@ -361,6 +395,19 @@ impl Palette {
 
     fn push(&mut self, item: Item, highlights: Vec<usize>, show_category: bool) {
         self.rows.push(Row { item, highlights, show_category });
+    }
+
+    /// Places matching what's typed, by their text or their file.
+    fn location_rows(&mut self, query: &str) {
+        for i in 0..self.locations.len() {
+            let location = &self.locations[i];
+            let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+            let matched = query.is_empty() || fuzzy::score(&format!("{} {file}", location.text), query).is_some();
+            if matched {
+                let highlights = fuzzy::score(&location.text, query).map(|(_, h)| h).unwrap_or_default();
+                self.push(Item::Location(i), highlights, false);
+            }
+        }
     }
 
     fn file_rows(&mut self, query: &str) {
@@ -504,7 +551,7 @@ impl Palette {
                 }
                 return;
             }
-            PaletteKind::Files | PaletteKind::Quick => {}
+            PaletteKind::Files | PaletteKind::Quick | PaletteKind::Locations => {}
         }
         let Some(item) = self.rows.get(ix).map(|r| r.item) else { return };
         match item {
@@ -512,6 +559,10 @@ impl Palette {
             Item::File(i) => cx.emit(PaletteEvent::OpenFile(self.files[i].path.clone())),
             Item::RecentFile(i) => cx.emit(PaletteEvent::OpenFile(self.recent_files[i].path.clone())),
             Item::Line(line) => cx.emit(PaletteEvent::GoToLine(line)),
+            Item::Location(i) => {
+                let location = &self.locations[i];
+                cx.emit(PaletteEvent::OpenLocation(location.path.clone(), location.position))
+            }
             Item::Quick(Quick::AllSettings) => {
                 cx.emit(PaletteEvent::Run(Quick::AllSettings.action(cx.global::<Settings>())))
             }
@@ -649,6 +700,33 @@ impl Palette {
                 div().child(format!("Go to line {line}")).into_any_element(),
                 None,
             ),
+            Item::Location(i) => {
+                let location = &self.locations[i];
+                let color = match location.kind {
+                    LocationKind::Error => theme.error,
+                    LocationKind::Warning => theme.warning,
+                    LocationKind::Reference => accent,
+                };
+                let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+                let marked = highlights_in(&location.text, 0);
+                let text = StyledText::new(location.text.clone()).with_highlights(marked);
+                // Code shows in the code font; a problem's message in the interface one.
+                let label = if location.kind == LocationKind::Reference {
+                    div().font_family(cx.global::<crate::fonts::Fonts>().code.clone()).text_size(px(13.)).child(text)
+                } else {
+                    div().child(text)
+                };
+                (
+                    div().size(px(5.)).rounded_full().bg(color).into_any_element(),
+                    label.into_any_element(),
+                    Some(
+                        div()
+                            .text_color(dim)
+                            .child(format!("{file}:{}", location.position.line + 1))
+                            .into_any_element(),
+                    ),
+                )
+            }
         };
         let separated = row.item == Item::Quick(Quick::AllSettings);
         div()
@@ -704,7 +782,7 @@ impl Palette {
     fn hint(&self) -> &'static str {
         match self.kind {
             PaletteKind::Files => "↵ open",
-            PaletteKind::Line => "↵ go",
+            PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Quick => match self.selected_item() {
                 Some(Item::Quick(q)) if q.is_choice() => "←→ change",
                 Some(Item::Quick(Quick::AllSettings)) | Some(Item::Command(_)) => "↵ run",
@@ -812,6 +890,9 @@ impl Render for Palette {
                     PaletteKind::Files if !self.files_loaded => "Looking for files…".to_string(),
                     PaletteKind::Files if self.query.is_empty() => "No files in this folder".to_string(),
                     PaletteKind::Files => format!("No file named “{}”", self.query),
+                    PaletteKind::Locations if self.locations.is_empty() => {
+                        format!("Nothing in {}", self.title.as_deref().unwrap_or("this list").to_lowercase())
+                    }
                     _ => format!("Nothing called “{}”", self.query),
                 };
                 Some(self.render_message(text, false, cx))
@@ -904,6 +985,8 @@ mod tests {
             recent_commands: Vec::new(),
             line_count: Some(10),
             terminal_open: false,
+            title: None,
+            locations: Vec::new(),
         };
         cx.new(|cx| Palette::new(options, cx))
     }
@@ -943,6 +1026,32 @@ mod tests {
         let p = palette(cx, PaletteKind::Files);
         type_query(cx, &p, ":42");
         assert_eq!(items(cx, &p), ["line 42"]);
+    }
+
+    #[gpui::test]
+    fn a_list_of_places_filters_by_text_and_file(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Settings::default()));
+        let place = |file: &str, text: &str| Location {
+            path: PathBuf::from(format!("/p/{file}")),
+            position: lsp_types::Position::new(3, 0),
+            text: text.into(),
+            kind: LocationKind::Reference,
+        };
+        let options = PaletteOptions {
+            kind: PaletteKind::Locations,
+            commands: Vec::new(),
+            root: PathBuf::from("/p"),
+            recent_files: Vec::new(),
+            recent_commands: Vec::new(),
+            line_count: None,
+            terminal_open: false,
+            title: Some("2 uses of total".into()),
+            locations: vec![place("a.rs", "let total = 1;"), place("b.rs", "print(total)")],
+        };
+        let p = cx.new(|cx| Palette::new(options, cx));
+        assert_eq!(p.read_with(cx, |p, _| p.rows.len()), 2);
+        type_query(cx, &p, "b.rs");
+        assert_eq!(p.read_with(cx, |p, _| p.rows.len()), 1);
     }
 
     #[test]

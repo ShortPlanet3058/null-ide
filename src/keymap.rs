@@ -101,6 +101,7 @@ pub fn register(keymap: Keymap, cx: &mut App) {
     crate::text_input::bind_keys(cx);
     crate::settings_panel::bind_keys(cx);
     crate::welcome::bind_keys(cx);
+    crate::editor::bind_refactor_keys(cx);
     crate::editor::bind_ai_keys(cx);
     // After the text field's keys, so ←→ can change a choice in the palette.
     crate::palette::bind_keys(cx);

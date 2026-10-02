@@ -24,6 +24,8 @@ pub struct Settings {
     pub fade_bars_while_typing: bool,
     /// Wrap long lines to the width of the editor instead of scrolling sideways.
     pub word_wrap: bool,
+    /// Format the file with its language server when saving with ⌘S.
+    pub format_on_save: bool,
     /// Whose shortcuts to use: Null's own, or another editor's.
     pub keymap: crate::keymap::Keymap,
     /// Set once the first-launch welcome has been seen.
@@ -44,6 +46,7 @@ impl Default for Settings {
             sidebar_visible: true,
             fade_bars_while_typing: false,
             word_wrap: false,
+            format_on_save: false,
             keymap: Default::default(),
             welcomed: false,
             autocomplete: true,

@@ -34,6 +34,8 @@ actions!(
         ShowCommands,
         AskAi,
         ToggleAi,
+        ShowProblems,
+        ToggleFormatOnSave,
         OpenSettings,
         OpenSettingsFile,
         IncreaseFontSize,
@@ -80,6 +82,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("ctrl-g", GoToLine, ctx),
+        KeyBinding::new("secondary-shift-m", ShowProblems, ctx),
         KeyBinding::new("alt-z", ToggleWordWrap, ctx),
         KeyBinding::new("secondary-n", NewUntitled, ctx),
         KeyBinding::new("secondary-shift-s", SaveAs, ctx),
@@ -483,6 +486,57 @@ impl Workspace {
                     let name = editor.read(cx).file_name();
                     this.show_notice(format!("{name} changed on disk. Your unsaved edits were kept."), cx);
                 }
+                EditorEvent::Rename { position, new_name } => {
+                    let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
+                    let request = this.lsp.read(cx).rename(&path, *position, new_name.clone());
+                    cx.spawn_in(window, async move |this, cx| {
+                        let result = request.await;
+                        this.update_in(cx, |this, _, cx| match result {
+                            Ok(edit) => this.apply_workspace_edit(edit, cx),
+                            Err(message) => this.show_notice(message, cx),
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                EditorEvent::FindReferences { position, name } => {
+                    let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
+                    let request = this.lsp.read(cx).references(&path, *position);
+                    let name = name.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        let found = request.await;
+                        this.update_in(cx, |this, window, cx| {
+                            let locations: Vec<_> = found
+                                .into_iter()
+                                .filter_map(|l| {
+                                    let path = crate::lsp::path_for(&l.uri)?;
+                                    let text = this.line_text(&path, l.range.start.line as usize, cx);
+                                    Some(crate::palette::Location {
+                                        path,
+                                        position: l.range.start,
+                                        text: text.trim().to_string(),
+                                        kind: crate::palette::LocationKind::Reference,
+                                    })
+                                })
+                                .collect();
+                            let mut locations = locations;
+                            locations.sort_by(|a, b| {
+                                (&a.path, a.position.line, a.position.character).cmp(&(
+                                    &b.path,
+                                    b.position.line,
+                                    b.position.character,
+                                ))
+                            });
+                            if locations.len() <= 1 {
+                                return this.show_notice(format!("{name} isn't used anywhere else"), cx);
+                            }
+                            let title = format!("{} uses of {name}", locations.len());
+                            this.open_locations(title, locations, window, cx);
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 EditorEvent::GoTo { path, range } => {
                     let range = *range;
                     this.open_file(path.clone(), window, cx);
@@ -670,7 +724,7 @@ impl Workspace {
     /// keyboard is in the tree or the terminal.
     fn save_active(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor().cloned() {
-            editor.update(cx, |editor, cx| editor.save_to_disk(cx));
+            editor.update(cx, |editor, cx| editor.save_from_keyboard(cx));
         }
     }
 
@@ -822,6 +876,15 @@ impl Workspace {
                 (Cursors, "Add Cursor Below".into(), Box::new(crate::editor::AddCursorBelow)),
                 (Go, "Go to Line…".into(), Box::new(GoToLine)),
                 (Go, "Go to Definition".into(), Box::new(GoToDefinition)),
+                (Go, "Find References".into(), Box::new(crate::editor::FindReferences)),
+                (Go, "Show Problems".into(), Box::new(ShowProblems)),
+                (Edit, "Rename Symbol".into(), Box::new(crate::editor::RenameSymbol)),
+                (Edit, "Format Document".into(), Box::new(crate::editor::FormatDocument)),
+                (
+                    Edit,
+                    toggle(settings.format_on_save, "Stop Formatting on Save", "Format on Save"),
+                    Box::new(ToggleFormatOnSave),
+                ),
                 (Go, "Show Info at Cursor".into(), Box::new(ShowInfo)),
                 (Go, "Next Tab".into(), Box::new(NextTab)),
                 (Go, "Previous Tab".into(), Box::new(PreviousTab)),
@@ -858,6 +921,29 @@ impl Workspace {
     /// Opens the palette of that kind. Pressing the same shortcut again closes it;
     /// another one switches to that kind.
     pub fn open_palette(&mut self, kind: PaletteKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette_with(kind, None, Vec::new(), window, cx);
+    }
+
+    /// A list of places (references, problems), shown like the palette.
+    fn open_locations(
+        &mut self,
+        title: String,
+        locations: Vec<crate::palette::Location>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette = None;
+        self.open_palette_with(PaletteKind::Locations, Some(title), locations, window, cx);
+    }
+
+    fn open_palette_with(
+        &mut self,
+        kind: PaletteKind,
+        title: Option<String>,
+        locations: Vec<crate::palette::Location>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some((palette, _)) = &self.palette {
             if palette.read(cx).kind() == kind {
                 return self.close_palette(window, cx);
@@ -876,6 +962,8 @@ impl Workspace {
             recent_commands: self.recent_commands.clone(),
             line_count: self.active_editor().map(|e| e.read(cx).buffer.len_lines()),
             terminal_open: self.terminal_open.on,
+            title,
+            locations,
         };
         let palette = cx.new(|cx| Palette::new(options, cx));
         let subscription = cx.subscribe_in(&palette, window, |this, palette, event, window, cx| match event {
@@ -884,6 +972,15 @@ impl Workspace {
                 let path = path.clone();
                 this.close_palette(window, cx);
                 this.open_file(path, window, cx);
+            }
+            PaletteEvent::OpenLocation(path, position) => {
+                let (path, position) = (path.clone(), *position);
+                this.close_palette(window, cx);
+                this.open_file(path, window, cx);
+                if let Some(editor) = this.active_editor() {
+                    let range = lsp_types::Range { start: position, end: position };
+                    editor.update(cx, |editor, cx| editor.select_lsp_range(range, cx));
+                }
             }
             PaletteEvent::GoToLine(line) => {
                 let line = *line;
@@ -1276,6 +1373,111 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A line of a file: from its open tab if there is one (it may not be saved), else from disk.
+    fn line_text(&self, path: &Path, line: usize, cx: &App) -> String {
+        if let Some(tab) = self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(path)) {
+            return tab.editor.read(cx).buffer.line_text(line);
+        }
+        std::fs::read_to_string(path).ok().and_then(|t| t.lines().nth(line).map(str::to_string)).unwrap_or_default()
+    }
+
+    /// Applies a rename (or any multi-file change) from a language server: open files as
+    /// one undo step each, others written on disk.
+    fn apply_workspace_edit(&mut self, edit: lsp_types::WorkspaceEdit, cx: &mut Context<Self>) {
+        let mut by_file: Vec<(PathBuf, Vec<lsp_types::TextEdit>)> = Vec::new();
+        let mut add = |uri: &lsp_types::Uri, edits: Vec<lsp_types::TextEdit>| {
+            let Some(path) = crate::lsp::path_for(uri) else { return };
+            match by_file.iter_mut().find(|(p, _)| *p == path) {
+                Some((_, list)) => list.extend(edits),
+                None => by_file.push((path, edits)),
+            }
+        };
+        for (uri, edits) in edit.changes.unwrap_or_default() {
+            add(&uri, edits);
+        }
+        let operations = match edit.document_changes {
+            Some(lsp_types::DocumentChanges::Edits(edits)) => edits,
+            Some(lsp_types::DocumentChanges::Operations(ops)) => ops
+                .into_iter()
+                .filter_map(|op| match op {
+                    lsp_types::DocumentChangeOperation::Edit(edit) => Some(edit),
+                    lsp_types::DocumentChangeOperation::Op(_) => None,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        for change in operations {
+            let edits = change
+                .edits
+                .into_iter()
+                .map(|e| match e {
+                    lsp_types::OneOf::Left(edit) => edit,
+                    lsp_types::OneOf::Right(annotated) => annotated.text_edit,
+                })
+                .collect();
+            add(&change.text_document.uri, edits);
+        }
+        let places: usize = by_file.iter().map(|(_, e)| e.len()).sum();
+        let files = by_file.len();
+        let mut failed = Vec::new();
+        for (path, edits) in by_file {
+            if let Some(tab) = self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(path.as_path())) {
+                tab.editor.update(cx, |editor, cx| editor.apply_lsp_edits(&edits, cx));
+            } else {
+                let written = std::fs::read_to_string(&path).map(|text| {
+                    let mut buffer = crate::buffer::Buffer::from_text(&text);
+                    crate::editor::apply_edits(&mut buffer, &edits);
+                    std::fs::write(&path, buffer.to_string())
+                });
+                if !matches!(written, Ok(Ok(()))) {
+                    failed.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                }
+            }
+        }
+        let message = match (places, failed.is_empty()) {
+            (0, _) => "Nothing to rename".to_string(),
+            (_, true) if files == 1 => format!("Renamed in {places} places"),
+            (_, true) => format!("Renamed in {places} places across {files} files"),
+            (_, false) => format!("Renamed, but couldn't write {}", failed.join(", ")),
+        };
+        self.show_notice(message, cx);
+    }
+
+    /// Every error and warning the language servers found, errors first.
+    fn show_problems(&mut self, _: &ShowProblems, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::palette::{Location, LocationKind};
+        use lsp_types::DiagnosticSeverity as S;
+        let found: Vec<(PathBuf, lsp_types::Diagnostic)> =
+            self.lsp.read(cx).all_diagnostics().map(|(p, d)| (p.clone(), d.clone())).collect();
+        let mut locations: Vec<Location> = found
+            .into_iter()
+            .filter_map(|(path, d)| {
+                let kind = match d.severity.unwrap_or(S::ERROR) {
+                    S::ERROR => LocationKind::Error,
+                    S::WARNING => LocationKind::Warning,
+                    _ => return None,
+                };
+                let text = d.message.lines().next().unwrap_or("").to_string();
+                Some(Location { path, position: d.range.start, text, kind })
+            })
+            .collect();
+        locations
+            .sort_by_key(|l| (l.kind != LocationKind::Error, l.path.clone(), l.position.line, l.position.character));
+        let errors = locations.iter().filter(|l| l.kind == LocationKind::Error).count();
+        let warnings = locations.len() - errors;
+        let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+        let title = match (errors, warnings) {
+            (0, 0) => "Problems".to_string(),
+            (e, 0) => plural(e, "error"),
+            (0, w) => plural(w, "warning"),
+            (e, w) => format!("{} and {}", plural(e, "error"), plural(w, "warning")),
+        };
+        if locations.is_empty() {
+            return self.show_notice("No problems found".into(), cx);
+        }
+        self.open_locations(title, locations, window, cx);
+    }
+
     /// The first-launch screen: look, shortcuts and AI.
     pub fn show_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let welcome = cx.new(Welcome::new);
@@ -1607,8 +1809,15 @@ impl Render for Workspace {
                 let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
                 bar.child(
                     div()
+                        .id("problems")
                         .flex()
                         .gap(px(10.))
+                        .cursor_pointer()
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_problems(&ShowProblems, window, cx)
+                            }),
+                        )
                         .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
                         .when(warnings > 0, |d| {
                             d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
@@ -1631,6 +1840,10 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings_file))
             .on_action(cx.listener(Self::show_commands))
             .on_action(cx.listener(Self::toggle_ai))
+            .on_action(cx.listener(Self::show_problems))
+            .on_action(cx.listener(|_, _: &ToggleFormatOnSave, _, cx| {
+                settings::update(cx, |s| s.format_on_save = !s.format_on_save)
+            }))
             .on_action(cx.listener(Self::ask_ai))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::close_tab))
