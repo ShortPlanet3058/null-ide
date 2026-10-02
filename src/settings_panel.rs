@@ -63,6 +63,7 @@ pub struct SettingsPanel {
     installed_fonts: Vec<String>,
     model: Entity<TextInput>,
     address: Entity<TextInput>,
+    completion_model: Entity<TextInput>,
     /// The provider the two fields above were filled for.
     fields_for: ProviderId,
     /// Whether that provider's key is set. Checked once, since it reads the keychain.
@@ -76,6 +77,7 @@ impl SettingsPanel {
     pub fn new(shortcuts: Vec<Shortcut>, cx: &mut Context<Self>) -> Self {
         let model = cx.new(|cx| TextInput::new("Model", cx));
         let address = cx.new(|cx| TextInput::new("Address", cx));
+        let completion_model = cx.new(|cx| TextInput::new("Same as above", cx));
         let subscriptions = vec![
             cx.subscribe(&model, |this, input, TextInputEvent::Changed, cx| {
                 let text = input.read(cx).text().trim().to_string();
@@ -85,6 +87,16 @@ impl SettingsPanel {
                     // Don't add an empty entry just for showing the field.
                     if value.is_some() || s.ai.providers.contains_key(provider.key()) {
                         s.ai.providers.entry(provider.key().into()).or_default().model = value;
+                    }
+                });
+            }),
+            cx.subscribe(&completion_model, |this, input, TextInputEvent::Changed, cx| {
+                let text = input.read(cx).text().trim().to_string();
+                let provider = this.fields_for;
+                let value = (!text.is_empty()).then_some(text);
+                settings::update(cx, |s| {
+                    if value.is_some() || s.ai.providers.contains_key(provider.key()) {
+                        s.ai.providers.entry(provider.key().into()).or_default().completion_model = value;
                     }
                 });
             }),
@@ -107,6 +119,7 @@ impl SettingsPanel {
             installed_fonts,
             model,
             address,
+            completion_model,
             fields_for: ProviderId::Off,
             has_key: None,
             _subscriptions: subscriptions,
@@ -133,6 +146,15 @@ impl SettingsPanel {
         self.address.update(cx, |input, cx| {
             input.set_placeholder(address_hint);
             input.set_text(&address, cx);
+        });
+        let completion_hint = match ai.completion_model(provider) {
+            Some(default) if saved.completion_model.is_none() => format!("Default: {default}"),
+            _ => "Same as the model above".to_string(),
+        };
+        let completion_model = saved.completion_model.clone().unwrap_or_default();
+        self.completion_model.update(cx, |input, cx| {
+            input.set_placeholder(completion_hint);
+            input.set_text(&completion_model, cx);
         });
         // Never read the keychain just to show this: it can make macOS ask for permission.
         self.has_key = provider.uses_api_key().then(|| ai::known_key(provider)).flatten();
@@ -553,10 +575,27 @@ impl SettingsPanel {
             }
             rows.push(Self::row(
                 "Suggest code as you type",
-                Some("Faint text at the caret when you pause; ⇥ takes it. Best with a fast model (Ollama, NVIDIA)"),
+                Some("Names from the file at once, then the AI's guess when you pause; ⇥ takes it"),
                 Self::toggle("ai-completions", s.ai.completions, &theme, cx, |s| s.ai.completions = !s.ai.completions),
                 &theme,
             ));
+            if s.ai.completions {
+                if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
+                    rows.push(Self::row(
+                        "Suggestions from the AI",
+                        Some("The command line tools take seconds to start, too slow for this: suggestions come from names in the file only"),
+                        div(),
+                        &theme,
+                    ));
+                } else {
+                    rows.push(Self::row(
+                        "Model for suggestions",
+                        Some("A small, fast model makes suggestions appear sooner"),
+                        Self::field(&self.completion_model, &theme),
+                        &theme,
+                    ));
+                }
+            }
             rows.push(Self::row(
                 "Ask and edit",
                 Some("⌘I edits the selection with AI; “Ask About This File” in ⌘K asks about it"),

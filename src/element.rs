@@ -272,6 +272,12 @@ impl Element for EditorElement {
                     if let Some((block, i)) = row.block {
                         let text = match &editor.blocks[block].kind {
                             crate::editor::BlockKind::Removed(lines) => lines.get(i).cloned().unwrap_or_default(),
+                            crate::editor::BlockKind::Writing(lines) => {
+                                // The AI's new code, arriving: plain text on the "added" tint.
+                                let text = lines.get(i).cloned().unwrap_or_default();
+                                let shaped = shape(text.clone(), &[run(text.len(), &font, theme.foreground)]);
+                                return RowLayout { x: px(0.), row, text, shaped };
+                            }
                             crate::editor::BlockKind::Ghost(lines) => {
                                 // The rest of a ghost completion: faint, nothing struck.
                                 let text = lines.get(i).cloned().unwrap_or_default();
@@ -321,6 +327,11 @@ impl Element for EditorElement {
                         runs.extend(runs_for(after, line_byte + at, &editor.spans, &under_after, &theme, &font));
                         let shown = format!("{before}{ghost}{after}");
                         let shaped = shape(shown, &runs);
+                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped };
+                    }
+                    // The code the AI is rewriting fades while the new code appears.
+                    if editor.ai_writing_lines().is_some_and(|l| l.contains(&row.line)) {
+                        let shaped = shape(text.clone(), &[run(text.len(), &font, theme.faint)]);
                         return RowLayout { x: char_width * row.indent as f32, row, text, shaped };
                     }
                     let runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
@@ -385,14 +396,17 @@ impl Element for EditorElement {
                 })
                 .collect();
             for (r, row) in row_layouts.iter().zip(visible.clone()) {
-                if let Some((block, _)) = r.row.block
-                    && matches!(editor.blocks[block].kind, crate::editor::BlockKind::Removed(_))
-                {
+                let tint = match r.row.block.map(|(b, _)| &editor.blocks[b].kind) {
+                    Some(crate::editor::BlockKind::Removed(_)) => Some(theme.git_deleted.opacity(0.13)),
+                    Some(crate::editor::BlockKind::Writing(_)) => Some(theme.git_added.opacity(0.13)),
+                    _ => None,
+                };
+                if let Some(tint) = tint {
                     let rect = Bounds::new(
                         point(bounds.left() + gutter_width - px(9.), row_top(row)),
                         size(bounds.size.width - gutter_width + px(9.), line_height),
                     );
-                    ai_tints.push((rect, theme.git_deleted.opacity(0.13)));
+                    ai_tints.push((rect, tint));
                 }
             }
             let current_line = editor.selection.is_empty().then(|| {

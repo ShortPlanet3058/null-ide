@@ -80,8 +80,11 @@ Settings) turns it off entirely.
   through and new ones tinted. ⇥ keeps it, Esc undoes it, ⌘I adjusts it.
 - **Questions** (typed in ⌘I, or “Ask About This File” in ⌘K) get a short note under the code
   they're about. Esc closes it.
-- **Suggestions while typing** (Settings → AI, off by default): pause at the end of a line and
-  the AI's guess shows faintly after the caret; ⇥ takes it.
+- **⌘I writes in place**: the new code appears line by line as it's written, over the
+  dimmed code it replaces.
+- **Suggestions while typing** (Settings → AI, off by default): names from the file appear
+  the moment you type two letters, then the AI's guess when you pause, streamed in; ⇥ takes
+  it, typing along keeps it. A separate fast model can be set for these.
 
 Choose where answers come from in Settings → AI:
 

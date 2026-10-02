@@ -49,6 +49,8 @@ pub enum BlockKind {
     Note,
     /// A ghost completion's lines below the caret's line.
     Ghost(Vec<String>),
+    /// The new code as the AI writes it, above the code it replaces.
+    Writing(Vec<String>),
 }
 
 pub struct Block {
@@ -66,6 +68,8 @@ pub(super) struct Prompting {
     /// Opened to ask about the code, not to change it.
     ask_only: bool,
     writing: bool,
+    /// What the AI has written so far, shown as it arrives.
+    preview: String,
     failed: Option<String>,
     task: Option<Task<()>>,
     _subscription: Subscription,
@@ -248,6 +252,7 @@ impl Editor {
             error: if ask_only { None } else { error },
             ask_only,
             writing: false,
+            preview: String::new(),
             failed: None,
             task: None,
             _subscription: subscription,
@@ -308,13 +313,25 @@ impl Editor {
                      indentation and style, and change no more than needed."
                 .into(),
             user,
+            ..Default::default()
         };
         let mut events = ai::stream(cx.global::<Settings>().ai.clone(), request);
         let task = cx.spawn(async move |this, cx| {
             let mut text = String::new();
             while let Some(event) = events.next().await {
                 match event {
-                    AiEvent::Text(chunk) => text.push_str(&chunk),
+                    AiEvent::Text(chunk) => {
+                        text.push_str(&chunk);
+                        let so_far = text.clone();
+                        this.update(cx, |this, cx| {
+                            if let Some(prompt) = &mut this.prompt {
+                                prompt.preview = so_far;
+                            }
+                            this.rebuild_blocks();
+                            cx.notify();
+                        })
+                        .ok();
+                    }
                     AiEvent::Done => {
                         let text = std::mem::take(&mut text);
                         let instruction = instruction.clone();
@@ -438,6 +455,7 @@ impl Editor {
                      specific to this code. Use a markdown code fence only when code really helps."
                 .into(),
             user,
+            ..Default::default()
         };
         let mut events = ai::stream(cx.global::<Settings>().ai.clone(), request);
         let task = cx.spawn(async move |this, cx| {
@@ -526,6 +544,16 @@ impl Editor {
         let mut blocks = Vec::new();
         if let Some(prompt) = &self.prompt {
             blocks.push(Block { before_line: prompt.lines.start, rows: 1, kind: BlockKind::Prompt });
+            // The new code appears line by line as it's written, above the code it replaces.
+            let written: Vec<String> =
+                prompt.preview.lines().filter(|l| !l.trim_start().starts_with("```")).map(str::to_string).collect();
+            if prompt.writing && !written.is_empty() {
+                blocks.push(Block {
+                    before_line: prompt.lines.start,
+                    rows: written.len(),
+                    kind: BlockKind::Writing(written),
+                });
+            }
         }
         if let Some(change) = &self.ai_change {
             for (line, old) in &change.removed {
@@ -552,6 +580,11 @@ impl Editor {
     /// Lines tinted while ⌘I is open: the code it will change.
     pub fn assist_target(&self) -> Option<Range<usize>> {
         self.prompt.as_ref().map(|p| p.lines.clone())
+    }
+
+    /// The code being rewritten, dimmed while the AI writes its replacement.
+    pub fn ai_writing_lines(&self) -> Option<Range<usize>> {
+        self.prompt.as_ref().filter(|p| p.writing).map(|p| p.lines.clone())
     }
 
     pub fn ai_added_lines(&self) -> &[Range<usize>] {
@@ -748,7 +781,7 @@ impl Editor {
                             .into_any_element(),
                     );
                 }
-                BlockKind::Removed(_) | BlockKind::Ghost(_) => {}
+                BlockKind::Removed(_) | BlockKind::Ghost(_) | BlockKind::Writing(_) => {}
             }
         }
         out
@@ -771,7 +804,7 @@ impl Editor {
 mod tests {
     use super::*;
     use crate::buffer::Buffer;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{EntityInputHandler as _, TestAppContext, VisualTestContext};
     use std::path::PathBuf;
 
     fn editor<'a>(cx: &'a mut TestAppContext, text: &str) -> (Entity<Editor>, &'a mut VisualTestContext) {
@@ -828,6 +861,29 @@ mod tests {
             });
             e.move_head(0, false, cx);
             assert!(e.ghost.is_none());
+        });
+    }
+
+    /// Typing part of a name defined above suggests the rest right away, and typing
+    /// along keeps the suggestion (no AI involved: the provider here is off).
+    #[gpui::test]
+    fn names_from_the_file_are_suggested_while_typing(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "def compute_moving_average(xs):\n    return 0\n\n");
+        cx.update(|_, cx| {
+            let mut settings = Settings::default();
+            settings.ai.completions = true;
+            cx.set_global(settings);
+        });
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(e.buffer.len_chars());
+            for c in "res = comp".chars() {
+                e.replace_text_in_range(None, &c.to_string(), window, cx);
+            }
+            assert_eq!(e.ghost_text().map(|(first, _)| first), Some("ute_moving_average"));
+            e.replace_text_in_range(None, "u", window, cx);
+            assert_eq!(e.ghost_text().map(|(first, _)| first), Some("te_moving_average"));
+            e.accept_ghost_action(&super::super::ghost::AcceptGhost, window, cx);
+            assert!(e.buffer.to_string().ends_with("res = compute_moving_average"));
         });
     }
 

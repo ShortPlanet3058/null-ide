@@ -91,6 +91,9 @@ pub struct ProviderSettings {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// A faster model for suggestions while typing; the usual one when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_model: Option<String>,
     /// Let reasoning models think before answering. Slower; off by default on NVIDIA,
     /// where it can turn a one-second edit into a thirty-second one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,6 +130,14 @@ impl AiSettings {
             .and_then(|p| p.model.clone())
             .filter(|m| !m.is_empty())
             .or(id.default_model().map(str::to_owned))
+    }
+
+    /// The model for suggestions while typing: the one set for them, else a fast default.
+    pub fn completion_model(&self, id: ProviderId) -> Option<String> {
+        self.providers.get(id.key()).and_then(|p| p.completion_model.clone()).filter(|m| !m.is_empty()).or(match id {
+            ProviderId::Claude => Some("claude-haiku-4-5-20251001".into()),
+            _ => None,
+        })
     }
 
     fn reasoning(&self, id: ProviderId) -> bool {
@@ -190,9 +201,14 @@ pub fn store_api_key(id: ProviderId, key: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Default)]
 pub struct Prompt {
     pub system: String,
     pub user: String,
+    /// A different model than the provider's usual one (a fast one for suggestions).
+    pub model: Option<String>,
+    /// Caps the answer's length, which also makes it come back sooner.
+    pub max_tokens: Option<u32>,
 }
 
 pub enum AiEvent {
@@ -243,7 +259,7 @@ pub fn ask(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)
         ProviderId::Off => Err("AI is off. Choose a provider with “AI: Use …” in the command palette.".into()),
         ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible => {
             let base = settings.base_url(id).unwrap_or_default();
-            let model = settings.model(id).ok_or_else(|| {
+            let model = prompt.model.clone().or_else(|| settings.model(id)).ok_or_else(|| {
                 format!("Set a model for {} in settings (\"ai\" → \"{}\" → \"model\").", id.label(), id.key())
             })?;
             let key = api_key(id);
@@ -254,7 +270,8 @@ pub fn ask(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)
         }
         ProviderId::Claude => {
             let key = api_key(id).ok_or_else(|| missing_key(id))?;
-            claude_api(&settings.model(id).unwrap_or_default(), &key, prompt, on_text)
+            let model = prompt.model.clone().or_else(|| settings.model(id)).unwrap_or_default();
+            claude_api(&model, &key, prompt, on_text)
         }
         ProviderId::ClaudeCode => claude_code(settings.model(id), prompt, on_text),
         ProviderId::Codex => codex(settings.model(id), prompt, on_text),
@@ -318,6 +335,7 @@ fn openai_compatible(
         "model": model,
         "stream": true,
         "temperature": 0.2,
+        "max_tokens": prompt.max_tokens.unwrap_or(4096),
         "messages": [
             { "role": "system", "content": prompt.system },
             { "role": "user", "content": prompt.user },
@@ -358,7 +376,7 @@ fn openai_compatible(
 fn claude_api(model: &str, key: &str, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
     let body = json!({
         "model": model,
-        "max_tokens": 16000,
+        "max_tokens": prompt.max_tokens.unwrap_or(16000),
         "stream": true,
         "fallbacks": "default",
         "output_config": { "effort": "medium" },
@@ -550,8 +568,11 @@ mod live_tests {
     #[ignore]
     fn nvidia_streams_an_answer() {
         let settings = AiSettings { provider: ProviderId::Nvidia, ..Default::default() };
-        let prompt =
-            Prompt { system: "Answer with one word.".into(), user: "What color is the sky on a clear day?".into() };
+        let prompt = Prompt {
+            system: "Answer with one word.".into(),
+            user: "What color is the sky on a clear day?".into(),
+            ..Default::default()
+        };
         let mut text = String::new();
         let mut chunks = 0;
         ask(&settings, &prompt, &mut |t| {

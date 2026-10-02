@@ -1135,7 +1135,9 @@ impl Editor {
             let indent: String = this.buffer.line_text(line).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
             let before = range.start.checked_sub(1).and_then(|i| this.buffer.char_at(i));
             let after = this.buffer.char_at(range.end);
-            let opens = matches!(before, Some('{' | '(' | '['));
+            // Python blocks open with a colon.
+            let python_block = before == Some(':') && this.language_name() == "Python";
+            let opens = matches!(before, Some('{' | '(' | '[')) || python_block;
             let inner = format!("{indent}{}", if opens { " ".repeat(TAB_SIZE) } else { String::new() });
             if opens
                 && matches!((before, after), (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']')))
@@ -1148,6 +1150,8 @@ impl Editor {
                 this.edit(range, &format!("\n{inner}"), EditKind::Other, cx);
             }
         });
+        // A new line is a good moment for a suggestion (the body after `def f():`...).
+        self.schedule_ghost(None, cx);
     }
 
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
@@ -1788,6 +1792,9 @@ impl EntityInputHandler for Editor {
                 this.edit(range, &text, EditKind::Typing, cx);
             });
         }
+        // Typing what the suggestion shows keeps it.
+        let kept =
+            if self.marked.is_none() && range == self.selection.range() { self.type_into_ghost(text) } else { None };
         let mut chars = text.chars();
         if let (Some(c), None, None) = (chars.next(), chars.next(), &self.marked)
             && range == self.selection.range()
@@ -1797,7 +1804,7 @@ impl EntityInputHandler for Editor {
         }
         self.edit(range, text, EditKind::Typing, cx);
         self.completion_after_typing(text, cx);
-        self.schedule_ghost(cx);
+        self.schedule_ghost(kept, cx);
     }
 
     fn replace_and_mark_text_in_range(
