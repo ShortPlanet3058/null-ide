@@ -47,6 +47,7 @@ actions!(
         UseGraphiteTheme,
         UsePaperTheme,
         SearchProject,
+        ReplaceInProject,
         ShowFiles,
         ToggleAutocomplete,
         ToggleTerminal,
@@ -83,6 +84,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-tab", PreviousTab, ctx),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
         KeyBinding::new("secondary-shift-f", SearchProject, ctx),
+        KeyBinding::new("secondary-shift-h", ReplaceInProject, ctx),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("ctrl-g", GoToLine, ctx),
@@ -272,6 +274,10 @@ impl Workspace {
                         let search = this.project_search.focus_handle(cx);
                         window.focus(&search);
                     }
+                }
+                ProjectSearchEvent::Replace { query, replacement, targets } => {
+                    let (query, replacement, targets) = (query.clone(), replacement.clone(), targets.clone());
+                    this.replace_in_files(&query, &replacement, &targets, cx);
                 }
             }),
         ];
@@ -614,6 +620,7 @@ impl Workspace {
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited => {
+                    this.share_unsaved(&editor, cx);
                     if cx.global::<Settings>().fade_bars_while_typing {
                         this.chrome.set(false, FADE_IN, FADE_OUT);
                     }
@@ -622,6 +629,7 @@ impl Workspace {
                 }
                 // Hand edits to the settings file take effect when saved.
                 EditorEvent::Saved => {
+                    this.share_unsaved(&editor, cx);
                     this.refresh_title(window, cx);
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
@@ -765,6 +773,11 @@ impl Workspace {
         }
         self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
+        if let Some(path) = tab.editor.read(cx).path().map(Path::to_path_buf)
+            && cx.has_global::<crate::project_search::UnsavedFiles>()
+        {
+            cx.global_mut::<crate::project_search::UnsavedFiles>().0.remove(&path);
+        }
         // Focus follows to the next tab only if it was in the tab being closed (deleting a
         // file from the tree keeps the keyboard in the tree).
         let had_focus = tab.editor.focus_handle(cx).contains_focused(window, cx);
@@ -1036,6 +1049,7 @@ impl Workspace {
             (Go, "Go to File…".into(), Box::new(TogglePalette)),
             (Go, "Go to Symbol in Project…".into(), Box::new(GoToSymbolInProject)),
             (Go, "Search in Project…".into(), Box::new(SearchProject)),
+            (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
             (View, toggle(settings.word_wrap, "Stop Wrapping Lines", "Wrap Lines"), Box::new(ToggleWordWrap)),
             (
@@ -1341,6 +1355,91 @@ impl Workspace {
         settings::update(cx, |s| s.sidebar_visible = true);
         self.project_search.update(cx, |search, cx| search.focus(selected, window, cx));
         cx.notify();
+    }
+
+    /// ⌘⇧H: project search with its replace field open.
+    fn replace_in_project(&mut self, _: &ReplaceInProject, window: &mut Window, cx: &mut Context<Self>) {
+        let selected =
+            self.active_editor().map(|e| e.read(cx).selected_text()).filter(|t| !t.is_empty() && !t.contains('\n'));
+        self.sidebar_search.set(true, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        self.project_search.update(cx, |search, cx| search.show_replace(selected, window, cx));
+        cx.notify();
+    }
+
+    /// Tells project search about a tab's unsaved text (or that it's saved now).
+    fn share_unsaved(&self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let editor = editor.read(cx);
+        let Some(path) = editor.path().map(Path::to_path_buf) else { return };
+        let text = editor.buffer.is_dirty().then(|| editor.buffer.rope().clone());
+        let unsaved = &mut cx.default_global::<crate::project_search::UnsavedFiles>().0;
+        match text {
+            Some(text) => unsaved.insert(path, text),
+            None => unsaved.remove(&path),
+        };
+    }
+
+    /// Replaces a search's matches across files. Files open in a tab change in their
+    /// editor (one undo step each, saved when you save); the others are written on disk.
+    fn replace_in_files(
+        &mut self,
+        query: &crate::search::SearchQuery,
+        replacement: &str,
+        targets: &[(PathBuf, Option<usize>)],
+        cx: &mut Context<Self>,
+    ) {
+        let (mut replaced, mut files, mut failed) = (0, 0, Vec::new());
+        for (path, line) in targets {
+            let open =
+                self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(path.as_path())).map(|t| t.editor.clone());
+            match open {
+                Some(editor) => {
+                    let count = editor.update(cx, |editor, cx| {
+                        let text = editor.buffer.to_string();
+                        let rope = editor.buffer.rope().clone();
+                        let edits: Vec<_> = crate::project_search::replacements(&text, query, replacement, *line)
+                            .into_iter()
+                            .map(|(r, new)| (rope.byte_to_char(r.start)..rope.byte_to_char(r.end), new))
+                            .collect();
+                        let count = edits.len();
+                        editor.apply_char_edits(edits, cx);
+                        count
+                    });
+                    // Before the search runs again, so it sees the new text.
+                    self.share_unsaved(&editor, cx);
+                    replaced += count;
+                    files += (count > 0) as usize;
+                }
+                None => {
+                    let Ok(text) = std::fs::read_to_string(path) else { continue };
+                    let edits = crate::project_search::replacements(&text, query, replacement, *line);
+                    if edits.is_empty() {
+                        continue;
+                    }
+                    let mut new = text.clone();
+                    for (range, with) in edits.iter().rev() {
+                        new.replace_range(range.clone(), with);
+                    }
+                    match std::fs::write(path, new) {
+                        Ok(()) => {
+                            replaced += edits.len();
+                            files += 1;
+                        }
+                        Err(_) => {
+                            failed.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+                        }
+                    }
+                }
+            }
+        }
+        let matches = if replaced == 1 { "1 match".to_string() } else { format!("{replaced} matches") };
+        let files = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
+        let mut message = format!("Replaced {matches} in {files}");
+        if !failed.is_empty() {
+            message.push_str(&format!(". Couldn't write {}", failed.join(", ")));
+        }
+        self.show_notice(message, cx);
+        self.project_search.update(cx, |search, cx| search.refresh(cx));
     }
 
     fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
@@ -2331,6 +2430,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_commands))
             .on_action(cx.listener(Self::toggle_ai))
             .on_action(cx.listener(Self::show_problems))
+            .on_action(cx.listener(Self::replace_in_project))
             .on_action(cx.listener(Self::go_to_symbol))
             .on_action(cx.listener(Self::go_to_symbol_in_project))
             .on_action(cx.listener(|_, _: &ToggleFormatOnSave, _, cx| {

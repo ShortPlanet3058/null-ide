@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-actions!(project_search, [NextResult, PreviousResult, OpenResult]);
+actions!(project_search, [NextResult, PreviousResult, OpenResult, ReplaceAllResults]);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("ProjectSearch");
@@ -25,8 +25,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", PreviousResult, ctx),
         KeyBinding::new("ctrl-p", PreviousResult, ctx),
         KeyBinding::new("enter", OpenResult, ctx),
+        KeyBinding::new("secondary-enter", ReplaceAllResults, ctx),
     ]);
 }
+
+/// Files with unsaved changes in a tab, by path: searching reads these instead of the
+/// disk, so results match what's on screen. Kept up to date by the workspace.
+#[derive(Default)]
+pub struct UnsavedFiles(pub std::collections::HashMap<PathBuf, ropey::Rope>);
+
+impl gpui::Global for UnsavedFiles {}
 
 /// Results arrive in batches this often while a search runs.
 const BATCH_EVERY: Duration = Duration::from_millis(80);
@@ -79,6 +87,8 @@ pub enum ProjectSearchEvent {
     /// `keep_focus`: opened from the keyboard, so the search keeps the focus to go on
     /// to the next result.
     Open { path: PathBuf, line: usize, columns: Range<usize>, query: SearchQuery, keep_focus: bool },
+    /// Replace the matches in these files (only on the given line, when there is one).
+    Replace { query: SearchQuery, replacement: String, targets: Vec<(PathBuf, Option<usize>)> },
 }
 
 /// Search across every file in the project. Lives in the sidebar.
@@ -98,7 +108,12 @@ pub struct ProjectSearch {
     /// The result row chosen from the keyboard.
     selected: Option<usize>,
     scroll: UniformListScrollHandle,
+    replace_input: Entity<TextInput>,
+    show_replace: bool,
+    /// The query compiled, for previewing replacements.
+    compiled: Option<regex::Regex>,
     _subscription: Subscription,
+    _replace_subscription: Subscription,
 }
 
 impl EventEmitter<ProjectSearchEvent> for ProjectSearch {}
@@ -107,6 +122,8 @@ impl ProjectSearch {
     pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextInput::new("Search in project", cx));
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.search(cx));
+        let replace_input = cx.new(|cx| TextInput::new("Replace with", cx));
+        let replace_subscription = cx.subscribe(&replace_input, |_, _, TextInputEvent::Changed, cx| cx.notify());
         Self {
             root,
             input,
@@ -121,8 +138,51 @@ impl ProjectSearch {
             cancel: Arc::default(),
             selected: None,
             scroll: UniformListScrollHandle::new(),
+            replace_input,
+            show_replace: false,
+            compiled: None,
             _subscription: subscription,
+            _replace_subscription: replace_subscription,
         }
+    }
+
+    /// Opens the replace field (⌘⇧H), focused when the search already has text.
+    pub fn show_replace(&mut self, text: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_replace = true;
+        let searching = text.is_some() || !self.input.read(cx).text().is_empty();
+        self.focus(text, window, cx);
+        if searching {
+            window.focus(&self.replace_input.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    /// Runs the search again (after a replace changed the files).
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.search(cx);
+    }
+
+    fn replacement(&self, cx: &App) -> String {
+        self.replace_input.read(cx).text().to_string()
+    }
+
+    /// ⌘↵ or the button: every match in every file found.
+    fn replace_all(&mut self, _: &ReplaceAllResults, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.show_replace || self.results.is_empty() {
+            return;
+        }
+        let targets = self.results.iter().map(|f| (f.path.clone(), None)).collect();
+        cx.emit(ProjectSearchEvent::Replace { query: self.query.clone(), replacement: self.replacement(cx), targets });
+    }
+
+    fn replace_line(&mut self, file: usize, line_match: usize, cx: &mut Context<Self>) {
+        let file = &self.results[file];
+        let line = file.matches[line_match].line;
+        cx.emit(ProjectSearchEvent::Replace {
+            query: self.query.clone(),
+            replacement: self.replacement(cx),
+            targets: vec![(file.path.clone(), Some(line))],
+        });
     }
 
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -147,6 +207,7 @@ impl ProjectSearch {
             regex: self.regex,
         };
         self.query = query.clone();
+        self.compiled = query.build().ok();
         self.selected = None;
         self.cancel.store(true, Ordering::Relaxed);
         if query.text.is_empty() {
@@ -162,6 +223,7 @@ impl ProjectSearch {
         self.status = Status::Searching;
         cx.notify();
         let root = self.root.clone();
+        let unsaved = cx.try_global::<UnsavedFiles>().map(|u| u.0.clone()).unwrap_or_default();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = cancel.clone();
         // Results show as they're found, file by file in order; the previous results stay
@@ -171,7 +233,7 @@ impl ProjectSearch {
             let (tx, mut rx) = futures::channel::mpsc::unbounded();
             cx.background_executor()
                 .spawn(async move {
-                    search_files(&root, &query, &cancel, |found| {
+                    search_files(&root, &query, &unsaved, &cancel, |found| {
                         tx.unbounded_send(found).ok();
                     })
                 })
@@ -309,9 +371,34 @@ impl ProjectSearch {
                     background_color: Some(theme.selection),
                     ..Default::default()
                 };
-                let text = StyledText::new(line_match.preview.clone())
-                    .with_highlights(line_match.highlights.iter().map(|r| (r.clone(), highlight)));
+                let text = if self.show_replace {
+                    // What replacing would do: the match struck through, the new text after it.
+                    let replacement = self.replacement(cx);
+                    let (shown, marks) = replace_preview(
+                        &line_match.preview,
+                        &line_match.highlights,
+                        &replacement,
+                        self.compiled.as_ref().filter(|_| self.query.regex),
+                    );
+                    let old = HighlightStyle {
+                        color: Some(theme.faint),
+                        strikethrough: Some(gpui::StrikethroughStyle { thickness: px(1.), color: Some(theme.faint) }),
+                        ..Default::default()
+                    };
+                    let new = HighlightStyle {
+                        color: Some(theme.foreground),
+                        background_color: Some(theme.accent_soft),
+                        ..Default::default()
+                    };
+                    StyledText::new(shown)
+                        .with_highlights(marks.into_iter().map(|(r, is_new)| (r, if is_new { new } else { old })))
+                } else {
+                    StyledText::new(line_match.preview.clone())
+                        .with_highlights(line_match.highlights.iter().map(|r| (r.clone(), highlight)))
+                };
+                let group: SharedString = format!("match-{ix}").into();
                 row.pl(px(10.))
+                    .group(group.clone())
                     .text_size(px(ui::T_SM))
                     .text_color(theme.muted)
                     .child(
@@ -330,6 +417,25 @@ impl ProjectSearch {
                             .font_family(cx.global::<Fonts>().code.clone())
                             .child(text),
                     )
+                    .when(self.show_replace, |row| {
+                        row.child(
+                            div()
+                                .id(("replace-line", ix))
+                                .flex_none()
+                                .px(px(6.))
+                                .rounded(px(ui::R_KEY))
+                                .text_size(px(ui::T_XS))
+                                .text_color(theme.muted)
+                                .invisible()
+                                .group_hover(group, |s| s.visible())
+                                .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
+                                .child("Replace")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.replace_line(f, m, cx)
+                                })),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, m, false, cx)))
                     .into_any_element()
             }
@@ -371,7 +477,13 @@ impl ProjectSearch {
 /// Returns whether the search stopped early at [`MAX_MATCHES`].
 /// Every match of `query` in the project's files, respecting `.gitignore`, reported to
 /// `report` in batches, files in order, then `Found::Done`. Stops quietly when `cancel` is set.
-fn search_files(root: &Path, query: &SearchQuery, cancel: &AtomicBool, mut report: impl FnMut(Found)) {
+fn search_files(
+    root: &Path,
+    query: &SearchQuery,
+    unsaved: &std::collections::HashMap<PathBuf, ropey::Rope>,
+    cancel: &AtomicBool,
+    mut report: impl FnMut(Found),
+) {
     let Ok(regex) = query.build() else { return };
     let mut files: Vec<PathBuf> = ignore::WalkBuilder::new(root)
         .hidden(false)
@@ -391,7 +503,13 @@ fn search_files(root: &Path, query: &SearchQuery, cancel: &AtomicBool, mut repor
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let text = match unsaved.get(&path) {
+            Some(rope) => rope.to_string(),
+            None => match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(_) => continue,
+            },
+        };
         if text.contains('\0') {
             continue;
         }
@@ -425,6 +543,81 @@ fn search_files(root: &Path, query: &SearchQuery, cancel: &AtomicBool, mut repor
         report(Found::Files(batch));
     }
     report(Found::Done { truncated: false });
+}
+
+/// A match's replacement: `$1`-style groups filled in for a regex search.
+pub fn expand(regex: Option<&regex::Regex>, matched: &str, replacement: &str) -> String {
+    match regex.and_then(|r| r.captures(matched)) {
+        Some(caps) => {
+            let mut out = String::new();
+            caps.expand(replacement, &mut out);
+            out
+        }
+        None => replacement.to_string(),
+    }
+}
+
+/// The replacements to make in `text`: byte ranges and their new text, first to last,
+/// only on line `only_line` (zero-based) when given.
+pub fn replacements(
+    text: &str,
+    query: &SearchQuery,
+    replacement: &str,
+    only_line: Option<usize>,
+) -> Vec<(Range<usize>, String)> {
+    let Ok(regex) = query.build() else { return Vec::new() };
+    let span = match only_line {
+        Some(line) => {
+            let start: usize = text.split_inclusive('\n').take(line).map(str::len).sum();
+            let len = text[start.min(text.len())..].split_inclusive('\n').next().map_or(0, str::len);
+            start..start + len
+        }
+        None => 0..text.len(),
+    };
+    regex
+        .captures_iter(text)
+        .filter_map(|caps| {
+            let m = caps.get(0)?;
+            if m.is_empty() || m.start() < span.start || m.end() > span.end {
+                return None;
+            }
+            let new = if query.regex {
+                let mut out = String::new();
+                caps.expand(replacement, &mut out);
+                out
+            } else {
+                replacement.to_string()
+            };
+            Some((m.range(), new))
+        })
+        .collect()
+}
+
+/// A preview line as a replace would leave it: each match kept (to be struck through)
+/// with its replacement after it. Returns the text and its marks (range, is the new text).
+fn replace_preview(
+    preview: &str,
+    matches: &[Range<usize>],
+    replacement: &str,
+    regex: Option<&regex::Regex>,
+) -> (SharedString, Vec<(Range<usize>, bool)>) {
+    let mut shown = String::new();
+    let mut marks = Vec::new();
+    let mut at = 0;
+    for m in matches {
+        shown.push_str(&preview[at..m.start]);
+        let old = &preview[m.clone()];
+        marks.push((shown.len()..shown.len() + old.len(), false));
+        shown.push_str(old);
+        let new = expand(regex, old, replacement);
+        if !new.is_empty() {
+            marks.push((shown.len()..shown.len() + new.len(), true));
+            shown.push_str(&new);
+        }
+        at = m.end;
+    }
+    shown.push_str(&preview[at..]);
+    (shown.into(), marks)
 }
 
 /// A trimmed, length-limited version of a line, with match ranges shifted to fit it.
@@ -479,6 +672,7 @@ impl Render for ProjectSearch {
             .on_action(cx.listener(Self::next_result))
             .on_action(cx.listener(Self::previous_result))
             .on_action(cx.listener(Self::open_result))
+            .on_action(cx.listener(Self::replace_all))
             .size_full()
             .flex()
             .flex_col()
@@ -496,11 +690,87 @@ impl Render for ProjectSearch {
                     .border_color(if invalid { theme.error } else { theme.hairline })
                     .text_size(px(ui::T_MD))
                     .line_height(px(20.))
+                    .child(
+                        div()
+                            .id("toggle-replace")
+                            .flex_none()
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(ui::R_KEY))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.hairline))
+                            .child(
+                                gpui::svg()
+                                    .path("icons/chevron-right.svg")
+                                    .size(px(11.))
+                                    .text_color(theme.muted)
+                                    .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                                        if self.show_replace { std::f32::consts::FRAC_PI_2 } else { 0. },
+                                    ))),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_replace = !this.show_replace;
+                                if this.show_replace {
+                                    window.focus(&this.replace_input.focus_handle(cx));
+                                }
+                                cx.notify();
+                            })),
+                    )
                     .child(div().flex_1().min_w_0().overflow_hidden().child(self.input.clone()))
                     .child(case)
                     .child(word)
                     .child(regex),
             )
+            .when(self.show_replace, |panel| {
+                let can_replace = !self.results.is_empty();
+                panel.child(
+                    div()
+                        .mx(px(12.))
+                        .mt(px(6.))
+                        .flex()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(ui::FIELD))
+                                .px(px(8.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(ui::R_ROW))
+                                .bg(theme.background)
+                                .border_1()
+                                .border_color(theme.hairline)
+                                .text_size(px(ui::T_MD))
+                                .line_height(px(20.))
+                                .overflow_hidden()
+                                .child(self.replace_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("replace-all")
+                                .flex_none()
+                                .h(px(ui::FIELD))
+                                .px(px(10.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(ui::R_ROW))
+                                .text_size(px(ui::T_SM))
+                                .when(can_replace, |b| {
+                                    b.cursor_pointer()
+                                        .text_color(theme.foreground)
+                                        .hover(|s| s.bg(theme.hairline))
+                                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                            this.replace_all(&ReplaceAllResults, window, cx)
+                                        }))
+                                })
+                                .when(!can_replace, |b| b.text_color(theme.faint))
+                                .child("Replace all"),
+                        ),
+                )
+            })
             .child(
                 div()
                     .px(px(16.))
@@ -524,6 +794,26 @@ impl Render for ProjectSearch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacements_fill_in_groups_and_can_keep_to_one_line() {
+        let text = "let a = old(1);\nlet b = old(2);\n";
+        let plain = SearchQuery { text: "old".into(), ..Default::default() };
+        assert_eq!(replacements(text, &plain, "new", None).len(), 2);
+        assert_eq!(replacements(text, &plain, "new", Some(1)), vec![(24..27, "new".into())]);
+        let regex = SearchQuery { text: r"old\((\d)\)".into(), regex: true, ..Default::default() };
+        let found = replacements(text, &regex, "new($1, 0)", None);
+        assert_eq!(found[1].1, "new(2, 0)");
+        // In a plain search, "$1" is just text.
+        assert_eq!(replacements(text, &plain, "$1", Some(0))[0].1, "$1");
+    }
+
+    #[test]
+    fn the_preview_shows_old_and_new_side_by_side() {
+        let (shown, marks) = replace_preview("a(old)", &[2..5], "new", None);
+        assert_eq!(shown.as_ref(), "a(oldnew)");
+        assert_eq!(marks, vec![(2..5, false), (5..8, true)]);
+    }
 
     #[gpui::test]
     fn arrows_step_through_matches_skipping_file_names(cx: &mut gpui::TestAppContext) {
@@ -565,7 +855,7 @@ mod tests {
         let query = SearchQuery { text: "alpha".into(), ..Default::default() };
         let mut results = Vec::new();
         let mut truncated = None;
-        search_files(&dir, &query, &AtomicBool::new(false), |found| match found {
+        search_files(&dir, &query, &Default::default(), &AtomicBool::new(false), |found| match found {
             Found::Files(files) => results.extend(files),
             Found::Done { truncated: t } => truncated = Some(t),
         });
@@ -582,7 +872,7 @@ mod tests {
 
         // A cancelled search reports nothing.
         let mut reported = false;
-        search_files(&dir, &query, &AtomicBool::new(true), |_| reported = true);
+        search_files(&dir, &query, &Default::default(), &AtomicBool::new(true), |_| reported = true);
         assert!(!reported);
 
         std::fs::remove_dir_all(&dir).unwrap();

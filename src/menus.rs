@@ -130,6 +130,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Find Previous", FindPrevious),
                 MenuItem::action("Replace…", DeployReplace),
                 MenuItem::action("Search in Project…", SearchProject),
+                MenuItem::action("Replace in Project…", crate::workspace::ReplaceInProject),
                 MenuItem::separator(),
                 MenuItem::action("Go to Definition", GoToDefinition),
                 MenuItem::action("Find References", crate::editor::FindReferences),
