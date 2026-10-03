@@ -134,6 +134,8 @@ pub fn set(cx: &mut App) {
             items: vec![
                 MenuItem::action("Quick Settings and Commands…", ShowCommands),
                 MenuItem::action("Go to File…", TogglePalette),
+                MenuItem::action("Go to Symbol…", crate::workspace::GoToSymbol),
+                MenuItem::action("Go to Symbol in Project…", crate::workspace::GoToSymbolInProject),
                 MenuItem::action("Go to Line…", GoToLine),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),

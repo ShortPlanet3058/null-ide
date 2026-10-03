@@ -384,6 +384,21 @@ impl Editor {
         self.goal_column = None;
         self.touch(cx);
     }
+
+    /// Like [`Self::select_lsp_range`], for a list floating over the top of the editor:
+    /// the line glides to two thirds down the view, clear of the list.
+    pub fn preview_lsp_range(&mut self, range: lsp_types::Range, cx: &mut Context<Self>) {
+        self.select_lsp_range(range, cx);
+        let Some(layout) = &self.layout else { return };
+        let lh = f32::from(layout.line_height);
+        let view = f32::from(layout.text_bounds.size.height);
+        let line = self.buffer.point(self.selection.head).0;
+        self.wrap.update(&self.buffer, self.wrap.width(), &self.block_specs());
+        let row = self.wrap.first_row(line) as f32;
+        self.scroll.target_y = (row * lh - view * 2. / 3.).max(0.);
+        self.autoscroll = false;
+        cx.notify();
+    }
 }
 
 /// Splits a hover's markdown into code blocks and plain paragraphs.

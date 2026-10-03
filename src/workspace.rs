@@ -51,6 +51,8 @@ actions!(
         ToggleAutocomplete,
         ToggleTerminal,
         GoToLine,
+        GoToSymbol,
+        GoToSymbolInProject,
         NewUntitled,
         SaveAs,
         SaveAll,
@@ -85,6 +87,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("ctrl-g", GoToLine, ctx),
         KeyBinding::new("secondary-shift-m", ShowProblems, ctx),
+        KeyBinding::new("secondary-shift-o", GoToSymbol, ctx),
+        KeyBinding::new("secondary-t", GoToSymbolInProject, ctx),
         KeyBinding::new("alt-z", ToggleWordWrap, ctx),
         KeyBinding::new("secondary-n", NewUntitled, ctx),
         KeyBinding::new("secondary-shift-s", SaveAs, ctx),
@@ -204,6 +208,9 @@ pub struct Workspace {
     /// The window's place on screen, for the session.
     window_state: Option<crate::session::WindowState>,
     reindex_task: Option<Task<()>>,
+    /// The editor and its view (caret line, column, top line) before a symbol list
+    /// started showing places in it.
+    view_before_preview: Option<(Entity<Editor>, (usize, usize, usize))>,
     /// Changed source files waiting to be read again.
     reindex_pending: HashSet<PathBuf>,
     /// What the project's .gitignore leaves out of the index.
@@ -309,6 +316,7 @@ impl Workspace {
             window_state: None,
             reindex_task: None,
             reindex_pending: HashSet::new(),
+            view_before_preview: None,
             ignore_rules,
             key_prompt: None,
             notice: None,
@@ -403,10 +411,12 @@ impl Workspace {
     fn build_index(&mut self, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
         cx.set_global(crate::project_index::ProjectContext { root: root.clone(), ..Default::default() });
-        self.index_task = Some(cx.spawn(async move |_, cx| {
+        self.index_task = Some(cx.spawn(async move |this, cx| {
             let definitions = cx.background_executor().spawn(async move { crate::project_index::index(&root) }).await;
-            cx.update(|cx| {
-                cx.global_mut::<crate::project_index::ProjectContext>().definitions = std::sync::Arc::new(definitions)
+            this.update(cx, |this, cx| {
+                cx.global_mut::<crate::project_index::ProjectContext>().definitions = std::sync::Arc::new(definitions);
+                // Done: "still reading" no longer applies.
+                this.index_task = None;
             })
             .ok();
         }));
@@ -1024,6 +1034,7 @@ impl Workspace {
             (File, "Open File or Folder…".into(), Box::new(Open)),
             (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
             (Go, "Go to File…".into(), Box::new(TogglePalette)),
+            (Go, "Go to Symbol in Project…".into(), Box::new(GoToSymbolInProject)),
             (Go, "Search in Project…".into(), Box::new(SearchProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
             (View, toggle(settings.word_wrap, "Stop Wrapping Lines", "Wrap Lines"), Box::new(ToggleWordWrap)),
@@ -1074,6 +1085,7 @@ impl Workspace {
                 (Cursors, "Add Cursor Above".into(), Box::new(crate::editor::AddCursorAbove)),
                 (Cursors, "Add Cursor Below".into(), Box::new(crate::editor::AddCursorBelow)),
                 (Go, "Go to Line…".into(), Box::new(GoToLine)),
+                (Go, "Go to Symbol…".into(), Box::new(GoToSymbol)),
                 (Go, "Go to Definition".into(), Box::new(GoToDefinition)),
                 (Go, "Find References".into(), Box::new(crate::editor::FindReferences)),
                 (Go, "Show Problems".into(), Box::new(ShowProblems)),
@@ -1182,11 +1194,22 @@ impl Workspace {
             }
             PaletteEvent::OpenLocation(path, position) => {
                 let (path, position) = (path.clone(), *position);
+                // Going there: no going back to the view before the preview.
+                this.view_before_preview = None;
                 this.close_palette(window, cx);
                 this.open_file(path, window, cx);
                 if let Some(editor) = this.active_editor() {
                     let range = lsp_types::Range { start: position, end: position };
                     editor.update(cx, |editor, cx| editor.select_lsp_range(range, cx));
+                }
+            }
+            PaletteEvent::Preview(path, position) => {
+                if let Some(editor) = this
+                    .active_editor()
+                    .filter(|e| e.read(cx).path() == Some(path.as_path()) || e.read(cx).path().is_none())
+                {
+                    let range = lsp_types::Range { start: *position, end: *position };
+                    editor.update(cx, |editor, cx| editor.preview_lsp_range(range, cx));
                 }
             }
             PaletteEvent::GoToLine(line) => {
@@ -1261,6 +1284,10 @@ impl Workspace {
     /// Closes whichever floating layer is open (the palette or the Settings window)
     /// and puts focus back where it was.
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Leaving a symbol list without choosing: the view goes back to where it was.
+        if let Some((editor, (line, column, top))) = self.view_before_preview.take() {
+            editor.update(cx, |editor, cx| editor.restore_view(line, column, top, cx));
+        }
         self.palette = None;
         self.settings_panel = None;
         let fallback = self.active_editor().map(|e| e.focus_handle(cx)).unwrap_or(self.focus_handle.clone());
@@ -1675,6 +1702,80 @@ impl Workspace {
     }
 
     /// Every error and warning the language servers found, errors first.
+    /// The functions, types and constants of a list of definitions, as places to go.
+    fn symbol_locations(
+        &self,
+        definitions: &[crate::project_index::Definition],
+        cx: &App,
+    ) -> Vec<crate::palette::Location> {
+        definitions
+            .iter()
+            .map(|d| {
+                // The caret lands on the name itself, in the columns servers count.
+                let line = self.line_text(&d.path, d.row, cx);
+                let column = line.find(&d.name).map_or(0, |b| line[..b].encode_utf16().count());
+                crate::palette::Location {
+                    path: d.path.clone(),
+                    position: lsp_types::Position { line: d.row as u32, character: column as u32 },
+                    text: d.name.clone(),
+                    kind: crate::palette::LocationKind::Symbol(d.kind),
+                }
+            })
+            .collect()
+    }
+
+    /// ⌘⇧O: the definitions in the open file, unsaved edits included. Moving through
+    /// them shows each in the editor; Esc goes back to where you were.
+    fn go_to_symbol(&mut self, _: &GoToSymbol, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else {
+            return self.show_notice("Open a file to go to one of its functions or types".into(), cx);
+        };
+        let (path, text, name) = {
+            let e = editor.read(cx);
+            (e.path().map(Path::to_path_buf), e.buffer.to_string(), e.file_name())
+        };
+        let path = path.unwrap_or_else(|| PathBuf::from(&name));
+        let definitions = crate::project_index::definitions_in(&path, &text);
+        if definitions.is_empty() {
+            return self.show_notice(format!("No functions or types found in {name}"), cx);
+        }
+        // Read from the editor (not the disk) for the columns, since it may be unsaved.
+        let locations: Vec<_> = definitions
+            .iter()
+            .map(|d| {
+                let line = editor.read(cx).buffer.line_text(d.row);
+                let column = line.find(&d.name).map_or(0, |b| line[..b].encode_utf16().count());
+                crate::palette::Location {
+                    path: path.clone(),
+                    position: lsp_types::Position { line: d.row as u32, character: column as u32 },
+                    text: d.name.clone(),
+                    kind: crate::palette::LocationKind::Symbol(d.kind),
+                }
+            })
+            .collect();
+        let view = editor.read(cx).view_state();
+        self.open_locations(format!("Go to a symbol in {name}"), locations, window, cx);
+        self.view_before_preview = Some((editor, view));
+    }
+
+    /// ⌘T: every definition in the project, by name.
+    fn go_to_symbol_in_project(&mut self, _: &GoToSymbolInProject, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(definitions) = cx.try_global::<crate::project_index::ProjectContext>().map(|c| c.definitions.clone())
+        else {
+            return;
+        };
+        if definitions.is_empty() {
+            let message = if self.index_task.is_some() {
+                "Still reading the project…"
+            } else {
+                "No functions or types found in this project"
+            };
+            return self.show_notice(message.into(), cx);
+        }
+        let locations = self.symbol_locations(&definitions, cx);
+        self.open_locations("Go to a symbol in the project".into(), locations, window, cx);
+    }
+
     fn show_problems(&mut self, _: &ShowProblems, window: &mut Window, cx: &mut Context<Self>) {
         use crate::palette::{Location, LocationKind};
         use lsp_types::DiagnosticSeverity as S;
@@ -2176,6 +2277,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_commands))
             .on_action(cx.listener(Self::toggle_ai))
             .on_action(cx.listener(Self::show_problems))
+            .on_action(cx.listener(Self::go_to_symbol))
+            .on_action(cx.listener(Self::go_to_symbol_in_project))
             .on_action(cx.listener(|_, _: &ToggleFormatOnSave, _, cx| {
                 settings::update(cx, |s| s.format_on_save = !s.format_on_save)
             }))

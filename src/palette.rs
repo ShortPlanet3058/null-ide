@@ -65,6 +65,8 @@ pub enum LocationKind {
     Reference,
     Error,
     Warning,
+    /// A definition, with the word that defines it (`fn`, `class`...).
+    Symbol(&'static str),
 }
 
 /// A place in the code, with the text to show for it.
@@ -294,6 +296,8 @@ pub enum PaletteEvent {
     Apply(Box<dyn Action>),
     GoToLine(usize),
     OpenLocation(PathBuf, lsp_types::Position),
+    /// The keyboard is on a place in the open file: show it, without going there yet.
+    Preview(PathBuf, lsp_types::Position),
 }
 
 pub struct Palette {
@@ -308,6 +312,8 @@ pub struct Palette {
     terminal_open: bool,
     title: Option<String>,
     locations: Vec<Location>,
+    /// Symbols of the open file: their line is enough, and moving through them shows each.
+    in_file: bool,
     root: PathBuf,
     rows: Vec<Row>,
     selected: usize,
@@ -358,6 +364,8 @@ impl Palette {
             line_count: options.line_count,
             terminal_open: options.terminal_open,
             title: options.title,
+            in_file: matches!(options.locations.first(), Some(l) if matches!(l.kind, LocationKind::Symbol(_)))
+                && options.locations.iter().all(|l| Some(&l.path) == options.locations.first().map(|f| &f.path)),
             locations: options.locations,
             root: options.root.clone(),
             rows: Vec::new(),
@@ -394,7 +402,16 @@ impl Palette {
         }
         self.selected = 0;
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        self.preview(cx);
         cx.notify();
+    }
+
+    /// Shows the chosen symbol of the open file in the editor behind.
+    fn preview(&self, cx: &mut Context<Self>) {
+        if let (true, Some(Row { item: Item::Location(i), .. })) = (self.in_file, self.rows.get(self.selected)) {
+            let location = &self.locations[*i];
+            cx.emit(PaletteEvent::Preview(location.path.clone(), location.position));
+        }
     }
 
     fn push(&mut self, item: Item, highlights: Vec<usize>, show_category: bool) {
@@ -403,6 +420,9 @@ impl Palette {
 
     /// Places matching what's typed, by their text or their file.
     fn location_rows(&mut self, query: &str) {
+        if matches!(self.locations.first(), Some(l) if matches!(l.kind, LocationKind::Symbol(_))) {
+            return self.symbol_rows(query);
+        }
         for i in 0..self.locations.len() {
             let location = &self.locations[i];
             let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
@@ -411,6 +431,30 @@ impl Palette {
                 let highlights = fuzzy::score(&location.text, query).map(|(_, h)| h).unwrap_or_default();
                 self.push(Item::Location(i), highlights, false);
             }
+        }
+    }
+
+    /// Symbols by name: in file order before typing, best match first after.
+    fn symbol_rows(&mut self, query: &str) {
+        const SHOWN: usize = 300;
+        if query.is_empty() {
+            // A whole project's worth is too many to scroll: it starts with what's typed.
+            if self.in_file {
+                for i in 0..self.locations.len().min(SHOWN) {
+                    self.push(Item::Location(i), Vec::new(), false);
+                }
+            }
+            return;
+        }
+        let mut found: Vec<(i32, usize, Vec<usize>)> = self
+            .locations
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| fuzzy::score(&l.text, query).map(|(score, h)| (score, i, h)))
+            .collect();
+        found.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
+        for (_, i, highlights) in found.into_iter().take(SHOWN) {
+            self.push(Item::Location(i), highlights, false);
         }
     }
 
@@ -505,6 +549,7 @@ impl Palette {
         if ix < self.rows.len() && ix != self.selected {
             self.selected = ix;
             self.scroll.scroll_to_item(ix);
+            self.preview(cx);
             cx.notify();
         }
     }
@@ -690,27 +735,58 @@ impl Palette {
                 let color = match location.kind {
                     LocationKind::Error => theme.error,
                     LocationKind::Warning => theme.warning,
-                    LocationKind::Reference => accent,
+                    LocationKind::Reference | LocationKind::Symbol(_) => accent,
                 };
-                let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
-                let marked = highlights_in(&location.text, 0);
-                let text = StyledText::new(location.text.clone()).with_highlights(marked);
-                // Code shows in the code font; a problem's message in the interface one.
-                let label = if location.kind == LocationKind::Reference {
-                    div().font_family(cx.global::<crate::fonts::Fonts>().code.clone()).text_size(px(13.)).child(text)
-                } else {
-                    div().child(text)
-                };
-                (
-                    div().size(px(5.)).rounded_full().bg(color).into_any_element(),
-                    label.into_any_element(),
-                    Some(
+                if let LocationKind::Symbol(kind) = location.kind {
+                    // The name in the code font, the word that defines it beside it, faint.
+                    let text = StyledText::new(location.text.clone()).with_highlights(highlights_in(&location.text, 0));
+                    let place = if self.in_file {
+                        format!("{}", location.position.line + 1)
+                    } else {
+                        let file =
+                            location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+                        format!("{file}:{}", location.position.line + 1)
+                    };
+                    (
+                        div().size(px(5.)).rounded_full().bg(color).into_any_element(),
                         div()
-                            .text_color(dim)
-                            .child(format!("{file}:{}", location.position.line + 1))
+                            .flex()
+                            .items_baseline()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .font_family(cx.global::<crate::fonts::Fonts>().code.clone())
+                                    .text_size(px(ui::T_MD))
+                                    .child(text),
+                            )
+                            .child(div().text_size(px(ui::T_SM)).text_color(dim).child(kind))
                             .into_any_element(),
-                    ),
-                )
+                        Some(div().text_color(dim).child(place).into_any_element()),
+                    )
+                } else {
+                    let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+                    let marked = highlights_in(&location.text, 0);
+                    let text = StyledText::new(location.text.clone()).with_highlights(marked);
+                    // Code shows in the code font; a problem's message in the interface one.
+                    let label = if location.kind == LocationKind::Reference {
+                        div()
+                            .font_family(cx.global::<crate::fonts::Fonts>().code.clone())
+                            .text_size(px(13.))
+                            .child(text)
+                    } else {
+                        div().child(text)
+                    };
+                    (
+                        div().size(px(5.)).rounded_full().bg(color).into_any_element(),
+                        label.into_any_element(),
+                        Some(
+                            div()
+                                .text_color(dim)
+                                .child(format!("{file}:{}", location.position.line + 1))
+                                .into_any_element(),
+                        ),
+                    )
+                }
             }
         };
         let separated = row.item == Item::Quick(Quick::AllSettings);
@@ -882,6 +958,9 @@ impl Render for Palette {
                     PaletteKind::Files => format!("No file named “{}”", self.query),
                     PaletteKind::Locations if self.locations.is_empty() => {
                         format!("Nothing in {}", self.title.as_deref().unwrap_or("this list").to_lowercase())
+                    }
+                    PaletteKind::Locations if self.query.is_empty() => {
+                        format!("Type a name: {} functions, types and constants", self.locations.len())
                     }
                     _ => format!("Nothing called “{}”", self.query),
                 };
