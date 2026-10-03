@@ -3,6 +3,7 @@ mod assets;
 mod buffer;
 mod editor;
 mod element;
+mod file_style;
 mod file_tree;
 mod find_bar;
 mod fonts;

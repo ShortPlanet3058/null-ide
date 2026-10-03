@@ -1,7 +1,7 @@
 //! Line-level editing commands: comments, indentation, moving and duplicating lines,
 //! and the brackets and quotes that close themselves.
 
-use super::{EditKind, Editor, EditorEvent, Selection, TAB_SIZE};
+use super::{EditKind, Editor, EditorEvent, Selection};
 use gpui::Context;
 use std::ops::Range;
 
@@ -83,19 +83,15 @@ impl Editor {
     pub(super) fn indent_lines(&mut self, cx: &mut Context<Self>) {
         let lines = self.selected_lines();
         let indented = lines.clone();
-        let unit = " ".repeat(TAB_SIZE);
+        let unit = self.style.indent.unit();
+        let added = unit.chars().count();
         let new_lines = self
             .line_texts(&lines)
             .into_iter()
             .map(|t| if t.trim().is_empty() { t } else { format!("{unit}{t}") })
             .collect();
         // A selection ending at the start of the next line keeps that end where it is.
-        self.rewrite_lines(
-            lines,
-            new_lines,
-            move |(l, c)| (l, if indented.contains(&l) { c + TAB_SIZE } else { c }),
-            cx,
-        );
+        self.rewrite_lines(lines, new_lines, move |(l, c)| (l, if indented.contains(&l) { c + added } else { c }), cx);
     }
 
     pub(super) fn outdent_lines(&mut self, cx: &mut Context<Self>) {
@@ -103,7 +99,13 @@ impl Editor {
         let texts = self.line_texts(&lines);
         let removed: Vec<usize> = texts
             .iter()
-            .map(|t| t.chars().take(TAB_SIZE).take_while(|c| *c == ' ').count().max(t.starts_with('\t') as usize))
+            .map(|t| {
+                if t.starts_with('\t') {
+                    1
+                } else {
+                    t.chars().take(self.style.indent.width()).take_while(|c| *c == ' ').count()
+                }
+            })
             .collect();
         if removed.iter().all(|&r| r == 0) {
             return;
@@ -400,6 +402,43 @@ mod editor_tests {
 
     fn select(cx: &mut TestAppContext, e: &gpui::Entity<Editor>, anchor: usize, head: usize) {
         e.update(cx, |e, _| e.selection = Selection { anchor, head });
+    }
+
+    #[gpui::test]
+    fn editing_keeps_to_the_file_s_own_style(cx: &mut TestAppContext) {
+        // A Go file indents with tabs; a 2-space file with 2 spaces.
+        let e = editor(cx, "func f() {\n}\n", "main.go");
+        select(cx, &e, 10, 10);
+        e.update(cx, |e, cx| e.tab_key(cx));
+        assert_eq!(text(cx, &e), "func f() {\t\n}\n");
+        let e = editor(cx, "a {\n  b {\n    c\n  }\n}\n", "x.js");
+        select(cx, &e, 0, 0);
+        e.update(cx, |e, cx| e.tab_key(cx));
+        assert_eq!(text(cx, &e), "  a {\n  b {\n    c\n  }\n}\n");
+        // A Windows file gets Windows line breaks.
+        let e = editor(cx, "one\r\ntwo\r\n", "x.txt");
+        select(cx, &e, 3, 3);
+        e.update(cx, |e, cx| {
+            let at = e.selection.head;
+            let nl = e.style.line_ending.text();
+            e.edit(at..at, nl, super::super::EditKind::Other, cx);
+        });
+        assert_eq!(text(cx, &e), "one\r\n\r\ntwo\r\n");
+    }
+
+    #[gpui::test]
+    fn saving_tidies_as_the_file_asks(cx: &mut TestAppContext) {
+        let e = editor(cx, "a  \r\nb\nc", "x.txt");
+        e.update(cx, |e, cx| {
+            e.style.trim_trailing = true;
+            e.style.final_newline = Some(true);
+            e.style.line_ending = crate::file_style::LineEnding::Crlf;
+            e.tidy_for_save(cx);
+        });
+        assert_eq!(text(cx, &e), "a\r\nb\r\nc\r\n");
+        // One undo step takes it all back.
+        e.update(cx, |e, cx| e.step_history(true, cx));
+        assert_eq!(text(cx, &e), "a  \r\nb\nc");
     }
 
     #[gpui::test]

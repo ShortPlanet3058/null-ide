@@ -1,7 +1,7 @@
 //! Changes the language server works out: renaming a symbol everywhere, formatting
 //! the file, finding where something is used.
 
-use super::{EditKind, Editor, EditorEvent, Selection, TAB_SIZE};
+use super::{EditKind, Editor, EditorEvent, Selection};
 use crate::buffer::Buffer;
 use crate::settings::Settings;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -182,7 +182,11 @@ impl Editor {
             return;
         };
         let version = self.buffer.version();
-        let request = lsp.read(cx).format(&path, TAB_SIZE as u32);
+        let request = lsp.read(cx).format(
+            &path,
+            self.style.indent.width() as u32,
+            self.style.indent != crate::file_style::Indent::Tabs,
+        );
         self.format_task = Some(cx.spawn(async move |this, cx| {
             let timeout = cx.background_executor().timer(FORMAT_TIMEOUT);
             let edits = futures::select_biased! {

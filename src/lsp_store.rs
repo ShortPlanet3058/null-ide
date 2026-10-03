@@ -579,13 +579,18 @@ impl LspStore {
     }
 
     /// The edits that format the whole file.
-    pub fn format(&self, path: &Path, tab_size: u32) -> impl Future<Output = Vec<lsp_types::TextEdit>> + use<> {
+    pub fn format(
+        &self,
+        path: &Path,
+        tab_size: u32,
+        insert_spaces: bool,
+    ) -> impl Future<Output = Vec<lsp_types::TextEdit>> + use<> {
         let request = self.server_for(path).zip(uri_for(path)).map(|(server, uri)| {
             server.request::<Formatting>(lsp_types::DocumentFormattingParams {
                 text_document: TextDocumentIdentifier { uri },
                 options: lsp_types::FormattingOptions {
                     tab_size,
-                    insert_spaces: true,
+                    insert_spaces,
                     trim_trailing_whitespace: Some(true),
                     insert_final_newline: Some(true),
                     trim_final_newlines: Some(true),
