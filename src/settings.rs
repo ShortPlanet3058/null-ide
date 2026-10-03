@@ -24,6 +24,12 @@ pub struct Settings {
     pub fade_bars_while_typing: bool,
     /// Wrap long lines to the width of the editor instead of scrolling sideways.
     pub word_wrap: bool,
+    /// Indentation for files that don't show their own (and have no .editorconfig):
+    /// this many spaces, or tabs when `indent_with_tabs`.
+    pub indent_size: usize,
+    pub indent_with_tabs: bool,
+    /// Let the code font join characters like -> or != into one symbol.
+    pub ligatures: bool,
     /// Format the file with its language server when saving with ⌘S.
     pub format_on_save: bool,
     /// Whose shortcuts to use: Null's own, or another editor's.
@@ -46,6 +52,9 @@ impl Default for Settings {
             sidebar_visible: true,
             fade_bars_while_typing: false,
             word_wrap: false,
+            indent_size: 4,
+            indent_with_tabs: false,
+            ligatures: true,
             format_on_save: false,
             keymap: Default::default(),
             welcomed: false,
@@ -58,6 +67,15 @@ impl Default for Settings {
 impl Global for Settings {}
 
 impl Settings {
+    /// The indentation new files get, and files that don't show their own.
+    pub fn default_indent(&self) -> crate::file_style::Indent {
+        if self.indent_with_tabs {
+            crate::file_style::Indent::Tabs
+        } else {
+            crate::file_style::Indent::Spaces(self.indent_size.clamp(1, 16))
+        }
+    }
+
     /// `~/.config/null/settings.json` on macOS and Linux (or `$XDG_CONFIG_HOME/null`),
     /// `%APPDATA%\Null\settings.json` on Windows.
     pub fn path() -> Option<PathBuf> {

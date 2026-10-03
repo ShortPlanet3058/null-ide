@@ -380,6 +380,11 @@ impl Palette {
         palette
     }
 
+    /// Types `query` into the field, as if the person had.
+    pub fn set_query(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(query, cx));
+    }
+
     pub fn kind(&self) -> PaletteKind {
         self.kind
     }

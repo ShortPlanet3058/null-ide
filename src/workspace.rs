@@ -1080,6 +1080,11 @@ impl Workspace {
                 (Lines, "Duplicate Line".into(), Box::new(crate::editor::DuplicateLineDown)),
                 (Lines, "Delete Line".into(), Box::new(crate::editor::DeleteLine)),
                 (Lines, "Select Line".into(), Box::new(crate::editor::SelectLine)),
+                (Lines, "Indent with Tabs".into(), Box::new(crate::editor::IndentWithTabs)),
+                (Lines, "Indent with 2 Spaces".into(), Box::new(crate::editor::IndentWith2Spaces)),
+                (Lines, "Indent with 4 Spaces".into(), Box::new(crate::editor::IndentWith4Spaces)),
+                (Lines, "Use LF Line Endings (macOS, Linux)".into(), Box::new(crate::editor::UseLfLineEndings)),
+                (Lines, "Use CRLF Line Endings (Windows)".into(), Box::new(crate::editor::UseCrlfLineEndings)),
                 (Lines, "Fold".into(), Box::new(crate::editor::Fold)),
                 (Lines, "Unfold".into(), Box::new(crate::editor::Unfold)),
                 (Lines, "Fold All".into(), Box::new(crate::editor::FoldAll)),
@@ -1257,6 +1262,17 @@ impl Workspace {
 
     fn show_commands(&mut self, _: &ShowCommands, window: &mut Window, cx: &mut Context<Self>) {
         self.open_palette(PaletteKind::Quick, window, cx);
+    }
+
+    /// ⌘K with something already typed: the status bar's indentation opens on "indent".
+    fn show_commands_for(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+        }
+        self.open_palette(PaletteKind::Quick, window, cx);
+        if let Some((palette, _)) = &self.palette {
+            palette.update(cx, |palette, cx| palette.set_query(query, cx));
+        }
     }
 
     fn ask_ai(&mut self, _: &AskAi, window: &mut Window, cx: &mut Context<Self>) {
@@ -2172,6 +2188,15 @@ impl Render for Workspace {
             self.key_prompt.as_ref().map(|(prompt, _)| prompt.clone().into_any_element())
         };
         let ai_provider = cx.global::<Settings>().ai.active();
+        // How the file is written, when it's not the usual: its indentation, Windows line endings.
+        let default_indent = cx.global::<Settings>().default_indent();
+        let (indent_label, crlf) = match self.active_editor().map(|e| e.read(cx).style.clone()) {
+            Some(style) => (
+                (style.indent != default_indent).then(|| style.indent.label()),
+                style.line_ending == crate::file_style::LineEnding::Crlf,
+            ),
+            None => (None, false),
+        };
         let theme = cx.global::<Theme>();
 
         let titlebar = div()
@@ -2199,72 +2224,97 @@ impl Render for Workspace {
             .child(div().w(px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
 
         let mut items = status_items.into_iter();
-        let status = div()
-            .h(px(28.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(16.))
-            .px(px(16.))
-            .border_t_1()
-            .border_color(theme.hairline)
-            .bg(theme.surface)
-            .text_size(px(12.))
-            .text_color(theme.muted)
-            .opacity(opacity)
-            .children(self.branch.clone().map(|branch| {
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.))
-                    .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
-                    .child(branch)
-            }))
-            .child(div().flex_1().min_w_0().truncate().children(items.next()))
-            .children(lsp_status)
-            .when(ai_provider != ProviderId::Off, |bar| {
-                bar.child(
+        let status =
+            div()
+                .h(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .px(px(16.))
+                .border_t_1()
+                .border_color(theme.hairline)
+                .bg(theme.surface)
+                .text_size(px(12.))
+                .text_color(theme.muted)
+                .opacity(opacity)
+                .children(self.branch.clone().map(|branch| {
                     div()
-                        .id("ai-status")
                         .flex()
                         .flex_none()
                         .items_center()
-                        .gap(px(6.))
-                        .whitespace_nowrap()
-                        .cursor_pointer()
-                        .text_color(theme.muted)
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
-                        .child(format!("AI · {}", ai_provider.label()))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.open_settings_at(Some(Section::Ai), window, cx)
-                        })),
-                )
-            })
-            .when(problems != (0, 0), |bar| {
-                let (errors, warnings) = problems;
-                let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
-                bar.child(
+                        .gap(px(5.))
+                        .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
+                        .child(branch)
+                }))
+                .child(div().flex_1().min_w_0().truncate().children(items.next()))
+                .children(lsp_status)
+                .children(indent_label.map(|label| {
                     div()
-                        .id("problems")
-                        .flex()
+                        .id("status-indent")
                         .flex_none()
                         .whitespace_nowrap()
-                        .gap(px(10.))
                         .cursor_pointer()
-                        .on_click(
-                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child(label)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_commands_for("indent with", window, cx)
+                        }))
+                }))
+                .when(crlf, |bar| {
+                    bar.child(
+                        div()
+                            .id("status-crlf")
+                            .flex_none()
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child("CRLF")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_commands_for("line endings", window, cx)
+                            })),
+                    )
+                })
+                .when(ai_provider != ProviderId::Off, |bar| {
+                    bar.child(
+                        div()
+                            .id("ai-status")
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(6.))
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .text_color(theme.muted)
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
+                            .child(format!("AI · {}", ai_provider.label()))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_settings_at(Some(Section::Ai), window, cx)
+                            })),
+                    )
+                })
+                .when(problems != (0, 0), |bar| {
+                    let (errors, warnings) = problems;
+                    let plural =
+                        |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+                    bar.child(
+                        div()
+                            .id("problems")
+                            .flex()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .gap(px(10.))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.show_problems(&ShowProblems, window, cx)
+                            }))
+                            .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
+                            .when(warnings > 0, |d| {
+                                d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
                             }),
-                        )
-                        .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
-                        .when(warnings > 0, |d| {
-                            d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
-                        }),
-                )
-            })
-            .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
+                    )
+                })
+                .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
 
         div()
             .key_context("Workspace")

@@ -19,6 +19,7 @@ pub use refactor::{FindReferences, FormatDocument, RenameSymbol, apply_edits};
 
 use crate::buffer::Buffer;
 use crate::element::{EditorElement, RowLayout};
+use crate::file_style::Indent as IndentStyle;
 use crate::find_bar::{CloseFind, DeployFind, DeployReplace, FindBar, FindNext, FindPrevious};
 use crate::fonts::Fonts;
 use crate::highlight::{Highlighter, Span};
@@ -39,6 +40,8 @@ use ropey::Rope;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+actions!(file_style, [IndentWithTabs, IndentWith2Spaces, IndentWith4Spaces, UseLfLineEndings, UseCrlfLineEndings]);
 
 actions!(
     editor,
@@ -336,6 +339,8 @@ pub struct Editor {
     pub buffer: Buffer,
     path: Option<PathBuf>,
     highlighter: Option<Highlighter>,
+    /// How this file is written: its indentation and line endings, kept when editing.
+    pub style: crate::file_style::FileStyle,
     /// Colours for the lines around the view (see [`Self::highlight_lines`]).
     pub spans: Vec<Span>,
     /// The longest line's width in columns, for the buffer revision it was measured at.
@@ -424,11 +429,17 @@ pub struct Editor {
 impl Editor {
     pub fn new(buffer: Buffer, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let highlighter = path.as_deref().and_then(languages::for_path).and_then(Highlighter::new);
+        let style = crate::file_style::FileStyle::for_file(
+            path.as_deref(),
+            &buffer.slice(0..buffer.len_chars().min(200_000)),
+            cx.global::<Settings>().default_indent(),
+        );
         let mut editor = Self {
             focus_handle: cx.focus_handle(),
             buffer,
             path,
             highlighter,
+            style,
             spans: Vec::new(),
             spans_for: None,
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
@@ -540,6 +551,12 @@ impl Editor {
         self.highlighter = languages::for_path(&path).and_then(Highlighter::new);
         self.spans.clear();
         self.spans_for = None;
+        // A new name can bring other rules (.editorconfig sections, Go's tabs).
+        self.style = crate::file_style::FileStyle::for_file(
+            Some(&path),
+            &self.buffer.slice(0..self.buffer.len_chars().min(200_000)),
+            cx.global::<Settings>().default_indent(),
+        );
         self.path = Some(path);
         self.rehighlight();
         if let Some(lsp) = lsp {
@@ -1239,8 +1256,9 @@ impl Editor {
                     let head = this.selection.head;
                     let (line, col) = this.buffer.point(head);
                     let before = this.buffer.line_text(line).chars().take(col).collect::<String>();
-                    if col > 0 && before.chars().all(|c| c == ' ') {
-                        let stop = (col - 1) / TAB_SIZE * TAB_SIZE;
+                    let width = this.style.indent.width();
+                    if col > 0 && before.chars().all(|c| c == ' ') && this.style.indent != IndentStyle::Tabs {
+                        let stop = (col - 1) / width * width;
                         return head - (col - stop)..head;
                     }
                     this.left_of(head)..head
@@ -1296,16 +1314,18 @@ impl Editor {
             // Python blocks open with a colon.
             let python_block = before == Some(':') && this.language_name() == "Python";
             let opens = matches!(before, Some('{' | '(' | '[')) || python_block;
-            let inner = format!("{indent}{}", if opens { " ".repeat(TAB_SIZE) } else { String::new() });
+            let inner = format!("{indent}{}", if opens { this.style.indent.unit() } else { String::new() });
+            // The file's own line break: "\r\n" in a Windows file.
+            let nl = this.style.line_ending.text();
             if opens
                 && matches!((before, after), (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']')))
             {
-                let text = format!("\n{inner}\n{indent}");
-                let caret = range.start + 1 + inner.chars().count();
+                let text = format!("{nl}{inner}{nl}{indent}");
+                let caret = range.start + nl.chars().count() + inner.chars().count();
                 this.edit(range, &text, EditKind::Other, cx);
                 this.selection = Selection::caret(caret);
             } else {
-                this.edit(range, &format!("\n{inner}"), EditKind::Other, cx);
+                this.edit(range, &format!("{nl}{inner}"), EditKind::Other, cx);
             }
         });
         // A new line is a good moment for a suggestion (the body after `def f():`...).
@@ -1330,9 +1350,12 @@ impl Editor {
             return self.indent_lines(cx);
         }
         let range = self.selection.range();
-        let (_, col) = self.buffer.point(range.start);
-        let spaces = TAB_SIZE - col % TAB_SIZE;
-        self.edit(range, &" ".repeat(spaces), EditKind::Typing, cx);
+        let text = match self.style.indent {
+            IndentStyle::Tabs => "\t".to_string(),
+            // Spaces up to the next indentation stop.
+            IndentStyle::Spaces(n) => " ".repeat(n - self.buffer.point(range.start).1 % n),
+        };
+        self.edit(range, &text, EditKind::Typing, cx);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -1360,7 +1383,13 @@ impl Editor {
         let Some(item) = cx.read_from_clipboard() else { return };
         let Some(text) = item.text() else { return };
         let kind = item.metadata().cloned().unwrap_or_default();
-        self.paste_text(text.replace("\r\n", "\n"), &kind, cx);
+        // Pasted line breaks become the file's own.
+        let text = text.replace("\r\n", "\n");
+        let text = match self.style.line_ending {
+            crate::file_style::LineEnding::Crlf => text.replace('\n', "\r\n"),
+            crate::file_style::LineEnding::Lf => text,
+        };
+        self.paste_text(text, &kind, cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -1400,11 +1429,92 @@ impl Editor {
     }
 
     /// Writes the buffer to its file. Returns false if there's no file or writing failed.
+    /// Changes made as one undo step, the caret staying on its line and column: (char
+    /// range, new text), in any order, not overlapping.
+    pub(crate) fn apply_char_edits(&mut self, mut edits: Vec<(Range<usize>, String)>, cx: &mut Context<Self>) {
+        if edits.is_empty() {
+            return;
+        }
+        let (line, col) = self.caret_point();
+        self.record_undo(EditKind::Other);
+        edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+        for (range, text) in edits {
+            self.buffer.replace(range, &text);
+        }
+        self.single_cursor();
+        self.selection = Selection::caret(self.buffer.offset(line, col));
+        self.goal_column = None;
+        self.text_changed(cx);
+        cx.emit(EditorEvent::Edited);
+        cx.notify();
+    }
+
+    /// What saving tidies, as the file's .editorconfig asks: spaces at line ends, the
+    /// final line break, and stray "\n" breaks in a "\r\n" file.
+    fn tidy_for_save(&mut self, cx: &mut Context<Self>) {
+        let style = self.style.clone();
+        let text = self.buffer.to_string();
+        let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+        let mut trailing: Option<usize> = None; // where a run of spaces at the end of a line starts
+        let mut previous = None;
+        let mut count = 0;
+        for (i, c) in text.chars().enumerate() {
+            match c {
+                ' ' | '\t' => {
+                    trailing.get_or_insert(i);
+                }
+                '\n' | '\r' => {
+                    if let Some(start) = trailing.take().filter(|_| style.trim_trailing) {
+                        edits.push((start..i, String::new()));
+                    }
+                    if c == '\n' && previous != Some('\r') && style.line_ending == crate::file_style::LineEnding::Crlf {
+                        edits.push((i..i, "\r".into()));
+                    }
+                }
+                _ => trailing = None,
+            }
+            previous = Some(c);
+            count = i + 1;
+        }
+        if let Some(start) = trailing.filter(|_| style.trim_trailing) {
+            edits.push((start..count, String::new()));
+        }
+        if style.final_newline == Some(true) && !text.is_empty() && !text.ends_with('\n') {
+            edits.push((count..count, style.line_ending.text().into()));
+        }
+        self.apply_char_edits(edits, cx);
+    }
+
+    /// Switches the file's line endings, converting every line break.
+    pub fn set_line_ending(&mut self, ending: crate::file_style::LineEnding, cx: &mut Context<Self>) {
+        self.style.line_ending = ending;
+        let mut edits = Vec::new();
+        let mut previous = None;
+        for (i, c) in self.buffer.rope().chars().enumerate() {
+            match (ending, c, previous) {
+                (crate::file_style::LineEnding::Crlf, '\n', p) if p != Some('\r') => edits.push((i..i, "\r".into())),
+                (crate::file_style::LineEnding::Lf, '\n', Some('\r')) => edits.push((i - 1..i, String::new())),
+                _ => {}
+            }
+            previous = Some(c);
+        }
+        self.apply_char_edits(edits, cx);
+        cx.notify();
+    }
+
+    /// Indents with this from now on (the lines already there stay as they are).
+    pub fn set_indent(&mut self, indent: IndentStyle, cx: &mut Context<Self>) {
+        self.style.indent = indent;
+        cx.notify();
+    }
+
     pub fn save_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(path) = &self.path else {
+        if self.path.is_none() {
             cx.emit(EditorEvent::NeedsPath);
             return false;
-        };
+        }
+        self.tidy_for_save(cx);
+        let Some(path) = &self.path else { return false };
         match std::fs::write(path, self.buffer.to_string()) {
             Ok(()) => {
                 self.buffer.mark_saved();
@@ -2266,6 +2376,15 @@ impl Render for Editor {
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::escape))
+            .on_action(cx.listener(|this, _: &IndentWithTabs, _, cx| this.set_indent(IndentStyle::Tabs, cx)))
+            .on_action(cx.listener(|this, _: &IndentWith2Spaces, _, cx| this.set_indent(IndentStyle::Spaces(2), cx)))
+            .on_action(cx.listener(|this, _: &IndentWith4Spaces, _, cx| this.set_indent(IndentStyle::Spaces(4), cx)))
+            .on_action(cx.listener(|this, _: &UseLfLineEndings, _, cx| {
+                this.set_line_ending(crate::file_style::LineEnding::Lf, cx)
+            }))
+            .on_action(cx.listener(|this, _: &UseCrlfLineEndings, _, cx| {
+                this.set_line_ending(crate::file_style::LineEnding::Crlf, cx)
+            }))
             .on_action(cx.listener(Self::fold))
             .on_action(cx.listener(Self::unfold))
             .on_action(cx.listener(Self::fold_all))

@@ -246,7 +246,11 @@ impl Element for EditorElement {
             let font_size = editor.font_size;
             let line_height = editor.line_height();
             let lh = f32::from(line_height);
-            let font = font(code_font.clone());
+            let mut font = font(code_font.clone());
+            if !cx.global::<Settings>().ligatures {
+                // Both kinds: some fonts (Geist Mono) join characters through `liga` too.
+                font.features = gpui::FontFeatures(std::sync::Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)]));
+            }
             let text_system = window.text_system().clone();
             let shape = |text: String, runs: &[TextRun]| text_system.shape_line(text.into(), font_size, runs, None);
             // A row of text, with its tabs drawn as spaces.

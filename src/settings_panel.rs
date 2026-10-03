@@ -419,9 +419,37 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Ligatures",
+                Some("Join characters like -> and != into one symbol, if the code font has them"),
+                Self::toggle("ligatures", s.ligatures, &theme, cx, |s| s.ligatures = !s.ligatures),
+                &theme,
+            ),
+            Self::row(
                 "Indentation",
-                Some("Tab inserts spaces; on a selection, Tab and Shift+Tab indent its lines"),
-                div().text_size(px(13.)).text_color(theme.muted).child("4 spaces"),
+                Some("For new files, and files that don't show their own. Files keep theirs, and .editorconfig wins"),
+                {
+                    use crate::file_style::Indent;
+                    Self::choices(
+                        "indent",
+                        vec![
+                            (Indent::Spaces(2), "2 spaces".into()),
+                            (Indent::Spaces(4), "4 spaces".into()),
+                            (Indent::Tabs, "Tabs".into()),
+                        ],
+                        s.default_indent(),
+                        &theme,
+                        cx,
+                        |_, indent, cx| {
+                            settings::update(cx, |s| match indent {
+                                Indent::Tabs => s.indent_with_tabs = true,
+                                Indent::Spaces(n) => {
+                                    s.indent_with_tabs = false;
+                                    s.indent_size = n;
+                                }
+                            })
+                        },
+                    )
+                },
                 &theme,
             ),
             Self::heading("Code intelligence", &theme),
