@@ -4,9 +4,10 @@
 use crate::ai::ProviderId;
 use crate::keymap::Keymap;
 use crate::settings::{self, Settings};
-use crate::theme::{Syntax, Theme, ThemeName};
+use crate::theme::{Theme, ThemeName};
+use crate::ui;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, Window,
+    AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding, Window,
     actions, div, prelude::*, px,
 };
 
@@ -58,14 +59,7 @@ impl Welcome {
     }
 
     fn label(text: &str, theme: &Theme) -> AnyElement {
-        div()
-            .pt(px(22.))
-            .pb(px(10.))
-            .text_size(px(11.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.faint)
-            .child(text.to_uppercase())
-            .into_any_element()
+        ui::section_heading(text, theme).pt(px(22.)).pb(px(10.)).into_any_element()
     }
 
     fn option(id: (&'static str, usize), text: &str, active: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
@@ -73,48 +67,21 @@ impl Welcome {
             .id(id)
             .px(px(13.))
             .py(px(7.))
-            .rounded(px(9.))
+            .rounded(px(ui::R_CONTROL))
             .border_1()
-            .text_size(px(13.))
+            .text_size(px(ui::T_MD))
             .cursor_pointer()
             .when(active, |d| d.border_color(theme.caret).bg(theme.accent_soft).text_color(theme.foreground))
             .when(!active, |d| {
-                d.border_color(theme.hairline).text_color(theme.muted).hover(|d| d.text_color(theme.foreground))
+                d.border_color(theme.line_strong).text_color(theme.muted).hover(|d| d.text_color(theme.foreground))
             })
             .child(text.to_string())
     }
 
     fn theme_card(name: ThemeName, active: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let preview = Theme::named(name);
-        let bar = |w: f32, color: Hsla| div().h(px(4.)).w(px(w)).rounded(px(2.)).bg(color);
-        div()
+        ui::theme_preview(name, active, theme)
             .id(name.label())
-            .flex()
-            .flex_col()
-            .gap(px(7.))
             .cursor_pointer()
-            .child(
-                div()
-                    .w(px(110.))
-                    .h(px(64.))
-                    .p(px(10.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .rounded(px(9.))
-                    .bg(preview.background)
-                    .border_2()
-                    .border_color(if active { theme.caret } else { theme.hairline })
-                    .child(bar(36., preview.syntax(Syntax::Keyword)))
-                    .child(bar(70., preview.foreground))
-                    .child(bar(28., preview.syntax(Syntax::String))),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(if active { theme.foreground } else { theme.muted })
-                    .child(name.label()),
-            )
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.theme = name)))
             .into_any_element()
     }
@@ -160,7 +127,7 @@ impl Render for Welcome {
             },
         ));
         let ai_note = match ai_now {
-            AiChoice::NotNow => "AI stays out of sight. Turn it on anytime from ⌘K.",
+            AiChoice::NotNow => "AI stays out of sight. Turn it on anytime from quick settings.",
             AiChoice::Provider(ProviderId::ClaudeCode) => "Uses your Claude plan through the claude command line tool.",
             AiChoice::Provider(ProviderId::Codex) => "Uses your ChatGPT plan through the codex command line tool.",
             AiChoice::Provider(_) => "Runs models on this computer. API keys and more providers are in Settings.",
@@ -175,7 +142,7 @@ impl Render for Welcome {
             .p(px(32.))
             .flex()
             .flex_col()
-            .rounded(px(16.))
+            .rounded(px(ui::R_MODAL))
             .border_1()
             .border_color(theme.hairline)
             .bg(theme.raised)
@@ -190,31 +157,31 @@ impl Render for Welcome {
             .child(
                 div()
                     .pt(px(4.))
-                    .text_size(px(13.))
+                    .text_size(px(ui::T_MD))
                     .text_color(theme.muted)
-                    .child("Three choices, each one changeable later in Settings (⌘,)."),
+                    .child("Three choices, each one changeable later in Settings."),
             )
             .child(Self::label("Look", &theme))
             .child(div().flex().gap(px(14.)).children(themes))
             .child(Self::label("Shortcuts you already know", &theme))
             .child(keymaps)
-            .child(div().pt(px(8.)).text_size(px(12.)).text_color(theme.faint).child(settings.keymap.summary()))
+            .child(div().pt(px(8.)).text_size(px(ui::T_SM)).text_color(theme.muted).child(settings.keymap.summary()))
             .child(Self::label("AI", &theme))
             .child(ais)
-            .child(div().pt(px(8.)).text_size(px(12.)).text_color(theme.faint).child(ai_note))
+            .child(div().pt(px(8.)).text_size(px(ui::T_SM)).text_color(theme.muted).child(ai_note))
             .child(
                 div().pt(px(28.)).flex().justify_end().child(
                     div()
                         .id("start")
                         .px(px(18.))
                         .py(px(8.))
-                        .rounded(px(9.))
+                        .rounded(px(ui::R_CONTROL))
                         .bg(theme.caret)
-                        .text_color(theme.background)
-                        .text_size(px(13.))
+                        .text_color(theme.on_accent)
+                        .text_size(px(ui::T_MD))
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
-                        .child("Start coding  ↵")
+                        .child("Start coding ↵")
                         .on_click(
                             cx.listener(|this, _: &ClickEvent, window, cx| this.finish(&FinishWelcome, window, cx)),
                         ),

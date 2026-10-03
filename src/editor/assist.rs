@@ -8,6 +8,7 @@ use crate::ai::{self, AiEvent, Prompt};
 use crate::settings::Settings;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
+use crate::ui;
 use crate::wrap::BlockSpec;
 use futures::StreamExt;
 use gpui::{
@@ -645,7 +646,7 @@ impl Editor {
                             .items_center()
                             .gap(px(10.))
                             .px(px(10.))
-                            .rounded(px(7.))
+                            .rounded(px(ui::R_CONTROL))
                             .border_1()
                             .border_color(if prompt.writing { theme.caret.opacity(0.5) } else { theme.hairline })
                             .bg(theme.raised)
@@ -671,39 +672,34 @@ impl Editor {
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.))
-                                    .text_color(if prompt.failed.is_some() { theme.error } else { theme.faint })
+                                    .text_size(px(ui::T_XS))
+                                    .text_color(if prompt.failed.is_some() { theme.error } else { theme.muted })
                                     .child(hint.to_string()),
                             )
                             .into_any_element(),
                     );
                 }
                 BlockKind::Hint => {
-                    let key = |k: &str, label: &str| {
+                    // The keys as they're bound now, so a changed shortcut shows here too.
+                    let key = |action: &dyn gpui::Action, fallback: &str, label: &str| {
+                        let keys = crate::palette::shortcut(action, cx).unwrap_or_else(|| fallback.to_string());
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(5.))
-                            .child(
-                                div()
-                                    .px(px(5.))
-                                    .rounded(px(4.))
-                                    .bg(theme.hairline)
-                                    .text_color(theme.muted)
-                                    .child(k.to_string()),
-                            )
+                            .gap(px(6.))
+                            .child(ui::key_cap(keys, &theme))
                             .child(label.to_string())
                     };
                     out.push(
                         place(div())
                             .flex()
                             .items_center()
-                            .gap(px(14.))
-                            .text_size(px(11.))
-                            .text_color(theme.faint)
-                            .child(key("⇥", "keep"))
-                            .child(key("esc", "undo"))
-                            .child(key("⌘I", "adjust"))
+                            .gap(px(16.))
+                            .text_size(px(ui::T_XS))
+                            .text_color(theme.muted)
+                            .child(key(&KeepChange, "⇥", "keep"))
+                            .child(key(&UndoChange, "Esc", "undo"))
+                            .child(key(&super::InlineAssist, "⌘I", "adjust"))
                             .into_any_element(),
                     );
                 }
@@ -712,7 +708,7 @@ impl Editor {
                     let body: Vec<AnyElement> = if let Some(failed) = &note.failed {
                         vec![div().text_color(theme.error).child(failed.clone()).into_any_element()]
                     } else if note.answer.trim().is_empty() {
-                        vec![div().text_color(theme.faint).child("Thinking…").into_any_element()]
+                        vec![div().text_color(theme.muted).child("Thinking…").into_any_element()]
                     } else {
                         crate::markdown::blocks(&note.answer, None)
                             .into_iter()
@@ -722,8 +718,8 @@ impl Editor {
                                         .my(px(4.))
                                         .px(px(10.))
                                         .py(px(6.))
-                                        .rounded(px(6.))
-                                        .bg(theme.background)
+                                        .rounded(px(ui::R_ROW))
+                                        .bg(theme.sunken)
                                         .font_family(code_font.clone())
                                         .text_size(px(12.5))
                                         .children(
@@ -760,8 +756,8 @@ impl Editor {
                                         div()
                                             .flex()
                                             .justify_between()
-                                            .text_size(px(11.))
-                                            .text_color(theme.faint)
+                                            .text_size(px(ui::T_XS))
+                                            .text_color(theme.muted)
                                             .child(
                                                 div()
                                                     .overflow_hidden()

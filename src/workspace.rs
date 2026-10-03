@@ -10,7 +10,7 @@ use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
 use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
-use crate::settings_panel::{SettingsPanel, SettingsPanelEvent, Shortcut};
+use crate::settings_panel::{Section, SettingsPanel, SettingsPanelEvent, Shortcut};
 use crate::terminal::{Shell, TerminalEvent, TerminalView};
 use crate::theme::{Theme, ThemeName};
 use crate::ui;
@@ -132,7 +132,6 @@ const TERMINAL_HEIGHT: f32 = 300.;
 const TERMINAL_SLIDE: Duration = Duration::from_millis(240);
 /// Room for the window buttons at the left of the title bar.
 const TITLEBAR_INSET: f32 = if cfg!(target_os = "macos") { 84. } else { 12. };
-const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
 
 fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0., 1.);
@@ -1206,7 +1205,8 @@ impl Workspace {
         settings::update(cx, |s| s.ai.enabled = !s.ai.enabled);
         let ai = &cx.global::<Settings>().ai;
         if ai.enabled && ai.provider == ProviderId::Off {
-            self.show_notice("AI is on. Choose where answers come from in Settings → AI (⌘,).".into(), cx);
+            let keys = crate::palette::shortcut(&OpenSettings, cx).map(|k| format!(" ({k})")).unwrap_or_default();
+            self.show_notice(format!("AI is on. Choose where answers come from in Settings → AI{keys}."), cx);
         }
     }
 
@@ -1288,29 +1288,27 @@ impl Workspace {
         let theme = cx.global::<Theme>();
         let searching = self.sidebar_search.on;
         let tab = |id: &'static str, label: &'static str, on: bool| {
-            div()
+            ui::segment(on, theme)
                 .id(id)
-                .px(px(8.))
-                .py(px(3.))
-                .rounded(px(6.))
-                .text_size(px(12.))
-                .text_color(if on { theme.foreground } else { theme.faint })
-                .when(on, |t| t.bg(theme.hairline))
-                .when(!on, |t| t.hover(|s| s.text_color(theme.muted)))
+                .flex_1()
+                .flex()
+                .justify_center()
+                .cursor_pointer()
+                .when(!on, |t| t.hover(|s| s.text_color(theme.foreground)))
                 .child(label)
         };
         div()
-            .flex()
-            .gap(px(4.))
-            .px(px(10.))
+            .px(px(12.))
             .pt(px(10.))
             .child(
-                tab("files", "Files", !searching)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx))),
+                ui::segmented(theme)
+                    .child(tab("files", "Files", !searching).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
+                    ))
+                    .child(tab("search", "Search", searching).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
+                    )),
             )
-            .child(tab("search", "Search", searching).on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
-            ))
             .into_any_element()
     }
 
@@ -1451,10 +1449,10 @@ impl Workspace {
             .items_center()
             .gap(px(8.))
             .px(px(12.))
-            .text_size(px(12.))
+            .text_size(px(ui::T_SM))
             .text_color(theme.muted)
             .child(div().text_color(theme.foreground).child("Terminal"))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_color(theme.faint).child(title))
+            .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(title))
             .child(
                 div()
                     .id("close-terminal")
@@ -1462,9 +1460,17 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(5.))
+                    .rounded(px(ui::R_KEY))
+                    .cursor_pointer()
+                    .group("close-terminal")
                     .hover(|s| s.bg(theme.hairline))
-                    .child(svg().path("icons/x.svg").size(px(12.)).text_color(theme.muted))
+                    .child(
+                        svg()
+                            .path("icons/x.svg")
+                            .size(px(12.))
+                            .text_color(theme.muted)
+                            .group_hover("close-terminal", |s| s.text_color(theme.foreground)),
+                    )
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_terminal(&ToggleTerminal, window, cx)
                     })),
@@ -1519,6 +1525,11 @@ impl Workspace {
 
     /// ⌘, opens the Settings window, or closes it.
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings_at(None, window, cx);
+    }
+
+    /// Opens Settings, at `section` if given. With Settings already open, closes it.
+    fn open_settings_at(&mut self, section: Option<Section>, window: &mut Window, cx: &mut Context<Self>) {
         if self.welcome.is_some() {
             return;
         }
@@ -1536,7 +1547,13 @@ impl Workspace {
             .map(|c| Shortcut { category: c.category, label: c.label, action: c.action })
             .collect();
         let lsp = self.lsp.clone();
-        let panel = cx.new(|cx| SettingsPanel::new(shortcuts, lsp, cx));
+        let panel = cx.new(|cx| {
+            let mut panel = SettingsPanel::new(shortcuts, lsp, cx);
+            if let Some(section) = section {
+                panel.show_section(section);
+            }
+            panel
+        });
         let subscription = cx.subscribe_in(&panel, window, |this, _, event, window, cx| match event {
             SettingsPanelEvent::Closed => this.close_palette(window, cx),
             SettingsPanelEvent::Run(action) => {
@@ -1873,12 +1890,17 @@ impl Workspace {
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>();
-        let hint = |keys: String, label: &'static str| {
-            div()
-                .flex()
-                .gap(px(12.))
-                .child(div().w(px(56.)).text_right().text_color(theme.muted).child(keys))
-                .child(div().text_color(theme.faint).child(label))
+        // The keys as they're bound now: another preset's, or the person's own.
+        let hint = |action: &dyn Action, label: &'static str| {
+            let keys = crate::palette::shortcut(action, cx)?;
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(div().w(px(64.)).flex().justify_end().child(ui::key_cap(keys, theme)))
+                    .child(div().text_color(theme.muted).child(label)),
+            )
         };
         div()
             .size_full()
@@ -1886,12 +1908,39 @@ impl Workspace {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(10.))
-            .text_size(px(13.))
-            .child(hint(format!("{MOD}O"), "Open a file or folder"))
-            .child(hint(format!("{MOD}B"), "Show or hide the files"))
+            .text_size(px(ui::T_MD))
+            // One column, so the keys and the words line up from row to row.
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .children(hint(&Open, "Open a file or folder"))
+                    .children(hint(&TogglePalette, "Find a file"))
+                    .children(hint(&ToggleSidebar, "Show or hide the files")),
+            )
             .into_any_element()
     }
+}
+
+/// The status bar's path is cut to about this many characters, from the left.
+const STATUS_PATH_CHARS: usize = 60;
+
+/// A long path with its first folders replaced by "…", keeping the file and the folders
+/// nearest to it, which say the most: `…/editor/assist.rs`.
+fn shorten_path(path: &str, max: usize) -> String {
+    if path.chars().count() <= max {
+        return path.to_string();
+    }
+    let parts: Vec<&str> = path.split(['/', '\\']).collect();
+    let mut kept = parts.last().copied().unwrap_or(path).to_string();
+    for part in parts.iter().rev().skip(1) {
+        if kept.chars().count() + part.chars().count() + 3 > max {
+            break;
+        }
+        kept = format!("{part}/{kept}");
+    }
+    format!("…/{kept}")
 }
 
 /// Where `path` ends up when `from` (it, or a folder above it) is renamed to `to`.
@@ -1945,18 +1994,24 @@ impl Render for Workspace {
                 let count = |s| problems.iter().filter(|p| p.severity == s).count();
                 (
                     vec![
-                        path.unwrap_or_else(|| "untitled".into()),
+                        path.map(|p| shorten_path(&p, STATUS_PATH_CHARS)).unwrap_or_else(|| "Untitled".into()),
                         match editor.extra.len() {
                             0 => format!("Ln {}, Col {}", line + 1, col + 1),
                             n => format!("{} cursors · Esc for one", n + 1),
                         },
-                        "Spaces: 4".into(),
                         editor.language_name().into(),
                     ],
                     (count(lsp_types::DiagnosticSeverity::ERROR), count(lsp_types::DiagnosticSeverity::WARNING)),
                 )
             }
-            None => (vec![root.display().to_string()], (0, 0)),
+            None => {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let shown = match home.as_ref().and_then(|h| root.strip_prefix(h).ok()) {
+                    Some(rest) => Path::new("~").join(rest).display().to_string(),
+                    None => root.display().to_string(),
+                };
+                (vec![shorten_path(&shown, STATUS_PATH_CHARS)], (0, 0))
+            }
         };
         let tabs = self.render_tabs(cx);
         let terminal_panel = self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx);
@@ -2024,20 +2079,24 @@ impl Render for Workspace {
                     .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
                     .child(branch)
             }))
-            .child(div().flex_1().overflow_hidden().whitespace_nowrap().children(items.next()))
+            .child(div().flex_1().min_w_0().truncate().children(items.next()))
             .children(lsp_status)
             .when(ai_provider != ProviderId::Off, |bar| {
                 bar.child(
                     div()
                         .id("ai-status")
                         .flex()
+                        .flex_none()
                         .items_center()
                         .gap(px(6.))
+                        .whitespace_nowrap()
+                        .cursor_pointer()
                         .text_color(theme.muted)
+                        .hover(|s| s.text_color(theme.foreground))
                         .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
                         .child(format!("AI · {}", ai_provider.label()))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.open_settings(&OpenSettings, window, cx)
+                            this.open_settings_at(Some(Section::Ai), window, cx)
                         })),
                 )
             })
@@ -2048,6 +2107,8 @@ impl Render for Workspace {
                     div()
                         .id("problems")
                         .flex()
+                        .flex_none()
+                        .whitespace_nowrap()
                         .gap(px(10.))
                         .cursor_pointer()
                         .on_click(
@@ -2061,7 +2122,7 @@ impl Render for Workspace {
                         }),
                 )
             })
-            .children(items);
+            .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
 
         div()
             .key_context("Workspace")
@@ -2162,14 +2223,15 @@ impl Render for Workspace {
             .children(self.notice.as_ref().map(|(message, _)| {
                 div().absolute().bottom(px(44.)).left_0().w_full().flex().justify_center().child(
                     div()
+                        .max_w(px(560.))
                         .px(px(14.))
                         .py(px(8.))
-                        .rounded(px(9.))
+                        .rounded(px(ui::R_POPOVER))
                         .bg(theme.raised)
                         .border_1()
                         .border_color(theme.hairline)
                         .shadow_lg()
-                        .text_size(px(13.))
+                        .text_size(px(ui::T_MD))
                         .text_color(theme.foreground)
                         .child(message.clone()),
                 )
@@ -2180,6 +2242,12 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_paths_keep_their_end() {
+        assert_eq!(shorten_path("src/main.rs", 60), "src/main.rs");
+        assert_eq!(shorten_path("a/very/deep/tree/of/folders/editor/assist.rs", 24), "…/editor/assist.rs");
+    }
 
     #[test]
     fn renamed_paths_never_gain_a_trailing_slash() {

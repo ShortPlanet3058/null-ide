@@ -10,6 +10,7 @@ mod refactor;
 pub use assist::{Block, BlockKind};
 pub use completion::CompletionMenu;
 pub use cursors::Cursor;
+pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::HoverCard;
 pub use refactor::{FindReferences, FormatDocument, RenameSymbol, apply_edits};
 
@@ -23,6 +24,7 @@ use crate::lsp_store::LspStore;
 use crate::search::SearchQuery;
 use crate::settings::Settings;
 use crate::theme::Theme;
+use crate::ui;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, HighlightStyle, KeyBinding, KeyContext, KeyDownEvent, ModifiersChangedEvent, MouseButton,
@@ -526,7 +528,7 @@ impl Editor {
             .as_deref()
             .and_then(Path::file_name)
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "untitled".into())
+            .unwrap_or_else(|| "Untitled".into())
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -1329,7 +1331,7 @@ impl Editor {
     /// under the word being typed, the typed letters stand out, a dot gives the kind, and
     /// only the selected row shows its details.
     fn render_completions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        const ROW: f32 = 24.;
+        const ROW: f32 = ui::ROW_SM;
         const ROWS: usize = 6;
         const PAD: f32 = 4.;
         const DOT_COLUMN: f32 = 18.;
@@ -1352,8 +1354,10 @@ impl Editor {
                 .flex()
                 .items_center()
                 .pr(px(10.))
-                .rounded(px(5.))
+                .rounded(px(ui::R_ROW))
+                .cursor_pointer()
                 .when(selected, |row| row.bg(theme.accent_soft))
+                .when(!selected, |row| row.hover(|r| r.bg(theme.hairline)))
                 .child(
                     div()
                         .w(px(DOT_COLUMN))
@@ -1378,8 +1382,8 @@ impl Editor {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_right()
-                            .text_size(px(11.5))
-                            .text_color(theme.faint)
+                            .text_size(px(ui::T_SM))
+                            .text_color(theme.muted)
                             .child(detail)
                     }))
                 })
@@ -1394,7 +1398,7 @@ impl Editor {
             .max_w(px(480.))
             .max_h(px(ROW * ROWS as f32 + PAD * 2.))
             .p(px(PAD))
-            .rounded(px(8.))
+            .rounded(px(ui::R_POPOVER))
             .bg(theme.raised)
             .border_1()
             .border_color(theme.hairline)
@@ -1434,8 +1438,8 @@ impl Editor {
                 div()
                     .px(px(8.))
                     .py(px(6.))
-                    .rounded(px(6.))
-                    .bg(theme.background)
+                    .rounded(px(ui::R_ROW))
+                    .bg(theme.sunken)
                     .font_family(code_font.clone())
                     .text_size(px(12.5))
                     .text_color(theme.foreground)
@@ -1455,12 +1459,12 @@ impl Editor {
             .flex_col()
             .gap(px(8.))
             .p(px(10.))
-            .rounded(px(10.))
+            .rounded(px(ui::R_POPOVER))
             .bg(theme.raised)
             .border_1()
             .border_color(theme.hairline)
             .shadow_lg()
-            .text_size(px(13.))
+            .text_size(px(ui::T_MD))
             .line_height(px(19.))
             .children(diagnostics)
             .children(blocks);

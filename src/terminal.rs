@@ -29,7 +29,8 @@ use std::sync::Arc;
 
 actions!(terminal, [Copy, Paste, Clear]);
 
-const FONT_SIZE: f32 = 13.;
+/// The terminal's text is a point smaller than the editor's, and follows it (⌘+ / ⌘-).
+const FONT_SIZE_BELOW_EDITOR: f32 = 1.;
 const PADDING: f32 = 10.;
 const SCROLLBACK: usize = 10_000;
 
@@ -564,7 +565,7 @@ impl Element for TerminalElement {
     ) -> Prepaint {
         let theme = cx.global::<Theme>().clone();
         let family = cx.global::<Fonts>().code.clone();
-        let font_size = px(FONT_SIZE);
+        let font_size = px((cx.global::<crate::settings::Settings>().font_size - FONT_SIZE_BELOW_EDITOR).max(9.));
         let base = font(family);
         let text_system = window.text_system().clone();
         let run = |len: usize, font: Font, color: Hsla| TextRun {

@@ -6,10 +6,11 @@ use crate::keymap::Keymap;
 use crate::palette::Category;
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::theme::{Syntax, Theme, ThemeName};
+use crate::theme::{Theme, ThemeName};
+use crate::ui;
 use gpui::{
-    Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
-    KeyBinding, SharedString, Subscription, Window, actions, div, prelude::*, px,
+    Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
+    SharedString, Subscription, Window, actions, div, prelude::*, px,
 };
 
 actions!(settings_panel, [CloseSettings]);
@@ -23,7 +24,7 @@ const UI_FONTS: &[(&str, &str)] =
     &[("Instrument Sans", "Instrument Sans"), (".SystemUIFont", "System"), ("Inter", "Inter")];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Section {
+pub enum Section {
     Appearance,
     Editor,
     Languages,
@@ -44,6 +45,17 @@ impl Section {
             Section::Keyboard => "Keyboard",
         }
     }
+}
+
+/// "Also ⌘+ and ⌘−": a phrase followed by the keys of some actions.
+fn keys_line(lead: &str, actions: &[&dyn Action], cx: &App) -> String {
+    let keys: Vec<String> = actions.iter().filter_map(|a| crate::palette::shortcut(*a, cx)).collect();
+    if keys.is_empty() { String::new() } else { format!("{lead} {}", keys.join(" and ")) }
+}
+
+/// The key for an action, or nothing when it has none.
+fn key(action: &dyn Action, cx: &App) -> String {
+    crate::palette::shortcut(action, cx).unwrap_or_default()
 }
 
 /// A command to list in the Keyboard section, with whatever key the preset gives it.
@@ -78,6 +90,11 @@ pub struct SettingsPanel {
 impl EventEmitter<SettingsPanelEvent> for SettingsPanel {}
 
 impl SettingsPanel {
+    /// Opens on another section than the first.
+    pub fn show_section(&mut self, section: Section) {
+        self.section = section;
+    }
+
     pub fn new(shortcuts: Vec<Shortcut>, lsp: Entity<crate::lsp_store::LspStore>, cx: &mut Context<Self>) -> Self {
         let model = cx.new(|cx| TextInput::new("Model", cx));
         let address = cx.new(|cx| TextInput::new("Address", cx));
@@ -195,8 +212,10 @@ impl SettingsPanel {
                     .flex_col()
                     .gap(px(2.))
                     .min_w_0()
-                    .child(div().text_size(px(14.)).text_color(theme.foreground).child(title.to_string()))
-                    .children(detail.map(|d| div().text_size(px(12.)).text_color(theme.faint).child(d.to_string()))),
+                    .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(title.to_string()))
+                    .children(
+                        detail.map(|d| div().text_size(px(ui::T_SM)).text_color(theme.muted).child(d.to_string())),
+                    ),
             )
             .child(div().flex_none().child(control))
             .into_any_element()
@@ -211,15 +230,8 @@ impl SettingsPanel {
     ) -> AnyElement {
         div()
             .id(id)
-            .w(px(36.))
-            .h(px(20.))
-            .p(px(2.))
-            .rounded_full()
             .cursor_pointer()
-            .flex()
-            .when(on, |d| d.justify_end().bg(theme.caret))
-            .when(!on, |d| d.bg(theme.hairline))
-            .child(div().size(px(16.)).rounded_full().bg(if on { theme.background } else { theme.muted }))
+            .child(ui::switch(on, theme))
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, &change)))
             .into_any_element()
     }
@@ -233,25 +245,15 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
         pick: impl Fn(&mut Self, T, &mut Context<Self>) + Clone + 'static,
     ) -> AnyElement {
-        div()
-            .flex()
+        ui::segmented(theme)
             .flex_wrap()
-            .gap(px(2.))
-            .p(px(2.))
-            .rounded(px(8.))
-            .bg(theme.hairline.opacity(0.5))
             .children(options.into_iter().enumerate().map(|(i, (value, label))| {
                 let active = value == current;
                 let pick = pick.clone();
-                div()
+                ui::segment(active, theme)
                     .id((id, i))
-                    .px(px(10.))
-                    .py(px(4.))
-                    .rounded(px(6.))
-                    .text_size(px(13.))
                     .cursor_pointer()
-                    .when(active, |d| d.bg(theme.raised).text_color(theme.foreground).shadow_sm())
-                    .when(!active, |d| d.text_color(theme.muted).hover(|d| d.text_color(theme.foreground)))
+                    .when(!active, |d| d.hover(|d| d.text_color(theme.foreground)))
                     .child(label)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| pick(this, value, cx)))
             }))
@@ -262,14 +264,16 @@ impl SettingsPanel {
         div()
             .id(id)
             .px(px(12.))
-            .py(px(5.))
-            .rounded(px(7.))
+            .h(px(ui::CONTROL))
+            .flex()
+            .items_center()
+            .rounded(px(ui::R_CONTROL))
             .border_1()
-            .border_color(theme.hairline)
-            .text_size(px(13.))
+            .border_color(theme.line_strong)
+            .text_size(px(ui::T_MD))
             .text_color(theme.foreground)
             .cursor_pointer()
-            .hover(|d| d.bg(theme.accent_soft))
+            .hover(|d| d.bg(theme.hairline))
             .child(label.to_string())
     }
 
@@ -278,7 +282,7 @@ impl SettingsPanel {
             .w(px(300.))
             .px(px(10.))
             .py(px(6.))
-            .rounded(px(7.))
+            .rounded(px(ui::R_CONTROL))
             .border_1()
             .border_color(theme.hairline)
             .bg(theme.background)
@@ -288,14 +292,7 @@ impl SettingsPanel {
     }
 
     fn heading(text: &str, theme: &Theme) -> AnyElement {
-        div()
-            .pt(px(18.))
-            .pb(px(2.))
-            .text_size(px(11.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.faint)
-            .child(text.to_uppercase())
-            .into_any_element()
+        ui::section_heading(text, theme).pt(px(20.)).pb(px(4.)).into_any_element()
     }
 
     // ---------- sections ----------
@@ -303,57 +300,9 @@ impl SettingsPanel {
     /// A small preview of a theme: its background with a few lines of colored "code".
     fn theme_card(&self, name: ThemeName, current: ThemeName, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>().clone();
-        let preview = Theme::named(name);
-        let active = name == current;
-        let bar = |w: f32, color: Hsla| div().h(px(5.)).w(px(w)).rounded(px(2.)).bg(color);
-        div()
+        ui::theme_preview(name, name == current, &theme)
             .id(name.label())
-            .flex()
-            .flex_col()
-            .gap(px(8.))
             .cursor_pointer()
-            .child(
-                div()
-                    .w(px(132.))
-                    .h(px(78.))
-                    .p(px(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(7.))
-                    .rounded(px(10.))
-                    .bg(preview.background)
-                    .border_2()
-                    .border_color(if active { theme.caret } else { theme.hairline })
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(5.))
-                            .child(bar(22., preview.syntax(Syntax::Keyword)))
-                            .child(bar(40., preview.syntax(Syntax::Function))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(5.))
-                            .pl(px(10.))
-                            .child(bar(30., preview.foreground))
-                            .child(bar(36., preview.syntax(Syntax::String))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(5.))
-                            .pl(px(10.))
-                            .child(bar(18., preview.syntax(Syntax::Comment)))
-                            .child(bar(2., preview.caret)),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(if active { theme.foreground } else { theme.muted })
-                    .child(name.label()),
-            )
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.theme = name)))
             .into_any_element()
     }
@@ -409,7 +358,16 @@ impl SettingsPanel {
             Self::heading("Theme", &theme),
             div().flex().gap(px(16.)).py(px(12.)).children(cards).into_any_element(),
             Self::heading("Text", &theme),
-            Self::row("Text size", Some("Also ⌘+ and ⌘−"), size, &theme),
+            Self::row(
+                "Text size",
+                Some(&keys_line(
+                    "Also",
+                    &[&crate::workspace::IncreaseFontSize, &crate::workspace::DecreaseFontSize],
+                    cx,
+                )),
+                size,
+                &theme,
+            ),
             Self::row(
                 "Code font",
                 None,
@@ -431,7 +389,7 @@ impl SettingsPanel {
             Self::heading("Window", &theme),
             Self::row(
                 "Show the sidebar",
-                Some("⌘B shows and hides it"),
+                Some(&keys_line("Shown and hidden with", &[&crate::workspace::ToggleSidebar], cx)),
                 Self::toggle("sidebar", s.sidebar_visible, &theme, cx, |s| s.sidebar_visible = !s.sidebar_visible),
                 &theme,
             ),
@@ -453,26 +411,35 @@ impl SettingsPanel {
             Self::heading("Text", &theme),
             Self::row(
                 "Wrap long lines",
-                Some("Fit lines to the window instead of scrolling sideways. ⌥Z"),
+                Some(&format!(
+                    "Fit lines to the window instead of scrolling sideways. {}",
+                    key(&crate::menus::ToggleWordWrap, cx)
+                )),
                 Self::toggle("wrap", s.word_wrap, &theme, cx, |s| s.word_wrap = !s.word_wrap),
                 &theme,
             ),
             Self::row(
                 "Indentation",
-                Some("Tab inserts spaces; Tab and ⇧Tab indent selected lines"),
+                Some("Tab inserts spaces; on a selection, Tab and Shift+Tab indent its lines"),
                 div().text_size(px(13.)).text_color(theme.muted).child("4 spaces"),
                 &theme,
             ),
             Self::heading("Code intelligence", &theme),
             Self::row(
                 "Format on save",
-                Some("Tidies the file with its language server on ⌘S. ⌥⇧F formats any time"),
+                Some(&format!(
+                    "Tidies the file with its language server when saving. {} formats any time",
+                    key(&crate::editor::FormatDocument, cx)
+                )),
                 Self::toggle("format-on-save", s.format_on_save, &theme, cx, |s| s.format_on_save = !s.format_on_save),
                 &theme,
             ),
             Self::row(
                 "Suggestions while typing",
-                Some("From the language server. ⌃Space asks for them either way"),
+                Some(&format!(
+                    "From the language server. {} asks for them either way",
+                    key(&crate::editor::ShowCompletions, cx)
+                )),
                 Self::toggle("autocomplete", s.autocomplete, &theme, cx, |s| s.autocomplete = !s.autocomplete),
                 &theme,
             ),
@@ -673,7 +640,7 @@ impl SettingsPanel {
                 None => ("Not installed".to_string(), ai::install_hint(current).unwrap_or_default().to_string()),
             };
             rows.push(Self::row(
-                &format!("`{program}` command"),
+                &format!("The {program} command"),
                 Some(&detail),
                 div().text_size(px(13.)).text_color(theme.muted).child(status),
                 &theme,
@@ -683,9 +650,9 @@ impl SettingsPanel {
             let get = current.key_url().map(|u| format!(" · get one at {u}")).unwrap_or_default();
             let (status, label) = match self.has_key {
                 Some(true) => (format!("Saved in the keychain{get}"), "Change…"),
-                Some(false) => (format!("Not set yet{get}"), "Set API Key…"),
+                Some(false) => (format!("Not set yet{get}"), "Set API key…"),
                 // Not read yet this session (reading it can ask for permission).
-                None => (format!("Kept in the system keychain{get}"), "Set API Key…"),
+                None => (format!("Kept in the system keychain{get}"), "Set API key…"),
             };
             rows.push(Self::row(
                 "API key",
@@ -732,7 +699,13 @@ impl SettingsPanel {
         rows.push(Self::heading("Suggestions while typing", &theme));
         rows.push(Self::row(
             "Suggest code as you type",
-            Some("Names from the file at once, then the AI's guess when you pause. ⇥ takes it, ⌥→ a word, ⌘→ a line, ⌥⇥ another"),
+            Some(&format!(
+                "Names from the file at once, then the AI's guess when you pause. {} takes it, {} a word, {} a line, {} another",
+                key(&crate::editor::AcceptGhost, cx),
+                key(&crate::editor::AcceptGhostWord, cx),
+                key(&crate::editor::AcceptGhostLine, cx),
+                key(&crate::editor::NextGhost, cx),
+            )),
             Self::toggle("ai-completions", s.ai.completions, &theme, cx, |s| s.ai.completions = !s.ai.completions),
             &theme,
         ));
@@ -763,7 +736,11 @@ impl SettingsPanel {
         }
         rows.push(Self::row(
             "Ask and edit",
-            Some("⌘I edits the code at the caret; a question there, or “Ask About This File” in ⌘K, gets a note"),
+            Some(&format!(
+                "{} edits the code at the caret; a question there, or “Ask About This File” in {}, gets a note",
+                key(&crate::editor::InlineAssist, cx),
+                key(&crate::workspace::ShowCommands, cx),
+            )),
             div(),
             &theme,
         ));
@@ -785,9 +762,10 @@ impl SettingsPanel {
                 &theme,
             ),
         ];
-        let keys_of = |s: &Shortcut| {
-            window.highest_precedence_binding_for_action(s.action.as_ref()).map(|b| crate::palette::format_keys(&b))
-        };
+        // From the keymap, not the window: Settings has focus, and the window only knows the
+        // keys of what's focused (editor shortcuts would be missing).
+        let _ = window;
+        let keys_of = |s: &Shortcut| crate::palette::shortcut(s.action.as_ref(), cx);
         for category in Category::ALL {
             let members: Vec<(&Shortcut, String)> = self
                 .shortcuts
@@ -809,16 +787,7 @@ impl SettingsPanel {
                         .border_color(theme.hairline)
                         .text_size(px(13.))
                         .child(div().text_color(theme.foreground).child(shortcut.label.clone()))
-                        .child(
-                            div()
-                                .px(px(6.))
-                                .py(px(1.))
-                                .rounded(px(5.))
-                                .bg(theme.hairline)
-                                .text_size(px(12.))
-                                .text_color(theme.muted)
-                                .child(keys),
-                        )
+                        .child(ui::key_cap(keys, &theme))
                         .into_any_element(),
                 );
             }
@@ -907,11 +876,13 @@ impl Render for SettingsPanel {
             // Clicks inside shouldn't reach the backdrop, which closes it.
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .w(px(780.))
-            .h(px(540.))
+            .h(px(560.))
+            // Short windows: it shrinks and scrolls rather than losing its bottom.
+            .max_h(gpui::relative(0.86))
             .max_w_full()
             .flex()
             .overflow_hidden()
-            .rounded(px(14.))
+            .rounded(px(ui::R_MODAL))
             .border_1()
             .border_color(theme.hairline)
             .bg(theme.raised)

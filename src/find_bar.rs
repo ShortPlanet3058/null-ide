@@ -3,6 +3,7 @@ use crate::fonts::Fonts;
 use crate::search::{MAX_MATCHES, SearchQuery};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
+use crate::ui;
 use gpui::{
     App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString, Subscription, Transformation,
     WeakEntity, Window, actions, div, prelude::*, px, radians, svg,
@@ -187,7 +188,7 @@ impl FindBar {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.))
+            .rounded(px(ui::R_ROW))
             .text_color(theme.muted)
             .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
             .child(svg().path(icon).size(px(14.)).with_transformation(Transformation::rotate(radians(turn))))
@@ -211,9 +212,9 @@ impl FindBar {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.))
+            .rounded(px(ui::R_ROW))
             .font_family(font)
-            .text_size(px(12.))
+            .text_size(px(ui::T_SM))
             .text_color(if on { theme.caret } else { theme.muted })
             .when(on, |b| b.bg(theme.accent_soft))
             .when(!on, |b| b.hover(|s| s.bg(theme.hairline).text_color(theme.foreground)))
@@ -225,11 +226,11 @@ impl FindBar {
         div()
             .flex_1()
             .min_w_0()
-            .h(px(CONTROL + 2.))
+            .h(px(ui::FIELD))
             .px(px(8.))
             .flex()
             .items_center()
-            .rounded(px(6.))
+            .rounded(px(ui::R_ROW))
             .bg(theme.background)
             .border_1()
             .border_color(if invalid { theme.error } else { theme.hairline })
@@ -322,8 +323,8 @@ impl Render for FindBar {
                     .w(px(78.))
                     .flex_none()
                     .text_right()
-                    .text_size(px(12.))
-                    .text_color(if invalid { theme.error } else { theme.faint })
+                    .text_size(px(ui::T_SM))
+                    .text_color(if invalid { theme.error } else { theme.muted })
                     .child(status),
             )
             .child(Self::icon_button(
@@ -356,8 +357,8 @@ impl Render for FindBar {
                 .flex_none()
                 .flex()
                 .items_center()
-                .rounded(px(6.))
-                .text_size(px(12.))
+                .rounded(px(ui::R_ROW))
+                .text_size(px(ui::T_SM))
                 .text_color(theme.muted)
                 .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
                 .child(label)
@@ -377,7 +378,7 @@ impl Render for FindBar {
                     .on_click(act(|this, window, cx| this.replace_next(&ReplaceNext, window, cx))),
             )
             .child(
-                text_button("replace-all", "Replace All")
+                text_button("replace-all", "Replace all")
                     .on_click(act(|this, window, cx| this.replace_all(&ReplaceAll, window, cx))),
             );
 
@@ -400,12 +401,12 @@ impl Render for FindBar {
             .flex_col()
             .gap(px(6.))
             .p(px(6.))
-            .rounded(px(10.))
+            .rounded(px(ui::R_POPOVER))
             .bg(theme.raised)
             .border_1()
             .border_color(theme.hairline)
             .shadow_md()
-            .text_size(px(13.))
+            .text_size(px(ui::T_MD))
             .line_height(px(20.))
             .text_color(theme.foreground)
             .child(find_row)

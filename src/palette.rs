@@ -9,10 +9,11 @@ use crate::fuzzy;
 use crate::settings::Settings;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{Theme, ThemeName};
+use crate::ui;
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     HighlightStyle, KeyBinding, KeyContext, MouseMoveEvent, ScrollHandle, SharedString, StyledText, Subscription,
-    Window, actions, div, prelude::*, px,
+    Window, actions, div, prelude::*, px, relative,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -38,7 +39,7 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-const ROW_HEIGHT: f32 = 34.;
+const ROW_HEIGHT: f32 = ui::ROW_LG;
 const LIST_HEIGHT: f32 = 380.;
 const MAX_RESULTS: usize = 100;
 /// ⌘P with nothing typed shows this many recent files.
@@ -310,6 +311,8 @@ pub struct Palette {
     root: PathBuf,
     rows: Vec<Row>,
     selected: usize,
+    /// Where the pointer was when the keyboard last moved the selection.
+    pointer_anchor: Option<gpui::Point<gpui::Pixels>>,
     scroll: ScrollHandle,
     opened_at: Instant,
     query: String,
@@ -359,6 +362,7 @@ impl Palette {
             root: options.root.clone(),
             rows: Vec::new(),
             selected: 0,
+            pointer_anchor: None,
             scroll: ScrollHandle::new(),
             opened_at: Instant::now(),
             query: String::new(),
@@ -497,6 +501,7 @@ impl Palette {
     }
 
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.pointer_anchor = None;
         if ix < self.rows.len() && ix != self.selected {
             self.selected = ix;
             self.scroll.scroll_to_item(ix);
@@ -579,37 +584,17 @@ impl Palette {
         let theme = cx.global::<Theme>();
         let settings = cx.global::<Settings>();
         let keys = |action: &dyn Action| {
-            window.highest_precedence_binding_for_action(action).map(|b| format_keys(&b)).map(|k| key_cap(k, theme))
+            window.highest_precedence_binding_for_action(action).map(|b| format_keys(&b)).map(|k| ui::key_cap(k, theme))
         };
-        let switch = |on: bool| {
-            div()
-                .w(px(30.))
-                .h(px(17.))
-                .p(px(2.))
-                .rounded_full()
-                .flex()
-                .when(on, |d| d.justify_end().bg(theme.caret))
-                .when(!on, |d| d.bg(theme.hairline))
-                .child(div().size(px(13.)).rounded_full().bg(if on { theme.background } else { theme.muted }))
-        };
+        let switch = |on: bool| ui::switch(on, theme);
         let row = div().flex().items_center().gap(px(8.));
         match quick {
-            Quick::Theme => row
-                .children(THEMES.into_iter().map(|t| {
-                    let current = t == settings.theme;
-                    div()
-                        .px(px(8.))
-                        .py(px(2.))
-                        .rounded(px(6.))
-                        .text_size(px(12.))
-                        .when(current, |d| d.bg(theme.hairline).text_color(theme.foreground))
-                        .when(!current, |d| d.text_color(theme.faint))
-                        .child(t.label())
-                }))
+            Quick::Theme => ui::segmented(theme)
+                .children(THEMES.into_iter().map(|t| ui::segment(t == settings.theme, theme).child(t.label())))
                 .into_any_element(),
             Quick::TextSize => row
-                .text_size(px(12.))
-                .child(key_cap("−".into(), theme))
+                .text_size(px(ui::T_SM))
+                .child(ui::key_cap("−", theme))
                 .child(
                     div()
                         .w(px(26.))
@@ -617,7 +602,7 @@ impl Palette {
                         .text_color(theme.foreground)
                         .child(format!("{}", settings.font_size)),
                 )
-                .child(key_cap("+".into(), theme))
+                .child(ui::key_cap("+", theme))
                 .into_any_element(),
             Quick::AllSettings => row.children(keys(&crate::workspace::OpenSettings)).into_any_element(),
             _ => {
@@ -651,7 +636,7 @@ impl Palette {
                 })
                 .collect()
         };
-        let dim = if selected { theme.muted } else { theme.faint };
+        let dim = theme.muted;
         let accent = if selected { theme.caret } else { theme.faint };
         let file_marker = || div().size(px(5.)).rounded(px(2.)).bg(accent).into_any_element();
         let (marker, label, right): (AnyElement, AnyElement, Option<AnyElement>) = match row.item {
@@ -664,7 +649,7 @@ impl Palette {
                     .items_center()
                     .gap(px(10.))
                     .when(row.show_category, |d| d.child(div().text_color(dim).child(command.category.label())))
-                    .children(command.keys.clone().map(|k| key_cap(k, theme)));
+                    .children(command.keys.clone().map(|k| ui::key_cap(k, theme)));
                 (
                     div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
                     StyledText::new(label).with_highlights(marked).into_any_element(),
@@ -740,16 +725,24 @@ impl Palette {
                     .items_center()
                     .gap(px(12.))
                     .px(px(14.))
-                    .rounded(px(9.))
-                    .text_size(px(14.))
+                    .rounded(px(ui::R_ROW_LG))
+                    .text_size(px(ui::T_LG))
+                    .cursor_pointer()
                     .text_color(if separated { theme.muted } else { theme.foreground })
                     .when(selected, |r| r.bg(theme.accent_soft))
                     .child(div().w(px(12.)).flex().justify_center().child(marker))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(label))
-                    .children(right.map(|r| div().flex_none().text_size(px(12.)).child(r))),
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    // Paths and keys give way before the name does.
+                    .children(right.map(|r| {
+                        div().flex_shrink().min_w_0().max_w(relative(0.45)).truncate().text_size(px(ui::T_SM)).child(r)
+                    })),
             )
-            .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
-                if this.selected != ix {
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                // Only a real move takes over from the keyboard, not a pointer resting there
+                // or a twitch of the trackpad.
+                let anchor = *this.pointer_anchor.get_or_insert(event.position);
+                let moved = (event.position.x - anchor.x).abs() + (event.position.y - anchor.y).abs();
+                if moved > px(4.) && this.selected != ix {
                     this.selected = ix;
                     cx.notify();
                 }
@@ -769,10 +762,10 @@ impl Palette {
                     .flex()
                     .items_center()
                     .px(px(14.))
-                    .rounded(px(9.))
+                    .rounded(px(ui::R_ROW_LG))
                     .when(active, |d| d.bg(theme.accent_soft))
-                    .text_size(px(14.))
-                    .text_color(if active { theme.foreground } else { theme.faint })
+                    .text_size(px(ui::T_LG))
+                    .text_color(if active { theme.foreground } else { theme.muted })
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(text)),
             )
             .into_any_element()
@@ -793,18 +786,6 @@ impl Palette {
     }
 }
 
-fn key_cap(keys: String, theme: &Theme) -> AnyElement {
-    div()
-        .px(px(6.))
-        .py(px(1.))
-        .rounded(px(5.))
-        .bg(theme.hairline)
-        .text_size(px(11.))
-        .text_color(theme.muted)
-        .child(keys)
-        .into_any_element()
-}
-
 /// Every file in the project, respecting `.gitignore`, sorted by path.
 fn list_files(root: &Path) -> Vec<FileEntry> {
     let mut files: Vec<FileEntry> = ignore::WalkBuilder::new(root)
@@ -818,6 +799,15 @@ fn list_files(root: &Path) -> Vec<FileEntry> {
         .collect();
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
     files
+}
+
+/// The shortcut for `action` with the current keymap, formatted, whatever has focus
+/// (asking the window only knows the keys of what's focused). The last binding added wins,
+/// as a keymap preset's do over the defaults.
+pub fn shortcut(action: &dyn Action, cx: &App) -> Option<String> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    keymap.bindings_for_action(action).last().map(format_keys)
 }
 
 /// Formats a shortcut the way the platform shows them: ⌘⇧] on macOS, Ctrl+Shift+] elsewhere.
@@ -937,7 +927,7 @@ impl Render for Palette {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .rounded(px(14.))
+            .rounded(px(ui::R_MODAL))
             .border_1()
             .border_color(theme.hairline)
             .bg(theme.raised)
@@ -949,10 +939,10 @@ impl Render for Palette {
                     .gap(px(12.))
                     .px(px(20.))
                     .py(px(14.))
-                    .text_size(px(16.))
+                    .text_size(px(ui::T_XL))
                     .line_height(px(24.))
                     .child(div().flex_1().min_w_0().child(self.input.clone()))
-                    .child(div().flex_none().text_size(px(12.)).text_color(theme.faint).child(hint)),
+                    .child(div().flex_none().text_size(px(ui::T_SM)).text_color(theme.muted).child(hint)),
             )
             .children(list.map(|l| div().border_t_1().border_color(theme.hairline).child(l)))
     }

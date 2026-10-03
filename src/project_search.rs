@@ -2,6 +2,7 @@ use crate::fonts::Fonts;
 use crate::search::SearchQuery;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
+use crate::ui;
 use gpui::{
     App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, SharedString,
     StyledText, Subscription, Task, Window, div, prelude::*, px, uniform_list,
@@ -16,7 +17,7 @@ const MAX_MATCHES: usize = 2_000;
 const MAX_FILE_SIZE: u64 = 1024 * 1024;
 /// Wait this long after the last keystroke before searching.
 const DEBOUNCE: Duration = Duration::from_millis(150);
-const ROW_HEIGHT: f32 = 24.;
+const ROW_HEIGHT: f32 = ui::ROW_SM;
 /// Long lines are cut down to this many characters around the match.
 const PREVIEW_CHARS: usize = 160;
 
@@ -162,15 +163,25 @@ impl ProjectSearch {
 
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Theme>();
-        let row = div().id(ix).h(px(ROW_HEIGHT)).flex().items_center().gap(px(8.)).pr(px(12.)).whitespace_nowrap();
+        let row = div()
+            .id(ix)
+            .h(px(ROW_HEIGHT))
+            .mx(px(6.))
+            .rounded(px(ui::R_ROW))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pr(px(6.))
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.hairline));
         match self.rows[ix] {
             Row::File(f) => {
                 let file = &self.results[f];
                 let name_start = file.relative.rfind(['/', '\\']).map_or(0, |i| i + 1);
                 let folder = file.relative[..name_start].trim_end_matches(['/', '\\']).to_string();
-                row.pl(px(16.))
-                    .mt(px(if ix == 0 { 0. } else { 4. }))
-                    .text_size(px(12.5))
+                row.pl(px(10.))
+                    .text_size(px(ui::T_SM))
                     .child(
                         div()
                             .flex_none()
@@ -178,14 +189,15 @@ impl ProjectSearch {
                             .font_weight(FontWeight::MEDIUM)
                             .child(file.relative[name_start..].to_string()),
                     )
-                    .child(div().flex_1().min_w_0().overflow_hidden().text_color(theme.faint).child(folder))
+                    .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(folder))
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(11.))
+                            .text_size(px(ui::T_XS))
                             .text_color(theme.muted)
                             .child(file.matches.len().to_string()),
                     )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, 0, cx)))
                     .into_any_element()
             }
             Row::Match(f, m) => {
@@ -197,10 +209,9 @@ impl ProjectSearch {
                 };
                 let text = StyledText::new(line_match.preview.clone())
                     .with_highlights(line_match.highlights.iter().map(|r| (r.clone(), highlight)));
-                row.pl(px(16.))
-                    .text_size(px(12.))
+                row.pl(px(10.))
+                    .text_size(px(ui::T_SM))
                     .text_color(theme.muted)
-                    .hover(|s| s.bg(theme.hairline))
                     .child(
                         div()
                             .w(px(32.))
@@ -240,12 +251,12 @@ impl ProjectSearch {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(5.))
+            .rounded(px(ui::R_KEY))
             .font_family(cx.global::<Fonts>().code.clone())
-            .text_size(px(11.5))
+            .text_size(px(ui::T_SM))
             .text_color(if on { theme.caret } else { theme.muted })
             .when(on, |b| b.bg(theme.accent_soft))
-            .when(!on, |b| b.hover(|s| s.bg(theme.hairline)))
+            .when(!on, |b| b.hover(|s| s.bg(theme.hairline).text_color(theme.foreground)))
             .child(label)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 flip(this);
@@ -354,17 +365,16 @@ impl Render for ProjectSearch {
             .child(
                 div()
                     .mx(px(12.))
-                    .mt(px(4.))
-                    .h(px(30.))
+                    .h(px(ui::FIELD))
                     .px(px(8.))
                     .flex()
                     .items_center()
                     .gap(px(2.))
-                    .rounded(px(7.))
+                    .rounded(px(ui::R_ROW))
                     .bg(theme.background)
                     .border_1()
                     .border_color(if invalid { theme.error } else { theme.hairline })
-                    .text_size(px(13.))
+                    .text_size(px(ui::T_MD))
                     .line_height(px(20.))
                     .child(div().flex_1().min_w_0().overflow_hidden().child(self.input.clone()))
                     .child(case)
@@ -375,8 +385,8 @@ impl Render for ProjectSearch {
                 div()
                     .px(px(16.))
                     .py(px(8.))
-                    .text_size(px(11.5))
-                    .text_color(if invalid { theme.error } else { theme.faint })
+                    .text_size(px(ui::T_SM))
+                    .text_color(if invalid { theme.error } else { theme.muted })
                     .child(status),
             )
             .child(

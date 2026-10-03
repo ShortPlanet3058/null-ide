@@ -3,6 +3,7 @@
 use crate::ai::{self, ProviderId};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
+use crate::ui;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, Window, actions, div, prelude::*, px,
 };
@@ -80,20 +81,26 @@ impl Render for KeyPrompt {
             .flex_col()
             .gap(px(10.))
             .p(px(16.))
-            .rounded(px(14.))
+            .rounded(px(ui::R_MODAL))
             .border_1()
             .border_color(theme.hairline)
             .bg(theme.raised)
             .shadow_lg()
-            .text_size(px(13.))
-            .child(div().text_size(px(14.)).text_color(theme.foreground).child(format!("{} API key", self.provider.label())))
+            .text_size(px(ui::T_MD))
             .child(
                 div()
-                    .h(px(32.))
+                    .text_size(px(ui::T_LG))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .child(format!("{} API key", self.provider.label())),
+            )
+            .child(
+                div()
+                    .h(px(ui::FIELD))
                     .px(px(10.))
                     .flex()
                     .items_center()
-                    .rounded(px(7.))
+                    .rounded(px(ui::R_CONTROL))
                     .bg(theme.background)
                     .border_1()
                     .border_color(theme.hairline)
@@ -101,9 +108,9 @@ impl Render for KeyPrompt {
                     .child(self.input.clone()),
             )
             .children(self.provider.key_url().map(|url| {
-                div().text_size(px(12.)).text_color(theme.muted).child(format!("Get a key at {url}"))
+                div().text_size(px(ui::T_SM)).text_color(theme.muted).child(format!("Get one at {url}"))
             }))
-            .child(div().text_size(px(12.)).text_color(theme.faint).child(format!(
+            .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(format!(
                 "Stored in your {store}, never in the settings file. Leave it empty and press ↵ to remove the saved key."
             )))
     }

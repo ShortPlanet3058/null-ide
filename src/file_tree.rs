@@ -1,6 +1,7 @@
 use crate::fs_ops;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
+use crate::ui;
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, KeyContext,
     MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy, SharedString, Subscription, Transformation,
@@ -73,7 +74,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(keys);
 }
 
-pub const ROW_HEIGHT: f32 = 26.;
+pub const ROW_HEIGHT: f32 = ui::ROW;
 /// Width of the sidebar the tree is drawn in.
 pub const TREE_WIDTH: f32 = 240.;
 const INDENT: f32 = 14.;
@@ -751,7 +752,8 @@ impl FileTree {
     fn render_row(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>();
         let row = &self.rows[ix];
-        let indent = px(16. + row.depth as f32 * INDENT);
+        // Rows sit inset from the sidebar's edges, so their highlight has rounded ends.
+        let indent = px(10. + row.depth as f32 * INDENT);
         let marker = |is_dir: bool, turn: f32, color: gpui::Hsla, dot: gpui::Hsla| {
             if is_dir {
                 div().size(px(14.)).flex().items_center().justify_center().child(
@@ -773,31 +775,39 @@ impl FileTree {
         // The error (like "already exists") sits at the end of the field, in red.
         // Rows in the list don't stretch, so the field gets an explicit width:
         // the sidebar minus the indent, the marker and the padding.
-        let field_width = (TREE_WIDTH - 16. - row.depth as f32 * INDENT - 14. - 8. - 12.).max(80.);
-        let name_field =
-            |edit: &Edit| {
-                div()
-                    .w(px(field_width))
-                    .flex_none()
-                    .h(px(22.))
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded(px(5.))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(if edit.error.is_some() { theme.error } else { theme.caret })
-                    .line_height(px(18.))
-                    .child(div().flex_1().min_w(px(40.)).overflow_hidden().child(edit.input.clone()))
-                    .children(edit.error.clone().map(|e| {
-                        div().flex_none().text_size(px(11.)).text_color(theme.error).whitespace_nowrap().child(e)
-                    }))
-            };
+        let field_width = (TREE_WIDTH - 12. - 10. - row.depth as f32 * INDENT - 14. - 8. - 12.).max(80.);
+        let name_field = |edit: &Edit| {
+            div()
+                .w(px(field_width))
+                .flex_none()
+                .h(px(22.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(px(ui::R_KEY))
+                .bg(theme.background)
+                .border_1()
+                .border_color(if edit.error.is_some() { theme.error } else { theme.caret })
+                .line_height(px(18.))
+                .child(div().flex_1().min_w(px(40.)).overflow_hidden().child(edit.input.clone()))
+                .children(edit.error.clone().map(|e| {
+                    div().flex_none().text_size(px(ui::T_XS)).text_color(theme.error).whitespace_nowrap().child(e)
+                }))
+        };
 
         let editing_this = |path: &Path| matches!(self.edit.as_ref().map(|e| &e.kind), Some(EditKind::Rename { path: p }) if p == path);
-        let base =
-            div().id(ix).h(px(ROW_HEIGHT)).flex().items_center().gap(px(8.)).pl(indent).pr(px(12.)).text_size(px(13.));
+        let base = div()
+            .id(ix)
+            .h(px(ROW_HEIGHT))
+            .mx(px(6.))
+            .rounded(px(ui::R_ROW))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pl(indent)
+            .pr(px(6.))
+            .text_size(px(ui::T_MD));
         match &row.kind {
             RowKind::NewItem { is_dir } => {
                 let edit = self.edit.as_ref().expect("a new-item row exists only while editing");
@@ -835,7 +845,7 @@ impl FileTree {
                     row_el.key_context("TreeEdit").child(name_field(edit)).into_any_element()
                 } else {
                     row_el
-                        .child(div().overflow_hidden().whitespace_nowrap().child(entry.name.clone()))
+                        .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click(ix, event.click_count(), window, cx)
                         }))
@@ -870,12 +880,13 @@ impl FileTree {
                         .flex()
                         .items_center()
                         .gap(px(16.))
-                        .rounded(px(6.))
+                        .rounded(px(ui::R_ROW))
+                        .cursor_pointer()
                         .text_color(if destructive { theme.error } else { theme.foreground })
                         .when(selected, |d| d.bg(theme.accent_soft))
                         .hover(|s| s.bg(theme.accent_soft))
                         .child(div().flex_1().child(item.label()))
-                        .children(item.keys().map(|k| div().text_size(px(11.5)).text_color(theme.faint).child(k)))
+                        .children(item.keys().map(|k| div().text_size(px(ui::T_SM)).text_color(theme.muted).child(k)))
                         .on_click(
                             cx.listener(move |this, _: &ClickEvent, window, cx| this.run_menu_item(item, window, cx)),
                         ),
@@ -888,12 +899,12 @@ impl FileTree {
                         .occlude()
                         .min_w(px(220.))
                         .p(px(4.))
-                        .rounded(px(9.))
+                        .rounded(px(ui::R_POPOVER))
                         .bg(theme.raised)
                         .border_1()
                         .border_color(theme.hairline)
                         .shadow_lg()
-                        .text_size(px(13.))
+                        .text_size(px(ui::T_MD))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.menu = None;
                             cx.notify();
@@ -925,10 +936,17 @@ impl Render for FileTree {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(4.))
-                .text_color(theme.faint)
-                .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
-                .child(svg().path(icon).size(px(14.)).text_color(theme.muted))
+                .rounded(px(ui::R_KEY))
+                .cursor_pointer()
+                .group(id)
+                .hover(|s| s.bg(theme.hairline))
+                .child(
+                    svg()
+                        .path(icon)
+                        .size(px(14.))
+                        .text_color(theme.muted)
+                        .group_hover(id, |s| s.text_color(theme.foreground)),
+                )
         };
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add("FileTree");
@@ -972,16 +990,7 @@ impl Render for FileTree {
                     .flex()
                     .items_center()
                     .gap(px(2.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(11.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.faint)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(title),
-                    )
+                    .child(ui::section_heading(&title, theme).flex_1().min_w_0().truncate())
                     .child(
                         div()
                             .flex()
