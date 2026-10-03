@@ -255,11 +255,15 @@ impl Workspace {
                 }
             }),
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
-                ProjectSearchEvent::Open { path, line, columns, query } => {
+                ProjectSearchEvent::Open { path, line, columns, query, keep_focus } => {
                     let (line, columns, query) = (*line, columns.clone(), query.clone());
                     this.open_file(path.clone(), window, cx);
                     if let Some(editor) = this.active_editor() {
                         editor.update(cx, |editor, cx| editor.reveal_match(line, columns, query, cx));
+                    }
+                    if *keep_focus {
+                        let search = this.project_search.focus_handle(cx);
+                        window.focus(&search);
                     }
                 }
             }),

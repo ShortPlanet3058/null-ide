@@ -3,13 +3,39 @@ use crate::search::SearchQuery;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
 use crate::ui;
+use futures::StreamExt;
 use gpui::{
-    App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, SharedString,
-    StyledText, Subscription, Task, Window, div, prelude::*, px, uniform_list,
+    App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyBinding,
+    ScrollStrategy, SharedString, StyledText, Subscription, Task, UniformListScrollHandle, Window, actions, div,
+    prelude::*, px, uniform_list,
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+actions!(project_search, [NextResult, PreviousResult, OpenResult]);
+
+pub fn bind_keys(cx: &mut App) {
+    let ctx = Some("ProjectSearch");
+    cx.bind_keys([
+        KeyBinding::new("down", NextResult, ctx),
+        KeyBinding::new("ctrl-n", NextResult, ctx),
+        KeyBinding::new("up", PreviousResult, ctx),
+        KeyBinding::new("ctrl-p", PreviousResult, ctx),
+        KeyBinding::new("enter", OpenResult, ctx),
+    ]);
+}
+
+/// Results arrive in batches this often while a search runs.
+const BATCH_EVERY: Duration = Duration::from_millis(80);
+
+/// What a running search reports.
+enum Found {
+    Files(Vec<FileResult>),
+    Done { truncated: bool },
+}
 
 /// Searching stops after this many matches.
 const MAX_MATCHES: usize = 2_000;
@@ -50,7 +76,9 @@ enum Status {
 }
 
 pub enum ProjectSearchEvent {
-    Open { path: PathBuf, line: usize, columns: Range<usize>, query: SearchQuery },
+    /// `keep_focus`: opened from the keyboard, so the search keeps the focus to go on
+    /// to the next result.
+    Open { path: PathBuf, line: usize, columns: Range<usize>, query: SearchQuery, keep_focus: bool },
 }
 
 /// Search across every file in the project. Lives in the sidebar.
@@ -65,6 +93,11 @@ pub struct ProjectSearch {
     status: Status,
     query: SearchQuery,
     task: Option<Task<()>>,
+    /// Set to stop the search running in the background when a new one starts.
+    cancel: Arc<AtomicBool>,
+    /// The result row chosen from the keyboard.
+    selected: Option<usize>,
+    scroll: UniformListScrollHandle,
     _subscription: Subscription,
 }
 
@@ -85,6 +118,9 @@ impl ProjectSearch {
             status: Status::Idle,
             query: SearchQuery::default(),
             task: None,
+            cancel: Arc::default(),
+            selected: None,
+            scroll: UniformListScrollHandle::new(),
             _subscription: subscription,
         }
     }
@@ -111,6 +147,8 @@ impl ProjectSearch {
             regex: self.regex,
         };
         self.query = query.clone();
+        self.selected = None;
+        self.cancel.store(true, Ordering::Relaxed);
         if query.text.is_empty() {
             self.task = None;
             self.set_results(Vec::new(), Status::Idle, cx);
@@ -124,17 +162,79 @@ impl ProjectSearch {
         self.status = Status::Searching;
         cx.notify();
         let root = self.root.clone();
-        // Replacing the task cancels a search that's still running.
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel = cancel.clone();
+        // Results show as they're found, file by file in order; the previous results stay
+        // until the first new ones arrive, so the list doesn't flash empty while typing.
         self.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(DEBOUNCE).await;
-            let (results, truncated) = cx.background_executor().spawn(async move { search_files(&root, &query) }).await;
-            this.update(cx, |this, cx| {
-                let matches = results.iter().map(|f| f.matches.len()).sum();
-                let status = Status::Done { files: results.len(), matches, truncated };
-                this.set_results(results, status, cx);
-            })
-            .ok();
+            let (tx, mut rx) = futures::channel::mpsc::unbounded();
+            cx.background_executor()
+                .spawn(async move {
+                    search_files(&root, &query, &cancel, |found| {
+                        tx.unbounded_send(found).ok();
+                    })
+                })
+                .detach();
+            let mut fresh = true;
+            while let Some(found) = rx.next().await {
+                let ok = this.update(cx, |this, cx| {
+                    let mut results = if fresh { Vec::new() } else { std::mem::take(&mut this.results) };
+                    fresh = false;
+                    let status = match found {
+                        Found::Files(files) => {
+                            results.extend(files);
+                            Status::Searching
+                        }
+                        Found::Done { truncated } => {
+                            let matches = results.iter().map(|f| f.matches.len()).sum();
+                            Status::Done { files: results.len(), matches, truncated }
+                        }
+                    };
+                    this.set_results(results, status, cx);
+                });
+                if ok.is_err() {
+                    break;
+                }
+            }
         }));
+    }
+
+    /// Moves the keyboard choice to the next (or previous) match, skipping file names.
+    fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let is_match = |ix: &usize| matches!(self.rows[*ix], Row::Match(..));
+        let next = match (self.selected, forward) {
+            (None, true) => (0..self.rows.len()).find(is_match),
+            (None, false) => (0..self.rows.len()).rev().find(is_match),
+            (Some(at), true) => (at + 1..self.rows.len()).find(is_match).or(Some(at)),
+            (Some(at), false) => (0..at).rev().find(is_match).or(Some(at)),
+        };
+        if let Some(ix) = next {
+            self.selected = Some(ix);
+            // Scrolls only as far as needed; going up, a file's first match brings its name along.
+            let shown = if !forward && ix > 0 && matches!(self.rows[ix - 1], Row::File(_)) { ix - 1 } else { ix };
+            self.scroll.scroll_to_item(shown, ScrollStrategy::Top);
+            cx.notify();
+        }
+    }
+
+    fn next_result(&mut self, _: &NextResult, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(true, cx);
+    }
+
+    fn previous_result(&mut self, _: &PreviousResult, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(false, cx);
+    }
+
+    /// ↵ opens the chosen match (the first, if none is chosen) and stays here for the next.
+    fn open_result(&mut self, _: &OpenResult, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() {
+            self.step(true, cx);
+        }
+        if let Some(Row::Match(f, m)) = self.selected.and_then(|ix| self.rows.get(ix)) {
+            let (f, m) = (*f, *m);
+            self.open(f, m, true, cx);
+        }
     }
 
     fn set_results(&mut self, results: Vec<FileResult>, status: Status, cx: &mut Context<Self>) {
@@ -150,7 +250,7 @@ impl ProjectSearch {
         cx.notify();
     }
 
-    fn open(&mut self, file: usize, line_match: usize, cx: &mut Context<Self>) {
+    fn open(&mut self, file: usize, line_match: usize, keep_focus: bool, cx: &mut Context<Self>) {
         let file = &self.results[file];
         let m = &file.matches[line_match];
         cx.emit(ProjectSearchEvent::Open {
@@ -158,6 +258,7 @@ impl ProjectSearch {
             line: m.line,
             columns: m.columns.clone(),
             query: self.query.clone(),
+            keep_focus,
         });
     }
 
@@ -174,6 +275,7 @@ impl ProjectSearch {
             .pr(px(6.))
             .whitespace_nowrap()
             .cursor_pointer()
+            .when(self.selected == Some(ix), |r| r.bg(theme.accent_soft))
             .hover(|s| s.bg(theme.hairline));
         match self.rows[ix] {
             Row::File(f) => {
@@ -197,7 +299,7 @@ impl ProjectSearch {
                             .text_color(theme.muted)
                             .child(file.matches.len().to_string()),
                     )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, 0, cx)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, 0, false, cx)))
                     .into_any_element()
             }
             Row::Match(f, m) => {
@@ -228,7 +330,7 @@ impl ProjectSearch {
                             .font_family(cx.global::<Fonts>().code.clone())
                             .child(text),
                     )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, m, cx)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, m, false, cx)))
                     .into_any_element()
             }
         }
@@ -267,8 +369,10 @@ impl ProjectSearch {
 
 /// Every match of `query` in the project's files, respecting `.gitignore`.
 /// Returns whether the search stopped early at [`MAX_MATCHES`].
-fn search_files(root: &Path, query: &SearchQuery) -> (Vec<FileResult>, bool) {
-    let Ok(regex) = query.build() else { return (Vec::new(), false) };
+/// Every match of `query` in the project's files, respecting `.gitignore`, reported to
+/// `report` in batches, files in order, then `Found::Done`. Stops quietly when `cancel` is set.
+fn search_files(root: &Path, query: &SearchQuery, cancel: &AtomicBool, mut report: impl FnMut(Found)) {
+    let Ok(regex) = query.build() else { return };
     let mut files: Vec<PathBuf> = ignore::WalkBuilder::new(root)
         .hidden(false)
         .filter_entry(|e| e.file_name() != ".git")
@@ -280,9 +384,13 @@ fn search_files(root: &Path, query: &SearchQuery) -> (Vec<FileResult>, bool) {
         .collect();
     files.sort();
 
-    let mut results = Vec::new();
+    let mut batch = Vec::new();
+    let mut sent = Instant::now();
     let mut total = 0;
     for path in files {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
         if text.contains('\0') {
             continue;
@@ -302,13 +410,21 @@ fn search_files(root: &Path, query: &SearchQuery) -> (Vec<FileResult>, bool) {
         }
         if !matches.is_empty() {
             let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
-            results.push(FileResult { path, relative, matches });
+            batch.push(FileResult { path, relative, matches });
         }
         if total >= MAX_MATCHES {
-            return (results, true);
+            report(Found::Files(batch));
+            return report(Found::Done { truncated: true });
+        }
+        if !batch.is_empty() && sent.elapsed() >= BATCH_EVERY {
+            report(Found::Files(std::mem::take(&mut batch)));
+            sent = Instant::now();
         }
     }
-    (results, false)
+    if !batch.is_empty() {
+        report(Found::Files(batch));
+    }
+    report(Found::Done { truncated: false });
 }
 
 /// A trimmed, length-limited version of a line, with match ranges shifted to fit it.
@@ -359,6 +475,10 @@ impl Render for ProjectSearch {
         };
         let invalid = matches!(self.status, Status::Invalid);
         div()
+            .key_context("ProjectSearch")
+            .on_action(cx.listener(Self::next_result))
+            .on_action(cx.listener(Self::previous_result))
+            .on_action(cx.listener(Self::open_result))
             .size_full()
             .flex()
             .flex_col()
@@ -395,6 +515,7 @@ impl Render for ProjectSearch {
                     self.rows.len(),
                     cx.processor(|this, range: Range<usize>, _, cx| range.map(|ix| this.render_row(ix, cx)).collect()),
                 )
+                .track_scroll(self.scroll.clone())
                 .flex_1(),
             )
     }
@@ -403,6 +524,31 @@ impl Render for ProjectSearch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn arrows_step_through_matches_skipping_file_names(cx: &mut gpui::TestAppContext) {
+        let search = cx.new(|cx| ProjectSearch::new(PathBuf::from("/p"), cx));
+        let m = |line| LineMatch { line, columns: 0..1, preview: "x".into(), highlights: vec![] };
+        let file = |name: &str, lines: Vec<usize>| FileResult {
+            path: PathBuf::from(name),
+            relative: name.into(),
+            matches: lines.into_iter().map(m).collect(),
+        };
+        search.update(cx, |s, cx| {
+            s.set_results(vec![file("a", vec![1, 2]), file("b", vec![3])], Status::Idle, cx);
+            // Rows: a, a:1, a:2, b, b:3.
+            s.step(true, cx);
+            assert_eq!(s.selected, Some(1));
+            s.step(true, cx);
+            s.step(true, cx);
+            assert_eq!(s.selected, Some(4));
+            // At the end it stays.
+            s.step(true, cx);
+            assert_eq!(s.selected, Some(4));
+            s.step(false, cx);
+            assert_eq!(s.selected, Some(2));
+        });
+    }
 
     #[test]
     fn finds_matches_across_files_and_skips_ignored_ones() {
@@ -417,7 +563,13 @@ mod tests {
         std::fs::write(dir.join("target/c.rs"), "alpha\n").unwrap();
 
         let query = SearchQuery { text: "alpha".into(), ..Default::default() };
-        let (results, truncated) = search_files(&dir, &query);
+        let mut results = Vec::new();
+        let mut truncated = None;
+        search_files(&dir, &query, &AtomicBool::new(false), |found| match found {
+            Found::Files(files) => results.extend(files),
+            Found::Done { truncated: t } => truncated = Some(t),
+        });
+        let truncated = truncated.expect("a finished search says so");
         assert!(!truncated);
         assert_eq!(results.len(), 1);
         let file = &results[0];
@@ -427,6 +579,11 @@ mod tests {
         // The preview drops indentation and keeps the highlight on the match.
         assert_eq!(file.matches[1].preview.as_ref(), "let beta = alpha();");
         assert_eq!(file.matches[1].highlights, vec![11..16]);
+
+        // A cancelled search reports nothing.
+        let mut reported = false;
+        search_files(&dir, &query, &AtomicBool::new(true), |_| reported = true);
+        assert!(!reported);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

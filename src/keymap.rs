@@ -96,6 +96,7 @@ pub fn register(keymap: Keymap, cx: &mut App) {
     crate::workspace::bind_keys(cx);
     crate::file_tree::bind_keys(cx);
     crate::find_bar::bind_keys(cx);
+    crate::project_search::bind_keys(cx);
     crate::terminal::bind_keys(cx);
     crate::key_prompt::bind_keys(cx);
     crate::text_input::bind_keys(cx);
