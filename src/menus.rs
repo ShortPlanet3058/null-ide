@@ -7,7 +7,7 @@ use crate::find_bar::{DeployFind, DeployReplace, FindNext, FindPrevious};
 use crate::workspace::{
     CloseAllTabs, CloseTab, DecreaseFontSize, GoToLine, IncreaseFontSize, NewUntitled, NextTab, Open, OpenSettings,
     PreviousTab, ReopenClosedTab, ResetFontSize, SaveAll, SaveAs, SearchProject, ShowCommands, TogglePalette,
-    ToggleSidebar, ToggleTerminal, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
+    ToggleSidebar, ToggleTerminal,
 };
 use gpui::{App, KeyBinding, Menu, MenuItem, SystemMenuType, actions};
 
@@ -166,9 +166,13 @@ pub fn set(cx: &mut App) {
                 MenuItem::submenu(Menu {
                     name: "Theme".into(),
                     items: vec![
-                        MenuItem::action("OLED", UseOledTheme),
-                        MenuItem::action("Graphite", UseGraphiteTheme),
-                        MenuItem::action("Paper", UsePaperTheme),
+                        MenuItem::action("Null", crate::workspace::UseNullTheme),
+                        MenuItem::action("Ash", crate::workspace::UseAshTheme),
+                        MenuItem::action("Midnight", crate::workspace::UseMidnightTheme),
+                        MenuItem::action("Moss", crate::workspace::UseMossTheme),
+                        MenuItem::separator(),
+                        MenuItem::action("Paper", crate::workspace::UsePaperTheme),
+                        MenuItem::action("Dune", crate::workspace::UseDuneTheme),
                     ],
                 }),
                 MenuItem::action(wrap_label, ToggleWordWrap),

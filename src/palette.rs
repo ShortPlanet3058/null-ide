@@ -207,7 +207,7 @@ impl Quick {
     }
 }
 
-const THEMES: [ThemeName; 3] = [ThemeName::Oled, ThemeName::Graphite, ThemeName::Paper];
+const THEMES: [ThemeName; 6] = ThemeName::ALL;
 
 fn next_theme(current: ThemeName, step: isize) -> ThemeName {
     let i = THEMES.iter().position(|t| *t == current).unwrap_or(0) as isize;
@@ -215,12 +215,7 @@ fn next_theme(current: ThemeName, step: isize) -> ThemeName {
 }
 
 fn theme_action(theme: ThemeName) -> Box<dyn Action> {
-    use crate::workspace::{UseGraphiteTheme, UseOledTheme, UsePaperTheme};
-    match theme {
-        ThemeName::Oled => Box::new(UseOledTheme),
-        ThemeName::Graphite => Box::new(UseGraphiteTheme),
-        ThemeName::Paper => Box::new(UsePaperTheme),
-    }
+    crate::workspace::theme_action(theme)
 }
 
 /// Commands that a quick setting already covers, left out of ⌘K's search.
@@ -233,9 +228,12 @@ fn covered_by_quick(name: &str) -> bool {
             | "ToggleAutocomplete"
             | "ToggleFadeWhileTyping"
             | "ToggleAi"
-            | "UseOledTheme"
-            | "UseGraphiteTheme"
+            | "UseNullTheme"
+            | "UseAshTheme"
+            | "UseMidnightTheme"
+            | "UseMossTheme"
             | "UsePaperTheme"
+            | "UseDuneTheme"
             | "IncreaseFontSize"
             | "DecreaseFontSize"
             | "OpenSettings"
@@ -667,8 +665,12 @@ impl Palette {
         let switch = |on: bool| ui::switch(on, theme);
         let row = div().flex().items_center().gap(px(8.));
         match quick {
-            Quick::Theme => ui::segmented(theme)
-                .children(THEMES.into_iter().map(|t| ui::segment(t == settings.theme, theme).child(t.label())))
+            // Six are too many to show at once: the current one, and ←→ for the others.
+            Quick::Theme => row
+                .text_size(px(ui::T_SM))
+                .child(ui::key_cap("←", theme))
+                .child(div().min_w(px(64.)).text_center().text_color(theme.foreground).child(settings.theme.label()))
+                .child(ui::key_cap("→", theme))
                 .into_any_element(),
             Quick::TextSize => row
                 .text_size(px(ui::T_SM))
@@ -1180,7 +1182,7 @@ mod tests {
 
     #[test]
     fn themes_cycle_both_ways() {
-        assert_eq!(next_theme(ThemeName::Oled, 1), ThemeName::Graphite);
-        assert_eq!(next_theme(ThemeName::Oled, -1), ThemeName::Paper);
+        assert_eq!(next_theme(ThemeName::Null, 1), ThemeName::Ash);
+        assert_eq!(next_theme(ThemeName::Null, -1), ThemeName::Dune);
     }
 }

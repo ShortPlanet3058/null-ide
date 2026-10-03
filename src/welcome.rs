@@ -2,13 +2,14 @@
 //! Null looks, the typeface, the shortcuts, AI), each applied as soon as it's picked.
 //! Shown again any time with "Welcome to Null…".
 
-use crate::ai::ProviderId;
+use crate::ai::{self, ProviderId};
 use crate::keymap::Keymap;
 use crate::settings::{self, Settings};
+use crate::text_input::TextInput;
 use crate::theme::{Syntax, Theme, ThemeName};
 use crate::ui;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
     SharedString, StyledText, Task, Window, WindowControlArea, actions, div, prelude::*, px,
 };
 use std::time::{Duration, Instant};
@@ -28,7 +29,6 @@ pub enum WelcomeEvent {
 const HELLO_EVERY: Duration = Duration::from_millis(2200);
 /// How long a hello takes to come in, and a step to slide in.
 const FADE: Duration = Duration::from_millis(420);
-const STEPS: usize = 4;
 
 /// "hello" in a few languages, as coloured pieces.
 const HELLOS: &[(&str, &[(&str, Syntax)])] = &[
@@ -93,20 +93,44 @@ const HELLOS: &[(&str, &[(&str, Syntax)])] = &[
     ("Ruby", &[("puts ", Syntax::Function), ("\"hello\"", Syntax::String)]),
 ];
 
-/// What AI the person picked; "not now" switches AI off entirely.
+/// How present AI is: the first question about it.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum AiChoice {
-    NotNow,
-    Provider(ProviderId),
+enum Presence {
+    Off,
+    WhenAsked,
+    WhileTyping,
 }
 
-const AI_CHOICES: [(AiChoice, &str, &str); 5] = [
-    (AiChoice::NotNow, "Not now", "AI stays out of sight. Turn it on any time in Settings."),
-    (AiChoice::Provider(ProviderId::ClaudeCode), "Claude Code", "Your Claude plan, through the claude command."),
-    (AiChoice::Provider(ProviderId::Codex), "Codex", "Your ChatGPT plan, through the codex command."),
-    (AiChoice::Provider(ProviderId::Nvidia), "A free API key", "NVIDIA's free models; paste the key in Settings."),
-    (AiChoice::Provider(ProviderId::Ollama), "Ollama", "Models running on this computer."),
+const PRESENCE: [(Presence, &str, &str); 3] = [
+    (Presence::Off, "Off", "No AI anywhere in Null. Turn it on later in Settings if you like."),
+    (Presence::WhenAsked, "When I ask", "⌘I to change code, questions, and tasks. Nothing while you type."),
+    (Presence::WhileTyping, "When I ask, and while I type", "Also suggests the rest of the line as you type."),
 ];
+
+/// Where answers come from, in three groups: a plan you already pay for, an API key
+/// (free tiers or paid), this computer.
+const SUBSCRIPTIONS: [(ProviderId, &str); 2] =
+    [(ProviderId::ClaudeCode, "Your Claude Pro or Max plan"), (ProviderId::Codex, "Your ChatGPT Plus or Pro plan")];
+const API_PROVIDERS: [(ProviderId, &str); 7] = [
+    (ProviderId::OpenaiCompatible, "GPT models"),
+    (ProviderId::Claude, "Claude models (Anthropic)"),
+    (ProviderId::Gemini, "Gemini models · free tier"),
+    (ProviderId::Mistral, "Codestral for suggestions · free tier"),
+    (ProviderId::Groq, "Very fast open models · free tier"),
+    (ProviderId::OpenRouter, "Many models, one key"),
+    (ProviderId::Nvidia, "Open models · free credits"),
+];
+const LOCAL: [(ProviderId, &str); 1] = [(ProviderId::Ollama, "Nothing leaves this computer")];
+
+/// The setup's steps; where answers come from only when AI is on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StepKind {
+    Look,
+    Type,
+    Keys,
+    Presence,
+    Provider,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -122,6 +146,8 @@ pub struct Welcome {
     hello_since: Instant,
     /// When the current step came in, for its slide.
     step_since: Instant,
+    /// The API key typed for the provider picked, saved on the way out.
+    key: Entity<TextInput>,
     _ticker: Task<()>,
 }
 
@@ -154,6 +180,11 @@ impl Welcome {
             hello: 0,
             hello_since: Instant::now(),
             step_since: Instant::now(),
+            key: cx.new(|cx| {
+                let mut input = TextInput::new("Paste the API key (or later, in Settings)", cx);
+                input.masked = true;
+                input
+            }),
             _ticker: ticker,
         }
     }
@@ -164,10 +195,20 @@ impl Welcome {
         cx.notify();
     }
 
+    /// The steps as things stand: where answers come from only once AI is on.
+    fn steps(cx: &App) -> Vec<StepKind> {
+        let mut steps = vec![StepKind::Look, StepKind::Type, StepKind::Keys, StepKind::Presence];
+        if cx.global::<Settings>().ai.enabled {
+            steps.push(StepKind::Provider);
+        }
+        steps
+    }
+
     fn next(&mut self, _: &WelcomeNext, _: &mut Window, cx: &mut Context<Self>) {
+        let count = Self::steps(cx).len();
         match self.stage {
             Stage::Hello => self.go(Stage::Step(0), cx),
-            Stage::Step(n) if n + 1 < STEPS => self.go(Stage::Step(n + 1), cx),
+            Stage::Step(n) if n + 1 < count => self.go(Stage::Step(n + 1), cx),
             Stage::Step(_) => self.finish(cx),
         }
     }
@@ -182,6 +223,14 @@ impl Welcome {
     }
 
     fn finish(&mut self, cx: &mut Context<Self>) {
+        // A key typed for the provider goes to the keychain, never to the settings file.
+        let key = self.key.read(cx).text().trim().to_string();
+        let provider = cx.global::<Settings>().ai.provider;
+        if !key.is_empty() && provider.uses_api_key() && cx.global::<Settings>().ai.enabled {
+            if let Err(error) = ai::store_api_key(provider, &key) {
+                eprintln!("null: couldn't save the key: {error}");
+            }
+        }
         settings::update(cx, |s| {
             s.welcomed = true;
             // "Not now" left as it was means no AI at all, not AI waiting for a provider.
@@ -370,7 +419,7 @@ impl Welcome {
 
     /// The top: room for the window buttons (and dragging the window), the wordmark, and
     /// how far along the setup is.
-    fn top_bar(step: Option<usize>, theme: &Theme) -> AnyElement {
+    fn top_bar(step: Option<(usize, usize)>, theme: &Theme) -> AnyElement {
         // On the window buttons' row, just after them.
         div()
             .h(px(42.))
@@ -382,128 +431,51 @@ impl Welcome {
             .pr(px(28.))
             .window_control_area(WindowControlArea::Drag)
             .child(Self::wordmark(theme))
-            .children(
-                step.map(|n| {
-                    div().text_size(px(ui::T_SM)).text_color(theme.faint).child(format!("{} of {STEPS}", n + 1))
-                }),
-            )
+            .children(step.map(|n| {
+                div().text_size(px(ui::T_SM)).text_color(theme.faint).child(format!("{} of {}", n.0 + 1, n.1))
+            }))
             .into_any_element()
     }
 
     fn render_step(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let settings = cx.global::<Settings>().clone();
         let theme = cx.global::<Theme>().clone();
+        let steps = Self::steps(cx);
+        let n = n.min(steps.len() - 1);
         let t = (self.step_since.elapsed().as_secs_f32() / FADE.as_secs_f32()).min(1.);
         if t < 1. {
             window.request_animation_frame();
         }
         let eased = 1. - (1. - t).powi(3);
-        let (title, sub, body): (&str, &str, AnyElement) = match n {
-            0 => (
+        let (title, sub, body): (&str, &str, AnyElement) = match steps[n] {
+            StepKind::Look => (
                 "Choose how Null looks",
                 "Switch any time from ⌘K or Settings.",
                 div()
-                    .flex()
-                    .gap(px(22.))
-                    .children([ThemeName::Oled, ThemeName::Graphite, ThemeName::Paper].into_iter().map(|name| {
-                        ui::theme_preview_scaled(name, settings.theme == name, &theme, 1.55)
+                    .grid()
+                    .grid_cols(3)
+                    .gap(px(18.))
+                    .children(ThemeName::ALL.into_iter().map(|name| {
+                        div()
                             .id(name.label())
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
                             .cursor_pointer()
+                            .child(ui::theme_preview_scaled(name, settings.theme == name, &theme, 1.45))
+                            .child(div().text_size(px(ui::T_SM)).text_color(theme.faint).child(name.note()))
                             .on_click(
                                 cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.theme = name)),
                             )
                     }))
                     .into_any_element(),
             ),
-            1 => {
-                let installed = cx.text_system().all_font_names();
-                let fonts: Vec<&str> = crate::settings_panel::CODE_FONTS
-                    .iter()
-                    .copied()
-                    .filter(|f| installed.iter().any(|i| i == f))
-                    .take(4)
-                    .collect();
-                let size = settings.font_size;
-                let step_size = |delta: f32| {
-                    cx.listener(move |_, _: &ClickEvent, _, cx| {
-                        settings::update(cx, |s| {
-                            s.font_size = (s.font_size + delta).clamp(settings::MIN_FONT_SIZE, settings::MAX_FONT_SIZE)
-                        })
-                    })
-                };
-                let stepper = |id: &'static str, label: &'static str| {
-                    div()
-                        .id(id)
-                        .size(px(ui::CONTROL))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(ui::R_CONTROL))
-                        .border_1()
-                        .border_color(theme.line_strong)
-                        .text_color(theme.foreground)
-                        .cursor_pointer()
-                        .hover(|d| d.bg(theme.hairline))
-                        .child(label)
-                };
-                (
-                    "Pick a typeface you can read all day",
-                    "Monospaced and made for code. The size changes with ⌘+ and ⌘- too.",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(16.))
-                        .child(div().flex().flex_wrap().gap(px(10.)).children(fonts.into_iter().enumerate().map(
-                            |(i, font)| {
-                                let active = settings.code_font == font;
-                                let name = font.to_string();
-                                div()
-                                    .id(("font", i))
-                                    .px(px(14.))
-                                    .py(px(8.))
-                                    .rounded(px(ui::R_CONTROL + 2.))
-                                    .border_1()
-                                    .font_family(SharedString::from(font))
-                                    .text_size(px(ui::T_LG))
-                                    .cursor_pointer()
-                                    .when(active, |d| {
-                                        d.border_color(theme.caret).bg(theme.accent_soft).text_color(theme.foreground)
-                                    })
-                                    .when(!active, |d| {
-                                        d.border_color(theme.line_strong)
-                                            .text_color(theme.muted)
-                                            .hover(|d| d.text_color(theme.foreground))
-                                    })
-                                    .child(font)
-                                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                        let name = name.clone();
-                                        settings::update(cx, |s| s.code_font = name)
-                                    }))
-                            },
-                        )))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .text_size(px(ui::T_MD))
-                                .text_color(theme.muted)
-                                .child("Size")
-                                .child(stepper("smaller", "−").on_click(step_size(-1.)))
-                                .child(
-                                    div()
-                                        .w(px(48.))
-                                        .text_center()
-                                        .text_color(theme.foreground)
-                                        .child(format!("{size:.0} px")),
-                                )
-                                .child(stepper("bigger", "+").on_click(step_size(1.))),
-                        )
-                        .child(Self::type_preview(&settings, &theme, cx.global::<crate::fonts::Fonts>().code.clone()))
-                        .into_any_element(),
-                )
-            }
-            2 => (
+            StepKind::Type => (
+                "Pick a typeface you can read all day",
+                "Each is monospaced, calm and made for code. The size changes with ⌘+ and ⌘- too.",
+                self.type_step(&settings, &theme, cx),
+            ),
+            StepKind::Keys => (
                 "Which shortcuts do your hands know?",
                 "Null's own keep the common VS Code ones. Change them any time in Settings.",
                 div()
@@ -517,28 +489,25 @@ impl Welcome {
                     }))
                     .into_any_element(),
             ),
-            _ => {
-                let now = if settings.ai.enabled && settings.ai.provider != ProviderId::Off {
-                    AiChoice::Provider(settings.ai.provider)
-                } else {
-                    AiChoice::NotNow
+            StepKind::Presence => {
+                let now = match (settings.ai.enabled, settings.ai.completions) {
+                    (false, _) => Presence::Off,
+                    (true, false) => Presence::WhenAsked,
+                    (true, true) => Presence::WhileTyping,
                 };
                 (
                     "How present should AI be?",
                     "It never opens a panel on its own, and never changes code without showing you the change.",
                     div()
-                        .grid()
-                        .grid_cols(2)
+                        .flex()
+                        .flex_col()
                         .gap(px(10.))
-                        .children(AI_CHOICES.into_iter().enumerate().map(|(i, (choice, title, line))| {
-                            Self::card(("ai", i), title, line, now == choice, &theme).on_click(cx.listener(
+                        .children(PRESENCE.into_iter().enumerate().map(|(i, (choice, title, line))| {
+                            Self::card(("presence", i), title, line, now == choice, &theme).on_click(cx.listener(
                                 move |_, _: &ClickEvent, _, cx| {
-                                    settings::update(cx, |s| match choice {
-                                        AiChoice::NotNow => s.ai.enabled = false,
-                                        AiChoice::Provider(id) => {
-                                            s.ai.enabled = true;
-                                            s.ai.provider = id;
-                                        }
+                                    settings::update(cx, |s| {
+                                        s.ai.enabled = choice != Presence::Off;
+                                        s.ai.completions = choice == Presence::WhileTyping;
                                     })
                                 },
                             ))
@@ -546,18 +515,24 @@ impl Welcome {
                         .into_any_element(),
                 )
             }
+            StepKind::Provider => (
+                "Where should answers come from?",
+                "A plan you already have, an API key from any of these (free tiers included), or this computer.",
+                self.provider_step(&settings, &theme, cx),
+            ),
         };
-        let last = n + 1 == STEPS;
+        let last = n + 1 == steps.len();
         let dot = |i: usize| -> Hsla { if i == n { theme.caret } else { theme.line_strong } };
+        let count = steps.len();
         div()
             .size_full()
             .flex()
             .flex_col()
-            .child(Self::top_bar(Some(n), &theme))
+            .child(Self::top_bar(Some((n, count)), &theme))
             .child(
                 div().flex_1().min_h_0().flex().justify_center().items_center().px(px(28.)).child(
                     div()
-                        .w(px(680.))
+                        .w(px(720.))
                         .max_w_full()
                         .flex()
                         .flex_col()
@@ -566,25 +541,25 @@ impl Welcome {
                         .ml(px(14. * (1. - eased)))
                         .child(
                             div()
-                                .text_size(px(32.))
+                                .text_size(px(30.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.foreground)
                                 .child(title),
                         )
-                        .child(div().pb(px(12.)).text_size(px(15.)).text_color(theme.muted).child(sub))
+                        .child(div().pb(px(10.)).text_size(px(15.)).text_color(theme.muted).child(sub))
                         .child(body),
                 ),
             )
             .child(
                 // Lined up with the step above: same width, same edges.
                 div()
-                    .w(px(680.))
+                    .w(px(720.))
                     .max_w_full()
                     .mx_auto()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .pb(px(40.))
+                    .pb(px(36.))
                     .child(
                         div()
                             .id("back")
@@ -607,7 +582,7 @@ impl Welcome {
                         div()
                             .flex()
                             .gap(px(8.))
-                            .children((0..STEPS).map(|i| div().size(px(6.)).rounded_full().bg(dot(i)))),
+                            .children((0..count).map(|i| div().size(px(6.)).rounded_full().bg(dot(i)))),
                     )
                     .child(
                         Self::primary("next", if last { "Start coding" } else { "Continue" }, &theme).on_click(
@@ -615,6 +590,189 @@ impl Welcome {
                         ),
                     ),
             )
+            .into_any_element()
+    }
+
+    /// The typefaces, each shown in itself, the size, and a preview.
+    fn type_step(&self, settings: &Settings, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let installed = cx.text_system().all_font_names();
+        let fonts: Vec<(&'static str, &'static str)> = crate::fonts::CODE_FONTS
+            .iter()
+            .copied()
+            .filter(|(family, _)| installed.iter().any(|i| i == family))
+            .take(9)
+            .collect();
+        let step_size = |delta: f32| {
+            cx.listener(move |_, _: &ClickEvent, _, cx| {
+                settings::update(cx, |s| {
+                    s.font_size = (s.font_size + delta).clamp(settings::MIN_FONT_SIZE, settings::MAX_FONT_SIZE)
+                })
+            })
+        };
+        let stepper = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .size(px(ui::CONTROL))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(ui::R_CONTROL))
+                .border_1()
+                .border_color(theme.line_strong)
+                .text_color(theme.foreground)
+                .cursor_pointer()
+                .hover(|d| d.bg(theme.hairline))
+                .child(label)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(div().grid().grid_cols(3).gap(px(8.)).children(fonts.into_iter().enumerate().map(
+                |(i, (family, label))| {
+                    let active = settings.code_font == family;
+                    div()
+                        .id(("font", i))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .px(px(14.))
+                        .py(px(9.))
+                        .rounded(px(ui::R_POPOVER))
+                        .border_1()
+                        .font_family(SharedString::from(family))
+                        .cursor_pointer()
+                        .when(active, |d| d.border_color(theme.caret).bg(theme.accent_soft))
+                        .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(theme.hairline)))
+                        .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(label))
+                        .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child("{ 0O 1lI } => ;"))
+                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                            settings::update(cx, |s| s.code_font = family.to_string())
+                        }))
+                },
+            )))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .text_size(px(ui::T_MD))
+                    .text_color(theme.muted)
+                    .child("Size")
+                    .child(stepper("smaller", "−").on_click(step_size(-1.)))
+                    .child(
+                        div()
+                            .w(px(48.))
+                            .text_center()
+                            .text_color(theme.foreground)
+                            .child(format!("{:.0} px", settings.font_size)),
+                    )
+                    .child(stepper("bigger", "+").on_click(step_size(1.))),
+            )
+            .child(Self::type_preview(settings, theme, cx.global::<crate::fonts::Fonts>().code.clone()))
+            .into_any_element()
+    }
+
+    /// Providers in three groups, as compact cards; then what the one picked needs.
+    fn provider_step(&self, settings: &Settings, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let current = settings.ai.provider;
+        let group =
+            |title: &str, items: &[(ProviderId, &'static str)], needs: Option<AnyElement>, cx: &mut Context<Self>| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(ui::section_heading(title, theme))
+                    .children(Some(div().grid().grid_cols(3).gap(px(8.)).children(items.iter().map(|&(id, line)| {
+                        let active = current == id;
+                        div()
+                            .id(id.label())
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .px(px(14.))
+                            .py(px(9.))
+                            .rounded(px(ui::R_POPOVER))
+                            .border_1()
+                            .cursor_pointer()
+                            .when(active, |d| d.border_color(theme.caret).bg(theme.accent_soft))
+                            .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(theme.hairline)))
+                            .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(id.label()))
+                            .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(line))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.key.update(cx, |input, cx| input.set_text("", cx));
+                                settings::update(cx, |s| {
+                                    s.ai.enabled = true;
+                                    s.ai.provider = id;
+                                })
+                            }))
+                    }))))
+                    // What the one picked needs, right under its group.
+                    .children(needs)
+            };
+        // What the provider picked needs: its key, or its command installed.
+        let needs: Option<AnyElement> = if current.uses_api_key() {
+            let found = ai::known_key(current) == Some(true);
+            let get = current.key_url().map(|u| format!("Get one at {u}")).unwrap_or_default();
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .h(px(ui::FIELD + 6.))
+                            .px(px(12.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(ui::R_CONTROL + 2.))
+                            .border_1()
+                            .border_color(theme.line_strong)
+                            .bg(theme.sunken)
+                            .text_size(px(ui::T_MD))
+                            .child(div().w_full().overflow_hidden().child(self.key.clone())),
+                    )
+                    .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(if found {
+                        format!("A key is already set. {get}. Kept in the keychain, never in a file.")
+                    } else {
+                        format!("{get}. Kept in the keychain, never in a file.")
+                    }))
+                    .into_any_element(),
+            )
+        } else if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
+            let program = if current == ProviderId::ClaudeCode { "claude" } else { "codex" };
+            let text = match ai::find_cli(program) {
+                Some(_) => format!("The {program} command is installed: you're set."),
+                None => ai::install_hint(current).unwrap_or_default().to_string(),
+            };
+            Some(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(text).into_any_element())
+        } else if current == ProviderId::Ollama {
+            Some(
+                div()
+                    .text_size(px(ui::T_SM))
+                    .text_color(theme.muted)
+                    .child("Install Ollama from ollama.com and pull a model; Null finds it on this computer.")
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        let in_group = |items: &[(ProviderId, &'static str)]| items.iter().any(|(id, _)| *id == current);
+        let (mut for_plans, mut for_keys, mut for_local) = (None, None, None);
+        if in_group(&SUBSCRIPTIONS) {
+            for_plans = needs;
+        } else if in_group(&API_PROVIDERS) {
+            for_keys = needs;
+        } else if in_group(&LOCAL) {
+            for_local = needs;
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(group("With your subscription", &SUBSCRIPTIONS, for_plans, cx))
+            .child(group("With an API key", &API_PROVIDERS, for_keys, cx))
+            .child(group("On this computer", &LOCAL, for_local, cx))
             .into_any_element()
     }
 }

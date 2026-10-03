@@ -19,8 +19,6 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", CloseSettings, Some("SettingsPanel"))]);
 }
 
-pub(crate) const CODE_FONTS: &[&str] =
-    &["Geist Mono", "SF Mono", "Menlo", "JetBrains Mono", "Fira Code", "Cascadia Code"];
 const UI_FONTS: &[(&str, &str)] =
     &[("Instrument Sans", "Instrument Sans"), (".SystemUIFont", "System"), ("Inter", "Inter")];
 
@@ -340,10 +338,8 @@ impl SettingsPanel {
     fn appearance(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = cx.global::<Settings>().clone();
         let theme = cx.global::<Theme>().clone();
-        let cards: Vec<AnyElement> = [ThemeName::Oled, ThemeName::Graphite, ThemeName::Paper]
-            .into_iter()
-            .map(|name| self.theme_card(name, s.theme, cx))
-            .collect();
+        let cards: Vec<AnyElement> =
+            ThemeName::ALL.into_iter().map(|name| self.theme_card(name, s.theme, cx)).collect();
         let size = div()
             .flex()
             .items_center()
@@ -370,8 +366,11 @@ impl SettingsPanel {
                 ))
             });
         let installed = |name: &str| name == ".SystemUIFont" || self.installed_fonts.iter().any(|f| f == name);
-        let mut code_fonts: Vec<(String, String)> =
-            CODE_FONTS.iter().filter(|f| installed(f)).map(|f| (f.to_string(), f.to_string())).collect();
+        let mut code_fonts: Vec<(String, String)> = crate::fonts::CODE_FONTS
+            .iter()
+            .filter(|(f, _)| installed(f))
+            .map(|(f, l)| (f.to_string(), l.to_string()))
+            .collect();
         if !code_fonts.iter().any(|(f, _)| *f == s.code_font) {
             code_fonts.push((s.code_font.clone(), s.code_font.clone()));
         }
@@ -386,7 +385,7 @@ impl SettingsPanel {
         let ui_options = ui_fonts.iter().enumerate().map(|(i, (_, l))| (i, l.clone())).collect();
         vec![
             Self::heading("Theme", &theme),
-            div().flex().gap(px(16.)).py(px(12.)).children(cards).into_any_element(),
+            div().grid().grid_cols(3).gap(px(16.)).py(px(12.)).children(cards).into_any_element(),
             Self::heading("Text", &theme),
             Self::row(
                 "Text size",
@@ -398,9 +397,9 @@ impl SettingsPanel {
                 size,
                 &theme,
             ),
-            Self::row(
+            Self::stacked_row(
                 "Code font",
-                None,
+                Some("Five come with Null; fonts you install show up here too"),
                 Self::choices("code-font", code_options, code_index, &theme, cx, move |_, i, cx| {
                     let font = code_fonts[i].0.clone();
                     settings::update(cx, |s| s.code_font = font);

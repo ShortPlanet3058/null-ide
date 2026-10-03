@@ -53,9 +53,12 @@ actions!(
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
-        UseOledTheme,
-        UseGraphiteTheme,
+        UseNullTheme,
+        UseAshTheme,
+        UseMidnightTheme,
+        UseMossTheme,
         UsePaperTheme,
+        UseDuneTheme,
         SearchProject,
         ReplaceInProject,
         ShowFiles,
@@ -1357,9 +1360,12 @@ impl Workspace {
                 toggle(settings.fade_bars_while_typing, "Stop Fading Bars While Typing", "Fade Bars While Typing"),
                 Box::new(ToggleFadeWhileTyping),
             ),
-            (Appearance, theme_label(ThemeName::Oled), Box::new(UseOledTheme)),
-            (Appearance, theme_label(ThemeName::Graphite), Box::new(UseGraphiteTheme)),
-            (Appearance, theme_label(ThemeName::Paper), Box::new(UsePaperTheme)),
+            (Appearance, theme_label(ThemeName::Null), theme_action(ThemeName::Null)),
+            (Appearance, theme_label(ThemeName::Ash), theme_action(ThemeName::Ash)),
+            (Appearance, theme_label(ThemeName::Midnight), theme_action(ThemeName::Midnight)),
+            (Appearance, theme_label(ThemeName::Moss), theme_action(ThemeName::Moss)),
+            (Appearance, theme_label(ThemeName::Paper), theme_action(ThemeName::Paper)),
+            (Appearance, theme_label(ThemeName::Dune), theme_action(ThemeName::Dune)),
             (Appearance, "Bigger Text".into(), Box::new(IncreaseFontSize)),
             (Appearance, "Smaller Text".into(), Box::new(DecreaseFontSize)),
             (Appearance, "Actual Size".into(), Box::new(ResetFontSize)),
@@ -2253,18 +2259,6 @@ impl Workspace {
         settings::update(cx, |s| s.font_size = DEFAULT_FONT_SIZE);
     }
 
-    fn use_oled_theme(&mut self, _: &UseOledTheme, _: &mut Window, cx: &mut Context<Self>) {
-        settings::update(cx, |s| s.theme = ThemeName::Oled);
-    }
-
-    fn use_graphite_theme(&mut self, _: &UseGraphiteTheme, _: &mut Window, cx: &mut Context<Self>) {
-        settings::update(cx, |s| s.theme = ThemeName::Graphite);
-    }
-
-    fn use_paper_theme(&mut self, _: &UsePaperTheme, _: &mut Window, cx: &mut Context<Self>) {
-        settings::update(cx, |s| s.theme = ThemeName::Paper);
-    }
-
     /// ⌘, opens the Settings window, or closes it.
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.open_settings_at(None, window, cx);
@@ -2759,6 +2753,18 @@ impl Workspace {
     }
 }
 
+/// The action that switches to `theme` (menus and ⌘K).
+pub fn theme_action(theme: ThemeName) -> Box<dyn Action> {
+    match theme {
+        ThemeName::Null => Box::new(UseNullTheme),
+        ThemeName::Ash => Box::new(UseAshTheme),
+        ThemeName::Midnight => Box::new(UseMidnightTheme),
+        ThemeName::Moss => Box::new(UseMossTheme),
+        ThemeName::Paper => Box::new(UsePaperTheme),
+        ThemeName::Dune => Box::new(UseDuneTheme),
+    }
+}
+
 /// The status bar's path is cut to about this many characters, from the left.
 const STATUS_PATH_CHARS: usize = 60;
 
@@ -3209,9 +3215,14 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
-            .on_action(cx.listener(Self::use_oled_theme))
-            .on_action(cx.listener(Self::use_graphite_theme))
-            .on_action(cx.listener(Self::use_paper_theme))
+            .on_action(cx.listener(|_, _: &UseNullTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Null)))
+            .on_action(cx.listener(|_, _: &UseAshTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Ash)))
+            .on_action(
+                cx.listener(|_, _: &UseMidnightTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Midnight)),
+            )
+            .on_action(cx.listener(|_, _: &UseMossTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Moss)))
+            .on_action(cx.listener(|_, _: &UsePaperTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Paper)))
+            .on_action(cx.listener(|_, _: &UseDuneTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Dune)))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::search_project))
             .on_action(cx.listener(Self::show_files))
