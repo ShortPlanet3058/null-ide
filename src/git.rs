@@ -3,7 +3,7 @@
 //! happens (quietly) where git isn't installed.
 
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
@@ -11,16 +11,23 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-pub fn repo_root(path: &Path) -> Option<PathBuf> {
-    let dir = if path.is_dir() { path } else { path.parent()? };
-    git(dir, &["rev-parse", "--show-toplevel"]).map(|s| PathBuf::from(s.trim()))
+/// The file as of the last commit. None if it isn't tracked (or there's no repo).
+/// Asked from the file's own folder, so a project opened through a link (or under
+/// /tmp, which is /private/tmp on macOS) still finds it.
+pub fn committed_text(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    git(path.parent()?, &["show", &format!("HEAD:./{name}")])
 }
 
-/// The file as of the last commit. None if it isn't tracked (or there's no repo).
-pub fn committed_text(path: &Path) -> Option<String> {
-    let root = repo_root(path)?;
-    let relative = path.strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/");
-    git(&root, &["show", &format!("HEAD:{relative}")])
+/// Whether a change inside `.git` can mean a new commit or branch: HEAD itself, the
+/// branch files (a commit moves one without touching HEAD), the index.
+pub fn is_state_change(path: &Path) -> bool {
+    let mut inside = path.components().skip_while(|c| c.as_os_str() != ".git").skip(1);
+    match inside.next().and_then(|c| c.as_os_str().to_str()) {
+        Some("HEAD" | "index" | "ORIG_HEAD" | "packed-refs" | "refs") => true,
+        Some("logs") => inside.next().is_some_and(|c| c.as_os_str() == "HEAD"),
+        _ => false,
+    }
 }
 
 pub fn current_branch(dir: &Path) -> Option<String> {
@@ -66,6 +73,39 @@ pub fn diff(base: &str, current: &str) -> Vec<Hunk> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    #[cfg(unix)]
+    fn finds_the_committed_text_through_a_link() {
+        let dir = std::env::temp_dir().join(format!("null-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let run = |args: &[&str]| git(&repo, args);
+        if run(&["init", "-q"]).is_none() {
+            return; // No git here: nothing to test.
+        }
+        std::fs::write(repo.join("src/a.rs"), "committed\n").unwrap();
+        run(&["add", "."]).unwrap();
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "edited\n").unwrap();
+        std::os::unix::fs::symlink(&repo, dir.join("link")).unwrap();
+        assert_eq!(committed_text(&dir.join("link/src/a.rs")).as_deref(), Some("committed\n"));
+        assert_eq!(committed_text(&repo.join("src/new.rs")), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn commits_and_branch_moves_count_as_git_changes() {
+        let p = |s: &str| PathBuf::from(s);
+        assert!(is_state_change(&p("/r/.git/HEAD")));
+        assert!(is_state_change(&p("/r/.git/refs/heads/main")));
+        assert!(is_state_change(&p("/r/.git/packed-refs")));
+        assert!(is_state_change(&p("/r/.git/logs/HEAD")));
+        assert!(!is_state_change(&p("/r/.git/objects/ab/cdef")));
+        assert!(!is_state_change(&p("/r/src/HEAD")));
+    }
 
     #[test]
     fn finds_added_modified_and_deleted_lines() {
@@ -85,7 +125,7 @@ mod tests {
     #[test]
     fn reads_committed_text_and_branch_from_this_repo() {
         let readme = Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
-        if repo_root(&readme).is_none() {
+        if git(readme.parent().unwrap(), &["rev-parse", "--git-dir"]).is_none() {
             return; // not running inside a git checkout
         }
         assert!(committed_text(&readme).is_some_and(|t| t.contains("Null")));

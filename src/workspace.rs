@@ -523,10 +523,7 @@ impl Workspace {
     }
 
     fn files_changed(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let git_changed = paths.iter().any(|p| {
-            p.components().any(|c| c.as_os_str() == ".git")
-                && p.file_name().is_some_and(|n| n == "HEAD" || n == "index" || n == "ORIG_HEAD")
-        });
+        let git_changed = paths.iter().any(|p| git::is_state_change(p));
         let visible: Vec<PathBuf> =
             paths.into_iter().filter(|p| !p.components().any(|c| c.as_os_str() == ".git")).collect();
         self.tree.update(cx, |tree, cx| tree.refresh(&visible, cx));
