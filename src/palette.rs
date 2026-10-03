@@ -57,6 +57,8 @@ pub enum PaletteKind {
     Line,
     /// Places in the code: where a symbol is used, or the problems found.
     Locations,
+    /// A task for the AI, typed in one line.
+    Task,
 }
 
 /// What a place in the list is.
@@ -67,6 +69,8 @@ pub enum LocationKind {
     Warning,
     /// A definition, with the word that defines it (`fn`, `class`...).
     Symbol(&'static str),
+    /// A file an AI task changed, with the lines added and removed.
+    FileChange(crate::ai_task::ChangeKind, usize, usize),
 }
 
 /// A place in the code, with the text to show for it.
@@ -86,6 +90,7 @@ impl PaletteKind {
             PaletteKind::Quick => "Quick settings and commands",
             PaletteKind::Line => "Go to line",
             PaletteKind::Locations => "Filter",
+            PaletteKind::Task => "Describe the task",
         }
     }
 }
@@ -298,6 +303,8 @@ pub enum PaletteEvent {
     OpenLocation(PathBuf, lsp_types::Position),
     /// The keyboard is on a place in the open file: show it, without going there yet.
     Preview(PathBuf, lsp_types::Position),
+    /// Start an AI task with this description.
+    StartTask(String),
 }
 
 pub struct Palette {
@@ -402,7 +409,7 @@ impl Palette {
         match self.kind {
             PaletteKind::Files => self.file_rows(&query),
             PaletteKind::Quick => self.quick_rows(&query),
-            PaletteKind::Line => {}
+            PaletteKind::Line | PaletteKind::Task => {}
             PaletteKind::Locations => self.location_rows(&query),
         }
         self.selected = 0;
@@ -427,6 +434,21 @@ impl Palette {
     fn location_rows(&mut self, query: &str) {
         if matches!(self.locations.first(), Some(l) if matches!(l.kind, LocationKind::Symbol(_))) {
             return self.symbol_rows(query);
+        }
+        // A task's changed files, then what to do with all of them.
+        if matches!(self.locations.first(), Some(l) if matches!(l.kind, LocationKind::FileChange(..))) {
+            for i in 0..self.locations.len() {
+                if query.is_empty() || fuzzy::score(&self.locations[i].text, query).is_some() {
+                    let highlights = fuzzy::score(&self.locations[i].text, query).map(|(_, h)| h).unwrap_or_default();
+                    self.push(Item::Location(i), highlights, false);
+                }
+            }
+            for i in 0..self.commands.len() {
+                if query.is_empty() || fuzzy::score(&self.commands[i].label, query).is_some() {
+                    self.push(Item::Command(i), Vec::new(), false);
+                }
+            }
+            return;
         }
         for i in 0..self.locations.len() {
             let location = &self.locations[i];
@@ -606,6 +628,12 @@ impl Palette {
                 }
                 return;
             }
+            PaletteKind::Task => {
+                if !self.query.is_empty() {
+                    cx.emit(PaletteEvent::StartTask(self.query.clone()));
+                }
+                return;
+            }
             PaletteKind::Files | PaletteKind::Quick | PaletteKind::Locations => {}
         }
         let Some(item) = self.rows.get(ix).map(|r| r.item) else { return };
@@ -740,9 +768,22 @@ impl Palette {
                 let color = match location.kind {
                     LocationKind::Error => theme.error,
                     LocationKind::Warning => theme.warning,
-                    LocationKind::Reference | LocationKind::Symbol(_) => accent,
+                    LocationKind::Reference | LocationKind::Symbol(_) | LocationKind::FileChange(..) => accent,
                 };
-                if let LocationKind::Symbol(kind) = location.kind {
+                if let LocationKind::FileChange(kind, added, removed) = location.kind {
+                    use crate::ai_task::ChangeKind;
+                    let text = StyledText::new(location.text.clone()).with_highlights(highlights_in(&location.text, 0));
+                    let (dot, place) = match kind {
+                        ChangeKind::Added => (theme.git_added, format!("new · +{added}")),
+                        ChangeKind::Changed => (theme.git_modified, format!("+{added} −{removed}")),
+                        ChangeKind::Deleted => (theme.git_deleted, "deleted · ↵ restores it".to_string()),
+                    };
+                    (
+                        div().size(px(5.)).rounded_full().bg(dot).into_any_element(),
+                        div().child(text).into_any_element(),
+                        Some(div().text_color(dim).child(place).into_any_element()),
+                    )
+                } else if let LocationKind::Symbol(kind) = location.kind {
                     // The name in the code font, the word that defines it beside it, faint.
                     let text = StyledText::new(location.text.clone()).with_highlights(highlights_in(&location.text, 0));
                     let place = if self.in_file {
@@ -857,6 +898,7 @@ impl Palette {
         match self.kind {
             PaletteKind::Files => "↵ open",
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
+            PaletteKind::Task => "↵ start",
             PaletteKind::Quick => match self.selected_item() {
                 Some(Item::Quick(q)) if q.is_choice() => "←→ change",
                 Some(Item::Quick(Quick::AllSettings)) | Some(Item::Command(_)) => "↵ run",
@@ -955,6 +997,13 @@ impl Render for Palette {
                     (None, None) => "A line number".to_string(),
                 };
                 Some(self.render_message(text, self.line_target().is_some(), cx))
+            }
+            PaletteKind::Task => {
+                let text = match &self.title {
+                    Some(who) => format!("{who} changes the files; you review every change before it stays"),
+                    None => "You review every change before it stays".into(),
+                };
+                Some(self.render_message(text, false, cx))
             }
             _ if self.rows.is_empty() => {
                 let text = match self.kind {

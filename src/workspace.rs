@@ -22,6 +22,7 @@ use gpui::{
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 actions!(
@@ -33,6 +34,11 @@ actions!(
         NextTab,
         MoveTabRight,
         MoveTabLeft,
+        NewAiTask,
+        ReviewAiTask,
+        StopAiTask,
+        KeepAllTaskChanges,
+        UndoAllTaskChanges,
         PreviousTab,
         TogglePalette,
         ShowCommands,
@@ -88,6 +94,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-f", SearchProject, ctx),
         KeyBinding::new("secondary-shift-h", ReplaceInProject, ctx),
         // Arrows rather than ⌘\, which takes several keys on many layouts.
+        KeyBinding::new("alt-secondary-i", NewAiTask, ctx),
         KeyBinding::new("ctrl-secondary-right", MoveTabRight, ctx),
         KeyBinding::new("ctrl-secondary-left", MoveTabLeft, ctx),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
@@ -178,6 +185,24 @@ impl Transition {
     }
 }
 
+/// An AI task: running in the background, then waiting for its changes to be reviewed.
+struct AiTaskRun {
+    title: String,
+    state: TaskState,
+    /// The running tool, so it can be stopped.
+    child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    _task: Option<Task<()>>,
+}
+
+enum TaskState {
+    /// Saving open files and copying the project, to compare with afterwards.
+    Starting,
+    /// At work; the file it's at, when it says.
+    Running(Option<String>),
+    /// Done: the files it changed, still to review.
+    Review(Vec<crate::ai_task::FileChange>),
+}
+
 struct Tab {
     editor: Entity<Editor>,
     /// Which side it's on: 0 left (or the only one), 1 right.
@@ -223,6 +248,10 @@ pub struct Workspace {
     /// The editor and its view (caret line, column, top line) before a symbol list
     /// started showing places in it.
     view_before_preview: Option<(Entity<Editor>, (usize, usize, usize))>,
+    /// The AI task running or waiting for review, if any.
+    ai_task: Option<AiTaskRun>,
+    /// Commands the next palette list shows after its places (a task's "Keep all").
+    pending_commands: Vec<crate::palette::Command>,
     /// Changed source files waiting to be read again.
     reindex_pending: HashSet<PathBuf>,
     /// What the project's .gitignore leaves out of the index.
@@ -334,6 +363,8 @@ impl Workspace {
             reindex_task: None,
             reindex_pending: HashSet::new(),
             view_before_preview: None,
+            ai_task: None,
+            pending_commands: Vec::new(),
             ignore_rules,
             key_prompt: None,
             notice: None,
@@ -689,6 +720,7 @@ impl Workspace {
                     cx.notify();
                 }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
+                EditorEvent::Reviewed => this.file_reviewed(&editor, cx),
                 EditorEvent::SaveFailed(message) => this.show_notice(message.clone(), cx),
                 EditorEvent::ChangedOnDisk => {
                     let name = editor.read(cx).file_name();
@@ -1264,6 +1296,15 @@ impl Workspace {
             if self.active.is_some() {
                 commands.push((Ai, "Edit with AI…".into(), Box::new(crate::editor::InlineAssist)));
             }
+            match self.ai_task.as_ref().map(|t| &t.state) {
+                None => commands.push((Ai, "New AI Task…".into(), Box::new(NewAiTask))),
+                Some(TaskState::Review(_)) => commands.extend([
+                    (Ai, "Review AI Task Changes…".into(), Box::new(ReviewAiTask) as Box<dyn Action>),
+                    (Ai, "Keep All AI Task Changes".into(), Box::new(KeepAllTaskChanges)),
+                    (Ai, "Undo All AI Task Changes".into(), Box::new(UndoAllTaskChanges)),
+                ]),
+                Some(_) => commands.push((Ai, "Stop AI Task".into(), Box::new(StopAiTask))),
+            }
         }
         commands.push((App, "Quit Null".into(), Box::new(Quit)));
         commands
@@ -1323,7 +1364,11 @@ impl Workspace {
         let active_path = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let options = PaletteOptions {
             kind,
-            commands: if kind == PaletteKind::Quick { self.commands(window, cx) } else { Vec::new() },
+            commands: if kind == PaletteKind::Quick {
+                self.commands(window, cx)
+            } else {
+                std::mem::take(&mut self.pending_commands)
+            },
             root: self.tree.read(cx).root().to_path_buf(),
             recent_files: self.recent_files.iter().filter(|p| Some(*p) != active_path.as_ref()).cloned().collect(),
             recent_commands: self.recent_commands.clone(),
@@ -1335,6 +1380,11 @@ impl Workspace {
         let palette = cx.new(|cx| Palette::new(options, cx));
         let subscription = cx.subscribe_in(&palette, window, |this, palette, event, window, cx| match event {
             PaletteEvent::Dismissed => this.close_palette(window, cx),
+            PaletteEvent::StartTask(text) => {
+                let text = text.clone();
+                this.close_palette(window, cx);
+                this.start_task(text, window, cx);
+            }
             PaletteEvent::OpenFile(path) => {
                 let path = path.clone();
                 this.close_palette(window, cx);
@@ -1345,6 +1395,9 @@ impl Workspace {
                 // Going there: no going back to the view before the preview.
                 this.view_before_preview = None;
                 this.close_palette(window, cx);
+                if this.review_file(&path, window, cx) {
+                    return;
+                }
                 this.open_file(path, window, cx);
                 if let Some(editor) = this.active_editor() {
                     let range = lsp_types::Range { start: position, end: position };
@@ -1502,6 +1555,238 @@ impl Workspace {
             Some(text) => unsaved.insert(path, text),
             None => unsaved.remove(&path),
         };
+    }
+
+    // ---------- AI tasks ----------
+
+    /// ⌥⌘I: describe a bigger job for Claude Code or Codex.
+    fn new_ai_task(&mut self, _: &NewAiTask, window: &mut Window, cx: &mut Context<Self>) {
+        let provider = cx.global::<Settings>().ai.active();
+        if !crate::ai::can_run_tasks(provider) {
+            return self.show_notice("Tasks run with Claude Code or Codex: choose one in Settings → AI.".into(), cx);
+        }
+        match self.ai_task.as_ref().map(|t| &t.state) {
+            Some(TaskState::Starting | TaskState::Running(_)) => {
+                return self.show_notice("A task is already running.".into(), cx);
+            }
+            Some(TaskState::Review(_)) => {
+                self.show_notice("First review what the last task changed.".into(), cx);
+                return self.review_ai_task(&ReviewAiTask, window, cx);
+            }
+            None => {}
+        }
+        self.open_palette_with(PaletteKind::Task, Some(provider.label().into()), Vec::new(), window, cx);
+    }
+
+    fn start_task(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = window;
+        let root = self.tree.read(cx).root().to_path_buf();
+        // The task reads and writes files on disk: unsaved edits go there first.
+        let mut saved = 0;
+        for tab in &self.tabs {
+            let dirty = tab.editor.read(cx).buffer.is_dirty() && tab.editor.read(cx).path().is_some();
+            if dirty && tab.editor.update(cx, |editor, cx| editor.save_to_disk(cx)) {
+                saved += 1;
+            }
+        }
+        if saved > 0 {
+            let files = if saved == 1 { "1 file".to_string() } else { format!("{saved} files") };
+            self.show_notice(format!("Saved {files} so the task sees them."), cx);
+        }
+        let title: String = text.chars().take(40).collect();
+        let child: Arc<std::sync::Mutex<Option<std::process::Child>>> = Arc::default();
+        let settings = cx.global::<Settings>().ai.clone();
+        let running = child.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let snapshot = {
+                let root = root.clone();
+                cx.background_executor().spawn(async move { crate::ai_task::Snapshot::take(&root) }).await
+            };
+            this.update(cx, |this, cx| {
+                if let Some(run) = &mut this.ai_task {
+                    run.state = TaskState::Running(None);
+                }
+                cx.notify();
+            })
+            .ok();
+            let (tx, mut rx) = futures::channel::mpsc::unbounded();
+            let work = {
+                let root = root.clone();
+                cx.background_executor().spawn(async move {
+                    crate::ai::run_task(&settings, &root, &text, &running, &mut |event| {
+                        tx.unbounded_send(event).ok();
+                    })
+                })
+            };
+            use futures::StreamExt;
+            while let Some(crate::ai::TaskEvent::File(file)) = rx.next().await {
+                this.update(cx, |this, cx| {
+                    if let Some(run) = &mut this.ai_task {
+                        run.state = TaskState::Running(Some(file));
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+            let result = work.await;
+            // Whatever happened (done, failed, stopped), see what changed.
+            let changes = cx.background_executor().spawn(async move { snapshot.changes(&root) }).await;
+            this.update(cx, |this, cx| this.task_finished(result, changes, cx)).ok();
+        });
+        self.ai_task = Some(AiTaskRun { title, state: TaskState::Starting, child, _task: Some(task) });
+        cx.notify();
+    }
+
+    fn task_finished(
+        &mut self,
+        result: Result<String, String>,
+        changes: Vec<crate::ai_task::FileChange>,
+        cx: &mut Context<Self>,
+    ) {
+        let count = changes.len();
+        let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
+        let message = match (&result, count) {
+            (Ok(summary), 0) => format!("The task changed nothing. {summary}"),
+            (Ok(summary), _) => format!("Changed {files}: review them from the status bar. {summary}"),
+            (Err(error), 0) => error.clone(),
+            (Err(error), _) => format!("{error} It changed {files} before stopping: review them from the status bar."),
+        };
+        self.show_notice(message.trim().to_string(), cx);
+        if count == 0 {
+            self.ai_task = None;
+        } else if let Some(run) = &mut self.ai_task {
+            run.state = TaskState::Review(changes);
+            run._task = None;
+        }
+        cx.notify();
+    }
+
+    fn stop_ai_task(&mut self, _: &StopAiTask, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(run) = &self.ai_task
+            && let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take()
+        {
+            child.kill().ok();
+        }
+        cx.notify();
+    }
+
+    /// The files the task changed, to open one by one; then keep or undo them all.
+    fn review_ai_task(&mut self, _: &ReviewAiTask, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::palette::{Category, Command, Location, LocationKind};
+        let Some(AiTaskRun { state: TaskState::Review(changes), title, .. }) = &self.ai_task else { return };
+        let root = self.tree.read(cx).root().to_path_buf();
+        let locations = changes
+            .iter()
+            .map(|c| Location {
+                path: c.path.clone(),
+                position: lsp_types::Position::default(),
+                text: c.path.strip_prefix(&root).unwrap_or(&c.path).display().to_string(),
+                kind: LocationKind::FileChange(c.kind, c.added, c.removed),
+            })
+            .collect();
+        let title = format!("✦ {title}");
+        self.pending_commands = vec![
+            Command {
+                category: Category::Ai,
+                label: "Keep All Changes".into(),
+                action: Box::new(KeepAllTaskChanges),
+                keys: None,
+            },
+            Command {
+                category: Category::Ai,
+                label: "Undo All Changes".into(),
+                action: Box::new(UndoAllTaskChanges),
+                keys: None,
+            },
+        ];
+        self.open_locations(title, locations, window, cx);
+    }
+
+    /// Opening a file from the review list: it opens with the task's changes to keep or
+    /// undo. A deleted file is put back. False when the file isn't part of the task.
+    fn review_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(AiTaskRun { state: TaskState::Review(changes), .. }) = &mut self.ai_task else { return false };
+        let Some(index) = changes.iter().position(|c| c.path == path) else { return false };
+        let change = changes[index].clone();
+        if change.kind == crate::ai_task::ChangeKind::Deleted {
+            let message = match crate::ai_task::undo(&change) {
+                Ok(()) => format!("Restored {}", change.path.file_name().unwrap_or_default().to_string_lossy()),
+                Err(error) => format!("Couldn't restore it: {error}"),
+            };
+            changes.remove(index);
+            self.show_notice(message, cx);
+            self.end_task_if_reviewed(cx);
+            return true;
+        }
+        self.open_file(path.to_path_buf(), window, cx);
+        if let Some(editor) = self.active_editor().cloned() {
+            editor.update(cx, |editor, cx| {
+                // The file as it is on disk now, whatever the tab had.
+                editor.reload_from_disk(cx);
+                editor.start_review(change.before.clone(), cx);
+            });
+            if !editor.read(cx).in_review() {
+                self.file_reviewed(&editor, cx);
+            }
+        }
+        true
+    }
+
+    /// Every change in a file was kept or undone: it leaves the list.
+    fn file_reviewed(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
+        if let Some(AiTaskRun { state: TaskState::Review(changes), .. }) = &mut self.ai_task {
+            changes.retain(|c| c.path != path);
+        }
+        self.end_task_if_reviewed(cx);
+    }
+
+    fn end_task_if_reviewed(&mut self, cx: &mut Context<Self>) {
+        if matches!(&self.ai_task, Some(AiTaskRun { state: TaskState::Review(changes), .. }) if changes.is_empty()) {
+            self.ai_task = None;
+            self.show_notice("Every change reviewed.".into(), cx);
+        }
+        cx.notify();
+    }
+
+    fn keep_all_task_changes(&mut self, _: &KeepAllTaskChanges, _: &mut Window, cx: &mut Context<Self>) {
+        self.ai_task = None;
+        for tab in &self.tabs {
+            tab.editor.update(cx, |editor, cx| editor.end_review(cx));
+        }
+        self.show_notice("Kept every change.".into(), cx);
+    }
+
+    /// Every file back as it was before the task (an added file goes to the Trash).
+    fn undo_all_task_changes(&mut self, _: &UndoAllTaskChanges, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(AiTaskRun { state: TaskState::Review(changes), .. }) = self.ai_task.take() else { return };
+        let mut failed = Vec::new();
+        for change in &changes {
+            let open = self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(change.path.as_path()));
+            match (open.map(|t| t.editor.clone()), change.kind) {
+                // An open file goes back in its editor too (one undo step), then to disk.
+                (Some(editor), crate::ai_task::ChangeKind::Changed) => {
+                    editor.update(cx, |editor, cx| {
+                        editor.end_review(cx);
+                        let all = 0..editor.buffer.len_chars();
+                        editor.apply_char_edits(vec![(all, change.before.clone())], cx);
+                        editor.save_to_disk(cx);
+                    });
+                }
+                _ => {
+                    if let Err(error) = crate::ai_task::undo(change) {
+                        failed.push(format!("{}: {error}", change.path.display()));
+                    }
+                }
+            }
+        }
+        let message = if failed.is_empty() {
+            "Every file is back as it was before the task.".to_string()
+        } else {
+            format!("Couldn't undo everything: {}", failed.join("; "))
+        };
+        self.show_notice(message, cx);
+        cx.notify();
     }
 
     /// Replaces a search's matches across files. Files open in a tab change in their
@@ -2535,6 +2820,52 @@ impl Render for Workspace {
                             })),
                     )
                 })
+                .children(self.ai_task.as_ref().map(|run| {
+                    // One line for a task: what it's at, then how many files to review.
+                    let text: String = match &run.state {
+                        TaskState::Starting => "Starting the task…".into(),
+                        TaskState::Running(Some(file)) => {
+                            let name =
+                                Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                            format!("Working on {name}…")
+                        }
+                        TaskState::Running(None) => format!("{}…", run.title.trim()),
+                        TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
+                        TaskState::Review(changes) => format!("Review {} files", changes.len()),
+                    };
+                    let reviewing = matches!(run.state, TaskState::Review(_));
+                    div()
+                        .id("ai-task")
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(6.))
+                        .whitespace_nowrap()
+                        .max_w(px(320.))
+                        .text_color(theme.foreground)
+                        .child(div().flex_none().text_color(theme.caret).child("✦"))
+                        .child(div().min_w_0().truncate().child(text))
+                        // While it works, only "Stop" stops it; once done, the line opens the review.
+                        .when(!reviewing, |d| {
+                            d.child(
+                                div()
+                                    .id("stop-ai-task")
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .text_color(theme.muted)
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .child("Stop")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.stop_ai_task(&StopAiTask, window, cx)
+                                    })),
+                            )
+                        })
+                        .when(reviewing, |d| {
+                            d.cursor_pointer().on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.review_ai_task(&ReviewAiTask, window, cx)
+                            }))
+                        })
+                }))
                 .when(ai_provider != ProviderId::Off, |bar| {
                     bar.child(
                         div()
@@ -2593,6 +2924,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_ai))
             .on_action(cx.listener(Self::show_problems))
             .on_action(cx.listener(Self::replace_in_project))
+            .on_action(cx.listener(Self::new_ai_task))
+            .on_action(cx.listener(Self::review_ai_task))
+            .on_action(cx.listener(Self::stop_ai_task))
+            .on_action(cx.listener(Self::keep_all_task_changes))
+            .on_action(cx.listener(Self::undo_all_task_changes))
             .on_action(cx.listener(|this, _: &MoveTabRight, window, cx| this.move_tab_to(1, window, cx)))
             .on_action(cx.listener(|this, _: &MoveTabLeft, window, cx| this.move_tab_to(0, window, cx)))
             .on_action(cx.listener(Self::go_to_symbol))

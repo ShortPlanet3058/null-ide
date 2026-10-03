@@ -702,6 +702,15 @@ pub fn install_hint(id: ProviderId) -> Option<&'static str> {
 }
 
 fn spawn_cli(program: &str, args: &[String], input: &str) -> Result<std::process::Child, String> {
+    spawn_cli_in(program, args, input, None)
+}
+
+fn spawn_cli_in(
+    program: &str,
+    args: &[String],
+    input: &str,
+    dir: Option<&std::path::Path>,
+) -> Result<std::process::Child, String> {
     let id = if program == "claude" { ProviderId::ClaudeCode } else { ProviderId::Codex };
     let path = find_cli(program)
         .ok_or_else(|| format!("`{program}` isn't installed. {}", install_hint(id).unwrap_or_default()))?;
@@ -709,6 +718,9 @@ fn spawn_cli(program: &str, args: &[String], input: &str) -> Result<std::process
     let search_path = crate::tools::search_path();
     let mut command = Command::new(&path);
     command.env("PATH", search_path);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
     // Claude Code bills an ANTHROPIC_API_KEY over the person's plan when one is set: this
     // provider is about the plan.
     if id == ProviderId::ClaudeCode {
@@ -820,6 +832,150 @@ fn codex(model: Option<String>, effort: Effort, prompt: &Prompt, on_text: &mut d
     }
     on_text(&answer);
     finish_cli("codex", child)
+}
+
+// ---------- tasks ----------
+
+/// What a task reports while it works.
+pub enum TaskEvent {
+    /// It's at a file (reading or changing it), relative to the project when it can be.
+    File(String),
+}
+
+/// Whether the provider can carry out a task in the project itself.
+pub fn can_run_tasks(id: ProviderId) -> bool {
+    matches!(id, ProviderId::ClaudeCode | ProviderId::Codex)
+}
+
+/// Hands `task` to the person's Claude Code or Codex, working in `root`: they read and
+/// change files there themselves (no shell commands for Claude Code; Codex stays in its
+/// workspace sandbox). Blocks until done; returns what the tool said at the end.
+/// `child` holds the running process, so it can be stopped from elsewhere.
+pub fn run_task(
+    settings: &AiSettings,
+    root: &std::path::Path,
+    task: &str,
+    child: &std::sync::Mutex<Option<std::process::Child>>,
+    on_event: &mut dyn FnMut(TaskEvent),
+) -> Result<String, String> {
+    let id = settings.active();
+    let model = settings.model(id);
+    let effort = settings.effort(id);
+    let system = "You are working on the person's project from inside their code editor, Null. Make the change \
+                  they ask for by editing the project's files directly. Keep changes focused on the task. Every \
+                  change will be reviewed in the editor before it's kept, so don't ask for confirmation. When done, \
+                  say in one or two sentences what you changed.";
+    let relative = |path: &str| -> String {
+        let p = std::path::Path::new(path);
+        p.strip_prefix(root).unwrap_or(p).display().to_string()
+    };
+    let (program, args, input) = match id {
+        ProviderId::ClaudeCode => {
+            let mut args: Vec<String> = [
+                "-p",
+                "--no-session-persistence",
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools",
+                "Read,Edit,MultiEdit,Write,Glob,Grep,LS",
+                "--disallowedTools",
+                "Bash,WebFetch,WebSearch,mcp__*",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--append-system-prompt",
+                system,
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            if let Some(model) = model {
+                args.extend(["--model".into(), model]);
+            }
+            if !matches!(effort, Effort::Auto | Effort::Off) {
+                args.extend(["--effort".into(), effort.key().into()]);
+            }
+            ("claude", args, task.to_string())
+        }
+        ProviderId::Codex => {
+            let mut args: Vec<String> =
+                ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "--json"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            if let Some(model) = model {
+                args.extend(["--model".into(), model]);
+            }
+            if !matches!(effort, Effort::Auto | Effort::Off) {
+                args.extend(["-c".into(), format!("model_reasoning_effort=\"{}\"", effort.key())]);
+            }
+            args.push("-".into());
+            ("codex", args, format!("{system}\n\nTask: {task}"))
+        }
+        _ => return Err("Tasks run with Claude Code or Codex: choose one in Settings → AI.".into()),
+    };
+    let mut process = spawn_cli_in(program, &args, &input, Some(root))?;
+    let stdout = process.stdout.take().expect("stdout is piped");
+    // Read on its own thread: a tool chatty on stderr would otherwise fill the pipe and stall.
+    let stderr = process.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = err.read_to_string(&mut text);
+            text
+        })
+    });
+    *child.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
+    let mut summary = String::new();
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
+        match program {
+            // Claude Code: tool calls name the file; the result says what was done.
+            "claude" => match event["type"].as_str() {
+                Some("assistant") => {
+                    for part in event["message"]["content"].as_array().into_iter().flatten() {
+                        if part["type"] == "tool_use"
+                            && let Some(path) = part["input"]["file_path"].as_str().or(part["input"]["path"].as_str())
+                        {
+                            on_event(TaskEvent::File(relative(path)));
+                        }
+                    }
+                }
+                Some("result") => summary = event["result"].as_str().unwrap_or_default().to_string(),
+                _ => {}
+            },
+            // Codex: items for file changes and messages (read loosely: the format moves).
+            _ => {
+                let item = &event["item"];
+                let kind = item["type"].as_str().unwrap_or_default();
+                if kind.contains("file") || kind.contains("patch") {
+                    for change in item["changes"].as_array().into_iter().flatten() {
+                        if let Some(path) = change["path"].as_str() {
+                            on_event(TaskEvent::File(relative(path)));
+                        }
+                    }
+                } else if kind.contains("message")
+                    && let Some(text) = item["text"].as_str()
+                {
+                    summary = text.to_string();
+                }
+            }
+        }
+    }
+    let process = child.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let Some(mut process) = process else { return Err("Stopped.".into()) };
+    let errors = stderr.and_then(|t| t.join().ok()).unwrap_or_default();
+    let status = process.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(summary.trim().to_string())
+    } else {
+        let detail: Vec<&str> = errors.lines().rev().take(3).collect();
+        Err(format!(
+            "`{program}` stopped with an error. Is it signed in? {}",
+            detail.into_iter().rev().collect::<Vec<_>>().join(" ")
+        )
+        .trim()
+        .to_string())
+    }
 }
 
 // ---------- fill in the middle ----------

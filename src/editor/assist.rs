@@ -52,6 +52,8 @@ pub enum BlockKind {
     Ghost(Vec<String>),
     /// The new code as the AI writes it, above the code it replaces.
     Writing(Vec<String>),
+    /// The keys for a reviewed change, with how many more there are.
+    ReviewHint(usize),
 }
 
 pub struct Block {
@@ -542,6 +544,7 @@ impl Editor {
     }
 
     pub(super) fn rebuild_blocks(&mut self) {
+        self.refresh_review();
         let mut blocks = Vec::new();
         if let Some(prompt) = &self.prompt {
             blocks.push(Block { before_line: prompt.lines.start, rows: 1, kind: BlockKind::Prompt });
@@ -566,6 +569,27 @@ impl Editor {
             let rows = self.note_rows(note);
             blocks.push(Block { before_line: note.line, rows, kind: BlockKind::Note });
         }
+        // An AI task's changes being reviewed: old lines struck through above the new ones,
+        // and the keys under the change at the caret.
+        if let Some(review) = &self.review {
+            for hunk in &review.hunks {
+                if !hunk.old_lines.is_empty() {
+                    blocks.push(Block {
+                        before_line: hunk.new.start,
+                        rows: hunk.old_lines.len(),
+                        kind: BlockKind::Removed(hunk.old_lines.clone()),
+                    });
+                }
+            }
+            if let Some(index) = self.current_hunk() {
+                let hunk = &review.hunks[index];
+                blocks.push(Block {
+                    before_line: hunk.new.end.max(hunk.new.start),
+                    rows: 1,
+                    kind: BlockKind::ReviewHint(review.hunks.len() - 1),
+                });
+            }
+        }
         if let (Some((_, rest)), Some(line)) = (self.ghost_text(), self.ghost_line())
             && !rest.is_empty()
         {
@@ -588,13 +612,18 @@ impl Editor {
         self.prompt.as_ref().filter(|p| p.writing).map(|p| p.lines.clone())
     }
 
-    pub fn ai_added_lines(&self) -> &[Range<usize>] {
-        self.ai_change.as_ref().map_or(&[], |c| c.added.as_slice())
+    pub fn ai_added_lines(&self) -> Vec<Range<usize>> {
+        let mut lines = self.ai_change.as_ref().map_or(Vec::new(), |c| c.added.clone());
+        lines.extend(self.review_added_lines());
+        lines
     }
 
     pub(super) fn ai_key_context(&self, context: &mut gpui::KeyContext) {
         if self.ai_change.is_some() {
             context.add("ai_change");
+        }
+        if self.review.is_some() {
+            context.add("review");
         }
         if self.note.is_some() {
             context.add("ai_note");
@@ -700,6 +729,36 @@ impl Editor {
                             .child(key(&KeepChange, "⇥", "keep"))
                             .child(key(&UndoChange, "Esc", "undo"))
                             .child(key(&super::InlineAssist, "⌘I", "adjust"))
+                            .into_any_element(),
+                    );
+                }
+                BlockKind::ReviewHint(more) => {
+                    // The keys as they're bound now, so a changed shortcut shows here too.
+                    let key = |action: &dyn gpui::Action, fallback: &str, label: &str| {
+                        let keys = crate::palette::shortcut(action, cx).unwrap_or_else(|| fallback.to_string());
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(ui::key_cap(keys, &theme))
+                            .child(label.to_string())
+                    };
+                    out.push(
+                        place(div())
+                            .flex()
+                            .items_center()
+                            .gap(px(16.))
+                            .text_size(px(ui::T_XS))
+                            .text_color(theme.muted)
+                            .child(key(&super::KeepHunk, "⇥", "keep"))
+                            .child(key(&super::UndoHunk, "Esc", "undo"))
+                            .when(*more > 0, |d| {
+                                d.child(if *more == 1 {
+                                    "1 more change".to_string()
+                                } else {
+                                    format!("{more} more changes")
+                                })
+                            })
                             .into_any_element(),
                     );
                 }
@@ -824,7 +883,7 @@ mod tests {
             e.apply_change("def f(x):\n    return x / 2\n".into(), "halve".into(), cx);
             assert_eq!(e.buffer.to_string(), "def f(x):\n    return x / 2\n\nprint(f(1))\n");
             // One line removed (shown struck through above its replacement), one added.
-            assert_eq!(e.ai_added_lines(), &[1..2]);
+            assert_eq!(e.ai_added_lines(), vec![1..2]);
             assert!(e.blocks.iter().any(|b| matches!(&b.kind, BlockKind::Removed(l) if l == &["    return x / 0"])));
             e.undo_change(&UndoChange, window, cx);
             assert_eq!(e.buffer.to_string(), "def f(x):\n    return x / 0\n\nprint(f(1))\n");

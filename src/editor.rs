@@ -7,6 +7,7 @@ mod fold;
 mod ghost;
 mod intel;
 mod refactor;
+mod review;
 mod signature;
 
 pub use assist::{Block, BlockKind};
@@ -16,6 +17,7 @@ pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::HoverCard;
 pub use refactor::{FindReferences, FormatDocument, RenameSymbol, apply_edits};
+pub use review::{KeepHunk, UndoHunk};
 
 use crate::buffer::Buffer;
 use crate::element::{EditorElement, RowLayout};
@@ -118,6 +120,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
 
 pub fn bind_ai_keys(cx: &mut App) {
     assist::bind_keys(cx);
+    review::bind_keys(cx);
     ghost::bind_keys(cx);
 }
 
@@ -271,6 +274,8 @@ pub enum EditorEvent {
         position: lsp_types::Position,
         new_name: String,
     },
+    /// Every change of a review was kept or undone.
+    Reviewed,
     /// Show where the symbol at `position` is used.
     FindReferences {
         position: lsp_types::Position,
@@ -416,6 +421,8 @@ pub struct Editor {
     /// ⌘I: the field while it's open, a change until it's kept or undone, an answer.
     prompt: Option<assist::Prompting>,
     ai_change: Option<assist::Change>,
+    /// An AI task's changes to this file, being reviewed.
+    review: Option<review::Review>,
     note: Option<assist::Note>,
     ghost: Option<ghost::Ghost>,
     ghost_task: Option<Task<()>>,
@@ -500,6 +507,7 @@ impl Editor {
             git_diff_task: None,
             prompt: None,
             ai_change: None,
+            review: None,
             note: None,
             ghost: None,
             ghost_task: None,
@@ -2385,6 +2393,8 @@ impl Render for Editor {
             .on_action(cx.listener(|this, _: &UseCrlfLineEndings, _, cx| {
                 this.set_line_ending(crate::file_style::LineEnding::Crlf, cx)
             }))
+            .on_action(cx.listener(Self::keep_hunk))
+            .on_action(cx.listener(Self::undo_hunk))
             .on_action(cx.listener(Self::fold))
             .on_action(cx.listener(Self::unfold))
             .on_action(cx.listener(Self::fold_all))
