@@ -16,6 +16,7 @@ use lsp_types::{
     TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, VersionedTextDocumentIdentifier, WindowClientCapabilities, WorkspaceFolder,
 };
+use ropey::Rope;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -92,8 +93,10 @@ pub struct LspStore {
     root: PathBuf,
     servers: HashMap<&'static str, ServerState>,
     /// Open files and their text, to hand to a server installed after they were opened.
-    documents: HashMap<PathBuf, String>,
+    documents: HashMap<PathBuf, Rope>,
     diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
+    /// Goes up whenever any diagnostics change, so views can keep what they derived.
+    diagnostics_version: u64,
     /// Work servers report, by progress token.
     progress: HashMap<String, Progress>,
     _tasks: Vec<Task<()>>,
@@ -108,9 +111,14 @@ impl LspStore {
             servers: HashMap::new(),
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
+            diagnostics_version: 0,
             progress: HashMap::new(),
             _tasks: Vec::new(),
         }
+    }
+
+    pub fn diagnostics_version(&self) -> u64 {
+        self.diagnostics_version
     }
 
     pub fn diagnostics(&self, path: &Path) -> &[Diagnostic] {
@@ -170,7 +178,7 @@ impl LspStore {
                 match result {
                     Ok(()) => {
                         this.servers.remove(config.name);
-                        let open: Vec<(PathBuf, String)> = this
+                        let open: Vec<(PathBuf, Rope)> = this
                             .documents
                             .iter()
                             .filter(|(p, _)| config_for(p).is_some_and(|c| c.name == config.name))
@@ -280,7 +288,8 @@ impl LspStore {
             this.update(cx, |this, _| {
                 let Some(ServerState::Starting { server, queued }) = this.servers.remove(config.name) else { return };
                 match result {
-                    Ok(_) => {
+                    Ok(result) => {
+                        server.set_capabilities(&result.capabilities);
                         server.notify::<Initialized>(InitializedParams {});
                         for f in queued {
                             f(&server);
@@ -305,6 +314,7 @@ impl LspStore {
                     let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(params) else { return };
                     let Some(path) = path_for(&params.uri) else { return };
                     self.diagnostics.insert(path, params.diagnostics);
+                    self.diagnostics_version += 1;
                     cx.emit(LspEvent::DiagnosticsChanged);
                     cx.notify();
                 }
@@ -349,13 +359,14 @@ impl LspStore {
         }
     }
 
-    pub fn open(&mut self, path: &Path, text: String, cx: &mut Context<Self>) {
+    pub fn open(&mut self, path: &Path, text: Rope, cx: &mut Context<Self>) {
         let (Some(uri), Some(_)) = (uri_for(path), config_for(path)) else { return };
         self.documents.insert(path.to_path_buf(), text.clone());
         let language_id = crate::servers::language_id(path);
         self.with_server(
             path,
             move |server| {
+                let text = text.to_string();
                 server.notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
                     text_document: TextDocumentItem { uri, language_id: language_id.into(), version: 0, text },
                 })
@@ -364,8 +375,16 @@ impl LspStore {
         );
     }
 
-    /// Sends the whole new text. Simple, and fast enough for files people edit by hand.
-    pub fn change(&mut self, path: &Path, text: String, version: i32, cx: &mut Context<Self>) {
+    /// Tells the server about a change: just the changed parts (`edits`) when it takes
+    /// them, else the whole text. `edits` is None when they aren't known (after an undo).
+    pub fn change(
+        &mut self,
+        path: &Path,
+        text: Rope,
+        edits: Option<Vec<TextDocumentContentChangeEvent>>,
+        version: i32,
+        cx: &mut Context<Self>,
+    ) {
         let Some(uri) = uri_for(path) else { return };
         if let Some(document) = self.documents.get_mut(path) {
             *document = text.clone();
@@ -373,9 +392,15 @@ impl LspStore {
         self.with_server(
             path,
             move |server| {
+                let content_changes = match edits {
+                    Some(edits) if server.incremental() => edits,
+                    _ => {
+                        vec![TextDocumentContentChangeEvent { range: None, range_length: None, text: text.to_string() }]
+                    }
+                };
                 server.notify::<DidChangeTextDocument>(DidChangeTextDocumentParams {
                     text_document: VersionedTextDocumentIdentifier { uri, version },
-                    content_changes: vec![TextDocumentContentChangeEvent { range: None, range_length: None, text }],
+                    content_changes,
                 })
             },
             cx,

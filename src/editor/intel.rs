@@ -6,8 +6,9 @@ use crate::lsp::path_for;
 use crate::lsp_store::{LspStore, Readiness};
 use crate::markdown;
 use gpui::{App, Context, Entity};
-use lsp_types::{DiagnosticSeverity, HoverContents, MarkedString, Position};
+use lsp_types::{DiagnosticSeverity, HoverContents, MarkedString, Position, TextDocumentContentChangeEvent};
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 
 /// Alt over a word this long shows its card.
@@ -31,6 +32,7 @@ pub struct HoverBlock {
 }
 
 /// A problem reported by the language server, in char offsets.
+#[derive(Clone)]
 pub struct Problem {
     pub range: Range<usize>,
     pub severity: DiagnosticSeverity,
@@ -43,7 +45,8 @@ impl Editor {
         if !lsp.read(cx).has_server_for(&path) {
             return;
         }
-        let text = self.buffer.to_string();
+        let text = self.buffer.rope().clone();
+        self.lsp_revision = self.buffer.revision();
         lsp.update(cx, |lsp, cx| lsp.open(&path, text, cx));
         self.lsp_subscription = Some(cx.observe(&lsp, |_, _, cx| cx.notify()));
         self.lsp = Some(lsp);
@@ -60,8 +63,26 @@ impl Editor {
     pub(super) fn sync_lsp(&mut self, cx: &mut Context<Self>) {
         let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else { return };
         self.lsp_version += 1;
-        let (text, version) = (self.buffer.to_string(), self.lsp_version);
-        lsp.update(cx, |lsp, cx| lsp.change(&path, text, version, cx));
+        // The edits since the server last heard, as it counts positions; a few bytes per keystroke.
+        // Any edit it can't be told as a range (one splitting a "\r\n"): the whole text instead.
+        let edits = self.buffer.edits_since(self.lsp_revision).and_then(|edits| {
+            edits
+                .map(|e| {
+                    let ((start_line, start_col), (end_line, end_col)) = e.lsp_range?;
+                    Some(TextDocumentContentChangeEvent {
+                        range: Some(lsp_types::Range {
+                            start: Position { line: start_line, character: start_col },
+                            end: Position { line: end_line, character: end_col },
+                        }),
+                        range_length: None,
+                        text: e.text.clone(),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        self.lsp_revision = self.buffer.revision();
+        let (text, version) = (self.buffer.rope().clone(), self.lsp_version);
+        lsp.update(cx, |lsp, cx| lsp.change(&path, text, edits, version, cx));
     }
 
     pub(super) fn lsp_saved(&mut self, cx: &mut Context<Self>) {
@@ -81,17 +102,29 @@ impl Editor {
     }
 
     /// Errors, warnings and notes the server reported for this file.
-    pub fn problems(&self, cx: &App) -> Vec<Problem> {
-        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return Vec::new() };
-        lsp.read(cx)
-            .diagnostics(path)
-            .iter()
-            .map(|d| Problem {
-                range: self.offset_from_lsp(d.range.start)..self.offset_from_lsp(d.range.end),
-                severity: d.severity.unwrap_or(DiagnosticSeverity::ERROR),
-                message: d.message.clone(),
-            })
-            .collect()
+    /// The server's problems for this file, in the current text. Drawn every frame, so
+    /// worked out once per change of the text or of the diagnostics.
+    pub fn problems(&self, cx: &App) -> Rc<Vec<Problem>> {
+        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return Rc::default() };
+        let lsp = lsp.read(cx);
+        let key = (lsp.diagnostics_version(), self.buffer.revision());
+        if let Some((k, problems)) = &*self.problems_cache.borrow()
+            && *k == key
+        {
+            return problems.clone();
+        }
+        let problems: Rc<Vec<Problem>> = Rc::new(
+            lsp.diagnostics(path)
+                .iter()
+                .map(|d| Problem {
+                    range: self.offset_from_lsp(d.range.start)..self.offset_from_lsp(d.range.end),
+                    severity: d.severity.unwrap_or(DiagnosticSeverity::ERROR),
+                    message: d.message.clone(),
+                })
+                .collect(),
+        );
+        *self.problems_cache.borrow_mut() = Some((key, problems.clone()));
+        problems
     }
 
     /// Shows, moves or hides the hover card to match the mouse and the Alt key.
@@ -256,9 +289,9 @@ impl Editor {
         self.hover_word = Some(word.clone());
         let mut diagnostics: Vec<(DiagnosticSeverity, String)> = self
             .problems(cx)
-            .into_iter()
+            .iter()
             .filter(|p| p.range.start <= offset && offset <= p.range.end.max(p.range.start + 1))
-            .map(|p| (p.severity, p.message))
+            .map(|p| (p.severity, p.message.clone()))
             .collect();
         let not_ready = self.not_ready_message(cx);
         let request = if not_ready.is_some() {

@@ -1,5 +1,27 @@
 use ropey::Rope;
+use std::collections::VecDeque;
 use std::ops::Range;
+
+/// How many edits the buffer remembers for whatever follows it (the parser, the
+/// language server). One further behind starts over from the whole text.
+const EDIT_LOG: usize = 512;
+
+/// One change, in the units the things following the text need: bytes and
+/// (line, byte column) for the parser, (line, UTF-16 column) for language servers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edit {
+    pub start_byte: usize,
+    pub old_end_byte: usize,
+    pub new_end_byte: usize,
+    pub start: (usize, usize),
+    pub old_end: (usize, usize),
+    pub new_end: (usize, usize),
+    /// Where the replaced text was, as language servers count (line, UTF-16 column),
+    /// before the change. None when they can't say it: an edit that splits or joins
+    /// a "\r\n" changes lines in a way positions can't describe.
+    pub lsp_range: Option<((u32, u32), (u32, u32))>,
+    pub text: String,
+}
 
 /// Text storage for one open file. Backed by a rope, so edits stay fast
 /// even on very large files.
@@ -12,6 +34,11 @@ pub struct Buffer {
     text: Rope,
     version: u64,
     saved_version: u64,
+    /// Goes up with every change, undo included (unlike `version`, which an undo
+    /// takes back), so a follower knows exactly which edits it has seen.
+    revision: u64,
+    /// The latest edits, each with the revision it made.
+    edits: VecDeque<(u64, Edit)>,
 }
 
 impl Default for Buffer {
@@ -26,7 +53,7 @@ impl Buffer {
     }
 
     pub fn from_text(source: &str) -> Self {
-        Self { text: Rope::from_str(source), version: 0, saved_version: 0 }
+        Self { text: Rope::from_str(source), version: 0, saved_version: 0, revision: 0, edits: VecDeque::new() }
     }
 
     pub fn rope(&self) -> &Rope {
@@ -36,6 +63,43 @@ impl Buffer {
     /// Goes up with every edit.
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The edits made since `revision`, in order. None when they aren't all known
+    /// (too old, or the text was replaced as a whole): start over from the text.
+    pub fn edits_since(&self, revision: u64) -> Option<impl Iterator<Item = &Edit>> {
+        if revision > self.revision {
+            return None;
+        }
+        if revision < self.revision {
+            let first = self.edits.front()?.0;
+            if first > revision + 1 {
+                return None;
+            }
+        }
+        Some(self.edits.iter().filter(move |(r, _)| *r > revision).map(|(_, e)| e))
+    }
+
+    /// (line, byte column) of a char index.
+    fn byte_point(&self, offset: usize) -> (usize, usize) {
+        let line = self.text.char_to_line(offset);
+        (line, self.text.char_to_byte(offset) - self.text.line_to_byte(line))
+    }
+
+    /// Whether a char index falls between the two halves of a "\r\n".
+    fn splits_crlf(&self, offset: usize) -> bool {
+        offset > 0 && self.char_at(offset - 1) == Some('\r') && self.char_at(offset) == Some('\n')
+    }
+
+    /// (line, UTF-16 column) of a char index.
+    fn utf16_point(&self, offset: usize) -> (u32, u32) {
+        let line = self.text.char_to_line(offset);
+        let column = self.text.char_to_utf16_cu(offset) - self.text.char_to_utf16_cu(self.text.line_to_char(line));
+        (line as u32, column as u32)
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -59,6 +123,11 @@ impl Buffer {
     pub fn replace(&mut self, range: Range<usize>, text: &str) -> usize {
         let end = range.end.min(self.len_chars());
         let start = range.start.min(end);
+        let start_byte = self.text.char_to_byte(start);
+        let (start_point, old_end) = (self.byte_point(start), self.byte_point(end));
+        let lsp_range = (!self.splits_crlf(start) && !self.splits_crlf(end))
+            .then(|| (self.utf16_point(start), self.utf16_point(end)));
+        let old_end_byte = self.text.char_to_byte(end);
         if start < end {
             self.text.remove(start..end);
         }
@@ -66,7 +135,24 @@ impl Buffer {
             self.text.insert(start, text);
         }
         self.version += 1;
-        start + text.chars().count()
+        let new_end = start + text.chars().count();
+        let lsp_range = lsp_range.filter(|_| !self.splits_crlf(start) && !self.splits_crlf(new_end));
+        self.revision += 1;
+        let edit = Edit {
+            start_byte,
+            old_end_byte,
+            new_end_byte: start_byte + text.len(),
+            start: start_point,
+            old_end,
+            new_end: self.byte_point(new_end),
+            lsp_range,
+            text: text.to_string(),
+        };
+        if self.edits.len() == EDIT_LOG {
+            self.edits.pop_front();
+        }
+        self.edits.push_back((self.revision, edit));
+        new_end
     }
 
     /// Restores an undo snapshot along with the version it had, so undoing back to the
@@ -74,6 +160,9 @@ impl Buffer {
     pub fn restore_version(&mut self, text: Rope, version: u64) {
         self.text = text;
         self.version = version;
+        // A whole new text: followers start over from it.
+        self.revision += 1;
+        self.edits.clear();
     }
 
     pub fn slice(&self, range: Range<usize>) -> String {
@@ -181,6 +270,64 @@ mod tests {
         assert!(buf.is_dirty());
         buf.mark_saved();
         assert!(!buf.is_dirty());
+    }
+
+    #[test]
+    fn edits_are_logged_in_every_unit() {
+        let mut buf = Buffer::from_text("é\nab");
+        let start = buf.revision();
+        buf.replace(3..4, "xyz\n");
+        let edits: Vec<Edit> = buf.edits_since(start).unwrap().cloned().collect();
+        assert_eq!(edits.len(), 1);
+        let e = &edits[0];
+        // "é" is two bytes: "b" starts at byte 4, column 1 of line 1.
+        assert_eq!((e.start_byte, e.old_end_byte, e.new_end_byte), (4, 5, 8));
+        assert_eq!((e.start, e.old_end, e.new_end), ((1, 1), (1, 2), (2, 0)));
+        assert_eq!(e.lsp_range, Some(((1, 1), (1, 2))));
+        assert_eq!(buf.edits_since(buf.revision()).unwrap().count(), 0);
+        // An undo replaces the whole text: the edits before it can't be followed.
+        buf.restore_version(Rope::from_str("é\nab"), 0);
+        assert!(buf.edits_since(start).is_none());
+    }
+
+    #[test]
+    fn a_server_replaying_the_edits_gets_the_same_text() {
+        let start = "fn é() {\n    let 😀 = 1;\n}\n";
+        let mut buf = Buffer::from_text(start);
+        let mut seed = 7u64;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n.max(1)
+        };
+        let pieces = ["", "x", "😀", "é\n", "\n\n", "ab\r\ncd", "\r", "\n"];
+        for _ in 0..300 {
+            let a = next(buf.len_chars() + 1);
+            let b = (a + next(4)).min(buf.len_chars());
+            buf.replace(a..b, pieces[next(pieces.len())]);
+        }
+        // As a server does: each change in turn, at a line and a UTF-16 column, or the
+        // whole text when an edit can't be placed that way (as the editor sends it then).
+        let mut server = Buffer::from_text(start);
+        let mut whole = 0;
+        for (i, e) in buf.edits_since(0).unwrap().enumerate() {
+            let Some((from, to)) = e.lsp_range else {
+                whole += 1;
+                let mut replay = Buffer::from_text(start);
+                for e in buf.edits_since(0).unwrap().take(i + 1) {
+                    let (a, b) = (replay.rope().byte_to_char(e.start_byte), replay.rope().byte_to_char(e.old_end_byte));
+                    replay.replace(a..b, &e.text);
+                }
+                server = replay;
+                continue;
+            };
+            let at = |(line, col): (u32, u32)| {
+                server.offset(line as usize, server.utf16_to_column(line as usize, col as usize))
+            };
+            let range = at(from)..at(to);
+            server.replace(range, &e.text);
+        }
+        assert_eq!(server.to_string(), buf.to_string());
+        assert!(whole > 0 && whole < 100, "{whole} edits needed the whole text");
     }
 
     #[test]

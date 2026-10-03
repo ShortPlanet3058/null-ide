@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Something the server sent that isn't a reply to one of our requests.
@@ -39,9 +39,26 @@ pub struct LanguageServer {
     child: Mutex<Child>,
     next_id: AtomicI64,
     pending: Pending,
+    /// Whether it takes just the changed parts of a file, rather than all of it each time.
+    incremental: AtomicBool,
 }
 
 impl LanguageServer {
+    pub fn incremental(&self) -> bool {
+        self.incremental.load(Ordering::Relaxed)
+    }
+
+    /// Reads, from what the server said it can do, how it wants file changes.
+    pub fn set_capabilities(&self, capabilities: &lsp_types::ServerCapabilities) {
+        use lsp_types::{TextDocumentSyncCapability as Sync, TextDocumentSyncKind as Kind};
+        let kind = match &capabilities.text_document_sync {
+            Some(Sync::Kind(kind)) => Some(*kind),
+            Some(Sync::Options(options)) => options.change,
+            None => None,
+        };
+        self.incremental.store(kind == Some(Kind::INCREMENTAL), Ordering::Relaxed);
+    }
+
     /// Starts `program` in `root` and returns it with a stream of its messages.
     pub fn spawn(
         program: &Path,
@@ -92,7 +109,13 @@ impl LanguageServer {
             replies.lock().unwrap().clear();
         })?;
 
-        let server = Self { stdin: Mutex::new(stdin), child: Mutex::new(child), next_id: AtomicI64::new(1), pending };
+        let server = Self {
+            stdin: Mutex::new(stdin),
+            child: Mutex::new(child),
+            next_id: AtomicI64::new(1),
+            pending,
+            incremental: AtomicBool::new(false),
+        };
         Ok((server, rx))
     }
 

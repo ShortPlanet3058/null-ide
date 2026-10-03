@@ -226,10 +226,10 @@ impl Editor {
         let span = self.line_range_chars(&lines);
         let error = self
             .problems(cx)
-            .into_iter()
+            .iter()
             .filter(|p| p.severity == DiagnosticSeverity::ERROR)
             .find(|p| p.range.start < span.end && p.range.end >= span.start)
-            .map(|p| p.message);
+            .map(|p| p.message.clone());
         let placeholder = match (&error, ask_only) {
             (_, true) => "Ask about this code",
             (Some(_), false) => "Fix the error, or describe a change",

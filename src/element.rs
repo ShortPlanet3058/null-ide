@@ -242,12 +242,13 @@ impl Element for EditorElement {
                 _ => 0..0,
             };
             let texts: Vec<String> = lines_shown.clone().map(|l| editor.buffer.line_text(l)).collect();
+            editor.highlight_lines(lines_shown.clone());
 
             // Errors and warnings get a wavy underline and color their line number.
             // Hints and notes only show in the hover card, to keep the code calm.
             let mut underlines: Vec<Vec<(Range<usize>, Hsla)>> = vec![Vec::new(); lines_shown.len()];
             let mut flagged: Vec<Option<Hsla>> = vec![None; lines_shown.len()];
-            for problem in editor.problems(cx) {
+            for problem in editor.problems(cx).iter() {
                 let color = match problem.severity {
                     DiagnosticSeverity::ERROR => theme.error,
                     DiagnosticSeverity::WARNING => theme.warning,
@@ -596,7 +597,7 @@ impl Element for EditorElement {
                         scroll_marks.push(mark(editor.buffer.point(m.start).0, 3., 4., theme.caret.opacity(0.8)));
                     }
                 }
-                for problem in editor.problems(cx) {
+                for problem in editor.problems(cx).iter() {
                     let color = match problem.severity {
                         DiagnosticSeverity::ERROR => theme.error,
                         DiagnosticSeverity::WARNING => theme.warning,

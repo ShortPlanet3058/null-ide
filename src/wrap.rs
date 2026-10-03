@@ -22,7 +22,8 @@ pub struct BlockSpec {
 pub struct WrapMap {
     /// Characters per row, or None when wrapping is off.
     width: Option<usize>,
-    version: u64,
+    /// The buffer revision it matches.
+    revision: u64,
     lines: usize,
     blocks: Vec<BlockSpec>,
     /// Off: one row per line, nothing stored.
@@ -55,7 +56,7 @@ impl Default for WrapMap {
     fn default() -> Self {
         Self {
             width: None,
-            version: u64::MAX,
+            revision: u64::MAX,
             lines: 1,
             blocks: Vec::new(),
             general: false,
@@ -78,18 +79,20 @@ impl WrapMap {
     }
 
     /// Brings the map up to date with the text, the row width (None to stop wrapping)
-    /// and the blocks between lines.
+    /// and the blocks between lines. After typing, only the edited lines are wrapped again.
     pub fn update(&mut self, buffer: &Buffer, width: Option<usize>, blocks: &[BlockSpec]) {
         let width = width.map(|w| w.max(MIN_ROOM));
-        if width == self.width
-            && buffer.version() == self.version
-            && buffer.len_lines() == self.lines
-            && blocks == self.blocks.as_slice()
-        {
+        let same_layout = width == self.width && blocks == self.blocks.as_slice();
+        if same_layout && buffer.revision() == self.revision && buffer.len_lines() == self.lines {
+            return;
+        }
+        if same_layout && self.general && self.rewrap_edits(buffer) {
+            self.revision = buffer.revision();
+            self.place_rows();
             return;
         }
         self.width = width;
-        self.version = buffer.version();
+        self.revision = buffer.revision();
         self.lines = buffer.len_lines();
         self.blocks = blocks.to_vec();
         self.starts.clear();
@@ -100,28 +103,82 @@ impl WrapMap {
         if !self.general {
             return;
         }
+        match width {
+            Some(width) => {
+                let mut texts = buffer.rope().lines();
+                for _ in 0..self.lines {
+                    // Ropey may not yield the empty line after a final line break.
+                    let text: String = texts.next().map(line_chars).unwrap_or_default();
+                    let (starts, indent) = wrap_line(&text, width);
+                    self.starts.push(starts);
+                    self.indents.push(indent);
+                }
+            }
+            None => {
+                self.starts = vec![vec![0]; self.lines];
+                self.indents = vec![0; self.lines];
+            }
+        }
+        self.place_rows();
+    }
+
+    /// Follows the buffer's edits since the last update, wrapping again only the lines
+    /// they touched. False when it can't (the edits aren't known): wrap everything.
+    fn rewrap_edits(&mut self, buffer: &Buffer) -> bool {
+        let Some(edits) = buffer.edits_since(self.revision) else { return false };
+        // Lines to wrap again, in the text as it is now.
+        let mut dirty: Vec<Range<usize>> = Vec::new();
+        for edit in edits {
+            let (start, old_end, new_end) = (edit.start.0, edit.old_end.0, edit.new_end.0);
+            if old_end >= self.starts.len() {
+                return false;
+            }
+            let added = new_end as isize - old_end as isize;
+            self.starts.splice(start..=old_end, (start..=new_end).map(|_| vec![0]));
+            self.indents.splice(start..=old_end, (start..=new_end).map(|_| 0));
+            for range in &mut dirty {
+                if range.start > old_end {
+                    *range = (range.start as isize + added) as usize..(range.end as isize + added) as usize;
+                } else if range.end > start {
+                    // Overlapping the edit: from the edit's start (or before) to past its new lines.
+                    range.start = range.start.min(start);
+                    range.end = (range.end as isize + added).max(new_end as isize + 1) as usize;
+                }
+            }
+            dirty.push(start..new_end + 1);
+        }
+        self.lines = buffer.len_lines();
+        if self.starts.len() != self.lines {
+            return false;
+        }
+        if let Some(width) = self.width {
+            for range in dirty {
+                for line in range.start.min(self.lines)..range.end.min(self.lines) {
+                    let text = line_chars(buffer.rope().line(line));
+                    (self.starts[line], self.indents[line]) = wrap_line(&text, width);
+                }
+            }
+        }
+        true
+    }
+
+    /// Where each line's rows and each block's rows go, from the rows each line takes.
+    fn place_rows(&mut self) {
+        self.first_rows.clear();
+        self.block_rows.clear();
+        let blocks = &self.blocks;
         let mut order: Vec<usize> = (0..blocks.len()).collect();
         order.sort_by_key(|&i| blocks[i].before_line);
         let mut pending = order.into_iter().peekable();
         let mut row = 0;
-        let mut texts = buffer.rope().lines();
         for line in 0..self.lines {
             while let Some(&b) = pending.peek().filter(|&&b| blocks[b].before_line <= line) {
                 self.block_rows.push((row, b));
                 row += blocks[b].rows;
                 pending.next();
             }
-            // Ropey may not yield the empty line after a final line break.
-            let text: String =
-                texts.next().map(|l| l.chars().filter(|c| *c != '\n' && *c != '\r').collect()).unwrap_or_default();
-            let (starts, indent) = match width {
-                Some(width) => wrap_line(&text, width),
-                None => (vec![0], 0),
-            };
             self.first_rows.push(row);
-            row += starts.len();
-            self.starts.push(starts);
-            self.indents.push(indent);
+            row += self.starts[line].len();
         }
         for b in pending {
             self.block_rows.push((row, b));
@@ -212,6 +269,11 @@ impl WrapMap {
     }
 }
 
+/// A line's text without its line break.
+fn line_chars(line: ropey::RopeSlice) -> String {
+    line.chars().filter(|c| *c != '\n' && *c != '\r').collect()
+}
+
 /// Where a line's rows start, and how far its continuation rows are indented.
 /// Breaks go after a space when one fits, so words stay whole; a word longer than
 /// the row is cut where the row ends.
@@ -247,6 +309,33 @@ fn wrap_line(text: &str, width: usize) -> (Vec<usize>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edits_rewrap_only_their_lines_and_match_a_fresh_map() {
+        let long = "word ".repeat(12);
+        let mut buffer = Buffer::from_text(&format!("a\n{long}\nb\n{long}\nc"));
+        let blocks = [BlockSpec { before_line: 3, rows: 2 }];
+        let mut map = WrapMap::default();
+        map.update(&buffer, Some(20), &blocks);
+        // Join two lines, split one, type on a wrapped one: three edits before the next update.
+        let b = buffer.line_to_char(2);
+        buffer.replace(b - 1..b, "");
+        let at = buffer.offset(0, 1);
+        buffer.replace(at..at, "\nnew line\n");
+        let at = buffer.offset(3, 3);
+        buffer.replace(at..at, &"more words ".repeat(4));
+        // Then lines removed across the edited ones.
+        let (from, to) = (buffer.offset(2, 2), buffer.offset(4, 1));
+        buffer.replace(from..to, "");
+        map.update(&buffer, Some(20), &blocks);
+        let mut fresh = WrapMap::default();
+        fresh.update(&buffer, Some(20), &blocks);
+        assert_eq!(map.lines, fresh.lines);
+        assert_eq!(map.starts, fresh.starts);
+        assert_eq!(map.indents, fresh.indents);
+        assert_eq!(map.first_rows, fresh.first_rows);
+        assert_eq!(map.block_rows, fresh.block_rows);
+    }
 
     #[test]
     fn breaks_after_spaces_and_cuts_long_words() {

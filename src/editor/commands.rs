@@ -260,25 +260,23 @@ impl Editor {
             if let Some(&(open, close)) =
                 [('(', ')'), ('[', ']'), ('{', '}')].iter().find(|(o, cl)| *o == c || *cl == c)
             {
+                // Walking the rope's chars in a row, not looking each one up: this runs every frame.
                 let forward = c == open;
-                let mut depth = 0i32;
+                let rope = self.buffer.rope();
+                let mut chars = rope.chars_at(if forward { i + 1 } else { i });
+                let mut depth = 1i32;
                 let mut j = i;
                 for _ in 0..LIMIT {
-                    match at(j) {
-                        Some(x) if x == open => depth += if forward { 1 } else { -1 },
-                        Some(x) if x == close => depth += if forward { -1 } else { 1 },
-                        None => break,
-                        _ => {}
+                    let next = if forward { chars.next() } else { chars.prev() };
+                    let Some(x) = next else { break };
+                    j = if forward { j + 1 } else { j - 1 };
+                    if x == open {
+                        depth += if forward { 1 } else { -1 };
+                    } else if x == close {
+                        depth += if forward { -1 } else { 1 };
                     }
                     if depth == 0 {
                         return Some((i, j));
-                    }
-                    if forward {
-                        j += 1;
-                    } else if j == 0 {
-                        break;
-                    } else {
-                        j -= 1;
                     }
                 }
             }

@@ -330,7 +330,12 @@ pub struct Editor {
     pub buffer: Buffer,
     path: Option<PathBuf>,
     highlighter: Option<Highlighter>,
+    /// Colours for the lines around the view (see [`Self::highlight_lines`]).
     pub spans: Vec<Span>,
+    /// The buffer revision and byte range `spans` cover.
+    spans_for: Option<(u64, Range<usize>)>,
+    /// `problems()` for a (diagnostics version, buffer revision).
+    problems_cache: std::cell::RefCell<Option<((u64, u64), std::rc::Rc<Vec<intel::Problem>>)>>,
     /// The main cursor: the one the view follows. Any others are in `extra`.
     pub selection: Selection,
     goal_column: Option<usize>,
@@ -363,6 +368,8 @@ pub struct Editor {
     last_query: SearchQuery,
     lsp: Option<Entity<LspStore>>,
     lsp_version: i32,
+    /// The buffer revision the language server has.
+    lsp_revision: u64,
     lsp_subscription: Option<Subscription>,
     pub hover: Option<HoverCard>,
     hover_word: Option<Range<usize>>,
@@ -411,6 +418,8 @@ impl Editor {
             path,
             highlighter,
             spans: Vec::new(),
+            spans_for: None,
+            problems_cache: Default::default(),
             selection: Selection::caret(0),
             goal_column: None,
             extra: Vec::new(),
@@ -442,6 +451,7 @@ impl Editor {
             last_query: SearchQuery::default(),
             lsp: None,
             lsp_version: 0,
+            lsp_revision: 0,
             lsp_subscription: None,
             hover: None,
             hover_word: None,
@@ -514,6 +524,7 @@ impl Editor {
         self.release_lsp(cx);
         self.highlighter = languages::for_path(&path).and_then(Highlighter::new);
         self.spans.clear();
+        self.spans_for = None;
         self.path = Some(path);
         self.rehighlight();
         if let Some(lsp) = lsp {
@@ -570,12 +581,33 @@ impl Editor {
         self.close_hover(cx);
     }
 
-    /// Brings everything derived from the text up to date after it changes.
+    /// Brings everything derived from the text up to date after it changes. Colours
+    /// follow when the lines are next drawn.
     fn rehighlight(&mut self) {
-        if let Some(highlighter) = &mut self.highlighter {
-            self.spans = highlighter.highlight(&self.buffer.to_string());
-        }
         self.refresh_search();
+    }
+
+    /// Makes sure `spans` colours `lines`: the syntax tree catches up with the edits
+    /// (only what changed is parsed again), then the lines around the view are
+    /// coloured, with some room so scrolling a little needs nothing new.
+    pub(crate) fn highlight_lines(&mut self, lines: Range<usize>) {
+        /// Lines coloured beyond the view on each side.
+        const ROOM: usize = 120;
+        let Some(highlighter) = &mut self.highlighter else { return };
+        let revision = self.buffer.revision();
+        let wanted = self.buffer.line_to_byte(lines.start)..self.buffer.line_to_byte(lines.end);
+        if let Some((r, range)) = &self.spans_for
+            && *r == revision
+            && range.start <= wanted.start
+            && range.end >= wanted.end
+        {
+            return;
+        }
+        highlighter.sync(&self.buffer);
+        let range =
+            self.buffer.line_to_byte(lines.start.saturating_sub(ROOM))..self.buffer.line_to_byte(lines.end + ROOM);
+        self.spans = highlighter.spans(self.buffer.rope(), range.clone());
+        self.spans_for = Some((revision, range));
     }
 
     // ---------- find & replace ----------

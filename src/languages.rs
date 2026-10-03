@@ -1,9 +1,9 @@
 //! The languages Null knows: how to recognise their files, their grammar and
 //! highlighting rules, and how they write comments.
 
+use crate::highlight::HighlightQuery;
 use std::path::Path;
 use std::sync::{LazyLock, OnceLock};
-use tree_sitter_highlight::HighlightConfiguration;
 
 pub struct Language {
     /// As people call it: "Python", "TypeScript".
@@ -15,48 +15,37 @@ pub struct Language {
     /// Highlight queries, concatenated: languages that extend another (TypeScript
     /// extends JavaScript, C++ extends C) list the base first.
     highlights: &'static [&'static str],
-    injections: &'static str,
     /// How a line comment starts, for toggling comments. None when there is only a block form.
     pub line_comment: Option<&'static str>,
     /// How a block comment opens and closes, for languages without line comments.
     pub block_comment: Option<(&'static str, &'static str)>,
-    config: OnceLock<Option<HighlightConfiguration>>,
+    query: OnceLock<Option<HighlightQuery>>,
 }
 
 macro_rules! language {
-    ($name:expr, [$($ext:expr),*], [$($file:expr),*], $grammar:expr, [$($query:expr),+], $injections:expr, $comment:expr) => {
+    ($name:expr, [$($ext:expr),*], [$($file:expr),*], $grammar:expr, [$($query:expr),+], $comment:expr) => {
         Language {
             name: $name,
             extensions: &[$($ext),*],
             file_names: &[$($file),*],
             grammar: || $grammar.into(),
             highlights: &[$($query),+],
-            injections: $injections,
             line_comment: $comment,
             block_comment: None,
-            config: OnceLock::new(),
+            query: OnceLock::new(),
         }
     };
 }
 
 static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
     let mut languages = vec![
-        language!(
-            "Rust",
-            ["rs"],
-            [],
-            tree_sitter_rust::LANGUAGE,
-            [tree_sitter_rust::HIGHLIGHTS_QUERY],
-            tree_sitter_rust::INJECTIONS_QUERY,
-            Some("//")
-        ),
+        language!("Rust", ["rs"], [], tree_sitter_rust::LANGUAGE, [tree_sitter_rust::HIGHLIGHTS_QUERY], Some("//")),
         language!(
             "Python",
             ["py", "pyi", "pyw"],
             [],
             tree_sitter_python::LANGUAGE,
             [tree_sitter_python::HIGHLIGHTS_QUERY],
-            "",
             Some("#")
         ),
         language!(
@@ -65,7 +54,6 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             [],
             tree_sitter_javascript::LANGUAGE,
             [tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_javascript::JSX_HIGHLIGHT_QUERY],
-            "",
             Some("//")
         ),
         language!(
@@ -74,7 +62,6 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             [],
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
             [tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_typescript::HIGHLIGHTS_QUERY],
-            "",
             Some("//")
         ),
         language!(
@@ -87,7 +74,6 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
                 tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
                 tree_sitter_typescript::HIGHLIGHTS_QUERY
             ],
-            "",
             Some("//")
         ),
         language!(
@@ -96,7 +82,6 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             [".prettierrc", ".eslintrc"],
             tree_sitter_json::LANGUAGE,
             [tree_sitter_json::HIGHLIGHTS_QUERY],
-            "",
             None
         ),
         language!(
@@ -105,7 +90,6 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             ["Cargo.lock", "Pipfile"],
             tree_sitter_toml_ng::LANGUAGE,
             [tree_sitter_toml_ng::HIGHLIGHTS_QUERY],
-            "",
             Some("#")
         ),
         language!(
@@ -114,7 +98,6 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             [],
             tree_sitter_md::LANGUAGE,
             [tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
-            "",
             None
         ),
         language!(
@@ -123,19 +106,17 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             [],
             tree_sitter_html::LANGUAGE,
             [tree_sitter_html::HIGHLIGHTS_QUERY],
-            "",
             None
         ),
-        language!("CSS", ["css"], [], tree_sitter_css::LANGUAGE, [tree_sitter_css::HIGHLIGHTS_QUERY], "", None),
-        language!("Go", ["go"], [], tree_sitter_go::LANGUAGE, [tree_sitter_go::HIGHLIGHTS_QUERY], "", Some("//")),
-        language!("C", ["c", "h"], [], tree_sitter_c::LANGUAGE, [tree_sitter_c::HIGHLIGHT_QUERY], "", Some("//")),
+        language!("CSS", ["css"], [], tree_sitter_css::LANGUAGE, [tree_sitter_css::HIGHLIGHTS_QUERY], None),
+        language!("Go", ["go"], [], tree_sitter_go::LANGUAGE, [tree_sitter_go::HIGHLIGHTS_QUERY], Some("//")),
+        language!("C", ["c", "h"], [], tree_sitter_c::LANGUAGE, [tree_sitter_c::HIGHLIGHT_QUERY], Some("//")),
         language!(
             "C++",
             ["cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++", "ipp"],
             [],
             tree_sitter_cpp::LANGUAGE,
             [tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY],
-            "",
             Some("//")
         ),
         language!(
@@ -144,7 +125,6 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             [".clang-format"],
             tree_sitter_yaml::LANGUAGE,
             [tree_sitter_yaml::HIGHLIGHTS_QUERY],
-            "",
             Some("#")
         ),
         language!(
@@ -153,7 +133,6 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", ".zshenv"],
             tree_sitter_bash::LANGUAGE,
             [tree_sitter_bash::HIGHLIGHT_QUERY],
-            "",
             Some("#")
         ),
     ];
@@ -183,19 +162,13 @@ impl Language {
     }
 
     /// Built on first use and shared by every file in this language.
-    pub fn highlight_config(&'static self, captures: &[&str]) -> Option<&'static HighlightConfiguration> {
-        self.config
-            .get_or_init(|| {
-                let query = self.highlights.join("\n");
-                match HighlightConfiguration::new(self.grammar(), self.name, &query, self.injections, "") {
-                    Ok(mut config) => {
-                        config.configure(captures);
-                        Some(config)
-                    }
-                    Err(err) => {
-                        eprintln!("null: highlighting for {} is unavailable: {err}", self.name);
-                        None
-                    }
+    pub fn highlight_query(&'static self) -> Option<&'static HighlightQuery> {
+        self.query
+            .get_or_init(|| match HighlightQuery::new(&self.grammar(), &self.highlights.join("\n")) {
+                Ok(query) => Some(query),
+                Err(err) => {
+                    eprintln!("null: highlighting for {} is unavailable: {err}", self.name);
+                    None
                 }
             })
             .as_ref()
@@ -220,7 +193,7 @@ mod tests {
     #[test]
     fn every_language_builds_its_highlighting() {
         for language in LANGUAGES.iter() {
-            assert!(language.highlight_config(crate::highlight::CAPTURES).is_some(), "{} failed", language.name);
+            assert!(language.highlight_query().is_some(), "{} failed", language.name);
         }
     }
 }
