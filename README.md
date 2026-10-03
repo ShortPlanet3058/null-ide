@@ -20,6 +20,19 @@ cargo run -- path/to/folder    # open another folder
 cargo run -- path/to/file.rs   # open a file
 ```
 
+### The Mac app
+
+```sh
+packaging/macos/bundle.sh             # builds target/release/Null.app
+packaging/macos/bundle.sh --install   # and copies it to /Applications
+```
+
+The app has Null's icon, opens from the Dock and the Finder ("Open With → Null" for files
+and folders), and takes files dropped on its Dock icon. **Null › Install Shell Command**
+adds a `null` command: `null .` or `null src/main.rs` from any terminal opens them in the
+running Null. The bundle is signed ad hoc, for this Mac; sharing it needs a Developer ID
+signature. Everything the script uses comes with macOS and Rust.
+
 Settings open with ⌘, / Ctrl+,. They're saved in `~/.config/null/settings.json`
 (`%APPDATA%\Null\settings.json` on Windows), which can also be edited by hand
 (“Edit as JSON…” in Settings).
@@ -32,6 +45,9 @@ Getting around:
 | ⌘K | quick settings (theme, text size, wrap, sidebar, terminal, AI…) changed right in the list, and every command once you type |
 | ⌘, | all settings |
 | ⌃G | go to a line |
+| ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
+| ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
+| ⌥⌘I | an AI task, reviewed change by change (with Claude Code or Codex) |
 
 Coming from another editor? Pick its shortcuts (VS Code, JetBrains, Sublime Text or Zed) on
 the welcome screen or in Settings → Keyboard.

@@ -35,6 +35,7 @@ actions!(
         MoveTabRight,
         MoveTabLeft,
         NewAiTask,
+        InstallShellCommand,
         ReviewAiTask,
         StopAiTask,
         KeepAllTaskChanges,
@@ -800,6 +801,64 @@ impl Workspace {
 
     /// Opens a folder as the project (its tabs replace these, after asking about unsaved
     /// changes), or a file in a tab.
+    /// Opens what the Finder or the `null` command handed over: files in tabs, a folder
+    /// as the project (unless it's this one already).
+    pub fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        for path in paths {
+            if path == root {
+                continue;
+            }
+            self.open_path(path, window, cx);
+        }
+    }
+
+    /// Installs `null`, to open files and folders from a terminal: `null .`, `null a.rs`.
+    /// Into /usr/local/bin when it can write there, else ~/.local/bin.
+    fn install_shell_command(&mut self, _: &InstallShellCommand, _: &mut Window, cx: &mut Context<Self>) {
+        let Ok(exe) = std::env::current_exe() else { return };
+        // From the app, `open -a` hands paths to the running Null; from a build, run it directly.
+        let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf);
+        let launch = match &bundle {
+            Some(app) => format!("open -a \"{}\" \"$p\"", app.display()),
+            None => format!("\"{}\" \"$p\" &", exe.display()),
+        };
+        let script = shell_script(&launch);
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let system = PathBuf::from("/usr/local/bin");
+        let writable = |dir: &Path| {
+            let probe = dir.join(".null-write-test");
+            let ok = std::fs::write(&probe, "").is_ok();
+            std::fs::remove_file(&probe).ok();
+            ok
+        };
+        let dir = if writable(&system) { system } else { home.join(".local/bin") };
+        let target = dir.join("null");
+        let result = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, script)).and_then(|()| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+            }
+            Ok(())
+        });
+        let on_path = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d == dir));
+        let message = match result {
+            Ok(()) if on_path || dir.starts_with("/usr/local") => {
+                format!("Installed {}: try `null .` in a terminal.", target.display())
+            }
+            Ok(()) => {
+                format!(
+                    "Installed {}. Add {} to your PATH to use `null` from a terminal.",
+                    target.display(),
+                    dir.display()
+                )
+            }
+            Err(error) => format!("Couldn't install the command: {error}"),
+        };
+        self.show_notice(message, cx);
+    }
+
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
             // The project being left keeps its session.
@@ -2616,6 +2675,20 @@ fn shorten_path(path: &str, max: usize) -> String {
     format!("…/{kept}")
 }
 
+/// The `null` command: each path made absolute (created when missing, as editors do),
+/// then handed to Null with `launch`, which reads it as `$p`.
+fn shell_script(launch: &str) -> String {
+    format!(
+        "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`.\n\
+         [ $# -eq 0 ] && set -- .\n\
+         for p in \"$@\"; do\n\
+         \tcase \"$p\" in /*) ;; *) p=\"$PWD/$p\" ;; esac\n\
+         \t[ -e \"$p\" ] || : > \"$p\"\n\
+         \t{launch}\n\
+         done\n"
+    )
+}
+
 /// Where `path` ends up when `from` (it, or a folder above it) is renamed to `to`.
 fn moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
     let rest = path.strip_prefix(from).ok()?;
@@ -2925,6 +2998,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_problems))
             .on_action(cx.listener(Self::replace_in_project))
             .on_action(cx.listener(Self::new_ai_task))
+            .on_action(cx.listener(Self::install_shell_command))
             .on_action(cx.listener(Self::review_ai_task))
             .on_action(cx.listener(Self::stop_ai_task))
             .on_action(cx.listener(Self::keep_all_task_changes))
@@ -3078,6 +3152,25 @@ mod tests {
             assert_eq!(names(w, cx, 0), vec!["b.txt".to_string(), "c.txt".to_string()]);
             assert!(w.shown_editor(0).is_some());
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_shell_command_is_valid_and_hands_over_absolute_paths() {
+        let dir = std::env::temp_dir().join(format!("null-cmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log");
+        // A stand-in for Null that writes down what it was given.
+        let script = shell_script(&format!("echo \"$p\" >> \"{}\"", log.display()));
+        let command = dir.join("null");
+        std::fs::write(&command, script).unwrap();
+        let run = std::process::Command::new("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
+        assert!(run.unwrap().success());
+        let given = std::fs::read_to_string(&log).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        assert!(given.lines().next().unwrap().ends_with("/new.txt"), "{given}");
+        assert!(dir.join("new.txt").exists());
+        assert_eq!(given.lines().count(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -66,6 +66,26 @@ fn resolve_args() -> (PathBuf, Option<PathBuf>) {
     (root, Some(path))
 }
 
+/// A `file://` URL as a path ("%20" back to a space, and so on).
+fn path_from_url(url: &str) -> Option<PathBuf> {
+    let encoded = url.strip_prefix("file://")?;
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(byte) = encoded.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            decoded.push(byte);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(PathBuf::from(String::from_utf8(decoded).ok()?))
+}
+
 /// The path with `.`, `..` and links resolved. A file that doesn't exist yet (`null new.rs`)
 /// keeps its name, under its resolved folder.
 fn absolute(path: &Path) -> PathBuf {
@@ -97,7 +117,33 @@ fn window_bounds(saved: Option<session::WindowState>, cx: &App) -> WindowBounds 
 fn main() {
     let (root, file) = resolve_args();
 
-    Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
+    // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
+    // or by the `null` command while Null runs: opened in the window.
+    let app = Application::new().with_assets(assets::Assets);
+    let (opened, mut to_open) = futures::channel::mpsc::unbounded::<Vec<String>>();
+    app.on_open_urls(move |urls| {
+        opened.unbounded_send(urls).ok();
+    });
+    app.run(move |cx: &mut App| {
+        cx.spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(urls) = to_open.next().await {
+                let paths: Vec<PathBuf> = urls.iter().filter_map(|u| path_from_url(u)).collect();
+                cx.update(|cx| {
+                    let workspace = cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>());
+                    if let Some(handle) = workspace {
+                        handle
+                            .update(cx, |workspace, window, cx| {
+                                window.activate_window();
+                                workspace.open_paths(paths, window, cx)
+                            })
+                            .ok();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
         settings::init(cx);
         keymap::register(cx.global::<settings::Settings>().keymap, cx);
         // ⌘Q with no window focused still asks about unsaved changes, in the main window.
@@ -147,4 +193,19 @@ fn main() {
         .expect("failed to open the main window");
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn urls_from_the_finder_become_paths() {
+        assert_eq!(
+            path_from_url("file:///Users/me/My%20Project/a.rs"),
+            Some(PathBuf::from("/Users/me/My Project/a.rs"))
+        );
+        assert_eq!(path_from_url("file:///tmp/caf%C3%A9.txt"), Some(PathBuf::from("/tmp/café.txt")));
+        assert_eq!(path_from_url("https://example.com"), None);
+    }
 }
