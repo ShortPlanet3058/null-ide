@@ -18,9 +18,9 @@ use futures::channel::mpsc;
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Font,
     FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, KeyDownEvent, Keystroke,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, Pixels, Point, ScrollDelta,
-    ScrollWheelEvent, ShapedLine, Style, Task, TextRun, UnderlineStyle, Window, actions, div, fill, font, point,
-    prelude::*, px, relative, size,
+    LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, Pixels, Point,
+    ScrollDelta, ScrollWheelEvent, ShapedLine, Style, Task, TextRun, UnderlineStyle, Window, actions, div, fill, font,
+    point, prelude::*, px, relative, size,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -101,6 +101,10 @@ pub struct TerminalView {
     cell: (Pixels, Pixels),
     pub title: String,
     selecting: bool,
+    /// While a program gets the mouse: the button held down (if any), and the last cell
+    /// reported, so moving within a cell sends nothing.
+    mouse_held: Option<MouseButton>,
+    mouse_cell: Option<(usize, usize)>,
     /// Scrolling smaller than a line, kept for the next event.
     scroll_rest: f32,
     /// Where the grid was drawn last frame, for mouse selection.
@@ -173,6 +177,8 @@ impl TerminalView {
             cell: (px(8.), px(16.)),
             title: String::new(),
             selecting: false,
+            mouse_held: None,
+            mouse_cell: None,
             scroll_rest: 0.,
             origin: Point::default(),
             _events: events,
@@ -280,8 +286,58 @@ impl TerminalView {
         (GridPoint::new(Line(line), Column(column)), side)
     }
 
+    /// The cell under the mouse on screen: (column, line), from the top-left.
+    fn screen_cell(&self, position: Point<Pixels>) -> (usize, usize) {
+        let x = f32::from(position.x - self.origin.x).max(0.);
+        let y = f32::from(position.y - self.origin.y).max(0.);
+        let column = ((x / f32::from(self.cell.0)) as usize).min(self.size.columns.saturating_sub(1));
+        let line = ((y / f32::from(self.cell.1)) as usize).min(self.size.lines.saturating_sub(1));
+        (column, line)
+    }
+
+    /// Whether the program running asked for the mouse (vim, htop, tmux...). Holding Shift
+    /// keeps it for selecting text, as in other terminals.
+    fn program_wants_mouse(&self, modifiers: &Modifiers) -> bool {
+        self.term.lock().mode().intersects(TermMode::MOUSE_MODE) && !modifiers.shift
+    }
+
+    /// Tells the program about a mouse event, in the encoding it asked for.
+    fn report_mouse(&mut self, button: u8, position: Point<Pixels>, modifiers: &Modifiers, pressed: bool) {
+        let mode = *self.term.lock().mode();
+        let cell = self.screen_cell(position);
+        if let Some(bytes) = mouse_report(button, cell, modifiers, pressed, mode) {
+            self.write(bytes);
+        }
+    }
+
+    fn on_any_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle);
+        if !self.program_wants_mouse(&event.modifiers) {
+            return;
+        }
+        let Some(button) = button_code(event.button) else { return };
+        self.term.lock().selection = None;
+        self.mouse_held = Some(event.button);
+        self.mouse_cell = Some(self.screen_cell(event.position));
+        self.report_mouse(button, event.position, &event.modifiers, true);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn on_any_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(held) = self.mouse_held.take() else { return };
+        if let Some(button) = button_code(held) {
+            self.report_mouse(button, event.position, &event.modifiers, false);
+        }
+        self.mouse_cell = None;
+        cx.stop_propagation();
+    }
+
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
+        if self.mouse_held.is_some() {
+            return;
+        }
         let (point, side) = self.grid_point(event.position);
         let kind = match event.click_count {
             2 => SelectionType::Semantic,
@@ -294,6 +350,21 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let mode = *self.term.lock().mode();
+        // Dragging (or just moving, if the program asked) is reported cell by cell.
+        let report_motion = match self.mouse_held {
+            Some(_) => mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION),
+            None => mode.contains(TermMode::MOUSE_MOTION) && !event.modifiers.shift,
+        };
+        if report_motion {
+            let cell = self.screen_cell(event.position);
+            if self.mouse_cell != Some(cell) {
+                self.mouse_cell = Some(cell);
+                let button = self.mouse_held.and_then(button_code).unwrap_or(3);
+                self.report_mouse(button + 32, event.position, &event.modifiers, true);
+            }
+            return;
+        }
         if self.selecting && event.pressed_button == Some(MouseButton::Left) {
             let (point, side) = self.grid_point(event.position);
             if let Some(selection) = self.term.lock().selection.as_mut() {
@@ -325,6 +396,14 @@ impl TerminalView {
             return;
         }
         let mode = *self.term.lock().mode();
+        // A program that took the mouse gets the wheel too.
+        if self.program_wants_mouse(&event.modifiers) {
+            let button = if lines > 0 { 64 } else { 65 };
+            for _ in 0..lines.unsigned_abs() {
+                self.report_mouse(button, event.position, &event.modifiers, true);
+            }
+            return;
+        }
         // Full-screen programs (less, man, git log, vim) scroll with the arrow keys.
         if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
             let arrow: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
@@ -339,6 +418,48 @@ impl TerminalView {
         self.term.lock().scroll_display(Scroll::Delta(lines));
         cx.notify();
     }
+}
+
+/// The button number terminals report (0 left, 1 middle, 2 right).
+fn button_code(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        _ => None,
+    }
+}
+
+/// A mouse event as a terminal program reads it: `button` (with 32 added for motion,
+/// 64/65 for the wheel), the cell (column, line from the top-left), Shift/Alt/Ctrl, and
+/// whether it's a press. SGR encoding when the program asked for it (any size of
+/// screen), else the classic one (cells up to 223), UTF-8 encoded if asked.
+fn mouse_report(
+    button: u8,
+    (column, line): (usize, usize),
+    modifiers: &Modifiers,
+    pressed: bool,
+    mode: TermMode,
+) -> Option<Vec<u8>> {
+    let mods = (modifiers.shift as u8) * 4 + (modifiers.alt as u8) * 8 + (modifiers.control as u8) * 16;
+    let (x, y) = (column + 1, line + 1);
+    if mode.contains(TermMode::SGR_MOUSE) {
+        let end = if pressed { 'M' } else { 'm' };
+        return Some(format!("\x1b[<{};{x};{y}{end}", button + mods).into_bytes());
+    }
+    // The classic encoding has no release per button: 3 means "released".
+    let code = if pressed { button + mods } else { 3 + mods };
+    let mut bytes = b"\x1b[M".to_vec();
+    bytes.push(32 + code);
+    for v in [x, y] {
+        if mode.contains(TermMode::UTF8_MOUSE) {
+            let c = char::from_u32(32 + v as u32)?;
+            bytes.extend(c.to_string().as_bytes());
+        } else {
+            bytes.push(u8::try_from(32 + v).ok()?);
+        }
+    }
+    Some(bytes)
 }
 
 impl Drop for TerminalView {
@@ -364,6 +485,10 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::clear))
             .on_key_down(cx.listener(Self::on_key_down))
+            // A program that took the mouse gets every button first (capture runs before the
+            // selection handlers below).
+            .capture_any_mouse_down(cx.listener(Self::on_any_mouse_down))
+            .capture_any_mouse_up(cx.listener(Self::on_any_mouse_up))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -737,6 +862,27 @@ mod tests {
 
     fn keys(s: &str) -> Option<Vec<u8>> {
         key_to_bytes(&Keystroke::parse(s).unwrap(), false)
+    }
+
+    #[test]
+    fn mouse_events_are_encoded_as_programs_ask() {
+        let none = Modifiers::default();
+        let sgr = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        // Left press and release at the top-left cell.
+        assert_eq!(mouse_report(0, (0, 0), &none, true, sgr).unwrap(), b"\x1b[<0;1;1M");
+        assert_eq!(mouse_report(0, (0, 0), &none, false, sgr).unwrap(), b"\x1b[<0;1;1m");
+        // Wheel down with Ctrl, far right: SGR has no size limit.
+        let ctrl = Modifiers { control: true, ..Default::default() };
+        assert_eq!(mouse_report(65, (299, 9), &ctrl, true, sgr).unwrap(), b"\x1b[<81;300;10M");
+        // The classic encoding: offsets of 32, release as button 3, nothing past column 223.
+        let classic = TermMode::MOUSE_REPORT_CLICK;
+        assert_eq!(mouse_report(2, (4, 1), &none, true, classic).unwrap(), b"\x1b[M\x22\x25\x22");
+        assert_eq!(mouse_report(2, (4, 1), &none, false, classic).unwrap(), b"\x1b[M\x23\x25\x22");
+        assert!(mouse_report(0, (300, 0), &none, true, classic).is_none());
+        // UTF-8 mode goes further.
+        let utf8 = classic | TermMode::UTF8_MOUSE;
+        // Column 301 is sent as the character 32 + 301.
+        assert_eq!(mouse_report(0, (300, 0), &none, true, utf8).unwrap(), "\x1b[M \u{14d}!".as_bytes());
     }
 
     #[test]
