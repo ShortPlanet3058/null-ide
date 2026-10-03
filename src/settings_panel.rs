@@ -561,14 +561,22 @@ impl SettingsPanel {
             let (detail, control): (String, AnyElement) = match (state, &found) {
                 (Some(Ok(())), _) => (
                     server.name.to_string(),
-                    div().text_size(px(13.)).text_color(theme.caret).child("Installing…").into_any_element(),
+                    div().text_size(px(ui::T_MD)).text_color(theme.caret).child("Installing…").into_any_element(),
                 ),
                 (_, Some(path)) => {
+                    // Where it is, briefly: "with Xcode", "~/.cargo/bin", "installed by Null".
                     let home = std::env::var("HOME").unwrap_or_default();
-                    let shown = path.display().to_string().replacen(&home, "~", 1);
+                    let full = path.display().to_string();
+                    let shown = if full.contains("/Xcode.app/") || full.starts_with("/Library/Developer/") {
+                        "with Xcode".to_string()
+                    } else if crate::tools::data_dir().is_some_and(|d| path.starts_with(d)) {
+                        "installed by Null".to_string()
+                    } else {
+                        path.parent().map_or(full.clone(), |d| d.display().to_string()).replacen(&home, "~", 1)
+                    };
                     (
                         format!("{} · {shown}", server.name),
-                        div().text_size(px(13.)).text_color(theme.muted).child("Installed").into_any_element(),
+                        div().text_size(px(ui::T_MD)).text_color(theme.muted).child("Installed").into_any_element(),
                     )
                 }
                 (failed, None) => {
@@ -819,7 +827,7 @@ impl SettingsPanel {
         let presets = Keymap::ALL.into_iter().map(|k| (k, k.label().to_string())).collect();
         let mut rows = vec![
             Self::heading("Shortcuts", &theme),
-            Self::row(
+            Self::stacked_row(
                 "Keys from",
                 Some(current.summary()),
                 Self::choices("keymap", presets, current, &theme, cx, |_, keymap, cx| {

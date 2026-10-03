@@ -737,8 +737,9 @@ impl Palette {
             Item::Quick(quick) => {
                 let label = quick.label().to_string();
                 let marked = highlights_in(&label, 0);
+                // Its control says what it is: no marker needed.
                 (
-                    div().size(px(5.)).rounded_full().border_1().border_color(accent).into_any_element(),
+                    div().into_any_element(),
                     StyledText::new(label).with_highlights(marked).into_any_element(),
                     Some(self.quick_control(quick, window, cx)),
                 )
