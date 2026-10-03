@@ -22,6 +22,8 @@ const TEXT_PADDING: f32 = 8.;
 const GUTTER_PADDING: f32 = 16.;
 /// Width of the scrollbar along the right edge.
 const BAR: f32 = 10.;
+/// Room in the gutter, after the line numbers, for the fold chevrons.
+const FOLD_SPACE: f32 = 12.;
 
 /// One row of text as drawn last frame.
 pub struct RowLayout {
@@ -110,6 +112,9 @@ pub fn position(
     }
 }
 
+/// What a folded line shows after its text.
+pub const FOLDED: &str = " ⋯";
+
 /// Draws an [`Editor`]: gutter, current line, selection, text and caret.
 pub struct EditorElement {
     editor: Entity<Editor>,
@@ -126,6 +131,8 @@ pub struct Prepaint {
     line_height: Pixels,
     current_line: Option<Bounds<Pixels>>,
     numbers: Vec<(ShapedLine, Point<Pixels>)>,
+    /// Fold chevrons: where, and whether folded (pointing right) or open (down).
+    chevrons: Vec<(Bounds<Pixels>, bool)>,
     lines: Vec<(ShapedLine, Point<Pixels>)>,
     selection: Vec<Bounds<Pixels>>,
     matches: Vec<(Bounds<Pixels>, bool)>,
@@ -251,7 +258,7 @@ impl Element for EditorElement {
             let char_width = shape("0".repeat(10), &[run(10, &font, theme.foreground)]).width / 10.;
             let total_lines = editor.buffer.len_lines();
             let digits = total_lines.to_string().len().max(3);
-            let gutter_width = char_width * digits as f32 + px(GUTTER_PADDING * 2.);
+            let gutter_width = char_width * digits as f32 + px(GUTTER_PADDING * 2. + FOLD_SPACE);
             let text_bounds =
                 Bounds::from_corners(point(bounds.left() + gutter_width, bounds.top()), bounds.bottom_right());
             let viewport_height = f32::from(bounds.size.height);
@@ -306,6 +313,12 @@ impl Element for EditorElement {
             };
             let texts: Vec<String> = lines_shown.clone().map(|l| editor.buffer.line_text(l)).collect();
             editor.highlight_lines(lines_shown.clone());
+            // The lines that can fold, needed only while the mouse is over the gutter.
+            let over_gutter = editor.mouse_position.is_some_and(|p| {
+                p.x >= bounds.left() && p.x < text_bounds.left() && p.y >= bounds.top() && p.y < bounds.bottom()
+            });
+            let foldable: std::collections::HashSet<usize> =
+                if over_gutter { editor.foldable().iter().map(|r| r.start).collect() } else { Default::default() };
 
             // Errors and warnings get a wavy underline and color their line number.
             // Hints and notes only show in the hover card, to keep the code calm.
@@ -403,7 +416,13 @@ impl Element for EditorElement {
                         let (shaped, tabs) = shape_row(&text, &[run(text.len(), &font, theme.faint)]);
                         return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
                     }
-                    let runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
+                    let mut runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
+                    // A folded line ends in "⋯", standing in for the lines it hides.
+                    if row.last && editor.is_folded(row.line) {
+                        runs.push(run(FOLDED.len(), &font, theme.muted));
+                        let (shaped, tabs) = shape_row(&format!("{text}{FOLDED}"), &runs);
+                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
+                    }
                     let (shaped, tabs) = shape_row(&text, &runs);
                     RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs }
                 })
@@ -493,6 +512,24 @@ impl Element for EditorElement {
                 )
             });
 
+            // Fold chevrons: on folded lines always, on lines that can fold while the mouse
+            // is over the gutter. Quiet otherwise.
+            let chevrons = row_layouts
+                .iter()
+                .zip(visible.clone())
+                .filter(|(r, _)| r.row.cols.start == 0 && r.row.block.is_none())
+                .filter_map(|(r, row)| {
+                    let folded = editor.is_folded(r.row.line);
+                    (folded || foldable.contains(&r.row.line)).then(|| {
+                        let center = point(
+                            bounds.left() + gutter_width - px(GUTTER_PADDING - 2. + FOLD_SPACE / 2.),
+                            row_top(row) + line_height / 2.,
+                        );
+                        (Bounds::centered_at(center, size(px(10.), px(10.))), folded)
+                    })
+                })
+                .collect();
+
             // Line numbers go on a line's first row only.
             let numbers = row_layouts
                 .iter()
@@ -507,7 +544,7 @@ impl Element for EditorElement {
                         theme.faint
                     });
                     let shaped = shape(label.clone(), &[run(label.len(), &font, color)]);
-                    let x = bounds.left() + gutter_width - px(GUTTER_PADDING) - shaped.width;
+                    let x = bounds.left() + gutter_width - px(GUTTER_PADDING + FOLD_SPACE) - shaped.width;
                     (shaped, point(x, row_top(row)))
                 })
                 .collect();
@@ -768,6 +805,7 @@ impl Element for EditorElement {
                 line_height,
                 current_line,
                 numbers,
+                chevrons,
                 lines,
                 selection,
                 matches,
@@ -825,6 +863,17 @@ impl Element for EditorElement {
         }
         for (number, origin) in &prepaint.numbers {
             number.paint(*origin, line_height, window, cx).ok();
+        }
+        for (bounds, folded) in &prepaint.chevrons {
+            // Folded points right, open points down.
+            let angle = if *folded { 0. } else { std::f32::consts::FRAC_PI_2 };
+            let center = bounds.center().scale(window.scale_factor());
+            let turn = gpui::TransformationMatrix::unit()
+                .translate(center)
+                .rotate(gpui::radians(angle))
+                .translate(gpui::Negate::negate(center));
+            let color = if *folded { theme.muted } else { theme.faint };
+            window.paint_svg(*bounds, "icons/chevron-right.svg".into(), turn, color, cx).ok();
         }
         window.with_content_mask(Some(ContentMask { bounds: prepaint.text_bounds }), |window| {
             for (rect, current) in &prepaint.matches {

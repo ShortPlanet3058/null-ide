@@ -403,6 +403,29 @@ mod editor_tests {
     }
 
     #[gpui::test]
+    fn folds_follow_edits_and_open_for_the_caret(cx: &mut TestAppContext) {
+        use super::super::EditKind;
+        let e = editor(cx, "fn a() {\n    one();\n    two();\n}\nfn b() {}\n", "x.rs");
+        e.update(cx, |e, cx| {
+            e.toggle_fold(0, cx);
+            assert!(e.is_folded(0));
+            e.wrap.update(&e.buffer, None, &[]);
+            assert_eq!(e.wrap.rows(), 4); // 6 lines, 2 hidden
+            // A line added above moves the fold down with its code.
+            e.edit(0..0, "// a\n", EditKind::Other, cx);
+            assert!(e.is_folded(1) && !e.is_folded(0));
+            // Typing on the folded line itself keeps it folded.
+            let at = e.buffer.offset(1, 4);
+            e.edit(at..at, "x", EditKind::Typing, cx);
+            assert!(e.is_folded(1));
+            // The caret going inside (a search, a jump) opens it.
+            e.selection = Selection::caret(e.buffer.offset(2, 2));
+            e.touch(cx);
+            assert!(!e.is_folded(1));
+        });
+    }
+
+    #[gpui::test]
     fn undo_takes_back_a_word_at_a_time(cx: &mut TestAppContext) {
         use super::super::EditKind;
         let e = editor(cx, "\n", "x.rs");

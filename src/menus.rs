@@ -105,6 +105,16 @@ pub fn set(cx: &mut App) {
                     ],
                 }),
                 MenuItem::submenu(Menu {
+                    name: "Folding".into(),
+                    items: vec![
+                        MenuItem::action("Fold", crate::editor::Fold),
+                        MenuItem::action("Unfold", crate::editor::Unfold),
+                        MenuItem::separator(),
+                        MenuItem::action("Fold All", crate::editor::FoldAll),
+                        MenuItem::action("Unfold All", crate::editor::UnfoldAll),
+                    ],
+                }),
+                MenuItem::submenu(Menu {
                     name: "Cursors".into(),
                     items: vec![
                         // Cmd+Shift+click in the text adds (or removes) a cursor too.

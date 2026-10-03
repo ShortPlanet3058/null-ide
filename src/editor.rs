@@ -3,6 +3,7 @@ mod changes;
 mod commands;
 mod completion;
 mod cursors;
+mod fold;
 mod ghost;
 mod intel;
 mod refactor;
@@ -11,6 +12,7 @@ mod signature;
 pub use assist::{Block, BlockKind};
 pub use completion::CompletionMenu;
 pub use cursors::Cursor;
+pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::HoverCard;
 pub use refactor::{FindReferences, FormatDocument, RenameSymbol, apply_edits};
@@ -108,6 +110,7 @@ const UNDO_GROUP: Duration = Duration::from_millis(1000);
 /// The keys for the AI's field and changes; registered after every other part's keys.
 pub fn bind_refactor_keys(cx: &mut App) {
     refactor::bind_keys(cx);
+    fold::bind_keys(cx);
 }
 
 pub fn bind_ai_keys(cx: &mut App) {
@@ -391,7 +394,7 @@ pub struct Editor {
     secondary_held: bool,
     /// The word underlined as a link while Cmd/Ctrl is held.
     pub link_word: Option<Range<usize>>,
-    mouse_position: Option<Point<Pixels>>,
+    pub(crate) mouse_position: Option<Point<Pixels>>,
     definition_task: Option<Task<()>>,
     /// While dragging the scrollbar: where on the thumb it was grabbed.
     scrollbar_drag: Option<Pixels>,
@@ -399,6 +402,7 @@ pub struct Editor {
     completion_task: Option<Task<()>>,
     /// Parameter hints while typing a call.
     signature: signature::Signature,
+    folds: fold::Folds,
     /// The file as last committed, to mark changed lines in the gutter.
     git_base: Option<std::sync::Arc<str>>,
     pub git_hunks: Vec<crate::git::Hunk>,
@@ -478,6 +482,7 @@ impl Editor {
             completion: None,
             completion_task: None,
             signature: Default::default(),
+            folds: Default::default(),
             git_base: None,
             git_hunks: Vec::new(),
             git_base_task: None,
@@ -585,6 +590,7 @@ impl Editor {
             return;
         }
         self.rehighlight();
+        self.folds_after_edit(cx);
         self.ai_text_changed();
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
@@ -836,6 +842,7 @@ impl Editor {
             self.close_hover(cx);
         }
         self.signature_after_move(cx);
+        self.unfold_around_caret(cx);
         self.last_activity = Instant::now();
         self.autoscroll = true;
         cx.notify();
@@ -1620,6 +1627,9 @@ impl Editor {
         if self.scrollbar_mouse_down(event.position, cx) {
             return;
         }
+        if let Some(line) = self.fold_click(event.position) {
+            return self.toggle_fold(line, cx);
+        }
         let offset = self.offset_at(event.position);
         // Cmd+Shift+click (Ctrl+Shift elsewhere) adds a cursor, or removes the one clicked.
         // Not Alt+click: holding Alt opens the info card.
@@ -1652,7 +1662,12 @@ impl Editor {
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let was_over_scrollbar = self.over_scrollbar();
+        let was_over_gutter = self.over_gutter();
         self.mouse_position = Some(event.position);
+        // The fold chevrons show while the mouse is over the gutter.
+        if was_over_gutter != self.over_gutter() {
+            cx.notify();
+        }
         if self.scrollbar_drag.is_some() && event.pressed_button == Some(MouseButton::Left) {
             return self.scrollbar_drag_to(event.position, cx);
         }
@@ -1663,6 +1678,39 @@ impl Editor {
             self.update_hover(cx);
         }
         // Dragging is followed window-wide, from the element (see `drag_to`).
+    }
+
+    fn over_gutter(&self) -> bool {
+        match (&self.layout, self.mouse_position) {
+            (Some(layout), Some(p)) => layout.bounds.contains(&p) && p.x < layout.text_bounds.left(),
+            _ => false,
+        }
+    }
+
+    /// The line whose fold a click toggles: its chevron in the gutter, or the "⋯" after a
+    /// folded line.
+    fn fold_click(&mut self, position: Point<Pixels>) -> Option<usize> {
+        let (line, first_row, last_row, in_gutter, past_text) = {
+            let layout = self.layout.as_ref()?;
+            let row = ((position.y - layout.text_origin.y) / layout.line_height).floor();
+            let r = layout.rows.get((row as usize).checked_sub(layout.first_row)?)?;
+            if r.row.block.is_some() || !layout.bounds.contains(&position) {
+                return None;
+            }
+            let text_end = r.shaped.x_for_index(r.shown_byte(r.text.len()));
+            (
+                r.row.line,
+                r.row.cols.start == 0,
+                r.row.last,
+                position.x < layout.text_bounds.left(),
+                position.x - layout.text_origin.x - r.x > text_end,
+            )
+        };
+        if in_gutter {
+            let can_fold = self.is_folded(line) || self.foldable().iter().any(|f| f.start == line);
+            return (can_fold && first_row).then_some(line);
+        }
+        (last_row && self.is_folded(line) && past_text).then_some(line)
     }
 
     pub fn is_dragging(&self) -> bool {
@@ -2218,6 +2266,10 @@ impl Render for Editor {
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::escape))
+            .on_action(cx.listener(Self::fold))
+            .on_action(cx.listener(Self::unfold))
+            .on_action(cx.listener(Self::fold_all))
+            .on_action(cx.listener(Self::unfold_all))
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::show_info))
             .on_action(cx.listener(Self::show_completions))
