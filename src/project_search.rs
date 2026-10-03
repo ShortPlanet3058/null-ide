@@ -311,9 +311,15 @@ fn preview(line: &str, matches: &[Range<usize>]) -> (SharedString, Vec<Range<usi
     }
     let mut end = line[start..].char_indices().nth(PREVIEW_CHARS).map_or(line.len(), |(i, _)| start + i);
     end = end.max(start);
-    let shifted =
-        matches.iter().filter(|m| m.start >= start && m.end <= end).map(|m| m.start - start..m.end - start).collect();
-    (line[start..end].trim_end().to_string().into(), shifted)
+    let preview = line[start..end].trim_end();
+    // Highlights stay inside the preview, which lost its trailing spaces.
+    let shifted = matches
+        .iter()
+        .filter(|m| m.start >= start && m.end <= end)
+        .map(|m| (m.start - start).min(preview.len())..(m.end - start).min(preview.len()))
+        .filter(|r| !r.is_empty())
+        .collect();
+    (preview.to_string().into(), shifted)
 }
 
 impl Focusable for ProjectSearch {

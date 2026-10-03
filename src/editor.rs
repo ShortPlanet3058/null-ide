@@ -667,12 +667,14 @@ impl Editor {
         }
         let text = self.buffer.to_string();
         let rope = self.buffer.rope();
+        // Every match, not just the ones highlighted (which stop at 10,000).
         let edits: Vec<(Range<usize>, String)> = search
-            .matches
-            .iter()
-            .map(|m| {
-                let bytes = rope.char_to_byte(m.start)..rope.char_to_byte(m.end);
-                (m.clone(), search.query.replacement_for(regex, &text, bytes, replacement))
+            .query
+            .find_every(regex, &text)
+            .into_iter()
+            .map(|bytes| {
+                let chars = rope.byte_to_char(bytes.start)..rope.byte_to_char(bytes.end);
+                (chars, search.query.replacement_for(regex, &text, bytes, replacement))
             })
             .collect();
         self.record_undo(EditKind::Other);
