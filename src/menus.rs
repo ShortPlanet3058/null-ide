@@ -53,6 +53,8 @@ pub fn set(cx: &mut App) {
         Menu {
             name: "Null".into(),
             items: vec![
+                MenuItem::action("Welcome to Null…", crate::workspace::ShowWelcome),
+                MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::action("Install Shell Command", crate::workspace::InstallShellCommand),
                 MenuItem::separator(),

@@ -35,6 +35,7 @@ actions!(
         MoveTabRight,
         MoveTabLeft,
         NewAiTask,
+        ShowWelcome,
         InstallShellCommand,
         ReviewAiTask,
         StopAiTask,
@@ -1450,6 +1451,7 @@ impl Workspace {
                 Some(_) => commands.push((Ai, "Stop AI Task".into(), Box::new(StopAiTask))),
             }
         }
+        commands.push((App, "Welcome to Null…".into(), Box::new(ShowWelcome)));
         commands.push((App, "Quit Null".into(), Box::new(Quit)));
         commands
             .into_iter()
@@ -2955,9 +2957,9 @@ impl Render for Workspace {
             })
         };
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
-        let overlay: Option<AnyElement> = if let Some((welcome, _)) = &self.welcome {
-            Some(welcome.clone().into_any_element())
-        } else if let Some((palette, _)) = &self.palette {
+        // The welcome covers the whole window; the rest float over the work.
+        let welcome = self.welcome.as_ref().map(|(w, _)| w.clone());
+        let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
             Some(panel.clone().into_any_element())
@@ -3165,6 +3167,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_problems))
             .on_action(cx.listener(Self::replace_in_project))
             .on_action(cx.listener(Self::new_ai_task))
+            .on_action(cx.listener(|this, _: &ShowWelcome, window, cx| this.show_welcome(window, cx)))
             .on_action(cx.listener(Self::install_shell_command))
             .on_action(cx.listener(Self::review_ai_task))
             .on_action(cx.listener(Self::stop_ai_task))
@@ -3255,6 +3258,9 @@ impl Render for Workspace {
                         .child(layer),
                 )
             })
+            .children(welcome.map(|welcome| {
+                div().absolute().top_0().left_0().size_full().occlude().child(welcome).into_any_element()
+            }))
             .children(self.notice.as_ref().map(|(message, _)| {
                 div().absolute().bottom(px(44.)).left_0().w_full().flex().justify_center().child(
                     div()
