@@ -265,7 +265,7 @@ impl Effort {
         }
     }
 
-    fn key(self) -> &'static str {
+    pub(crate) fn key(self) -> &'static str {
         match self {
             Effort::Auto => "auto",
             Effort::Off => "off",
@@ -346,7 +346,7 @@ impl AiSettings {
             .unwrap_or(id.default_effort())
     }
 
-    fn base_url(&self, id: ProviderId) -> Option<String> {
+    pub(crate) fn base_url(&self, id: ProviderId) -> Option<String> {
         self.providers
             .get(id.key())
             .and_then(|p| p.base_url.clone())
@@ -497,17 +497,17 @@ fn ask_inner(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&st
     }
 }
 
-fn missing_key(id: ProviderId) -> String {
+pub(crate) fn missing_key(id: ProviderId) -> String {
     let get = id.key_url().map(|u| format!(" (get one at {u})")).unwrap_or_default();
     format!("No API key for {}{get}. Add it in Settings → AI.", id.label())
 }
 
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().http_status_as_error(false).build().into()
 }
 
 /// The message inside a provider's error response, or the raw body.
-fn error_message(status: u16, body: &str) -> String {
+pub(crate) fn error_message(status: u16, body: &str) -> String {
     let parsed: Option<Value> = serde_json::from_str(body).ok();
     let message = parsed
         .as_ref()
@@ -842,9 +842,10 @@ pub enum TaskEvent {
     File(String),
 }
 
-/// Whether the provider can carry out a task in the project itself.
+/// Whether the provider can carry out a task: Claude Code and Codex by themselves, the
+/// others through Null's own tools (see `ai_agent`).
 pub fn can_run_tasks(id: ProviderId) -> bool {
-    matches!(id, ProviderId::ClaudeCode | ProviderId::Codex)
+    id != ProviderId::Off
 }
 
 /// Hands `task` to the person's Claude Code or Codex, working in `root`: they read and
@@ -856,9 +857,13 @@ pub fn run_task(
     root: &std::path::Path,
     task: &str,
     child: &std::sync::Mutex<Option<std::process::Child>>,
+    stop: &std::sync::atomic::AtomicBool,
     on_event: &mut dyn FnMut(TaskEvent),
 ) -> Result<String, String> {
     let id = settings.active();
+    if !matches!(id, ProviderId::ClaudeCode | ProviderId::Codex) {
+        return crate::ai_agent::run(settings, root, task, stop, on_event);
+    }
     let model = settings.model(id);
     let effort = settings.effort(id);
     let system = "You are working on the person's project from inside their code editor, Null. Make the change \
@@ -912,7 +917,7 @@ pub fn run_task(
             args.push("-".into());
             ("codex", args, format!("{system}\n\nTask: {task}"))
         }
-        _ => return Err("Tasks run with Claude Code or Codex: choose one in Settings → AI.".into()),
+        _ => unreachable!("API providers run through ai_agent"),
     };
     let mut process = spawn_cli_in(program, &args, &input, Some(root))?;
     let stdout = process.stdout.take().expect("stdout is piped");

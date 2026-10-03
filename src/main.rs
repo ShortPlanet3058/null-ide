@@ -1,4 +1,5 @@
 mod ai;
+mod ai_agent;
 mod ai_task;
 mod assets;
 mod buffer;
