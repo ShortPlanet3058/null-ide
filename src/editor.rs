@@ -6,6 +6,7 @@ mod cursors;
 mod ghost;
 mod intel;
 mod refactor;
+mod signature;
 
 pub use assist::{Block, BlockKind};
 pub use completion::CompletionMenu;
@@ -396,6 +397,8 @@ pub struct Editor {
     scrollbar_drag: Option<Pixels>,
     pub completion: Option<CompletionMenu>,
     completion_task: Option<Task<()>>,
+    /// Parameter hints while typing a call.
+    signature: signature::Signature,
     /// The file as last committed, to mark changed lines in the gutter.
     git_base: Option<std::sync::Arc<str>>,
     pub git_hunks: Vec<crate::git::Hunk>,
@@ -474,6 +477,7 @@ impl Editor {
             scrollbar_drag: None,
             completion: None,
             completion_task: None,
+            signature: Default::default(),
             git_base: None,
             git_hunks: Vec::new(),
             git_base_task: None,
@@ -810,6 +814,8 @@ impl Editor {
     fn escape(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
         if self.hover.is_some() {
             self.close_hover(cx);
+        } else if self.signature.card.is_some() {
+            self.close_signature(cx);
         } else if !self.extra.is_empty() {
             self.single_cursor();
             cx.notify();
@@ -829,6 +835,7 @@ impl Editor {
         if self.hover_from_keyboard {
             self.close_hover(cx);
         }
+        self.signature_after_move(cx);
         self.last_activity = Instant::now();
         self.autoscroll = true;
         cx.notify();
@@ -2087,6 +2094,7 @@ impl EntityInputHandler for Editor {
         }
         self.edit(range, text, EditKind::Typing, cx);
         self.completion_after_typing(text, cx);
+        self.signature_after_typing(text, cx);
         self.schedule_ghost(kept, cx);
     }
 
@@ -2254,6 +2262,7 @@ impl Render for Editor {
         let hover = self.render_hover(cx);
         let rename = self.render_rename(cx);
         let completions = self.render_completions(cx);
+        let signature = self.render_signature(cx);
         let ai_blocks = self.render_ai_blocks(cx);
         div()
             .relative()
@@ -2265,6 +2274,7 @@ impl Render for Editor {
             .children(hover)
             .children(rename)
             .children(completions)
+            .children(signature)
             .children(ai_blocks)
     }
 }
