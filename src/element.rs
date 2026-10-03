@@ -427,7 +427,12 @@ impl Element for EditorElement {
                     editor.scroll.x = caret_x - text_width + cw * 8.;
                 }
             }
-            let widest = row_layouts.iter().map(|r| f32::from(r.x + r.shaped.width)).fold(caret_x, f32::max);
+            // The limit is the file's longest line, not the longest on screen: scrolling down
+            // past a long line doesn't pull the view back.
+            let widest = row_layouts
+                .iter()
+                .map(|r| f32::from(r.x + r.shaped.width))
+                .fold(caret_x.max(editor.longest_line() as f32 * cw), f32::max);
             editor.scroll.x = editor.scroll.x.clamp(0., (widest + cw * 4. - text_width).max(0.));
             editor.autoscroll = false;
             editor.reveal_only = false;

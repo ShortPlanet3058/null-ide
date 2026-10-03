@@ -301,6 +301,8 @@ pub struct Scroll {
     pub target_y: f32,
     pub x: f32,
     pub last_tick: Option<Instant>,
+    /// The direction a trackpad swipe settled on (true: sideways), until it ends.
+    pub swipe_sideways: Option<bool>,
 }
 
 pub struct CaretMotion {
@@ -332,6 +334,8 @@ pub struct Editor {
     highlighter: Option<Highlighter>,
     /// Colours for the lines around the view (see [`Self::highlight_lines`]).
     pub spans: Vec<Span>,
+    /// The longest line's width in columns, for the buffer revision it was measured at.
+    longest_line: std::cell::Cell<(u64, usize)>,
     /// The buffer revision and byte range `spans` cover.
     spans_for: Option<(u64, Range<usize>)>,
     /// `problems()` for a (diagnostics version, buffer revision).
@@ -420,6 +424,7 @@ impl Editor {
             highlighter,
             spans: Vec::new(),
             spans_for: None,
+            longest_line: std::cell::Cell::new((u64::MAX, 0)),
             problems_cache: Default::default(),
             selection: Selection::caret(0),
             goal_column: None,
@@ -431,7 +436,7 @@ impl Editor {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: None,
-            scroll: Scroll { y: 0., target_y: 0., x: 0., last_tick: None },
+            scroll: Scroll { y: 0., target_y: 0., x: 0., last_tick: None, swipe_sideways: None },
             caret: CaretMotion {
                 from: Point::default(),
                 to: Point::default(),
@@ -586,6 +591,30 @@ impl Editor {
     /// follow when the lines are next drawn.
     fn rehighlight(&mut self) {
         self.refresh_search();
+    }
+
+    /// The widest line in columns (tabs at full width). Measured over the whole file once;
+    /// after typing, only the edited lines, so it can stay a little wide after a long line
+    /// shrinks (some extra room to scroll) but never costs a pass over the file.
+    pub(crate) fn longest_line(&self) -> usize {
+        let width = |line: ropey::RopeSlice| {
+            line.chars().filter(|c| *c != '\n' && *c != '\r').fold(0, |col, c| col + crate::wrap::char_columns(c, col))
+        };
+        let (revision, cols) = self.longest_line.get();
+        if revision == self.buffer.revision() {
+            return cols;
+        }
+        let rope = self.buffer.rope();
+        let last = self.buffer.len_lines().saturating_sub(1);
+        let cols = match self.buffer.edits_since(revision).filter(|_| revision != u64::MAX) {
+            Some(edits) => edits
+                .flat_map(|e| e.start.0..=e.new_end.0)
+                .map(|line| width(rope.line(line.min(last))))
+                .fold(cols, usize::max),
+            None => rope.lines().map(width).max().unwrap_or(0),
+        };
+        self.longest_line.set((self.buffer.revision(), cols));
+        cols
     }
 
     /// Makes sure `spans` colours `lines`: the syntax tree catches up with the edits
@@ -1868,11 +1897,27 @@ impl Editor {
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let line_height = f32::from(self.line_height());
         match event.delta {
-            // Trackpads report exact pixels and already feel smooth: follow them 1:1.
+            // Trackpads report exact pixels and already feel smooth: follow them 1:1. A swipe
+            // keeps to the direction it started in, so scrolling down doesn't drift sideways.
             ScrollDelta::Pixels(delta) => {
-                self.scroll.y -= f32::from(delta.y);
-                self.scroll.target_y = self.scroll.y;
-                self.scroll.x -= f32::from(delta.x);
+                if matches!(event.touch_phase, gpui::TouchPhase::Started) {
+                    self.scroll.swipe_sideways = None;
+                }
+                let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+                if self.scroll.swipe_sideways.is_none() && (dx.abs() > 1. || dy.abs() > 1.) {
+                    self.scroll.swipe_sideways = Some(dx.abs() > dy.abs());
+                }
+                match self.scroll.swipe_sideways {
+                    Some(true) => self.scroll.x -= dx,
+                    Some(false) => {
+                        self.scroll.y -= dy;
+                        self.scroll.target_y = self.scroll.y;
+                    }
+                    None => {}
+                }
+                if matches!(event.touch_phase, gpui::TouchPhase::Ended) {
+                    self.scroll.swipe_sideways = None;
+                }
             }
             // Mouse wheels jump in notches: glide to the new position instead.
             ScrollDelta::Lines(delta) => {
