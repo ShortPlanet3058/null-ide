@@ -47,20 +47,39 @@ impl Editor {
         }
         let text = self.buffer.rope().clone();
         self.lsp_revision = self.buffer.revision();
-        lsp.update(cx, |lsp, cx| lsp.open(&path, text, cx));
+        // A second copy of a file open twice leaves the talking to the first.
+        if !self.lsp_follower {
+            lsp.update(cx, |lsp, cx| lsp.open(&path, text, cx));
+        }
         self.lsp_subscription = Some(cx.observe(&lsp, |_, _, cx| cx.notify()));
         self.lsp = Some(lsp);
     }
 
     /// Tells the server the file is no longer open. Call before dropping the editor.
     pub fn release_lsp(&mut self, cx: &mut Context<Self>) {
-        if let (Some(lsp), Some(path)) = (self.lsp.take(), self.path.clone()) {
+        if let (Some(lsp), Some(path)) = (self.lsp.take().filter(|_| !self.lsp_follower), self.path.clone()) {
             lsp.update(cx, |lsp, cx| lsp.close(&path, cx));
         }
         self.lsp_subscription = None;
     }
 
+    /// The other copy of this file closed: this one tells the server about the file now.
+    pub fn lead_lsp(&mut self, cx: &mut Context<Self>) {
+        if !self.lsp_follower {
+            return;
+        }
+        self.lsp_follower = false;
+        if let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) {
+            self.lsp_revision = self.buffer.revision();
+            let text = self.buffer.rope().clone();
+            lsp.update(cx, |lsp, cx| lsp.open(&path, text, cx));
+        }
+    }
+
     pub(super) fn sync_lsp(&mut self, cx: &mut Context<Self>) {
+        if self.lsp_follower {
+            return;
+        }
         let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else { return };
         self.lsp_version += 1;
         // The edits since the server last heard, as it counts positions; a few bytes per keystroke.
@@ -86,7 +105,7 @@ impl Editor {
     }
 
     pub(super) fn lsp_saved(&mut self, cx: &mut Context<Self>) {
-        if let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) {
+        if let (Some(lsp), Some(path)) = (self.lsp.clone().filter(|_| !self.lsp_follower), self.path.clone()) {
             lsp.update(cx, |lsp, cx| lsp.save(&path, cx));
         }
     }

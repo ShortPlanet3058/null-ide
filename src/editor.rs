@@ -308,6 +308,15 @@ pub struct ScrollbarLayout {
     pub max_scroll: f32,
 }
 
+/// A file's text and state, to open a second copy of it (see [`Editor::twin`]).
+pub struct TwinSource {
+    text: String,
+    dirty: bool,
+    path: PathBuf,
+    style: crate::file_style::FileStyle,
+    view: (usize, usize, usize),
+}
+
 pub struct Scroll {
     pub y: f32,
     pub target_y: f32,
@@ -389,6 +398,9 @@ pub struct Editor {
     lsp_version: i32,
     /// The buffer revision the language server has.
     lsp_revision: u64,
+    /// A second copy of a file open on both sides: it leaves talking to the language
+    /// server to the first, so the server doesn't hear every change twice.
+    pub lsp_follower: bool,
     lsp_subscription: Option<Subscription>,
     pub hover: Option<HoverCard>,
     hover_word: Option<Range<usize>>,
@@ -483,6 +495,7 @@ impl Editor {
             lsp: None,
             lsp_version: 0,
             lsp_revision: 0,
+            lsp_follower: false,
             lsp_subscription: None,
             hover: None,
             hover_word: None,
@@ -1491,6 +1504,91 @@ impl Editor {
             edits.push((count..count, style.line_ending.text().into()));
         }
         self.apply_char_edits(edits, cx);
+    }
+
+    /// Opens a second copy of `source` (the same file on the other side): its text (unsaved
+    /// edits included), its caret, its style. The language server is left to the first.
+    pub fn twin(source: TwinSource, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) -> Self {
+        let mut buffer = Buffer::from_text(&source.text);
+        if source.dirty {
+            buffer.mark_unsaved();
+        }
+        let mut editor = Self::new(buffer, Some(source.path), cx);
+        editor.style = source.style;
+        editor.lsp_follower = true;
+        if let Some(lsp) = lsp {
+            editor.attach_lsp(lsp, cx);
+        }
+        editor.reload_git_base(cx);
+        let (line, column, top) = source.view;
+        editor.restore_view(line, column, top, cx);
+        editor
+    }
+
+    /// What a second copy of this editor's file starts from.
+    pub fn twin_source(&self) -> Option<TwinSource> {
+        Some(TwinSource {
+            text: self.buffer.to_string(),
+            dirty: self.buffer.is_dirty(),
+            path: self.path.clone()?,
+            style: self.style.clone(),
+            view: self.view_state(),
+        })
+    }
+
+    /// Replays the other copy's edits here, keeping this side's carets where they were in
+    /// the text. Without the edits (after an undo there), takes its whole text.
+    pub fn apply_twin_edits(
+        &mut self,
+        edits: Option<Vec<crate::buffer::Edit>>,
+        text: &Rope,
+        saved: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.record_undo(EditKind::Typing);
+        match edits {
+            Some(edits) => {
+                for edit in edits {
+                    let rope = self.buffer.rope();
+                    let start = rope.byte_to_char(edit.start_byte.min(rope.len_bytes()));
+                    let end = rope.byte_to_char(edit.old_end_byte.min(rope.len_bytes()));
+                    let added = edit.text.chars().count();
+                    let shift = |o: usize| {
+                        if o <= start {
+                            o
+                        } else if o >= end {
+                            o + added - (end - start)
+                        } else {
+                            start + added
+                        }
+                    };
+                    self.selection =
+                        Selection { anchor: shift(self.selection.anchor), head: shift(self.selection.head) };
+                    for cursor in &mut self.extra {
+                        cursor.selection =
+                            Selection { anchor: shift(cursor.selection.anchor), head: shift(cursor.selection.head) };
+                    }
+                    self.buffer.replace(start..end, &edit.text);
+                }
+            }
+            None => {
+                let (line, column) = self.caret_point();
+                self.buffer.replace(0..self.buffer.len_chars(), &text.to_string());
+                self.single_cursor();
+                self.selection = Selection::caret(self.buffer.offset(line, column));
+            }
+        }
+        if saved {
+            self.buffer.mark_saved();
+        }
+        self.text_changed(cx);
+        cx.notify();
+    }
+
+    /// Types `text` at `at`, as the keyboard would (for tests elsewhere in the crate).
+    #[cfg(test)]
+    pub fn type_text_for_test(&mut self, at: usize, text: &str, cx: &mut Context<Self>) {
+        self.edit(at..at, text, EditKind::Typing, cx);
     }
 
     /// Switches the file's line endings, converting every line break.
