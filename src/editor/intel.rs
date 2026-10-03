@@ -49,14 +49,6 @@ impl Editor {
         self.lsp = Some(lsp);
     }
 
-    /// Re-sends the file after the project's language servers restarted.
-    pub fn reattach_lsp(&mut self, cx: &mut Context<Self>) {
-        self.lsp_version = 0;
-        if let Some(lsp) = self.lsp.take() {
-            self.attach_lsp(lsp, cx);
-        }
-    }
-
     /// Tells the server the file is no longer open. Call before dropping the editor.
     pub fn release_lsp(&mut self, cx: &mut Context<Self>) {
         if let (Some(lsp), Some(path)) = (self.lsp.take(), self.path.clone()) {

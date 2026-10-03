@@ -47,6 +47,12 @@ pub struct Theme {
     pub accent_soft: Hsla,
     /// Floating layers like the command palette.
     pub raised: Hsla,
+    /// A border that should read (key caps, buttons), where `hairline` only separates.
+    pub line_strong: Hsla,
+    /// Text on the amber accent.
+    pub on_accent: Hsla,
+    /// Set into a raised panel: code blocks in cards and notes.
+    pub sunken: Hsla,
     /// Dims what is behind a floating layer.
     pub scrim: Hsla,
     pub selection: Hsla,
@@ -95,6 +101,9 @@ impl Theme {
             caret: rgb(0xf2b35b).into(),
             accent_soft: rgba(0xf2b35b1f).into(),
             raised: rgb(0x141418).into(),
+            line_strong: rgb(0x2c2c33).into(),
+            on_accent: rgb(0x1b1206).into(),
+            sunken: rgb(0x0b0b0d).into(),
             scrim: rgba(0x00000073).into(),
             selection: rgba(0xf2b35b38).into(),
             find_match: rgba(0xffffff1f).into(),
@@ -147,6 +156,9 @@ impl Theme {
             caret: rgb(0xefb565).into(),
             accent_soft: rgba(0xefb5651f).into(),
             raised: rgb(0x212227).into(),
+            line_strong: rgb(0x35363d).into(),
+            on_accent: rgb(0x1b1206).into(),
+            sunken: rgb(0x18191d).into(),
             scrim: rgba(0x00000052).into(),
             selection: rgba(0xefb56533).into(),
             find_match: rgba(0xffffff1f).into(),
@@ -199,6 +211,9 @@ impl Theme {
             caret: rgb(0xb4620c).into(),
             accent_soft: rgba(0xb4620c1a).into(),
             raised: rgb(0xffffff).into(),
+            line_strong: rgb(0xd4d3ce).into(),
+            on_accent: rgb(0xffffff).into(),
+            sunken: rgb(0xf4f4f2).into(),
             scrim: rgba(0x14141929).into(),
             selection: rgba(0xb4620c2b).into(),
             find_match: rgba(0x1d1e221a).into(),

@@ -69,10 +69,11 @@ impl Buffer {
         start + text.chars().count()
     }
 
-    /// Restores text from an undo snapshot. Counts as an edit.
-    pub fn restore(&mut self, text: Rope) {
+    /// Restores an undo snapshot along with the version it had, so undoing back to the
+    /// saved text counts as saved again.
+    pub fn restore_version(&mut self, text: Rope, version: u64) {
         self.text = text;
-        self.version += 1;
+        self.version = version;
     }
 
     pub fn slice(&self, range: Range<usize>) -> String {

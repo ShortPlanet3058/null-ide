@@ -18,6 +18,10 @@ impl Cursor {
     }
 }
 
+/// What's on the clipboard, as Null wrote it: whole lines, or one piece per cursor.
+const LINES: &str = "null-lines";
+const PIECES: &str = "null-pieces";
+
 /// Set while a command runs once per cursor.
 pub(super) struct Batch {
     /// The cursors before the command, main one first, for undo.
@@ -286,21 +290,37 @@ impl Editor {
         ranges.into_iter().filter(|r| !r.is_empty()).map(|r| self.buffer.slice(r)).collect()
     }
 
+    /// Copies the selections; with nothing selected, the whole lines the cursors are on,
+    /// marked as such so pasting puts them back as lines.
     pub(super) fn copy_selections(&self, cx: &mut Context<Self>) -> bool {
         let texts = self.selected_texts();
         if texts.is_empty() {
-            return false;
+            let mut lines: Vec<usize> = self.all_selections().iter().map(|s| self.buffer.point(s.head).0).collect();
+            lines.sort();
+            lines.dedup();
+            let text: String = lines.iter().map(|&l| format!("{}\n", self.buffer.line_text(l))).collect();
+            cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, LINES.to_string()));
+            return true;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(texts.join("\n")));
+        let kind = if texts.len() > 1 { PIECES } else { "" };
+        cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(texts.join("\n"), kind.to_string()));
         true
     }
 
-    /// Pastes at every cursor. When the clipboard holds one line per cursor, each
-    /// cursor gets its own line, so copying from several cursors and pasting works.
-    pub(super) fn paste_text(&mut self, text: String, cx: &mut Context<Self>) {
+    /// Pastes at every cursor. Whole lines (copied with nothing selected) go in above
+    /// the cursor's line; text copied from several cursors goes one piece per cursor.
+    pub(super) fn paste_text(&mut self, text: String, kind: &str, cx: &mut Context<Self>) {
+        if kind == LINES && self.all_selections().iter().all(|s| s.is_empty()) {
+            return self.for_each_cursor(cx, |this, cx| {
+                let caret = this.selection.head;
+                let start = this.buffer.line_to_char(this.buffer.point(caret).0);
+                this.edit(start..start, &text, super::EditKind::Other, cx);
+                this.selection = Selection::caret(caret + text.chars().count());
+            });
+        }
         let count = self.extra.len() + 1;
         let lines: Vec<&str> = text.split('\n').collect();
-        let split = count > 1 && lines.len() == count;
+        let split = kind == PIECES && count > 1 && lines.len() == count;
         // Cursors are visited bottom up, so hand out the lines from the end.
         let mut next = count;
         self.for_each_cursor(cx, |this, cx| {
@@ -418,12 +438,86 @@ mod tests {
     }
 
     #[gpui::test]
+    fn enter_inside_the_indentation_does_not_double_it(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "    foo\n");
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(0);
+            e.newline(&crate::editor::Newline, window, cx);
+        });
+        assert_eq!(text(cx, &e), "\n    foo\n");
+        // On a line of only spaces, the spaces don't stay behind.
+        e.update_in(cx, |e, window, cx| {
+            e.buffer.replace(0..e.buffer.len_chars(), "    \n");
+            e.selection = Selection::caret(4);
+            e.newline(&crate::editor::Newline, window, cx);
+        });
+        assert_eq!(text(cx, &e), "\n    \n");
+    }
+
+    #[gpui::test]
+    fn moving_the_last_line_down_adds_nothing(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "a\nb\n");
+        e.update(cx, |e, cx| {
+            e.selection = Selection::caret(2);
+            e.move_lines(true, cx);
+            e.move_lines(true, cx);
+        });
+        assert_eq!(text(cx, &e), "a\nb\n");
+    }
+
+    #[gpui::test]
+    fn tab_twice_indents_the_same_lines(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "a\nb\n");
+        e.update(cx, |e, cx| {
+            e.selection = Selection::caret(0);
+            e.select_line(cx);
+            e.tab_key(cx);
+            e.tab_key(cx);
+        });
+        assert_eq!(text(cx, &e), "        a\nb\n");
+    }
+
+    #[gpui::test]
+    fn undoing_back_to_the_saved_text_counts_as_saved(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "x\n");
+        e.update(cx, |e, cx| {
+            e.edit(0..0, "y", crate::editor::EditKind::Other, cx);
+            assert!(e.buffer.is_dirty());
+            e.step_history(true, cx);
+            assert!(!e.buffer.is_dirty());
+        });
+    }
+
+    #[gpui::test]
+    fn arrows_step_over_whole_emoji(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "a👍🏽b\n");
+        e.update(cx, |e, _| {
+            // The thumbs-up and its skin tone are two code points, one character on screen.
+            assert_eq!(e.right_of(1), 3);
+            assert_eq!(e.left_of(3), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn copy_with_nothing_selected_copies_the_line_and_pastes_it_above(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "one\ntwo\n");
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(5);
+            e.copy(&crate::editor::Copy, window, cx);
+            e.paste(&crate::editor::Paste, window, cx);
+        });
+        assert_eq!(text(cx, &e), "one\ntwo\ntwo\n");
+        // The caret stays on the same text, now one line down.
+        assert_eq!(e.read_with(cx, |e, _| e.caret_point()), (2, 1));
+    }
+
+    #[gpui::test]
     fn pasting_one_line_per_cursor(cx: &mut TestAppContext) {
         let (e, cx) = editor(cx, "x\ny\n");
         e.update(cx, |e, cx| {
             e.selection = Selection::caret(0);
             e.add_cursor_vertically(true, cx);
-            e.paste_text("1\n2".into(), cx);
+            e.paste_text("1\n2".into(), super::PIECES, cx);
         });
         assert_eq!(text(cx, &e), "1x\n2y\n");
     }

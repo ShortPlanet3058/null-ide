@@ -10,9 +10,10 @@ use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
 use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
-use crate::settings_panel::{SettingsPanel, SettingsPanelEvent, Shortcut};
+use crate::settings_panel::{Section, SettingsPanel, SettingsPanelEvent, Shortcut};
 use crate::terminal::{Shell, TerminalEvent, TerminalView};
 use crate::theme::{Theme, ThemeName};
+use crate::ui;
 use crate::welcome::{Welcome, WelcomeEvent};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
@@ -131,7 +132,6 @@ const TERMINAL_HEIGHT: f32 = 300.;
 const TERMINAL_SLIDE: Duration = Duration::from_millis(240);
 /// Room for the window buttons at the left of the title bar.
 const TITLEBAR_INSET: f32 = if cfg!(target_os = "macos") { 84. } else { 12. };
-const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
 
 fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0., 1.);
@@ -198,6 +198,8 @@ pub struct Workspace {
     watch_task: Option<Task<()>>,
     index_task: Option<Task<()>>,
     session_task: Option<Task<()>>,
+    /// The tab strip, scrolled so the current tab is always in view.
+    tab_scroll: gpui::ScrollHandle,
     /// The window's place on screen, for the session.
     window_state: Option<crate::session::WindowState>,
     reindex_task: Option<Task<()>>,
@@ -293,6 +295,7 @@ impl Workspace {
             watch_task: None,
             index_task: None,
             session_task: None,
+            tab_scroll: gpui::ScrollHandle::new(),
             window_state: None,
             reindex_task: None,
             key_prompt: None,
@@ -361,10 +364,6 @@ impl Workspace {
     /// Opens the project as it was: its tabs (caret and scroll included), folders and terminal.
     pub fn restore_session(&mut self, session: crate::session::Session, window: &mut Window, cx: &mut Context<Self>) {
         self.tree.update(cx, |tree, cx| tree.expand_folders(&session.expanded, cx));
-        for path in session.recent_files.iter().rev() {
-            self.recent_files.retain(|p| p != path);
-            self.recent_files.insert(0, path.clone());
-        }
         self.window_state = session.window;
         for tab in &session.tabs {
             self.open_file(tab.path.clone(), window, cx);
@@ -374,6 +373,11 @@ impl Workspace {
         }
         if let Some(active) = session.active.and_then(|i| session.tabs.get(i)) {
             self.open_file(active.path.clone(), window, cx);
+        }
+        // Opening the tabs moved each to the front of the recent files: put the saved order back.
+        for path in session.recent_files.iter().rev() {
+            self.recent_files.retain(|p| p != path);
+            self.recent_files.insert(0, path.clone());
         }
         if session.terminal_open && !self.terminal_open.on {
             self.toggle_terminal(&ToggleTerminal, window, cx);
@@ -564,13 +568,16 @@ impl Workspace {
         let subscriptions = [
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
-                EditorEvent::Edited if cx.global::<Settings>().fade_bars_while_typing => {
-                    this.chrome.set(false, FADE_IN, FADE_OUT);
+                EditorEvent::Edited => {
+                    if cx.global::<Settings>().fade_bars_while_typing {
+                        this.chrome.set(false, FADE_IN, FADE_OUT);
+                    }
+                    this.refresh_title(window, cx);
                     cx.notify();
                 }
-                EditorEvent::Edited => {}
                 // Hand edits to the settings file take effect when saved.
                 EditorEvent::Saved => {
+                    this.refresh_title(window, cx);
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
                     }
@@ -647,58 +654,58 @@ impl Workspace {
         self.activate(ix, window, cx);
     }
 
-    /// Opens a folder as the project, or a file in a tab.
+    /// Opens a folder as the project (its tabs replace these, after asking about unsaved
+    /// changes), or a file in a tab.
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
-            // The project being left keeps its session; its tabs give way to the new one's,
-            // unless some have unsaved changes.
+            // The project being left keeps its session.
             self.save_session(cx);
-            let all_saved = self.tabs.iter().all(|t| !t.editor.read(cx).buffer.is_dirty());
-            if all_saved {
-                while !self.tabs.is_empty() {
-                    self.remove_tab(self.tabs.len() - 1, window, cx);
-                }
-            }
-            self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
-            // Language servers work per project: restart them for the new folder.
-            let root = path.clone();
-            self.lsp.update(cx, |lsp, _| {
-                lsp.shutdown();
-                *lsp = LspStore::new(root);
-            });
-            for tab in &self.tabs {
-                tab.editor.update(cx, |editor, cx| editor.reattach_lsp(cx));
-            }
-            self.refresh_git(cx);
-            self.watch(path.clone(), cx);
-            self.tree.update(cx, |tree, cx| tree.set_root(path.clone(), cx));
-            self.build_index(cx);
-            let mut session = crate::session::Session::load(&path);
-            if !all_saved {
-                session.tabs.clear();
-                session.active = None;
-            }
-            session.window = self.window_state;
-            self.restore_session(session, window, cx);
-            let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
-            self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
-            self.schedule_session_save(cx);
+            self.confirm_unsaved(CloseAction::SwitchProject(path), window, cx);
         } else {
             self.open_file(path, window, cx);
         }
     }
 
+    fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
+        // Language servers work per project: restart them for the new folder.
+        let root = path.clone();
+        self.lsp.update(cx, |lsp, _| {
+            lsp.shutdown();
+            *lsp = LspStore::new(root);
+        });
+        self.recent_files.clear();
+        self.recently_closed.clear();
+        self.refresh_git(cx);
+        self.watch(path.clone(), cx);
+        self.tree.update(cx, |tree, cx| tree.set_root(path.clone(), cx));
+        self.build_index(cx);
+        let mut session = crate::session::Session::load(&path);
+        session.window = self.window_state;
+        self.restore_session(session, window, cx);
+        self.schedule_session_save(cx);
+    }
+
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_tab(ix, true, window, cx);
+    }
+
+    /// Makes tab `ix` the current one; `focus` also moves the keyboard to it.
+    fn show_tab(&mut self, ix: usize, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix) else { return };
         self.active = Some(ix);
-        let editor = self.tabs[ix].editor.read(cx);
+        let editor = tab.editor.read(cx);
         let path = editor.path().map(Path::to_path_buf);
         if let Some(path) = &path {
             self.recent_files.retain(|p| p != path);
             self.recent_files.insert(0, path.clone());
             self.recent_files.truncate(50);
         }
-        window.set_window_title(&editor.file_name());
-        window.focus(&editor.focus_handle(cx));
+        if focus {
+            window.focus(&editor.focus_handle(cx));
+        }
+        self.refresh_title(window, cx);
+        self.tab_scroll.scroll_to_item(ix);
         self.share_open_files(cx);
         self.schedule_session_save(cx);
         self.tree.update(cx, |tree, cx| tree.set_active(path, cx));
@@ -706,52 +713,51 @@ impl Workspace {
     }
 
     fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
         self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
+        // Focus follows to the next tab only if it was in the tab being closed (deleting a
+        // file from the tree keeps the keyboard in the tree).
+        let had_focus = tab.editor.focus_handle(cx).contains_focused(window, cx);
         if let Some(path) = tab.editor.read(cx).path() {
             self.recently_closed.push(path.to_path_buf());
         }
         tab.editor.update(cx, |editor, cx| editor.release_lsp(cx));
         if self.tabs.is_empty() {
             self.active = None;
-            window.set_window_title("Null");
-            window.focus(&self.focus_handle);
+            self.refresh_title(window, cx);
+            if had_focus {
+                window.focus(&self.focus_handle);
+            }
             self.tree.update(cx, |tree, cx| tree.set_active(None, cx));
             cx.notify();
         } else {
             let active = self.active.unwrap_or(0);
-            let next = if active > ix || active == self.tabs.len() { active - 1 } else { active };
-            self.activate(next.min(self.tabs.len() - 1), window, cx);
+            let next = if active > ix || active == self.tabs.len() { active.saturating_sub(1) } else { active };
+            self.show_tab(next.min(self.tabs.len() - 1), had_focus, window, cx);
         }
     }
 
+    /// "file — project" in the title bar, and the close button's unsaved dot.
+    fn refresh_title(&self, window: &mut Window, cx: &App) {
+        let project = self.tree.read(cx).root().file_name().map(|n| n.to_string_lossy().into_owned());
+        let editor = self.active_editor().map(|e| e.read(cx));
+        let title = match (editor.map(|e| e.file_name()), project) {
+            (Some(file), Some(project)) => format!("{file} — {project}"),
+            (Some(file), None) => file,
+            (None, Some(project)) => project,
+            (None, None) => "Null".into(),
+        };
+        window.set_window_title(&title);
+        window.set_window_edited(self.tabs.iter().any(|t| t.editor.read(cx).buffer.is_dirty()));
+    }
+
     fn close_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let editor = self.tabs[ix].editor.clone();
-        if !editor.read(cx).buffer.is_dirty() {
-            self.remove_tab(ix, window, cx);
-            return;
-        }
-        let message = format!("Save changes to {}?", editor.read(cx).file_name());
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &message,
-            Some("Your changes will be lost if you don't save them."),
-            &["Save", "Don't Save", "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(choice) = answer.await else { return };
-            this.update_in(cx, |this, window, cx| {
-                if choice == 2 || (choice == 0 && !editor.update(cx, |editor, cx| editor.save_to_disk(cx))) {
-                    return;
-                }
-                if let Some(ix) = this.tabs.iter().position(|tab| tab.editor == editor) {
-                    this.remove_tab(ix, window, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        // The index can be out of date (a click on a tab already gone).
+        let Some(editor) = self.tabs.get(ix).map(|t| t.editor.clone()) else { return };
+        self.confirm_unsaved(CloseAction::CloseTabs(vec![editor]), window, cx);
     }
 
     /// Asks before discarding unsaved changes. Returns true when `action` can go ahead
@@ -783,13 +789,14 @@ impl Workspace {
                 if choice == 2 {
                     return;
                 }
-                if choice == 0 {
-                    let saved = dirty.iter().all(|editor| editor.update(cx, |editor, cx| editor.save_to_disk(cx)));
-                    if !saved {
-                        return;
-                    }
+                if choice == 1 {
+                    return this.finish_close(action, window, cx);
                 }
-                this.finish_close(action, window, cx);
+                // Save: files with a name right away, then ask where to put each untitled one.
+                let (named, untitled): (Vec<_>, Vec<_>) = dirty.into_iter().partition(|e| e.read(cx).path().is_some());
+                if named.iter().all(|editor| editor.update(cx, |editor, cx| editor.save_to_disk(cx))) {
+                    this.save_untitled_then(untitled, action, window, cx);
+                }
             })
             .ok();
         })
@@ -797,9 +804,49 @@ impl Workspace {
         false
     }
 
+    /// Asks where to save each untitled file in turn, then goes on with `action`.
+    /// Cancelling any of them stops there, so nothing unsaved is lost.
+    fn save_untitled_then(
+        &mut self,
+        mut pending: Vec<Entity<Editor>>,
+        action: CloseAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = pending.first().cloned() else { return self.finish_close(action, window, cx) };
+        // Show which file the dialog is about.
+        if let Some(ix) = self.tabs.iter().position(|t| t.editor == editor) {
+            self.activate(ix, window, cx);
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        let answer = cx.prompt_for_new_path(&root, None);
+        let lsp = self.lsp.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                let saved = editor.update(cx, |editor, cx| {
+                    editor.set_path(path, Some(lsp), cx);
+                    editor.save_to_disk(cx)
+                });
+                if saved {
+                    pending.remove(0);
+                    this.save_untitled_then(pending, action, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn finish_close(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             CloseAction::Quit => cx.quit(),
+            CloseAction::SwitchProject(path) => {
+                while !self.tabs.is_empty() {
+                    self.remove_tab(self.tabs.len() - 1, window, cx);
+                }
+                self.switch_project(path, window, cx);
+            }
             CloseAction::CloseWindow => window.remove_window(),
             CloseAction::CloseTabs(editors) => {
                 for editor in editors {
@@ -887,10 +934,9 @@ impl Workspace {
         .detach();
     }
 
-    fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm_unsaved(CloseAction::Quit, window, cx) {
-            cx.quit();
-        }
+    /// Quits, after asking about unsaved changes (finishing the close quits).
+    pub fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_unsaved(CloseAction::Quit, window, cx);
     }
 
     fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
@@ -1048,8 +1094,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.palette = None;
+        // Replacing a list keeps the way back to where the keyboard was before it.
+        let replacing = self.palette.take().is_some();
+        let saved = self.focus_before_palette.clone();
         self.open_palette_with(PaletteKind::Locations, Some(title), locations, window, cx);
+        if replacing {
+            self.focus_before_palette = saved;
+        }
     }
 
     fn open_palette_with(
@@ -1060,6 +1111,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.welcome.is_some() {
+            return;
+        }
         if let Some((palette, _)) = &self.palette {
             if palette.read(cx).kind() == kind {
                 return self.close_palette(window, cx);
@@ -1151,7 +1205,8 @@ impl Workspace {
         settings::update(cx, |s| s.ai.enabled = !s.ai.enabled);
         let ai = &cx.global::<Settings>().ai;
         if ai.enabled && ai.provider == ProviderId::Off {
-            self.show_notice("AI is on. Choose where answers come from in Settings → AI (⌘,).".into(), cx);
+            let keys = crate::palette::shortcut(&OpenSettings, cx).map(|k| format!(" ({k})")).unwrap_or_default();
+            self.show_notice(format!("AI is on. Choose where answers come from in Settings → AI{keys}."), cx);
         }
     }
 
@@ -1160,6 +1215,9 @@ impl Workspace {
     }
 
     fn go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_editor().is_none() {
+            return self.show_notice("Open a file to go to one of its lines".into(), cx);
+        }
         self.open_palette(PaletteKind::Line, window, cx);
     }
 
@@ -1230,29 +1288,27 @@ impl Workspace {
         let theme = cx.global::<Theme>();
         let searching = self.sidebar_search.on;
         let tab = |id: &'static str, label: &'static str, on: bool| {
-            div()
+            ui::segment(on, theme)
                 .id(id)
-                .px(px(8.))
-                .py(px(3.))
-                .rounded(px(6.))
-                .text_size(px(12.))
-                .text_color(if on { theme.foreground } else { theme.faint })
-                .when(on, |t| t.bg(theme.hairline))
-                .when(!on, |t| t.hover(|s| s.text_color(theme.muted)))
+                .flex_1()
+                .flex()
+                .justify_center()
+                .cursor_pointer()
+                .when(!on, |t| t.hover(|s| s.text_color(theme.foreground)))
                 .child(label)
         };
         div()
-            .flex()
-            .gap(px(4.))
-            .px(px(10.))
+            .px(px(12.))
             .pt(px(10.))
             .child(
-                tab("files", "Files", !searching)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx))),
+                ui::segmented(theme)
+                    .child(tab("files", "Files", !searching).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
+                    ))
+                    .child(tab("search", "Search", searching).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
+                    )),
             )
-            .child(tab("search", "Search", searching).on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
-            ))
             .into_any_element()
     }
 
@@ -1357,7 +1413,7 @@ impl Workspace {
             let root = self.tree.read(cx).root().to_path_buf();
             let shell = match Shell::start(root) {
                 Ok(shell) => shell,
-                Err(err) => return eprintln!("null: couldn't start a terminal: {err}"),
+                Err(err) => return self.show_notice(format!("Couldn't start a terminal: {err}"), cx),
             };
             let terminal = cx.new(|cx| TerminalView::new(shell, cx));
             let subscription = cx.subscribe_in(&terminal, window, |this, _, event, window, cx| match event {
@@ -1393,10 +1449,10 @@ impl Workspace {
             .items_center()
             .gap(px(8.))
             .px(px(12.))
-            .text_size(px(12.))
+            .text_size(px(ui::T_SM))
             .text_color(theme.muted)
             .child(div().text_color(theme.foreground).child("Terminal"))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_color(theme.faint).child(title))
+            .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(title))
             .child(
                 div()
                     .id("close-terminal")
@@ -1404,9 +1460,17 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(5.))
+                    .rounded(px(ui::R_KEY))
+                    .cursor_pointer()
+                    .group("close-terminal")
                     .hover(|s| s.bg(theme.hairline))
-                    .child(svg().path("icons/x.svg").size(px(12.)).text_color(theme.muted))
+                    .child(
+                        svg()
+                            .path("icons/x.svg")
+                            .size(px(12.))
+                            .text_color(theme.muted)
+                            .group_hover("close-terminal", |s| s.text_color(theme.foreground)),
+                    )
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_terminal(&ToggleTerminal, window, cx)
                     })),
@@ -1461,6 +1525,14 @@ impl Workspace {
 
     /// ⌘, opens the Settings window, or closes it.
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings_at(None, window, cx);
+    }
+
+    /// Opens Settings, at `section` if given. With Settings already open, closes it.
+    fn open_settings_at(&mut self, section: Option<Section>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.welcome.is_some() {
+            return;
+        }
         if self.settings_panel.is_some() {
             return self.close_palette(window, cx);
         }
@@ -1475,7 +1547,13 @@ impl Workspace {
             .map(|c| Shortcut { category: c.category, label: c.label, action: c.action })
             .collect();
         let lsp = self.lsp.clone();
-        let panel = cx.new(|cx| SettingsPanel::new(shortcuts, lsp, cx));
+        let panel = cx.new(|cx| {
+            let mut panel = SettingsPanel::new(shortcuts, lsp, cx);
+            if let Some(section) = section {
+                panel.show_section(section);
+            }
+            panel
+        });
         let subscription = cx.subscribe_in(&panel, window, |this, _, event, window, cx| match event {
             SettingsPanelEvent::Closed => this.close_palette(window, cx),
             SettingsPanelEvent::Run(action) => {
@@ -1701,65 +1779,128 @@ impl Workspace {
         }
     }
 
+    /// Each tab's name, with its folder added where two tabs share a name (mod.rs · a).
+    fn tab_labels(&self, cx: &App) -> Vec<(String, Option<String>)> {
+        let names: Vec<(String, Option<PathBuf>)> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let editor = t.editor.read(cx);
+                (editor.file_name(), editor.path().map(Path::to_path_buf))
+            })
+            .collect();
+        names
+            .iter()
+            .map(|(name, path)| {
+                let shared = names.iter().filter(|(other, _)| other == name).count() > 1;
+                let folder = path
+                    .as_ref()
+                    .filter(|_| shared)
+                    .and_then(|p| p.parent()?.file_name())
+                    .map(|f| f.to_string_lossy().into_owned());
+                (name.clone(), folder)
+            })
+            .collect()
+    }
+
     fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.global::<Theme>();
+        let theme = cx.global::<Theme>().clone();
+        let labels = self.tab_labels(cx);
         div()
             .id("tabs")
             .flex()
             .gap(px(2.))
             .min_w_0()
             .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll)
             .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
                 let editor = tab.editor.read(cx);
                 let active = self.active == Some(ix);
                 let dirty = editor.buffer.is_dirty();
                 let group = format!("tab-{ix}");
+                // Unsaved: a small dot, which turns into the close button under the pointer.
                 let close = div()
                     .id(("close", ix))
+                    .relative()
                     .size(px(16.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .text_size(px(14.))
-                    .text_color(if active || dirty { theme.muted } else { gpui::transparent_black() })
-                    .group_hover(group.clone(), |s| s.text_color(theme.muted))
-                    .hover(|s| s.bg(theme.faint.opacity(0.4)).text_color(theme.foreground))
-                    .child(if dirty { "●" } else { "×" })
+                    .flex_none()
+                    .rounded(px(ui::R_KEY))
+                    .hover(|s| s.bg(theme.hairline))
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(!dirty, |d| d.invisible())
+                            .group_hover(group.clone(), |s| s.invisible())
+                            .child(div().size(px(7.)).rounded_full().bg(theme.muted)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(dirty || !active, |d| d.invisible())
+                            .group_hover(group.clone(), |s| s.visible())
+                            .child(svg().path("icons/x.svg").size(px(10.)).text_color(theme.muted)),
+                    )
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         this.close_tab_at(ix, window, cx);
                     }));
+                let (name, folder) = labels[ix].clone();
                 div()
                     .id(("tab", ix))
                     .group(group)
                     .h(px(28.))
+                    .max_w(px(220.))
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap(px(8.))
                     .pl(px(12.))
                     .pr(px(6.))
-                    .rounded(px(7.))
-                    .text_size(px(12.5))
+                    .rounded(px(ui::R_CONTROL))
+                    .text_size(px(ui::T_MD))
                     .text_color(if active { theme.foreground } else { theme.muted })
                     .when(active, |tab| tab.bg(theme.hairline))
                     .when(!active, |tab| tab.hover(|s| s.bg(theme.hairline.opacity(0.6))))
-                    .child(editor.file_name())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .gap(px(6.))
+                            .child(div().min_w_0().truncate().child(name))
+                            .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
+                    )
                     .child(close)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(ix, window, cx)))
+                    // Middle-click closes, as in browsers.
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| this.close_tab_at(ix, window, cx)),
+                    )
             }))
             .into_any_element()
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>();
-        let hint = |keys: String, label: &'static str| {
-            div()
-                .flex()
-                .gap(px(12.))
-                .child(div().w(px(56.)).text_right().text_color(theme.muted).child(keys))
-                .child(div().text_color(theme.faint).child(label))
+        // The keys as they're bound now: another preset's, or the person's own.
+        let hint = |action: &dyn Action, label: &'static str| {
+            let keys = crate::palette::shortcut(action, cx)?;
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(div().w(px(64.)).flex().justify_end().child(ui::key_cap(keys, theme)))
+                    .child(div().text_color(theme.muted).child(label)),
+            )
         };
         div()
             .size_full()
@@ -1767,12 +1908,39 @@ impl Workspace {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(10.))
-            .text_size(px(13.))
-            .child(hint(format!("{MOD}O"), "Open a file or folder"))
-            .child(hint(format!("{MOD}B"), "Show or hide the files"))
+            .text_size(px(ui::T_MD))
+            // One column, so the keys and the words line up from row to row.
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .children(hint(&Open, "Open a file or folder"))
+                    .children(hint(&TogglePalette, "Find a file"))
+                    .children(hint(&ToggleSidebar, "Show or hide the files")),
+            )
             .into_any_element()
     }
+}
+
+/// The status bar's path is cut to about this many characters, from the left.
+const STATUS_PATH_CHARS: usize = 60;
+
+/// A long path with its first folders replaced by "…", keeping the file and the folders
+/// nearest to it, which say the most: `…/editor/assist.rs`.
+fn shorten_path(path: &str, max: usize) -> String {
+    if path.chars().count() <= max {
+        return path.to_string();
+    }
+    let parts: Vec<&str> = path.split(['/', '\\']).collect();
+    let mut kept = parts.last().copied().unwrap_or(path).to_string();
+    for part in parts.iter().rev().skip(1) {
+        if kept.chars().count() + part.chars().count() + 3 > max {
+            break;
+        }
+        kept = format!("{part}/{kept}");
+    }
+    format!("…/{kept}")
 }
 
 /// Where `path` ends up when `from` (it, or a folder above it) is renamed to `to`.
@@ -1787,6 +1955,8 @@ enum CloseAction {
     Quit,
     CloseWindow,
     CloseTabs(Vec<Entity<Editor>>),
+    /// Open another folder as the project: every tab closes first.
+    SwitchProject(PathBuf),
 }
 
 impl Focusable for Workspace {
@@ -1824,18 +1994,24 @@ impl Render for Workspace {
                 let count = |s| problems.iter().filter(|p| p.severity == s).count();
                 (
                     vec![
-                        path.unwrap_or_else(|| "untitled".into()),
+                        path.map(|p| shorten_path(&p, STATUS_PATH_CHARS)).unwrap_or_else(|| "Untitled".into()),
                         match editor.extra.len() {
                             0 => format!("Ln {}, Col {}", line + 1, col + 1),
                             n => format!("{} cursors · Esc for one", n + 1),
                         },
-                        "Spaces: 4".into(),
                         editor.language_name().into(),
                     ],
                     (count(lsp_types::DiagnosticSeverity::ERROR), count(lsp_types::DiagnosticSeverity::WARNING)),
                 )
             }
-            None => (vec![root.display().to_string()], (0, 0)),
+            None => {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let shown = match home.as_ref().and_then(|h| root.strip_prefix(h).ok()) {
+                    Some(rest) => Path::new("~").join(rest).display().to_string(),
+                    None => root.display().to_string(),
+                };
+                (vec![shorten_path(&shown, STATUS_PATH_CHARS)], (0, 0))
+            }
         };
         let tabs = self.render_tabs(cx);
         let terminal_panel = self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx);
@@ -1903,20 +2079,24 @@ impl Render for Workspace {
                     .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
                     .child(branch)
             }))
-            .child(div().flex_1().overflow_hidden().whitespace_nowrap().children(items.next()))
+            .child(div().flex_1().min_w_0().truncate().children(items.next()))
             .children(lsp_status)
             .when(ai_provider != ProviderId::Off, |bar| {
                 bar.child(
                     div()
                         .id("ai-status")
                         .flex()
+                        .flex_none()
                         .items_center()
                         .gap(px(6.))
+                        .whitespace_nowrap()
+                        .cursor_pointer()
                         .text_color(theme.muted)
+                        .hover(|s| s.text_color(theme.foreground))
                         .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
                         .child(format!("AI · {}", ai_provider.label()))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.open_settings(&OpenSettings, window, cx)
+                            this.open_settings_at(Some(Section::Ai), window, cx)
                         })),
                 )
             })
@@ -1927,6 +2107,8 @@ impl Render for Workspace {
                     div()
                         .id("problems")
                         .flex()
+                        .flex_none()
+                        .whitespace_nowrap()
                         .gap(px(10.))
                         .cursor_pointer()
                         .on_click(
@@ -1940,7 +2122,7 @@ impl Render for Workspace {
                         }),
                 )
             })
-            .children(items);
+            .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
 
         div()
             .key_context("Workspace")
@@ -2027,6 +2209,10 @@ impl Render for Workspace {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                // The welcome is closed by its own button, not by clicking around it.
+                                if this.welcome.is_some() {
+                                    return;
+                                }
                                 this.key_prompt = None;
                                 this.close_palette(window, cx);
                             }),
@@ -2037,14 +2223,15 @@ impl Render for Workspace {
             .children(self.notice.as_ref().map(|(message, _)| {
                 div().absolute().bottom(px(44.)).left_0().w_full().flex().justify_center().child(
                     div()
+                        .max_w(px(560.))
                         .px(px(14.))
                         .py(px(8.))
-                        .rounded(px(9.))
+                        .rounded(px(ui::R_POPOVER))
                         .bg(theme.raised)
                         .border_1()
                         .border_color(theme.hairline)
                         .shadow_lg()
-                        .text_size(px(13.))
+                        .text_size(px(ui::T_MD))
                         .text_color(theme.foreground)
                         .child(message.clone()),
                 )
@@ -2055,6 +2242,12 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_paths_keep_their_end() {
+        assert_eq!(shorten_path("src/main.rs", 60), "src/main.rs");
+        assert_eq!(shorten_path("a/very/deep/tree/of/folders/editor/assist.rs", 24), "…/editor/assist.rs");
+    }
 
     #[test]
     fn renamed_paths_never_gain_a_trailing_slash() {

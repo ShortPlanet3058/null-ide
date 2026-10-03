@@ -42,7 +42,7 @@ impl Keymap {
     pub fn summary(self) -> &'static str {
         match self {
             Keymap::Null => "⌘P files · ⌘K quick settings and commands · ⌘D next match · ⌥⇧↓ duplicate line",
-            Keymap::VsCode => "⌘P files · ⇧⌘P commands · ⌘D next match · ⇧⌥↓ duplicate · ⇧⌘K delete line",
+            Keymap::VsCode => "⌘P files · ⇧⌘P commands · ⌘D next match · ⌥⇧↓ duplicate · ⇧⌘K delete line",
             Keymap::JetBrains => "⇧⌘O files · ⇧⌘A actions · ⌘L go to line · ⌘D duplicate · ⌘⌫ delete line",
             Keymap::Sublime => "⌘P files · ⇧⌘P commands · ⇧⌘D duplicate · ⌃⇧K delete line · ⌃⌘↑ move line",
             Keymap::Zed => "⌘P files · ⇧⌘P commands · ⌘D next match · ⇧⌘D duplicate · ⌃⇧K delete line",
@@ -106,7 +106,7 @@ pub fn register(keymap: Keymap, cx: &mut App) {
     // After the text field's keys, so ←→ can change a choice in the palette.
     crate::palette::bind_keys(cx);
     cx.bind_keys(keymap.overrides());
-    cx.bind_keys([KeyBinding::new("secondary-q", crate::menus::Quit, None)]);
+    crate::menus::bind_keys(cx);
 }
 
 #[cfg(test)]

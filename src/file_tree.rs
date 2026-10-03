@@ -1,6 +1,7 @@
 use crate::fs_ops;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
+use crate::ui;
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, KeyContext,
     MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy, SharedString, Subscription, Transformation,
@@ -46,12 +47,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", ExpandOrOpen, tree),
         KeyBinding::new("left", Collapse, tree),
         KeyBinding::new("f2", Rename, tree),
-        KeyBinding::new("down", MenuNext, menu),
-        KeyBinding::new("up", MenuPrevious, menu),
-        KeyBinding::new("enter", MenuConfirm, menu),
-        KeyBinding::new("escape", MenuClose, menu),
         KeyBinding::new("enter", CommitEdit, edit),
         KeyBinding::new("escape", CancelEdit, edit),
+        // Arrows stay in the name being typed instead of moving through the tree.
+        KeyBinding::new("up", gpui::NoAction {}, edit),
+        KeyBinding::new("down", gpui::NoAction {}, edit),
     ];
     if cfg!(target_os = "macos") {
         // As in Finder: Return renames, Cmd+Down opens, Cmd+Backspace moves to the Trash.
@@ -64,10 +64,17 @@ pub fn bind_keys(cx: &mut App) {
     } else {
         keys.extend([KeyBinding::new("enter", Activate, tree), KeyBinding::new("delete", Trash, tree)]);
     }
+    // Last, so that with the menu open its keys win over the tree's (Return renames otherwise).
+    keys.extend([
+        KeyBinding::new("down", MenuNext, menu),
+        KeyBinding::new("up", MenuPrevious, menu),
+        KeyBinding::new("enter", MenuConfirm, menu),
+        KeyBinding::new("escape", MenuClose, menu),
+    ]);
     cx.bind_keys(keys);
 }
 
-pub const ROW_HEIGHT: f32 = 26.;
+pub const ROW_HEIGHT: f32 = ui::ROW;
 /// Width of the sidebar the tree is drawn in.
 pub const TREE_WIDTH: f32 = 240.;
 const INDENT: f32 = 14.;
@@ -267,6 +274,7 @@ impl FileTree {
         }
         self.active = path;
         self.rebuild();
+        self.reveal_selected();
         cx.notify();
     }
 
@@ -294,7 +302,9 @@ impl FileTree {
         }
     }
 
-    fn read_dir(dir: &Path) -> Vec<Entry> {
+    /// The folder's entries, folders first. Everything inside an ignored folder is ignored
+    /// (dimmed) too: `node_modules/x` as well as `node_modules`.
+    fn read_dir(dir: &Path, inside_ignored: bool) -> Vec<Entry> {
         let visible: HashSet<PathBuf> = ignore::WalkBuilder::new(dir)
             .max_depth(Some(1))
             .hidden(false)
@@ -309,10 +319,12 @@ impl FileTree {
             .filter(|e| !ALWAYS_HIDDEN.contains(&e.file_name().to_string_lossy().as_ref()))
             .map(|e| {
                 let path = e.path();
+                // The entry's own type, without another look at the disk (links: what they point to).
+                let is_dir = e.file_type().is_ok_and(|t| t.is_dir() || (t.is_symlink() && path.is_dir()));
                 Entry {
                     name: e.file_name().to_string_lossy().into_owned().into(),
-                    is_dir: path.is_dir(),
-                    ignored: !visible.contains(&path),
+                    is_dir,
+                    ignored: inside_ignored || !visible.contains(&path),
                     path,
                 }
             })
@@ -341,15 +353,27 @@ impl FileTree {
     }
 
     fn push_children(&mut self, dir: &Path, depth: usize) {
-        let entries = self.children.entry(dir.to_path_buf()).or_insert_with(|| Self::read_dir(dir)).clone();
+        self.push_children_of(dir, depth, false);
+    }
+
+    fn push_children_of(&mut self, dir: &Path, depth: usize, inside_ignored: bool) {
+        let entries =
+            self.children.entry(dir.to_path_buf()).or_insert_with(|| Self::read_dir(dir, inside_ignored)).clone();
         for entry in entries {
             let expanded = entry.is_dir && self.expanded.contains(&entry.path);
-            let path = entry.path.clone();
+            let (path, ignored) = (entry.path.clone(), entry.ignored);
             self.rows.push(Row { kind: RowKind::Entry(entry), depth, expanded });
             if expanded {
                 self.push_new_item_row(&path, depth + 1);
-                self.push_children(&path, depth + 1);
+                self.push_children_of(&path, depth + 1, ignored);
             }
+        }
+    }
+
+    /// Scrolls the selected row into view, the least needed.
+    fn reveal_selected(&mut self) {
+        if let Some(ix) = self.selected_ix() {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
     }
 
@@ -419,7 +443,8 @@ impl FileTree {
         };
         let ix = entries[next];
         self.selected = self.entry_at(ix).map(|e| e.path.clone());
-        self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        // Moving down keeps the row at the bottom edge, moving up at the top: never a jump.
+        self.scroll.scroll_to_item(ix, if delta > 0 { ScrollStrategy::Bottom } else { ScrollStrategy::Top });
         cx.notify();
     }
 
@@ -449,6 +474,7 @@ impl FileTree {
         } else if let Some(parent) = entry.path.parent().filter(|p| *p != self.root) {
             // On a file or closed folder, Left goes up to the parent folder.
             self.selected = Some(parent.to_path_buf());
+            self.reveal_selected();
             cx.notify();
         }
     }
@@ -538,6 +564,7 @@ impl FileTree {
                 self.expand_to(&path);
                 self.selected = Some(path.clone());
                 self.rebuild();
+                self.reveal_selected();
                 window.focus(&self.focus_handle);
                 match from {
                     Some(from) if from != path => cx.emit(FileTreeEvent::Renamed { from, to: path }),
@@ -725,7 +752,8 @@ impl FileTree {
     fn render_row(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>();
         let row = &self.rows[ix];
-        let indent = px(16. + row.depth as f32 * INDENT);
+        // Rows sit inset from the sidebar's edges, so their highlight has rounded ends.
+        let indent = px(10. + row.depth as f32 * INDENT);
         let marker = |is_dir: bool, turn: f32, color: gpui::Hsla, dot: gpui::Hsla| {
             if is_dir {
                 div().size(px(14.)).flex().items_center().justify_center().child(
@@ -747,31 +775,39 @@ impl FileTree {
         // The error (like "already exists") sits at the end of the field, in red.
         // Rows in the list don't stretch, so the field gets an explicit width:
         // the sidebar minus the indent, the marker and the padding.
-        let field_width = (TREE_WIDTH - 16. - row.depth as f32 * INDENT - 14. - 8. - 12.).max(80.);
-        let name_field =
-            |edit: &Edit| {
-                div()
-                    .w(px(field_width))
-                    .flex_none()
-                    .h(px(22.))
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded(px(5.))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(if edit.error.is_some() { theme.error } else { theme.caret })
-                    .line_height(px(18.))
-                    .child(div().flex_1().min_w(px(40.)).overflow_hidden().child(edit.input.clone()))
-                    .children(edit.error.clone().map(|e| {
-                        div().flex_none().text_size(px(11.)).text_color(theme.error).whitespace_nowrap().child(e)
-                    }))
-            };
+        let field_width = (TREE_WIDTH - 12. - 10. - row.depth as f32 * INDENT - 14. - 8. - 12.).max(80.);
+        let name_field = |edit: &Edit| {
+            div()
+                .w(px(field_width))
+                .flex_none()
+                .h(px(22.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(px(ui::R_KEY))
+                .bg(theme.background)
+                .border_1()
+                .border_color(if edit.error.is_some() { theme.error } else { theme.caret })
+                .line_height(px(18.))
+                .child(div().flex_1().min_w(px(40.)).overflow_hidden().child(edit.input.clone()))
+                .children(edit.error.clone().map(|e| {
+                    div().flex_none().text_size(px(ui::T_XS)).text_color(theme.error).whitespace_nowrap().child(e)
+                }))
+        };
 
         let editing_this = |path: &Path| matches!(self.edit.as_ref().map(|e| &e.kind), Some(EditKind::Rename { path: p }) if p == path);
-        let base =
-            div().id(ix).h(px(ROW_HEIGHT)).flex().items_center().gap(px(8.)).pl(indent).pr(px(12.)).text_size(px(13.));
+        let base = div()
+            .id(ix)
+            .h(px(ROW_HEIGHT))
+            .mx(px(6.))
+            .rounded(px(ui::R_ROW))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pl(indent)
+            .pr(px(6.))
+            .text_size(px(ui::T_MD));
         match &row.kind {
             RowKind::NewItem { is_dir } => {
                 let edit = self.edit.as_ref().expect("a new-item row exists only while editing");
@@ -809,7 +845,7 @@ impl FileTree {
                     row_el.key_context("TreeEdit").child(name_field(edit)).into_any_element()
                 } else {
                     row_el
-                        .child(div().overflow_hidden().whitespace_nowrap().child(entry.name.clone()))
+                        .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click(ix, event.click_count(), window, cx)
                         }))
@@ -844,12 +880,13 @@ impl FileTree {
                         .flex()
                         .items_center()
                         .gap(px(16.))
-                        .rounded(px(6.))
+                        .rounded(px(ui::R_ROW))
+                        .cursor_pointer()
                         .text_color(if destructive { theme.error } else { theme.foreground })
                         .when(selected, |d| d.bg(theme.accent_soft))
                         .hover(|s| s.bg(theme.accent_soft))
                         .child(div().flex_1().child(item.label()))
-                        .children(item.keys().map(|k| div().text_size(px(11.5)).text_color(theme.faint).child(k)))
+                        .children(item.keys().map(|k| div().text_size(px(ui::T_SM)).text_color(theme.muted).child(k)))
                         .on_click(
                             cx.listener(move |this, _: &ClickEvent, window, cx| this.run_menu_item(item, window, cx)),
                         ),
@@ -862,12 +899,12 @@ impl FileTree {
                         .occlude()
                         .min_w(px(220.))
                         .p(px(4.))
-                        .rounded(px(9.))
+                        .rounded(px(ui::R_POPOVER))
                         .bg(theme.raised)
                         .border_1()
                         .border_color(theme.hairline)
                         .shadow_lg()
-                        .text_size(px(13.))
+                        .text_size(px(ui::T_MD))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.menu = None;
                             cx.notify();
@@ -899,10 +936,17 @@ impl Render for FileTree {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(4.))
-                .text_color(theme.faint)
-                .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
-                .child(svg().path(icon).size(px(14.)).text_color(theme.muted))
+                .rounded(px(ui::R_KEY))
+                .cursor_pointer()
+                .group(id)
+                .hover(|s| s.bg(theme.hairline))
+                .child(
+                    svg()
+                        .path(icon)
+                        .size(px(14.))
+                        .text_color(theme.muted)
+                        .group_hover(id, |s| s.text_color(theme.foreground)),
+                )
         };
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add("FileTree");
@@ -946,16 +990,7 @@ impl Render for FileTree {
                     .flex()
                     .items_center()
                     .gap(px(2.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(11.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.faint)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(title),
-                    )
+                    .child(ui::section_heading(&title, theme).flex_1().min_w_0().truncate())
                     .child(
                         div()
                             .flex()
@@ -1021,7 +1056,7 @@ mod tests {
         std::fs::write(dir.join(".env"), "").unwrap();
         std::fs::write(dir.join("Cargo.toml"), "").unwrap();
 
-        let entries = FileTree::read_dir(&dir);
+        let entries = FileTree::read_dir(&dir, false);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_ref()).collect();
         assert_eq!(names, ["src", "target", ".env", ".gitignore", "Cargo.toml"]);
         let ignored = |name: &str| entries.iter().find(|e| e.name.as_ref() == name).unwrap().ignored;

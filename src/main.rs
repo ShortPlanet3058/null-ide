@@ -29,6 +29,7 @@ mod terminal;
 mod text_input;
 mod theme;
 mod tools;
+mod ui;
 mod welcome;
 mod workspace;
 mod wrap;
@@ -44,7 +45,7 @@ use workspace::Workspace;
 /// `null <file>` opens the file inside the current folder (or its own folder
 /// when it lives elsewhere).
 fn resolve_args() -> (PathBuf, Option<PathBuf>) {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
     let Some(arg) = std::env::args().nth(1) else {
         // Opened from the Finder (or the Dock), there's no folder to go by: the last project.
         let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -54,12 +55,25 @@ fn resolve_args() -> (PathBuf, Option<PathBuf>) {
         }
         return (cwd, None);
     };
-    let path = cwd.join(arg);
+    // `null .` and `null` are the same project, with the same session: no `/.` at the end.
+    let path = absolute(&cwd.join(arg));
     if path.is_dir() {
         return (path, None);
     }
     let root = if path.starts_with(&cwd) { cwd } else { path.parent().map(PathBuf::from).unwrap_or(cwd) };
     (root, Some(path))
+}
+
+/// The path with `.`, `..` and links resolved. A file that doesn't exist yet (`null new.rs`)
+/// keeps its name, under its resolved folder.
+fn absolute(path: &Path) -> PathBuf {
+    if let Ok(path) = std::fs::canonicalize(path) {
+        return path;
+    }
+    match (path.parent().and_then(|p| std::fs::canonicalize(p).ok()), path.file_name()) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// The window where it was last time, if that's still on a screen; centred otherwise.
@@ -84,7 +98,17 @@ fn main() {
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         settings::init(cx);
         keymap::register(cx.global::<settings::Settings>().keymap, cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // ⌘Q with no window focused still asks about unsaved changes, in the main window.
+        cx.on_action(|_: &Quit, cx| {
+            let workspace = cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>());
+            match workspace {
+                Some(handle) => {
+                    handle.update(cx, |workspace, window, cx| workspace.quit(&Quit, window, cx)).ok();
+                }
+                None => cx.quit(),
+            }
+        });
+        menus::init(cx);
         menus::set(cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {

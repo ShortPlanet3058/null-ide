@@ -9,9 +9,38 @@ use crate::workspace::{
     PreviousTab, ReopenClosedTab, ResetFontSize, SaveAll, SaveAs, SearchProject, ShowCommands, TogglePalette,
     ToggleSidebar, ToggleTerminal, UseGraphiteTheme, UseOledTheme, UsePaperTheme,
 };
-use gpui::{App, Menu, MenuItem, SystemMenuType, actions};
+use gpui::{App, KeyBinding, Menu, MenuItem, SystemMenuType, actions};
 
-actions!(null, [Quit, ToggleFadeWhileTyping, ToggleWordWrap]);
+actions!(null, [Quit, ToggleFadeWhileTyping, ToggleWordWrap, Hide, HideOthers, ShowAll, Minimize, Zoom]);
+
+/// The menu items every Mac app has: hiding the app, and the Window menu's two.
+pub fn init(cx: &mut App) {
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &Minimize, cx| {
+        if let Some(window) = cx.active_window() {
+            window.update(cx, |_, window, _| window.minimize_window()).ok();
+        }
+    });
+    cx.on_action(|_: &Zoom, cx| {
+        if let Some(window) = cx.active_window() {
+            window.update(cx, |_, window, _| window.zoom_window()).ok();
+        }
+    });
+}
+
+/// The app's own keys, the same whatever the keymap preset.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+            KeyBinding::new("cmd-m", Minimize, None),
+        ]);
+    }
+}
 
 /// Installs the menu bar. Menu items can't show a checkmark yet, so toggles
 /// are labelled with what choosing them will do.
@@ -28,6 +57,10 @@ pub fn set(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
+                MenuItem::action("Hide Null", Hide),
+                MenuItem::action("Hide Others", HideOthers),
+                MenuItem::action("Show All", ShowAll),
+                MenuItem::separator(),
                 MenuItem::action("Quit Null", Quit),
             ],
         },
@@ -35,7 +68,7 @@ pub fn set(cx: &mut App) {
             name: "File".into(),
             items: vec![
                 MenuItem::action("New File", NewUntitled),
-                MenuItem::action("Open…", Open),
+                MenuItem::action("Open File or Folder…", Open),
                 MenuItem::action("Reopen Closed Tab", ReopenClosedTab),
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),
@@ -69,7 +102,6 @@ pub fn set(cx: &mut App) {
                         MenuItem::action("Duplicate Line", DuplicateLineDown),
                         MenuItem::action("Delete Line", DeleteLine),
                         MenuItem::action("Select Line", SelectLine),
-                        MenuItem::action("Go to Line…", GoToLine),
                     ],
                 }),
                 MenuItem::submenu(Menu {
@@ -124,6 +156,10 @@ pub fn set(cx: &mut App) {
                 MenuItem::action(wrap_label, ToggleWordWrap),
                 MenuItem::action(fade_label, ToggleFadeWhileTyping),
             ],
+        },
+        Menu {
+            name: "Window".into(),
+            items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)],
         },
     ]);
 }

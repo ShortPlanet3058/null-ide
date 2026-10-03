@@ -29,7 +29,8 @@ use std::sync::Arc;
 
 actions!(terminal, [Copy, Paste, Clear]);
 
-const FONT_SIZE: f32 = 13.;
+/// The terminal's text is a point smaller than the editor's, and follows it (⌘+ / ⌘-).
+const FONT_SIZE_BELOW_EDITOR: f32 = 1.;
 const PADDING: f32 = 10.;
 const SCROLLBACK: usize = 10_000;
 
@@ -48,7 +49,10 @@ pub fn bind_keys(cx: &mut App) {
         // deletes a word, Ctrl+B moves back...). Inside the terminal, give them back.
         for key in "abcdefghijklmnopqrstuvwxyz,=-0".chars() {
             keys.push(KeyBinding::new(&format!("ctrl-{key}"), NoAction {}, ctx));
-            keys.push(KeyBinding::new(&format!("ctrl-shift-{key}"), NoAction {}, ctx));
+            // Ctrl+Shift+C and V stay copy and paste.
+            if key != 'c' && key != 'v' {
+                keys.push(KeyBinding::new(&format!("ctrl-shift-{key}"), NoAction {}, ctx));
+            }
         }
     }
     cx.bind_keys(keys);
@@ -97,6 +101,8 @@ pub struct TerminalView {
     cell: (Pixels, Pixels),
     pub title: String,
     selecting: bool,
+    /// Scrolling smaller than a line, kept for the next event.
+    scroll_rest: f32,
     /// Where the grid was drawn last frame, for mouse selection.
     origin: Point<Pixels>,
     _events: Task<()>,
@@ -167,6 +173,7 @@ impl TerminalView {
             cell: (px(8.), px(16.)),
             title: String::new(),
             selecting: false,
+            scroll_rest: 0.,
             origin: Point::default(),
             _events: events,
         }
@@ -249,7 +256,8 @@ impl TerminalView {
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
+        // No escape characters: pasted text could otherwise end bracketed paste early and run commands.
+        let text = text.replace('\x1b', "").replace("\r\n", "\r").replace('\n', "\r");
         let bytes = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text };
         self.term.lock().scroll_display(Scroll::Bottom);
         self.write(bytes.into_bytes());
@@ -306,14 +314,30 @@ impl TerminalView {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let lines = match event.delta {
-            ScrollDelta::Lines(delta) => (delta.y * 3.).round() as i32,
-            ScrollDelta::Pixels(delta) => (f32::from(delta.y) / f32::from(self.cell.1)).round() as i32,
+        // Small trackpad moves add up instead of being rounded away.
+        self.scroll_rest += match event.delta {
+            ScrollDelta::Lines(delta) => delta.y * 3.,
+            ScrollDelta::Pixels(delta) => f32::from(delta.y) / f32::from(self.cell.1),
         };
-        if lines != 0 {
-            self.term.lock().scroll_display(Scroll::Delta(lines));
-            cx.notify();
+        let lines = self.scroll_rest.trunc() as i32;
+        self.scroll_rest -= lines as f32;
+        if lines == 0 {
+            return;
         }
+        let mode = *self.term.lock().mode();
+        // Full-screen programs (less, man, git log, vim) scroll with the arrow keys.
+        if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+            let arrow: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            };
+            self.write(arrow.repeat(lines.unsigned_abs() as usize));
+            return;
+        }
+        self.term.lock().scroll_display(Scroll::Delta(lines));
+        cx.notify();
     }
 }
 
@@ -414,7 +438,15 @@ pub fn key_to_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> 
             };
             meta(vec![byte])
         }
-        // Option/Alt + a key acts as Meta, as shells expect (Alt+B / Alt+F move by word).
+        // On a Mac, Option types characters on many keyboards (| [ ] { } ~ \ on French and
+        // German ones): send what it types, as the Mac's own Terminal does.
+        key if m.alt
+            && cfg!(target_os = "macos")
+            && keystroke.key_char.as_deref().is_some_and(|c| !c.is_empty() && c != key) =>
+        {
+            keystroke.key_char.as_ref()?.as_bytes().to_vec()
+        }
+        // Elsewhere, Alt + a key acts as Meta, as shells expect (Alt+B / Alt+F move by word).
         key if m.alt && key.chars().count() == 1 => {
             let c = if m.shift { key.to_uppercase() } else { key.to_string() };
             meta(c.into_bytes())
@@ -437,6 +469,10 @@ fn indexed_color(index: usize, theme: &Theme) -> Hsla {
             let v = (8. + 10. * (index - 232) as f32) / 255.;
             gpui::Rgba { r: v, g: v, b: v, a: 1. }.into()
         }
+        // The named colors programs can ask about (OSC 10/11/12) to pick a light or dark look.
+        256 => theme.foreground,
+        257 => theme.background,
+        258 => theme.caret,
         _ => theme.foreground,
     }
 }
@@ -529,7 +565,7 @@ impl Element for TerminalElement {
     ) -> Prepaint {
         let theme = cx.global::<Theme>().clone();
         let family = cx.global::<Fonts>().code.clone();
-        let font_size = px(FONT_SIZE);
+        let font_size = px((cx.global::<crate::settings::Settings>().font_size - FONT_SIZE_BELOW_EDITOR).max(9.));
         let base = font(family);
         let text_system = window.text_system().clone();
         let run = |len: usize, font: Font, color: Hsla| TextRun {

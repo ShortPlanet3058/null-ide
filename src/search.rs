@@ -17,7 +17,9 @@ impl SearchQuery {
     pub fn build(&self) -> Result<Regex, regex::Error> {
         let mut pattern = if self.regex { self.text.clone() } else { regex::escape(&self.text) };
         if self.whole_word {
-            pattern = format!(r"\b(?:{pattern})\b");
+            // Half word boundaries: "->" or "foo(" as whole words still match, where \b can't
+            // sit next to punctuation.
+            pattern = format!(r"\b{{start-half}}(?:{pattern})\b{{end-half}}");
         }
         RegexBuilder::new(&pattern).case_insensitive(!self.case_sensitive).multi_line(true).build()
     }
@@ -28,6 +30,14 @@ impl SearchQuery {
             return Vec::new();
         }
         regex.find_iter(text).filter(|m| !m.is_empty()).take(MAX_MATCHES).map(|m| m.range()).collect()
+    }
+
+    /// Byte ranges of every non-empty match, however many: for replacing them all.
+    pub fn find_every(&self, regex: &Regex, text: &str) -> Vec<Range<usize>> {
+        if self.text.is_empty() {
+            return Vec::new();
+        }
+        regex.find_iter(text).filter(|m| !m.is_empty()).map(|m| m.range()).collect()
     }
 
     /// The text that replaces the match at `range`. In regex mode `$1`, `${name}`
@@ -51,6 +61,16 @@ impl SearchQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whole_words_can_be_punctuation() {
+        let query = SearchQuery { text: "->".into(), whole_word: true, case_sensitive: true, regex: false };
+        let regex = query.build().unwrap();
+        assert_eq!(query.find_all(&regex, "a -> b").len(), 1);
+        let word = SearchQuery { text: "foo".into(), whole_word: true, ..Default::default() };
+        let regex = word.build().unwrap();
+        assert_eq!(word.find_all(&regex, "foo food (foo)").len(), 2);
+    }
 
     fn query(text: &str) -> SearchQuery {
         SearchQuery { text: text.into(), ..Default::default() }
