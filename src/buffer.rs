@@ -110,6 +110,11 @@ impl Buffer {
         self.saved_version = self.version;
     }
 
+    /// Counts as having unsaved changes (a copy of a text that has them).
+    pub fn mark_unsaved(&mut self) {
+        self.saved_version = u64::MAX;
+    }
+
     pub fn len_chars(&self) -> usize {
         self.text.len_chars()
     }
