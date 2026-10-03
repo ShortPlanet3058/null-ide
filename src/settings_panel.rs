@@ -19,7 +19,8 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", CloseSettings, Some("SettingsPanel"))]);
 }
 
-const CODE_FONTS: &[&str] = &["Geist Mono", "SF Mono", "Menlo", "JetBrains Mono", "Fira Code", "Cascadia Code"];
+pub(crate) const CODE_FONTS: &[&str] =
+    &["Geist Mono", "SF Mono", "Menlo", "JetBrains Mono", "Fira Code", "Cascadia Code"];
 const UI_FONTS: &[(&str, &str)] =
     &[("Instrument Sans", "Instrument Sans"), (".SystemUIFont", "System"), ("Inter", "Inter")];
 
@@ -207,17 +208,60 @@ impl SettingsPanel {
             .border_b_1()
             .border_color(theme.hairline)
             .child(
+                // The words keep a readable width whatever the control beside them.
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .min_w_0()
+                    .flex_1()
+                    .min_w(px(200.))
                     .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(title.to_string()))
                     .children(
                         detail.map(|d| div().text_size(px(ui::T_SM)).text_color(theme.muted).child(d.to_string())),
                     ),
             )
-            .child(div().flex_none().child(control))
+            .child(div().flex_shrink_0().max_w(gpui::relative(0.6)).child(control))
+            .into_any_element()
+    }
+
+    /// A row whose control needs the width (a model field and its suggestions): the
+    /// words above, the control under them, full width.
+    fn stacked_row(title: &str, detail: Option<&str>, control: impl IntoElement, theme: &Theme) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .py(px(12.))
+            .border_b_1()
+            .border_color(theme.hairline)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(title.to_string()))
+                    .children(
+                        detail.map(|d| div().text_size(px(ui::T_SM)).text_color(theme.muted).child(d.to_string())),
+                    ),
+            )
+            .child(control)
+            .into_any_element()
+    }
+
+    /// A text field as wide as its row.
+    fn wide_field(input: &Entity<TextInput>, theme: &Theme) -> AnyElement {
+        div()
+            .w_full()
+            .h(px(ui::FIELD + 4.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .rounded(px(ui::R_CONTROL))
+            .border_1()
+            .border_color(theme.line_strong)
+            .bg(theme.background)
+            .text_size(px(ui::T_MD))
+            .child(div().w_full().overflow_hidden().child(input.clone()))
             .into_any_element()
     }
 
@@ -275,20 +319,6 @@ impl SettingsPanel {
             .cursor_pointer()
             .hover(|d| d.bg(theme.hairline))
             .child(label.to_string())
-    }
-
-    fn field(input: &Entity<TextInput>, theme: &Theme) -> AnyElement {
-        div()
-            .w(px(300.))
-            .px(px(10.))
-            .py(px(6.))
-            .rounded(px(ui::R_CONTROL))
-            .border_1()
-            .border_color(theme.hairline)
-            .bg(theme.background)
-            .text_size(px(13.))
-            .child(input.clone())
-            .into_any_element()
     }
 
     fn heading(text: &str, theme: &Theme) -> AnyElement {
@@ -485,24 +515,27 @@ impl SettingsPanel {
         div()
             .flex()
             .flex_wrap()
-            .justify_end()
             .gap(px(6.))
-            .pt(px(6.))
             .children(recommended.iter().enumerate().map(|(i, r)| {
                 let active = current.as_deref() == Some(r.model);
                 let input = input.clone();
                 div()
                     .id((id, i))
                     .flex()
-                    .gap(px(5.))
-                    .px(px(8.))
-                    .py(px(2.))
-                    .rounded(px(6.))
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(ui::CONTROL))
+                    .px(px(10.))
+                    .rounded(px(ui::R_CONTROL))
                     .border_1()
-                    .text_size(px(11.))
+                    .text_size(px(ui::T_SM))
                     .cursor_pointer()
-                    .when(active, |d| d.border_color(theme.caret).text_color(theme.foreground))
-                    .when(!active, |d| d.border_color(theme.hairline).text_color(theme.muted))
+                    .when(active, |d| d.border_color(theme.caret).bg(theme.accent_soft).text_color(theme.foreground))
+                    .when(!active, |d| {
+                        d.border_color(theme.line_strong)
+                            .text_color(theme.muted)
+                            .hover(|d| d.text_color(theme.foreground).bg(theme.hairline))
+                    })
                     .child(r.model)
                     .child(div().text_color(theme.faint).child(r.note))
                     .on_click(move |_, _, cx| input.update(cx, |input, cx| input.set_text(r.model, cx)))
@@ -670,7 +703,7 @@ impl SettingsPanel {
             rows.push(Self::row(
                 &format!("The {program} command"),
                 Some(&detail),
-                div().text_size(px(13.)).text_color(theme.muted).child(status),
+                div().text_size(px(ui::T_MD)).text_color(theme.muted).child(status),
                 &theme,
             ));
         }
@@ -692,14 +725,14 @@ impl SettingsPanel {
             ));
         }
         let model = s.ai.model(current);
-        rows.push(Self::row(
+        rows.push(Self::stacked_row(
             "Model",
             Some(if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
-                "For edits and answers. Empty: the one chosen in the tool"
+                "For edits, answers and tasks. Empty: the one chosen in the tool"
             } else {
-                "For edits and answers. Empty: the first one below"
+                "For edits, answers and tasks. Empty: the first one below"
             }),
-            div().flex().flex_col().items_end().child(Self::field(&self.model, &theme)).child(Self::model_chips(
+            div().flex().flex_col().gap(px(8.)).child(Self::wide_field(&self.model, &theme)).child(Self::model_chips(
                 "model",
                 current.recommended(),
                 model,
@@ -722,7 +755,12 @@ impl SettingsPanel {
             ));
         }
         if matches!(current, ProviderId::Nvidia | ProviderId::Ollama | ProviderId::OpenaiCompatible) {
-            rows.push(Self::row("Address", None, Self::field(&self.address, &theme), &theme));
+            rows.push(Self::stacked_row(
+                "Address",
+                Some("Where the service answers, if not the usual place"),
+                Self::wide_field(&self.address, &theme),
+                &theme,
+            ));
         }
         rows.push(Self::heading("Suggestions while typing", &theme));
         rows.push(Self::row(
@@ -746,10 +784,10 @@ impl SettingsPanel {
                     &theme,
                 ));
             } else {
-                rows.push(Self::row(
+                rows.push(Self::stacked_row(
                     "Model for suggestions",
                     Some("A code model that fills in the middle is best: fast, and it continues your code"),
-                    div().flex().flex_col().items_end().child(Self::field(&self.completion_model, &theme)).child(
+                    div().flex().flex_col().gap(px(8.)).child(Self::wide_field(&self.completion_model, &theme)).child(
                         Self::model_chips(
                             "suggestion-model",
                             current.recommended_for_suggestions(),

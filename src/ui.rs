@@ -101,22 +101,28 @@ pub fn segment(active: bool, theme: &Theme) -> Div {
 /// A theme as a small card: its background with a few lines of coloured "code", and its
 /// name under it. The same on the welcome screen and in Settings.
 pub fn theme_preview(name: ThemeName, active: bool, theme: &Theme) -> Div {
+    theme_preview_scaled(name, active, theme, 1.)
+}
+
+/// The theme card at `scale` times its usual size (bigger on the welcome screen).
+pub fn theme_preview_scaled(name: ThemeName, active: bool, theme: &Theme, scale: f32) -> Div {
     let preview = Theme::named(name);
-    let bar = |w: f32, color: gpui::Hsla| div().h(px(4.)).w(px(w)).rounded(px(2.)).bg(color);
-    let line = |indent: f32| div().flex().gap(px(5.)).pl(px(indent));
+    let k = |v: f32| px(v * scale);
+    let bar = |w: f32, color: gpui::Hsla| div().h(k(4.)).w(k(w)).rounded(k(2.)).bg(color);
+    let line = |indent: f32| div().flex().gap(k(5.)).pl(k(indent));
     div()
         .flex()
         .flex_col()
         .gap(px(8.))
         .child(
             div()
-                .w(px(120.))
-                .h(px(70.))
-                .p(px(11.))
+                .w(k(120.))
+                .h(k(70.))
+                .p(k(11.))
                 .flex()
                 .flex_col()
-                .gap(px(7.))
-                .rounded(px(R_POPOVER))
+                .gap(k(7.))
+                .rounded(px(R_POPOVER * scale.sqrt()))
                 .bg(preview.background)
                 .border_2()
                 .border_color(if active { theme.caret } else { theme.line_strong })
