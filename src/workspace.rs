@@ -16,9 +16,9 @@ use crate::theme::{Theme, ThemeName};
 use crate::ui;
 use crate::welcome::{Welcome, WelcomeEvent};
 use gpui::{
-    Action, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
-    MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Subscription, Task, Window,
-    WindowControlArea, actions, div, prelude::*, px, svg,
+    Action, AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable, KeyBinding,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, SharedString,
+    Subscription, Task, Window, WindowControlArea, actions, div, prelude::*, px, relative, svg,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -204,6 +204,40 @@ enum TaskState {
     Review(Vec<crate::ai_task::FileChange>),
 }
 
+/// A tab being dragged: to another place in the tabs, or to the other side.
+#[derive(Clone)]
+struct DraggedTab {
+    editor: Entity<Editor>,
+    label: SharedString,
+}
+
+/// What follows the pointer while a tab is dragged: its name, as a small pill.
+struct TabGhost {
+    label: SharedString,
+}
+
+impl Render for TabGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.global::<Theme>();
+        div()
+            .px(px(12.))
+            .py(px(4.))
+            .rounded(px(ui::R_CONTROL))
+            .bg(theme.raised)
+            .border_1()
+            .border_color(theme.line_strong)
+            .shadow_md()
+            .text_size(px(ui::T_MD))
+            .text_color(theme.foreground)
+            .font_family(cx.global::<Fonts>().ui.clone())
+            .child(self.label.clone())
+    }
+}
+
+/// The line between the two sides, being dragged to resize them.
+#[derive(Clone)]
+struct DraggedDivider;
+
 struct Tab {
     editor: Entity<Editor>,
     /// Which side it's on: 0 left (or the only one), 1 right.
@@ -223,6 +257,8 @@ pub struct Workspace {
     active: Option<usize>,
     /// The tab each side shows.
     shown: [Option<Entity<Editor>>; 2],
+    /// How much of the width the left side takes when split.
+    split_ratio: f32,
     sidebar: Transition,
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
@@ -340,6 +376,7 @@ impl Workspace {
             sidebar_search: Transition::new(false),
             tabs: Vec::new(),
             shown: [None, None],
+            split_ratio: 0.5,
             active: None,
             sidebar: Transition::new(cx.global::<Settings>().sidebar_visible),
             chrome: Transition::new(true),
@@ -409,6 +446,7 @@ impl Workspace {
                     column,
                     top_line,
                     side: tab.side,
+                    folds: editor.folded_regions(),
                 })
             })
             .collect::<Vec<_>>();
@@ -418,6 +456,7 @@ impl Workspace {
         crate::session::Session {
             active: active.and_then(|p| tabs.iter().position(|t| t.path == p)),
             shown_right: right.and_then(|p| tabs.iter().position(|t| t.path == p)),
+            split_ratio: self.is_split().then_some(self.split_ratio),
             tabs,
             expanded: self.tree.read(cx).expanded_folders(),
             recent_files: self.recent_files.iter().take(20).cloned().collect(),
@@ -445,8 +484,14 @@ impl Workspace {
         for tab in &session.tabs {
             self.open_file_on(tab.path.clone(), Some(tab.side.min(1)), window, cx);
             if let Some(editor) = self.active_editor() {
-                editor.update(cx, |editor, cx| editor.restore_view(tab.line, tab.column, tab.top_line, cx));
+                editor.update(cx, |editor, cx| {
+                    editor.restore_folds(&tab.folds, cx);
+                    editor.restore_view(tab.line, tab.column, tab.top_line, cx)
+                });
             }
+        }
+        if let Some(ratio) = session.split_ratio {
+            self.split_ratio = ratio.clamp(0.2, 0.8);
         }
         // What the right side showed, then the tab that had the keyboard.
         if let Some(right) = session.shown_right.and_then(|i| session.tabs.get(i)) {
@@ -997,6 +1042,44 @@ impl Workspace {
             self.shown = [None, None];
         }
         self.show_tab(ix, true, window, cx);
+    }
+
+    /// A tab dropped on `side`: before tab `before`, or at the end of that side.
+    fn drop_tab(
+        &mut self,
+        editor: &Entity<Editor>,
+        before: Option<usize>,
+        side: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(from) = self.tabs.iter().position(|t| &t.editor == editor) else { return };
+        let old_side = self.tabs[from].side;
+        if side == 1 && old_side == 0 && self.side_tabs(0).len() == 1 && !self.is_split() {
+            return self.show_notice("Open another file to see two side by side".into(), cx);
+        }
+        let active = self.active.map(|i| self.tabs[i].editor.clone());
+        let target = before.map(|i| self.tabs[i].editor.clone());
+        let mut tab = self.tabs.remove(from);
+        tab.side = side;
+        let at = match target.and_then(|t| self.tabs.iter().position(|x| x.editor == t)) {
+            Some(i) => i,
+            None => self.side_tabs(side).last().map_or(self.tabs.len(), |&i| i + 1),
+        };
+        self.tabs.insert(at, tab);
+        self.active = active.and_then(|a| self.tabs.iter().position(|t| t.editor == a));
+        // The side it left shows another of its tabs.
+        if old_side != side && self.shown[old_side].as_ref() == Some(editor) {
+            let left = self.side_tabs(old_side);
+            self.shown[old_side] = left.first().map(|&i| self.tabs[i].editor.clone());
+        }
+        if self.side_tabs(0).is_empty() {
+            for t in &mut self.tabs {
+                t.side = 0;
+            }
+            self.shown = [None, None];
+        }
+        self.show_tab(at, true, window, cx);
     }
 
     /// Clicking into a side makes its tab the current one.
@@ -2541,6 +2624,10 @@ impl Workspace {
             .min_w_0()
             .overflow_x_scroll()
             .track_scroll(&self.tab_scroll[side])
+            // Dropped past the last tab: at the end of this side.
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| {
+                this.drop_tab(&dragged.editor, None, side, window, cx)
+            }))
             .children(self.tabs.iter().enumerate().filter(|(_, t)| t.side == side).map(|(ix, tab)| {
                 let editor = tab.editor.read(cx);
                 let shown = self.shown[side].as_ref() == Some(&tab.editor);
@@ -2584,9 +2671,19 @@ impl Workspace {
                         this.close_tab_at(ix, window, cx);
                     }));
                 let (name, folder) = labels[ix].clone();
+                let dragged = DraggedTab { editor: tab.editor.clone(), label: name.clone().into() };
                 div()
                     .id(("tab", ix))
                     .group(group)
+                    .on_drag(dragged, |tab, _, _, cx| cx.new(|_| TabGhost { label: tab.label.clone() }))
+                    .drag_over::<DraggedTab>({
+                        let line = theme.caret;
+                        move |style, _, _, _| style.border_l_2().border_color(line)
+                    })
+                    .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| {
+                        cx.stop_propagation();
+                        this.drop_tab(&dragged.editor, Some(ix), side, window, cx);
+                    }))
                     .h(px(28.))
                     .max_w(px(220.))
                     .flex()
@@ -2769,23 +2866,88 @@ impl Render for Workspace {
                 Some(editor) => editor.clone().into_any_element(),
                 None => this.render_empty(cx),
             };
+            let theme = cx.global::<Theme>().clone();
             div()
-                .flex_1()
+                .id(("pane", side))
+                .relative()
                 .min_w_0()
                 .h_full()
                 .capture_any_mouse_down(
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| this.focus_side(side, window, cx)),
                 )
                 .child(content)
+                // A tab dropped on a side moves there.
+                .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(theme.accent_soft.opacity(0.5)))
+                .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| {
+                    this.drop_tab(&dragged.editor, None, side, window, cx)
+                }))
                 .into_any_element()
         };
+        let theme_now = cx.global::<Theme>().clone();
         let body = if split {
-            let left = pane(self, 0, cx);
-            let right = pane(self, 1, cx);
-            let line = cx.global::<Theme>().hairline;
-            div().size_full().flex().child(left).child(div().w(px(1.)).h_full().flex_none().bg(line)).child(right)
+            let left = div().w(relative(self.split_ratio)).h_full().flex_none().child(pane(self, 0, cx));
+            let right = div().flex_1().min_w_0().h_full().child(pane(self, 1, cx));
+            // The line between the sides: drag it to resize them.
+            let divider = div()
+                .id("divider")
+                .w(px(7.))
+                .mx(px(-3.))
+                .h_full()
+                .flex_none()
+                .flex()
+                .justify_center()
+                .cursor_col_resize()
+                .group("divider")
+                .on_drag(DraggedDivider, |_, _, _, cx| cx.new(|_| gpui::EmptyView))
+                .child(
+                    div()
+                        .w(px(1.))
+                        .h_full()
+                        .bg(theme_now.hairline)
+                        .group_hover("divider", |s| s.bg(theme_now.line_strong)),
+                );
+            div()
+                .size_full()
+                .flex()
+                .on_drag_move::<DraggedDivider>(cx.listener(|this, event: &DragMoveEvent<DraggedDivider>, _, cx| {
+                    let x = f32::from(event.event.position.x - event.bounds.left());
+                    this.split_ratio = (x / f32::from(event.bounds.size.width)).clamp(0.2, 0.8);
+                    this.schedule_session_save(cx);
+                    cx.notify();
+                }))
+                .child(left)
+                .child(divider)
+                .child(right)
         } else {
-            div().size_full().child(pane(self, 0, cx))
+            // While a tab is dragged, the right half offers to open it there.
+            // (Unsplit, the only thing Null drags is a tab.)
+            let dragging_tab = cx.has_active_drag() && self.tabs.len() > 1;
+            div().relative().size_full().child(div().size_full().child(pane(self, 0, cx))).when(dragging_tab, |body| {
+                body.child(
+                    div()
+                        .id("drop-right")
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .w(relative(0.5))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(ui::T_MD))
+                        .text_color(theme_now.muted)
+                        .border_l_1()
+                        .border_color(theme_now.hairline)
+                        .drag_over::<DraggedTab>({
+                            let tint = theme_now.accent_soft;
+                            move |style, _, _, _| style.bg(tint)
+                        })
+                        .child("Open on the right")
+                        .on_drop(cx.listener(|this, dragged: &DraggedTab, window, cx| {
+                            this.drop_tab(&dragged.editor, None, 1, window, cx)
+                        })),
+                )
+            })
         };
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
         let overlay: Option<AnyElement> = if let Some((welcome, _)) = &self.welcome {
@@ -2825,7 +2987,7 @@ impl Render for Workspace {
                 // Each side's tabs over it: the left ones end where the right side begins.
                 Some(right) => {
                     let main = f32::from(window.viewport_size().width) - sidebar_width;
-                    let left_width = (sidebar_width + main / 2. - TITLEBAR_INSET).max(80.);
+                    let left_width = (sidebar_width + main * self.split_ratio - TITLEBAR_INSET).max(80.);
                     bar.child(div().flex_none().w(px(left_width)).pr(px(8.)).child(tabs_left))
                         .child(div().flex_1().min_w_0().pl(px(8.)).child(right))
                 }
@@ -3145,6 +3307,21 @@ mod tests {
             // Next tab stays on its side.
             w.next_tab(&NextTab, window, cx);
             assert_eq!(w.active_editor().map(|e| e.read(cx).file_name()), Some("b.txt".into()));
+            // Dragging c before b reorders the right side; dropping b on the left moves it there.
+            let (b, c) = (w.side_tabs(1)[0], w.side_tabs(1)[1]);
+            let c_editor = w.tabs[c].editor.clone();
+            w.drop_tab(&c_editor, Some(b), 1, window, cx);
+            assert_eq!(names(w, cx, 1), vec!["c.txt".to_string(), "b.txt".to_string()]);
+            let b_editor = w.tabs[w.side_tabs(1)[1]].editor.clone();
+            w.drop_tab(&b_editor, None, 0, window, cx);
+            assert_eq!(names(w, cx, 0), vec!["a.txt".to_string(), "b.txt".to_string()]);
+            assert_eq!(names(w, cx, 1), vec!["c.txt".to_string()]);
+            assert_eq!(w.shown_editor(1).map(|e| e.read(cx).file_name()), Some("c.txt".into()));
+            // Back to b on the right for what follows.
+            w.drop_tab(&b_editor, None, 1, window, cx);
+            let c_editor = w.tabs[w.side_tabs(1)[0]].editor.clone();
+            w.drop_tab(&c_editor, None, 1, window, cx);
+            w.activate(w.side_tabs(1)[0], window, cx);
             // Closing the left's only tab: the right becomes the only side.
             let a = w.side_tabs(0)[0];
             w.remove_tab(a, window, cx);
