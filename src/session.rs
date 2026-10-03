@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 pub struct Session {
     pub tabs: Vec<TabState>,
     pub active: Option<usize>,
+    /// The tab the right side showed, when the window was split.
+    pub shown_right: Option<usize>,
     /// Folders expanded in the file tree.
     pub expanded: Vec<PathBuf>,
     /// Files opened lately, most recent first, for ⌘P.
@@ -27,6 +29,8 @@ pub struct TabState {
     pub column: usize,
     /// The first line shown, so the view comes back where it was.
     pub top_line: usize,
+    /// 1 for the right side of a split window.
+    pub side: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -68,7 +72,9 @@ impl Session {
         let mut session: Self = serde_json::from_str(&text).unwrap_or_default();
         let before = session.tabs.len();
         let active_path = session.active.and_then(|i| session.tabs.get(i)).map(|t| t.path.clone());
+        let right_path = session.shown_right.and_then(|i| session.tabs.get(i)).map(|t| t.path.clone());
         session.tabs.retain(|t| t.path.is_file());
+        session.shown_right = right_path.and_then(|p| session.tabs.iter().position(|t| t.path == p));
         session.active = active_path
             .and_then(|p| session.tabs.iter().position(|t| t.path == p))
             .or_else(|| (before > 0 && !session.tabs.is_empty()).then_some(0));

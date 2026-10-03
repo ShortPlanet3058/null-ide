@@ -31,6 +31,8 @@ actions!(
         CloseTab,
         ToggleSidebar,
         NextTab,
+        MoveTabRight,
+        MoveTabLeft,
         PreviousTab,
         TogglePalette,
         ShowCommands,
@@ -85,6 +87,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenSettings, ctx),
         KeyBinding::new("secondary-shift-f", SearchProject, ctx),
         KeyBinding::new("secondary-shift-h", ReplaceInProject, ctx),
+        // Arrows rather than ⌘\, which takes several keys on many layouts.
+        KeyBinding::new("ctrl-secondary-right", MoveTabRight, ctx),
+        KeyBinding::new("ctrl-secondary-left", MoveTabLeft, ctx),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("ctrl-g", GoToLine, ctx),
@@ -175,6 +180,8 @@ impl Transition {
 
 struct Tab {
     editor: Entity<Editor>,
+    /// Which side it's on: 0 left (or the only one), 1 right.
+    side: usize,
     _subscriptions: [Subscription; 2],
 }
 
@@ -186,7 +193,10 @@ pub struct Workspace {
     /// On while the sidebar shows project search instead of files.
     sidebar_search: Transition,
     tabs: Vec<Tab>,
+    /// The tab with the keyboard: the one shown on the side being worked in.
     active: Option<usize>,
+    /// The tab each side shows.
+    shown: [Option<Entity<Editor>>; 2],
     sidebar: Transition,
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
@@ -206,7 +216,7 @@ pub struct Workspace {
     index_task: Option<Task<()>>,
     session_task: Option<Task<()>>,
     /// The tab strip, scrolled so the current tab is always in view.
-    tab_scroll: gpui::ScrollHandle,
+    tab_scroll: [gpui::ScrollHandle; 2],
     /// The window's place on screen, for the session.
     window_state: Option<crate::session::WindowState>,
     reindex_task: Option<Task<()>>,
@@ -299,6 +309,7 @@ impl Workspace {
             project_search,
             sidebar_search: Transition::new(false),
             tabs: Vec::new(),
+            shown: [None, None],
             active: None,
             sidebar: Transition::new(cx.global::<Settings>().sidebar_visible),
             chrome: Transition::new(true),
@@ -318,7 +329,7 @@ impl Workspace {
             watch_task: None,
             index_task: None,
             session_task: None,
-            tab_scroll: gpui::ScrollHandle::new(),
+            tab_scroll: [gpui::ScrollHandle::new(), gpui::ScrollHandle::new()],
             window_state: None,
             reindex_task: None,
             reindex_pending: HashSet::new(),
@@ -360,13 +371,21 @@ impl Workspace {
             .filter_map(|tab| {
                 let editor = tab.editor.read(cx);
                 let (line, column, top_line) = editor.view_state();
-                Some(crate::session::TabState { path: editor.path()?.to_path_buf(), line, column, top_line })
+                Some(crate::session::TabState {
+                    path: editor.path()?.to_path_buf(),
+                    line,
+                    column,
+                    top_line,
+                    side: tab.side,
+                })
             })
             .collect::<Vec<_>>();
         // The active tab among those saved (untitled tabs aren't).
         let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        let right = self.shown_editor(1).and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         crate::session::Session {
             active: active.and_then(|p| tabs.iter().position(|t| t.path == p)),
+            shown_right: right.and_then(|p| tabs.iter().position(|t| t.path == p)),
             tabs,
             expanded: self.tree.read(cx).expanded_folders(),
             recent_files: self.recent_files.iter().take(20).cloned().collect(),
@@ -392,10 +411,14 @@ impl Workspace {
         self.tree.update(cx, |tree, cx| tree.expand_folders(&session.expanded, cx));
         self.window_state = session.window;
         for tab in &session.tabs {
-            self.open_file(tab.path.clone(), window, cx);
+            self.open_file_on(tab.path.clone(), Some(tab.side.min(1)), window, cx);
             if let Some(editor) = self.active_editor() {
                 editor.update(cx, |editor, cx| editor.restore_view(tab.line, tab.column, tab.top_line, cx));
             }
+        }
+        // What the right side showed, then the tab that had the keyboard.
+        if let Some(right) = session.shown_right.and_then(|i| session.tabs.get(i)) {
+            self.open_file(right.path.clone(), window, cx);
         }
         if let Some(active) = session.active.and_then(|i| session.tabs.get(i)) {
             self.open_file(active.path.clone(), window, cx);
@@ -604,18 +627,47 @@ impl Workspace {
         self.active.and_then(|ix| self.tabs.get(ix)).map(|tab| &tab.editor)
     }
 
-    /// Opens a file in a tab, or switches to it if it's already open.
+    /// Opens a file in a tab, or switches to it if it's already open (on either side).
     pub fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file_on(path, None, window, cx);
+    }
+
+    /// Opens a file on `side`, or the side being worked in.
+    fn open_file_on(&mut self, path: PathBuf, side: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.tabs.iter().position(|tab| tab.editor.read(cx).path() == Some(path.as_path())) {
             self.activate(ix, window, cx);
             return;
         }
         let lsp = self.lsp.clone();
         let editor = cx.new(|cx| Editor::open(path, Some(lsp), cx));
-        self.add_tab(editor, window, cx);
+        self.add_tab_on(editor, side, window, cx);
+    }
+
+    fn is_split(&self) -> bool {
+        self.tabs.iter().any(|t| t.side == 1)
+    }
+
+    /// The side being worked in.
+    fn focused_side(&self) -> usize {
+        self.active.and_then(|i| self.tabs.get(i)).map_or(0, |t| t.side)
+    }
+
+    /// The editor a side shows, if it shows one.
+    fn shown_editor(&self, side: usize) -> Option<&Entity<Editor>> {
+        self.shown[side].as_ref().filter(|e| self.tabs.iter().any(|t| &t.editor == *e && t.side == side))
+    }
+
+    /// Tabs on `side`, by index.
+    fn side_tabs(&self, side: usize) -> Vec<usize> {
+        (0..self.tabs.len()).filter(|&i| self.tabs[i].side == side).collect()
     }
 
     fn add_tab(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_tab_on(editor, None, window, cx);
+    }
+
+    fn add_tab_on(&mut self, editor: Entity<Editor>, side: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let side = side.unwrap_or_else(|| self.focused_side());
         let subscriptions = [
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
@@ -702,8 +754,15 @@ impl Workspace {
                 }
             }),
         ];
-        let ix = self.active.map_or(self.tabs.len(), |ix| ix + 1);
-        self.tabs.insert(ix, Tab { editor, _subscriptions: subscriptions });
+        // Next to the current tab when it's on the same side, else at the end of that side.
+        let ix = match self.active {
+            Some(a) if self.tabs.get(a).is_some_and(|t| t.side == side) => a + 1,
+            _ => self.side_tabs(side).last().map_or(self.tabs.len(), |&i| i + 1),
+        };
+        if let Some(a) = self.active.filter(|&a| a >= ix) {
+            self.active = Some(a + 1);
+        }
+        self.tabs.insert(ix, Tab { editor, side, _subscriptions: subscriptions });
         self.activate(ix, window, cx);
     }
 
@@ -749,6 +808,10 @@ impl Workspace {
     fn show_tab(&mut self, ix: usize, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix) else { return };
         self.active = Some(ix);
+        self.shown[tab.side] = Some(tab.editor.clone());
+        let side = tab.side;
+        let position = self.side_tabs(side).iter().position(|&i| i == ix).unwrap_or(0);
+        let tab = &self.tabs[ix];
         let editor = tab.editor.read(cx);
         let path = editor.path().map(Path::to_path_buf);
         if let Some(path) = &path {
@@ -760,7 +823,7 @@ impl Workspace {
             window.focus(&editor.focus_handle(cx));
         }
         self.refresh_title(window, cx);
-        self.tab_scroll.scroll_to_item(ix);
+        self.tab_scroll[side].scroll_to_item(position);
         self.share_open_files(cx);
         self.schedule_session_save(cx);
         self.tree.update(cx, |tree, cx| tree.set_active(path, cx));
@@ -785,18 +848,73 @@ impl Workspace {
             self.recently_closed.push(path.to_path_buf());
         }
         tab.editor.update(cx, |editor, cx| editor.release_lsp(cx));
+        let was_active = self.active == Some(ix);
+        if let Some(a) = self.active.filter(|&a| a > ix) {
+            self.active = Some(a - 1);
+        }
+        // The side it was on shows its neighbour instead.
+        let same_side = self.side_tabs(tab.side);
+        let neighbour = same_side.iter().find(|&&i| i >= ix).or(same_side.last()).copied();
+        if self.shown[tab.side].as_ref() == Some(&tab.editor) {
+            self.shown[tab.side] = neighbour.map(|i| self.tabs[i].editor.clone());
+        }
+        // Nothing left on the left: the right side becomes the only one.
+        if self.side_tabs(0).is_empty() && self.is_split() {
+            for t in &mut self.tabs {
+                t.side = 0;
+            }
+            self.shown = [self.shown[1].take(), None];
+        }
         if self.tabs.is_empty() {
             self.active = None;
+            self.shown = [None, None];
             self.refresh_title(window, cx);
             if had_focus {
                 window.focus(&self.focus_handle);
             }
             self.tree.update(cx, |tree, cx| tree.set_active(None, cx));
             cx.notify();
-        } else {
-            let active = self.active.unwrap_or(0);
-            let next = if active > ix || active == self.tabs.len() { active.saturating_sub(1) } else { active };
+        } else if was_active {
+            let other =
+                self.shown_editor(1 - tab.side.min(1)).and_then(|e| self.tabs.iter().position(|t| &t.editor == e));
+            let next = neighbour.or(other).unwrap_or(0);
             self.show_tab(next.min(self.tabs.len() - 1), had_focus, window, cx);
+        } else {
+            self.refresh_title(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Moves the current tab to the other side (⌃⌘→ / ⌃⌘←), opening the split when needed.
+    fn move_tab_to(&mut self, to: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.active else { return };
+        let from = self.tabs[ix].side;
+        if from == to {
+            return;
+        }
+        if self.tabs.len() < 2 {
+            return self.show_notice("Open another file to see two side by side".into(), cx);
+        }
+        self.tabs[ix].side = to;
+        let left_behind = self.side_tabs(from);
+        let neighbour = left_behind.iter().find(|&&i| i >= ix).or(left_behind.last());
+        self.shown[from] = neighbour.map(|&i| self.tabs[i].editor.clone());
+        if self.side_tabs(0).is_empty() {
+            for t in &mut self.tabs {
+                t.side = 0;
+            }
+            self.shown = [None, None];
+        }
+        self.show_tab(ix, true, window, cx);
+    }
+
+    /// Clicking into a side makes its tab the current one.
+    fn focus_side(&mut self, side: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.shown_editor(side).and_then(|e| self.tabs.iter().position(|t| &t.editor == e)) else {
+            return;
+        };
+        if self.active != Some(ix) {
+            self.show_tab(ix, false, window, cx);
         }
     }
 
@@ -1020,16 +1138,21 @@ impl Workspace {
         }
     }
 
+    /// The next tab on the same side, round to the first.
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.active {
-            self.activate((ix + 1) % self.tabs.len(), window, cx);
-        }
+        self.step_tab(1, window, cx);
     }
 
     fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.active {
-            self.activate((ix + self.tabs.len() - 1) % self.tabs.len(), window, cx);
-        }
+        self.step_tab(-1, window, cx);
+    }
+
+    fn step_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.active else { return };
+        let side = self.side_tabs(self.tabs[ix].side);
+        let at = side.iter().position(|&i| i == ix).unwrap_or(0) as isize;
+        let next = side[(at + step).rem_euclid(side.len() as isize) as usize];
+        self.activate(next, window, cx);
     }
 
     /// Every command the palette offers right now, by category, with its shortcut.
@@ -1121,6 +1244,8 @@ impl Workspace {
                 ),
                 (Go, "Show Info at Cursor".into(), Box::new(ShowInfo)),
                 (Go, "Next Tab".into(), Box::new(NextTab)),
+                (View, "Move Tab to the Right Side".into(), Box::new(MoveTabRight)),
+                (View, "Move Tab to the Left Side".into(), Box::new(MoveTabLeft)),
                 (Go, "Previous Tab".into(), Box::new(PreviousTab)),
             ]);
         }
@@ -2060,19 +2185,24 @@ impl Workspace {
             .collect()
     }
 
-    fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// One side's tabs. The one it shows stands out; most of all on the side being worked in.
+    fn render_tabs(&self, side: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>().clone();
         let labels = self.tab_labels(cx);
+        let split = self.is_split();
         div()
-            .id("tabs")
+            .id(("tabs", side))
             .flex()
             .gap(px(2.))
             .min_w_0()
             .overflow_x_scroll()
-            .track_scroll(&self.tab_scroll)
-            .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
+            .track_scroll(&self.tab_scroll[side])
+            .children(self.tabs.iter().enumerate().filter(|(_, t)| t.side == side).map(|(ix, tab)| {
                 let editor = tab.editor.read(cx);
-                let active = self.active == Some(ix);
+                let shown = self.shown[side].as_ref() == Some(&tab.editor);
+                // With two sides, the one not being worked in shows its tab a little quieter.
+                let active = shown && (!split || self.active == Some(ix));
+                let resting = shown && !active;
                 let dirty = editor.buffer.is_dirty();
                 let group = format!("tab-{ix}");
                 // Unsaved: a small dot, which turns into the close button under the pointer.
@@ -2123,9 +2253,10 @@ impl Workspace {
                     .pr(px(6.))
                     .rounded(px(ui::R_CONTROL))
                     .text_size(px(ui::T_MD))
-                    .text_color(if active { theme.foreground } else { theme.muted })
+                    .text_color(if active || resting { theme.foreground } else { theme.muted })
                     .when(active, |tab| tab.bg(theme.hairline))
-                    .when(!active, |tab| tab.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                    .when(resting, |tab| tab.bg(theme.hairline.opacity(0.45)))
+                    .when(!shown, |tab| tab.hover(|s| s.bg(theme.hairline.opacity(0.6))))
                     .child(
                         div()
                             .min_w_0()
@@ -2270,11 +2401,33 @@ impl Render for Workspace {
                 (vec![shorten_path(&shown, STATUS_PATH_CHARS)], (0, 0))
             }
         };
-        let tabs = self.render_tabs(cx);
+        let split = self.is_split();
+        let tabs_left = self.render_tabs(0, cx);
+        let tabs_right = split.then(|| self.render_tabs(1, cx));
         let terminal_panel = self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx);
-        let body = match self.active_editor() {
-            Some(editor) => div().size_full().child(editor.clone()),
-            None => div().size_full().child(self.render_empty(cx)),
+        // One editor, or two side by side, each side making its tab current when clicked into.
+        let pane = |this: &Self, side: usize, cx: &mut Context<Self>| -> AnyElement {
+            let content = match this.shown_editor(side) {
+                Some(editor) => editor.clone().into_any_element(),
+                None => this.render_empty(cx),
+            };
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .capture_any_mouse_down(
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| this.focus_side(side, window, cx)),
+                )
+                .child(content)
+                .into_any_element()
+        };
+        let body = if split {
+            let left = pane(self, 0, cx);
+            let right = pane(self, 1, cx);
+            let line = cx.global::<Theme>().hairline;
+            div().size_full().flex().child(left).child(div().w(px(1.)).h_full().flex_none().bg(line)).child(right)
+        } else {
+            div().size_full().child(pane(self, 0, cx))
         };
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
         let overlay: Option<AnyElement> = if let Some((welcome, _)) = &self.welcome {
@@ -2310,7 +2463,16 @@ impl Render for Workspace {
             .bg(theme.surface)
             .opacity(opacity)
             .window_control_area(WindowControlArea::Drag)
-            .child(tabs);
+            .map(|bar| match tabs_right {
+                // Each side's tabs over it: the left ones end where the right side begins.
+                Some(right) => {
+                    let main = f32::from(window.viewport_size().width) - sidebar_width;
+                    let left_width = (sidebar_width + main / 2. - TITLEBAR_INSET).max(80.);
+                    bar.child(div().flex_none().w(px(left_width)).pr(px(8.)).child(tabs_left))
+                        .child(div().flex_1().min_w_0().pl(px(8.)).child(right))
+                }
+                None => bar.child(tabs_left),
+            });
 
         let sidebar_panel = div()
             .flex_none()
@@ -2431,6 +2593,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_ai))
             .on_action(cx.listener(Self::show_problems))
             .on_action(cx.listener(Self::replace_in_project))
+            .on_action(cx.listener(|this, _: &MoveTabRight, window, cx| this.move_tab_to(1, window, cx)))
+            .on_action(cx.listener(|this, _: &MoveTabLeft, window, cx| this.move_tab_to(0, window, cx)))
             .on_action(cx.listener(Self::go_to_symbol))
             .on_action(cx.listener(Self::go_to_symbol_in_project))
             .on_action(cx.listener(|_, _: &ToggleFormatOnSave, _, cx| {
@@ -2536,6 +2700,50 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn two_sides_open_move_and_close_back_to_one(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let names = |w: &Workspace, cx: &App, side: usize| -> Vec<String> {
+            w.side_tabs(side).iter().map(|&i| w.tabs[i].editor.read(cx).file_name()).collect()
+        };
+        workspace.update_in(cx, |w, window, cx| {
+            for name in ["a.txt", "b.txt"] {
+                w.open_file(dir.join(name), window, cx);
+            }
+            // b moves right: a stays on the left.
+            w.move_tab_to(1, window, cx);
+            assert!(w.is_split());
+            assert_eq!((names(w, cx, 0), names(w, cx, 1)), (vec!["a.txt".into()], vec!["b.txt".into()]));
+            // Files open on the side being worked in.
+            w.open_file(dir.join("c.txt"), window, cx);
+            assert_eq!(names(w, cx, 1), vec!["b.txt".to_string(), "c.txt".to_string()]);
+            assert_eq!(w.shown_editor(1).map(|e| e.read(cx).file_name()), Some("c.txt".into()));
+            // Next tab stays on its side.
+            w.next_tab(&NextTab, window, cx);
+            assert_eq!(w.active_editor().map(|e| e.read(cx).file_name()), Some("b.txt".into()));
+            // Closing the left's only tab: the right becomes the only side.
+            let a = w.side_tabs(0)[0];
+            w.remove_tab(a, window, cx);
+            assert!(!w.is_split());
+            assert_eq!(names(w, cx, 0), vec!["b.txt".to_string(), "c.txt".to_string()]);
+            assert!(w.shown_editor(0).is_some());
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn long_paths_keep_their_end() {
