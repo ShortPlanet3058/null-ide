@@ -20,6 +20,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Subscription, Task, Window,
     WindowControlArea, actions, div, prelude::*, px, svg,
 };
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -203,6 +204,10 @@ pub struct Workspace {
     /// The window's place on screen, for the session.
     window_state: Option<crate::session::WindowState>,
     reindex_task: Option<Task<()>>,
+    /// Changed source files waiting to be read again.
+    reindex_pending: HashSet<PathBuf>,
+    /// What the project's .gitignore leaves out of the index.
+    ignore_rules: ignore::gitignore::Gitignore,
     /// The AI answer panel, while open.
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
     /// A short message at the bottom of the window, and when it appeared.
@@ -225,6 +230,7 @@ impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
         let lsp = cx.new(|_| LspStore::new(root.clone()));
+        let ignore_rules = crate::project_index::ignore_rules(&root);
         let tree = cx.new(|cx| FileTree::new(root, cx));
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
@@ -298,6 +304,8 @@ impl Workspace {
             tab_scroll: gpui::ScrollHandle::new(),
             window_state: None,
             reindex_task: None,
+            reindex_pending: HashSet::new(),
+            ignore_rules,
             key_prompt: None,
             notice: None,
             notice_task: None,
@@ -400,31 +408,57 @@ impl Workspace {
         }));
     }
 
-    /// Re-reads the definitions of source files that changed.
+    /// Re-reads the definitions of source files that changed, leaving out ignored ones
+    /// (a build writing into `target/`, an install filling `node_modules`). Changes that
+    /// arrive while a batch is being read wait for it, so none are lost.
     fn reindex(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let changed: Vec<PathBuf> = paths.iter().filter(|p| crate::project_index::is_source(p)).cloned().collect();
-        if changed.is_empty() || !cx.has_global::<crate::project_index::ProjectContext>() {
+        if !cx.has_global::<crate::project_index::ProjectContext>() {
             return;
         }
-        let current = cx.global::<crate::project_index::ProjectContext>().definitions.clone();
-        self.reindex_task = Some(cx.spawn(async move |_, cx| {
-            let updated = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut definitions: Vec<_> =
-                        current.iter().filter(|d| !changed.contains(&d.path)).cloned().collect();
-                    for path in &changed {
-                        if let Ok(text) = std::fs::read_to_string(path) {
-                            definitions.extend(crate::project_index::definitions_in(path, &text));
-                        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        if paths.iter().any(|p| p.file_name().is_some_and(|n| n == ".gitignore" || n == "exclude")) {
+            self.ignore_rules = crate::project_index::ignore_rules(&root);
+        }
+        let rules = &self.ignore_rules;
+        self.reindex_pending.extend(
+            paths
+                .iter()
+                .filter(|p| crate::project_index::is_source(p) && !crate::project_index::is_ignored(rules, &root, p))
+                .cloned(),
+        );
+        if self.reindex_pending.is_empty() || self.reindex_task.is_some() {
+            return;
+        }
+        self.reindex_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(Some((changed, current))) = this.update(cx, |this, cx| {
+                    if this.reindex_pending.is_empty() {
+                        this.reindex_task = None;
+                        return None;
                     }
-                    definitions
+                    let changed = std::mem::take(&mut this.reindex_pending);
+                    Some((changed, cx.global::<crate::project_index::ProjectContext>().definitions.clone()))
+                }) else {
+                    return;
+                };
+                let updated = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let mut definitions: Vec<_> =
+                            current.iter().filter(|d| !changed.contains(&d.path)).cloned().collect();
+                        for path in &changed {
+                            if let Ok(text) = std::fs::read_to_string(path) {
+                                definitions.extend(crate::project_index::definitions_in(path, &text));
+                            }
+                        }
+                        definitions
+                    })
+                    .await;
+                cx.update(|cx| {
+                    cx.global_mut::<crate::project_index::ProjectContext>().definitions = std::sync::Arc::new(updated)
                 })
-                .await;
-            cx.update(|cx| {
-                cx.global_mut::<crate::project_index::ProjectContext>().definitions = std::sync::Arc::new(updated)
-            })
-            .ok();
+                .ok();
+            }
         }));
     }
 
@@ -679,6 +713,8 @@ impl Workspace {
         self.refresh_git(cx);
         self.watch(path.clone(), cx);
         self.tree.update(cx, |tree, cx| tree.set_root(path.clone(), cx));
+        self.ignore_rules = crate::project_index::ignore_rules(&path);
+        self.reindex_pending.clear();
         self.build_index(cx);
         let mut session = crate::session::Session::load(&path);
         session.window = self.window_state;
