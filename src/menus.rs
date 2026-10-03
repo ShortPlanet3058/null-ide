@@ -54,6 +54,7 @@ pub fn set(cx: &mut App) {
             name: "Null".into(),
             items: vec![
                 MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action("Install Shell Command", crate::workspace::InstallShellCommand),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
