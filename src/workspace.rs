@@ -192,6 +192,8 @@ struct AiTaskRun {
     state: TaskState,
     /// The running tool, so it can be stopped.
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    /// Set to stop a task running through an API (between two steps).
+    stop: Arc<std::sync::atomic::AtomicBool>,
     _task: Option<Task<()>>,
 }
 
@@ -1705,7 +1707,7 @@ impl Workspace {
     fn new_ai_task(&mut self, _: &NewAiTask, window: &mut Window, cx: &mut Context<Self>) {
         let provider = cx.global::<Settings>().ai.active();
         if !crate::ai::can_run_tasks(provider) {
-            return self.show_notice("Tasks run with Claude Code or Codex: choose one in Settings → AI.".into(), cx);
+            return self.show_notice("Tasks need AI: choose where it comes from in Settings → AI.".into(), cx);
         }
         match self.ai_task.as_ref().map(|t| &t.state) {
             Some(TaskState::Starting | TaskState::Running(_)) => {
@@ -1737,8 +1739,10 @@ impl Workspace {
         }
         let title: String = text.chars().take(40).collect();
         let child: Arc<std::sync::Mutex<Option<std::process::Child>>> = Arc::default();
+        let stop: Arc<std::sync::atomic::AtomicBool> = Arc::default();
         let settings = cx.global::<Settings>().ai.clone();
         let running = child.clone();
+        let stopping = stop.clone();
         let task = cx.spawn(async move |this, cx| {
             let snapshot = {
                 let root = root.clone();
@@ -1755,7 +1759,7 @@ impl Workspace {
             let work = {
                 let root = root.clone();
                 cx.background_executor().spawn(async move {
-                    crate::ai::run_task(&settings, &root, &text, &running, &mut |event| {
+                    crate::ai::run_task(&settings, &root, &text, &running, &stopping, &mut |event| {
                         tx.unbounded_send(event).ok();
                     })
                 })
@@ -1775,7 +1779,7 @@ impl Workspace {
             let changes = cx.background_executor().spawn(async move { snapshot.changes(&root) }).await;
             this.update(cx, |this, cx| this.task_finished(result, changes, cx)).ok();
         });
-        self.ai_task = Some(AiTaskRun { title, state: TaskState::Starting, child, _task: Some(task) });
+        self.ai_task = Some(AiTaskRun { title, state: TaskState::Starting, child, stop, _task: Some(task) });
         cx.notify();
     }
 
@@ -1804,10 +1808,11 @@ impl Workspace {
     }
 
     fn stop_ai_task(&mut self, _: &StopAiTask, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(run) = &self.ai_task
-            && let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take()
-        {
-            child.kill().ok();
+        if let Some(run) = &self.ai_task {
+            run.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                child.kill().ok();
+            }
         }
         cx.notify();
     }
