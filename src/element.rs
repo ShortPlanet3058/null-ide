@@ -484,8 +484,8 @@ impl Element for EditorElement {
             // A change from the AI: its new lines tinted green, the removed ones red.
             let mut ai_tints: Vec<(Bounds<Pixels>, Hsla)> = editor
                 .ai_added_lines()
-                .iter()
-                .map(|lines| rows_of(lines.clone()))
+                .into_iter()
+                .map(|lines| rows_of(lines))
                 .filter(|r| !r.is_empty())
                 .map(|r| {
                     let rect = Bounds::from_corners(
