@@ -782,14 +782,19 @@ impl Element for TerminalElement {
                 thickness: px(1.),
                 wavy: cell.flags.contains(Flags::UNDERCURL),
             });
-            let continues = pending.as_ref().is_some_and(|(text, start, l, f, color, u)| {
-                *l == line
-                    && *start + text.chars().count() == column
-                    && *f == cell_font
-                    && *color == fg
-                    && *u == underline
-                    && wide == 1.
-            });
+            // Only plain ASCII joins a run: the code font draws it exactly one cell wide. Other
+            // characters (box drawing, arrows, symbols from a fallback font) can be a little
+            // wider or narrower, so each sits on its own cell instead of pushing the rest along.
+            let continues = c.is_ascii()
+                && pending.as_ref().is_some_and(|(text, start, l, f, color, u)| {
+                    *l == line
+                        && *start + text.chars().count() == column
+                        && text.is_ascii()
+                        && *f == cell_font
+                        && *color == fg
+                        && *u == underline
+                        && wide == 1.
+                });
             if !continues {
                 flush(&mut pending);
                 pending = Some((String::new(), column, line, cell_font, fg, underline));
