@@ -1,7 +1,9 @@
+use crate::buffer::{Buffer, Edit};
 use crate::languages::Language;
 use crate::theme::Syntax;
+use ropey::Rope;
 use std::ops::Range;
-use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter as TsHighlighter};
+use tree_sitter::{InputEdit, Parser, Point, Query, QueryCursor, StreamingIterator, TextProvider, Tree};
 
 /// Capture names we ask tree-sitter for. A capture like `comment.documentation`
 /// falls back to the longest matching prefix, here `comment`.
@@ -70,41 +72,143 @@ fn syntax_for(capture: &str) -> Syntax {
 /// never overlap.
 pub type Span = (Range<usize>, Syntax);
 
+/// A language's highlighting rules, compiled once, with what each capture colours.
+pub struct HighlightQuery {
+    query: Query,
+    /// For each capture: its colour, or None for names Null doesn't colour.
+    syntax: Vec<Option<Syntax>>,
+}
+
+impl HighlightQuery {
+    pub fn new(grammar: &tree_sitter::Language, source: &str) -> Result<Self, tree_sitter::QueryError> {
+        let query = Query::new(grammar, source)?;
+        let syntax = query.capture_names().iter().map(|name| resolve(name)).collect();
+        Ok(Self { query, syntax })
+    }
+}
+
+/// A capture like `comment.documentation` falls back to the longest known prefix, here `comment`.
+fn resolve(name: &str) -> Option<Syntax> {
+    let mut name = name;
+    loop {
+        if CAPTURES.contains(&name) {
+            return Some(syntax_for(name));
+        }
+        name = &name[..name.rfind('.')?];
+    }
+}
+
+/// One file's syntax tree, kept up to date edit by edit: after a keystroke only the
+/// changed part is parsed again, and only the lines on screen are coloured.
 pub struct Highlighter {
-    config: &'static HighlightConfiguration,
-    highlighter: TsHighlighter,
+    query: &'static HighlightQuery,
+    parser: Parser,
+    tree: Option<Tree>,
+    /// The buffer revision the tree matches.
+    revision: u64,
 }
 
 impl Highlighter {
     pub fn new(language: &'static Language) -> Option<Self> {
-        Some(Self { config: language.highlight_config(CAPTURES)?, highlighter: TsHighlighter::new() })
+        let query = language.highlight_query()?;
+        let mut parser = Parser::new();
+        parser.set_language(&language.grammar()).ok()?;
+        Some(Self { query, parser, tree: None, revision: 0 })
     }
 
-    /// Highlights the whole document. Re-parses from scratch; incremental
-    /// parsing comes later.
-    pub fn highlight(&mut self, source: &str) -> Vec<Span> {
-        let Ok(events) = self.highlighter.highlight(self.config, source.as_bytes(), None, |_| None) else {
-            return Vec::new();
+    /// Brings the tree up to date with the text: the edits since last time are applied
+    /// to the old tree, so parsing again reuses everything they didn't touch.
+    pub fn sync(&mut self, buffer: &Buffer) {
+        if self.tree.is_some() && self.revision == buffer.revision() {
+            return;
+        }
+        let mut old = self.tree.take();
+        if let Some(tree) = &mut old {
+            match buffer.edits_since(self.revision) {
+                Some(edits) => edits.for_each(|e| tree.edit(&input_edit(e))),
+                None => old = None,
+            }
+        }
+        let rope = buffer.rope();
+        let mut read = |byte: usize, _: Point| -> &[u8] {
+            if byte >= rope.len_bytes() {
+                return &[];
+            }
+            let (chunk, start, _, _) = rope.chunk_at_byte(byte);
+            &chunk.as_bytes()[byte - start..]
         };
-        let mut spans = Vec::new();
-        let mut stack: Vec<Syntax> = Vec::new();
-        for event in events {
-            match event {
-                Ok(HighlightEvent::HighlightStart(h)) => stack.push(syntax_for(CAPTURES[h.0])),
-                Ok(HighlightEvent::HighlightEnd) => {
-                    stack.pop();
-                }
-                Ok(HighlightEvent::Source { start, end }) => {
-                    if let Some(&syntax) = stack.last()
-                        && syntax != Syntax::Plain
-                    {
-                        spans.push((start..end, syntax));
-                    }
-                }
-                Err(_) => return Vec::new(),
+        self.tree = self.parser.parse_with_options(&mut read, old.as_ref(), None);
+        self.revision = buffer.revision();
+    }
+
+    /// The coloured spans within `range` (bytes). Call [`Self::sync`] first.
+    pub fn spans(&self, rope: &Rope, range: Range<usize>) -> Vec<Span> {
+        let Some(tree) = &self.tree else { return Vec::new() };
+        let range = range.start.min(rope.len_bytes())..range.end.min(rope.len_bytes());
+        if range.is_empty() {
+            return Vec::new();
+        }
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(range.clone());
+        // Every captured node once. A node's captures come in pattern order and the last
+        // one decides, as in tree-sitter's own highlighter: queries list general rules
+        // (`(identifier) @variable`) before specific ones (`name: (identifier) @function`).
+        let mut nodes: Vec<(usize, Range<usize>, Option<Syntax>)> = Vec::new();
+        let mut captures = cursor.captures(&self.query.query, tree.root_node(), RopeText(rope));
+        while let Some((m, i)) = captures.next() {
+            let capture = m.captures[*i];
+            let syntax = self.query.syntax[capture.index as usize];
+            match nodes.last_mut() {
+                Some((id, _, last)) if *id == capture.node.id() => *last = syntax,
+                _ => nodes.push((capture.node.id(), capture.node.byte_range(), syntax)),
+            }
+        }
+        let mut nodes: Vec<(Range<usize>, Syntax)> =
+            nodes.into_iter().filter_map(|(_, r, syntax)| Some((r, syntax?))).collect();
+        // Outer nodes first, so the nodes inside them paint over them.
+        nodes.sort_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end)));
+        let mut painted: Vec<Option<Syntax>> = vec![None; range.len()];
+        for (r, syntax) in nodes {
+            let (a, b) = (r.start.max(range.start) - range.start, r.end.min(range.end).max(range.start) - range.start);
+            if a < b {
+                painted[a..b].fill(Some(syntax));
+            }
+        }
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, syntax) in painted.into_iter().enumerate() {
+            let Some(syntax) = syntax.filter(|s| *s != Syntax::Plain) else { continue };
+            let at = range.start + i;
+            match spans.last_mut() {
+                Some((r, s)) if r.end == at && *s == syntax => r.end = at + 1,
+                _ => spans.push((at..at + 1, syntax)),
             }
         }
         spans
+    }
+}
+
+fn input_edit(e: &Edit) -> InputEdit {
+    let point = |(row, column): (usize, usize)| Point { row, column };
+    InputEdit {
+        start_byte: e.start_byte,
+        old_end_byte: e.old_end_byte,
+        new_end_byte: e.new_end_byte,
+        start_position: point(e.start),
+        old_end_position: point(e.old_end),
+        new_end_position: point(e.new_end),
+    }
+}
+
+/// Node text for query predicates (`#match?`, `#eq?`), read straight from the rope.
+struct RopeText<'a>(&'a Rope);
+
+impl<'a> TextProvider<&'a [u8]> for RopeText<'a> {
+    type I = std::iter::Map<ropey::iter::Chunks<'a>, fn(&'a str) -> &'a [u8]>;
+
+    fn text(&mut self, node: tree_sitter::Node) -> Self::I {
+        let len = self.0.len_bytes();
+        let range = node.start_byte().min(len)..node.end_byte().min(len);
+        self.0.byte_slice(range).chunks().map(str::as_bytes as fn(&'a str) -> &'a [u8])
     }
 }
 
@@ -119,15 +223,55 @@ pub fn spans_in(spans: &[Span], range: Range<usize>) -> impl Iterator<Item = Spa
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The whole text's spans, as the editor would get them.
+    pub fn highlight(file: &str, source: &str) -> Vec<Span> {
+        let language = crate::languages::for_path(std::path::Path::new(file)).unwrap();
+        let mut highlighter = Highlighter::new(language).unwrap();
+        let buffer = Buffer::from_text(source);
+        highlighter.sync(&buffer);
+        highlighter.spans(buffer.rope(), 0..source.len())
+    }
+
+    #[test]
+    fn edits_reparse_only_what_changed_and_match_a_fresh_parse() {
+        let language = crate::languages::for_path(std::path::Path::new("a.rs")).unwrap();
+        let mut highlighter = Highlighter::new(language).unwrap();
+        let mut buffer = Buffer::from_text("fn main() {\n    let x = 1;\n}\n");
+        highlighter.sync(&buffer);
+        // Typing a quote turns the rest of the line into a string, then closing it ends it.
+        let at = buffer.offset(1, 12);
+        buffer.replace(at..at, "\"é");
+        let end = buffer.offset(1, 14);
+        buffer.replace(end..end, "\"");
+        highlighter.sync(&buffer);
+        let text = buffer.to_string();
+        let incremental = highlighter.spans(buffer.rope(), 0..text.len());
+        assert_eq!(incremental, highlight("a.rs", &text));
+        assert!(
+            incremental.iter().any(|(r, s)| &text[r.clone()] == "\"é\"" && *s == Syntax::String),
+            "{incremental:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_asked_range_is_coloured() {
+        let source = "fn a() {}\nfn b() {}\n";
+        let language = crate::languages::for_path(std::path::Path::new("a.rs")).unwrap();
+        let mut highlighter = Highlighter::new(language).unwrap();
+        let buffer = Buffer::from_text(source);
+        highlighter.sync(&buffer);
+        let spans = highlighter.spans(buffer.rope(), 10..source.len());
+        assert!(spans.iter().all(|(r, _)| r.start >= 10), "{spans:?}");
+        assert!(spans.iter().any(|(r, s)| &source[r.clone()] == "b" && *s == Syntax::Function));
+    }
 
     #[test]
     fn highlights_keywords_strings_and_comments() {
         let source = "// hi\nfn main() { let s = \"x\"; }";
-        let spans = Highlighter::new(crate::languages::for_path(std::path::Path::new("a.rs")).unwrap())
-            .unwrap()
-            .highlight(source);
+        let spans = highlight("a.rs", source);
         let kind_of = |text: &str| {
             let start = source.find(text).unwrap();
             spans.iter().find(|(r, _)| r.start == start).map(|(_, s)| *s)
@@ -153,12 +297,8 @@ mod language_tests {
 
     fn kinds(file: &str, source: &str) -> Vec<(String, Syntax)> {
         let language = crate::languages::for_path(Path::new(file)).unwrap();
-        Highlighter::new(language)
-            .unwrap()
-            .highlight(source)
-            .into_iter()
-            .map(|(r, s)| (source[r].to_string(), s))
-            .collect()
+        let _ = language;
+        super::tests::highlight(file, source).into_iter().map(|(r, s)| (source[r].to_string(), s)).collect()
     }
 
     #[test]

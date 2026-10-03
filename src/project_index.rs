@@ -68,6 +68,20 @@ pub fn definitions_in(path: &Path, text: &str) -> Vec<Definition> {
         .collect()
 }
 
+/// What the project's `.gitignore` (and `.git/info/exclude`) leave out: build output,
+/// dependencies. Their files aren't the person's code, so they stay out of the index.
+pub fn ignore_rules(root: &Path) -> ignore::gitignore::Gitignore {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    builder.add(root.join(".gitignore"));
+    builder.add(root.join(".git").join("info").join("exclude"));
+    builder.build().unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
+}
+
+/// Whether `path` (inside `root`) is left out by the rules, itself or through a folder above it.
+pub fn is_ignored(rules: &ignore::gitignore::Gitignore, root: &Path, path: &Path) -> bool {
+    path.starts_with(root) && rules.matched_path_or_any_parents(path, false).is_ignore()
+}
+
 pub fn is_source(path: &Path) -> bool {
     path.extension().and_then(|x| x.to_str()).is_some_and(|x| SOURCE_EXTENSIONS.contains(&x))
 }
@@ -141,6 +155,20 @@ mod tests {
             lines("a.ts", "export function run(x: number) {\n  if (x) {}\n}\n"),
             ["export function run(x: number)"]
         );
+    }
+
+    #[test]
+    fn ignored_files_are_recognised_through_their_folders() {
+        let root = std::env::temp_dir().join(format!("null-ignore-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\nnode_modules\n*.gen.ts\n").unwrap();
+        let rules = ignore_rules(&root);
+        assert!(is_ignored(&rules, &root, &root.join("target/debug/build/x/out/a.rs")));
+        assert!(is_ignored(&rules, &root, &root.join("web/node_modules/react/index.js")));
+        assert!(is_ignored(&rules, &root, &root.join("src/api.gen.ts")));
+        assert!(!is_ignored(&rules, &root, &root.join("src/main.rs")));
+        assert!(!is_ignored(&rules, &root, Path::new("/elsewhere/a.rs")));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

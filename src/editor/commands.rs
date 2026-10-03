@@ -260,25 +260,23 @@ impl Editor {
             if let Some(&(open, close)) =
                 [('(', ')'), ('[', ']'), ('{', '}')].iter().find(|(o, cl)| *o == c || *cl == c)
             {
+                // Walking the rope's chars in a row, not looking each one up: this runs every frame.
                 let forward = c == open;
-                let mut depth = 0i32;
+                let rope = self.buffer.rope();
+                let mut chars = rope.chars_at(if forward { i + 1 } else { i });
+                let mut depth = 1i32;
                 let mut j = i;
                 for _ in 0..LIMIT {
-                    match at(j) {
-                        Some(x) if x == open => depth += if forward { 1 } else { -1 },
-                        Some(x) if x == close => depth += if forward { -1 } else { 1 },
-                        None => break,
-                        _ => {}
+                    let next = if forward { chars.next() } else { chars.prev() };
+                    let Some(x) = next else { break };
+                    j = if forward { j + 1 } else { j - 1 };
+                    if x == open {
+                        depth += if forward { 1 } else { -1 };
+                    } else if x == close {
+                        depth += if forward { -1 } else { 1 };
                     }
                     if depth == 0 {
                         return Some((i, j));
-                    }
-                    if forward {
-                        j += 1;
-                    } else if j == 0 {
-                        break;
-                    } else {
-                        j -= 1;
                     }
                 }
             }
@@ -402,6 +400,34 @@ mod editor_tests {
 
     fn select(cx: &mut TestAppContext, e: &gpui::Entity<Editor>, anchor: usize, head: usize) {
         e.update(cx, |e, _| e.selection = Selection { anchor, head });
+    }
+
+    #[gpui::test]
+    fn undo_takes_back_a_word_at_a_time(cx: &mut TestAppContext) {
+        use super::super::EditKind;
+        let e = editor(cx, "\n", "x.rs");
+        let type_at = |cx: &mut TestAppContext, text: &str| {
+            for c in text.chars() {
+                e.update(cx, |e, cx| {
+                    let at = e.selection.head;
+                    e.edit(at..at, &c.to_string(), EditKind::Typing, cx)
+                });
+            }
+        };
+        type_at(cx, "let total = 1;");
+        let undo = |cx: &mut TestAppContext| e.update(cx, |e, cx| e.step_history(true, cx));
+        undo(cx);
+        assert_eq!(text(cx, &e), "let total = \n");
+        // A symbol goes with the word before it.
+        undo(cx);
+        assert_eq!(text(cx, &e), "let \n");
+        // Typing somewhere else is its own step, even right away.
+        select(cx, &e, 0, 0);
+        type_at(cx, "a");
+        select(cx, &e, 5, 5);
+        type_at(cx, "b");
+        undo(cx);
+        assert_eq!(text(cx, &e), "alet \n");
     }
 
     #[gpui::test]

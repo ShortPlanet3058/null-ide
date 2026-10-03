@@ -301,6 +301,8 @@ pub struct Scroll {
     pub target_y: f32,
     pub x: f32,
     pub last_tick: Option<Instant>,
+    /// The direction a trackpad swipe settled on (true: sideways), until it ends.
+    pub swipe_sideways: Option<bool>,
 }
 
 pub struct CaretMotion {
@@ -330,7 +332,14 @@ pub struct Editor {
     pub buffer: Buffer,
     path: Option<PathBuf>,
     highlighter: Option<Highlighter>,
+    /// Colours for the lines around the view (see [`Self::highlight_lines`]).
     pub spans: Vec<Span>,
+    /// The longest line's width in columns, for the buffer revision it was measured at.
+    longest_line: std::cell::Cell<(u64, usize)>,
+    /// The buffer revision and byte range `spans` cover.
+    spans_for: Option<(u64, Range<usize>)>,
+    /// `problems()` for a (diagnostics version, buffer revision).
+    problems_cache: std::cell::RefCell<Option<((u64, u64), std::rc::Rc<Vec<intel::Problem>>)>>,
     /// The main cursor: the one the view follows. Any others are in `extra`.
     pub selection: Selection,
     goal_column: Option<usize>,
@@ -342,7 +351,8 @@ pub struct Editor {
     pub marked: Option<Range<usize>>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
-    last_edit: Option<(EditKind, Instant)>,
+    /// The last edit, for grouping undo steps: its kind, when, and where the caret ended.
+    last_edit: Option<(EditKind, Instant, usize)>,
     pub scroll: Scroll,
     pub caret: CaretMotion,
     /// Last caret move or edit. The caret stays solid until it has been idle a moment.
@@ -363,6 +373,8 @@ pub struct Editor {
     last_query: SearchQuery,
     lsp: Option<Entity<LspStore>>,
     lsp_version: i32,
+    /// The buffer revision the language server has.
+    lsp_revision: u64,
     lsp_subscription: Option<Subscription>,
     pub hover: Option<HoverCard>,
     hover_word: Option<Range<usize>>,
@@ -411,6 +423,9 @@ impl Editor {
             path,
             highlighter,
             spans: Vec::new(),
+            spans_for: None,
+            longest_line: std::cell::Cell::new((u64::MAX, 0)),
+            problems_cache: Default::default(),
             selection: Selection::caret(0),
             goal_column: None,
             extra: Vec::new(),
@@ -421,7 +436,7 @@ impl Editor {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: None,
-            scroll: Scroll { y: 0., target_y: 0., x: 0., last_tick: None },
+            scroll: Scroll { y: 0., target_y: 0., x: 0., last_tick: None, swipe_sideways: None },
             caret: CaretMotion {
                 from: Point::default(),
                 to: Point::default(),
@@ -442,6 +457,7 @@ impl Editor {
             last_query: SearchQuery::default(),
             lsp: None,
             lsp_version: 0,
+            lsp_revision: 0,
             lsp_subscription: None,
             hover: None,
             hover_word: None,
@@ -514,6 +530,7 @@ impl Editor {
         self.release_lsp(cx);
         self.highlighter = languages::for_path(&path).and_then(Highlighter::new);
         self.spans.clear();
+        self.spans_for = None;
         self.path = Some(path);
         self.rehighlight();
         if let Some(lsp) = lsp {
@@ -570,12 +587,57 @@ impl Editor {
         self.close_hover(cx);
     }
 
-    /// Brings everything derived from the text up to date after it changes.
+    /// Brings everything derived from the text up to date after it changes. Colours
+    /// follow when the lines are next drawn.
     fn rehighlight(&mut self) {
-        if let Some(highlighter) = &mut self.highlighter {
-            self.spans = highlighter.highlight(&self.buffer.to_string());
-        }
         self.refresh_search();
+    }
+
+    /// The widest line in columns (tabs at full width). Measured over the whole file once;
+    /// after typing, only the edited lines, so it can stay a little wide after a long line
+    /// shrinks (some extra room to scroll) but never costs a pass over the file.
+    pub(crate) fn longest_line(&self) -> usize {
+        let width = |line: ropey::RopeSlice| {
+            line.chars().filter(|c| *c != '\n' && *c != '\r').fold(0, |col, c| col + crate::wrap::char_columns(c, col))
+        };
+        let (revision, cols) = self.longest_line.get();
+        if revision == self.buffer.revision() {
+            return cols;
+        }
+        let rope = self.buffer.rope();
+        let last = self.buffer.len_lines().saturating_sub(1);
+        let cols = match self.buffer.edits_since(revision).filter(|_| revision != u64::MAX) {
+            Some(edits) => edits
+                .flat_map(|e| e.start.0..=e.new_end.0)
+                .map(|line| width(rope.line(line.min(last))))
+                .fold(cols, usize::max),
+            None => rope.lines().map(width).max().unwrap_or(0),
+        };
+        self.longest_line.set((self.buffer.revision(), cols));
+        cols
+    }
+
+    /// Makes sure `spans` colours `lines`: the syntax tree catches up with the edits
+    /// (only what changed is parsed again), then the lines around the view are
+    /// coloured, with some room so scrolling a little needs nothing new.
+    pub(crate) fn highlight_lines(&mut self, lines: Range<usize>) {
+        /// Lines coloured beyond the view on each side.
+        const ROOM: usize = 120;
+        let Some(highlighter) = &mut self.highlighter else { return };
+        let revision = self.buffer.revision();
+        let wanted = self.buffer.line_to_byte(lines.start)..self.buffer.line_to_byte(lines.end);
+        if let Some((r, range)) = &self.spans_for
+            && *r == revision
+            && range.start <= wanted.start
+            && range.end >= wanted.end
+        {
+            return;
+        }
+        highlighter.sync(&self.buffer);
+        let range =
+            self.buffer.line_to_byte(lines.start.saturating_sub(ROOM))..self.buffer.line_to_byte(lines.end + ROOM);
+        self.spans = highlighter.spans(self.buffer.rope(), range.clone());
+        self.spans_for = Some((revision, range));
     }
 
     // ---------- find & replace ----------
@@ -887,7 +949,7 @@ impl Editor {
         }
         self.wrap.update(&self.buffer, self.wrap.width(), &self.block_specs());
         let (line, col) = self.buffer.point(self.selection.head);
-        let (row, display_col) = self.wrap.to_display(line, col);
+        let (row, display_col) = self.wrap.to_display(line, col, &self.buffer);
         let goal = self.goal_column.unwrap_or(display_col);
         let last = self.wrap.rows() - 1;
         let mut target = row as isize + lines;
@@ -1081,7 +1143,7 @@ impl Editor {
             return;
         }
         let now = Instant::now();
-        let grouped = matches!(self.last_edit, Some((last, at)) if last == kind && kind != EditKind::Other && now - at < UNDO_GROUP);
+        let grouped = matches!(self.last_edit, Some((last, at, _)) if last == kind && kind != EditKind::Other && now - at < UNDO_GROUP);
         if !grouped {
             let (selection, extra) = match &mut self.batch {
                 Some(batch) => (batch.before[0], batch.before[1..].to_vec()),
@@ -1098,7 +1160,7 @@ impl Editor {
             }
         }
         self.redo_stack.clear();
-        self.last_edit = Some((kind, now));
+        self.last_edit = Some((kind, now, self.selection.head));
         if let Some(batch) = &mut self.batch {
             batch.recorded = true;
         }
@@ -1108,14 +1170,40 @@ impl Editor {
         if kind == EditKind::Other {
             self.close_completion(cx);
         }
+        if self.starts_undo_step(&range, text, kind) {
+            self.last_edit = None;
+        }
         self.record_undo(kind);
         let end = self.buffer.replace(range, text);
+        if let Some((_, _, caret)) = &mut self.last_edit
+            && self.batch.is_none()
+        {
+            *caret = end;
+        }
         self.selection = Selection::caret(end);
         self.marked = None;
         self.goal_column = None;
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
+    }
+
+    /// Whether this edit starts a new undo step even right after another of its kind:
+    /// undo takes back a word at a time, and never more than one place's typing.
+    fn starts_undo_step(&self, range: &Range<usize>, text: &str, kind: EditKind) -> bool {
+        let Some((last, _, caret)) = self.last_edit else { return false };
+        if last != kind || kind == EditKind::Other {
+            return false;
+        }
+        // Typing somewhere else (with several cursors, every cursor moves: skip that).
+        let elsewhere = self.batch.is_none() && range.start != caret && range.end != caret;
+        // A new line, or a new word after a space.
+        let new_line = text.contains('\n');
+        let new_word = kind == EditKind::Typing
+            && text.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && range.start > 0
+            && self.buffer.char_at(range.start - 1).is_some_and(char::is_whitespace);
+        elsewhere || new_line || new_word
     }
 
     fn delete_or(&mut self, range: impl FnOnce(&Self) -> Range<usize>, cx: &mut Context<Self>) {
@@ -1495,7 +1583,7 @@ impl Editor {
         let x = position.x - layout.text_origin.x;
         match row.checked_sub(layout.first_row).and_then(|i| layout.rows.get(i)) {
             Some(r) => {
-                let byte = r.shaped.closest_index_for_x(x - r.x);
+                let byte = r.text_byte(r.shaped.closest_index_for_x(x - r.x));
                 // The row can show more than its text (a ghost completion): clicks past it land at its end.
                 let chars = r.text.get(..byte).map_or(r.text.chars().count(), |t| t.chars().count());
                 let col = r.row.cols.start + chars;
@@ -1809,11 +1897,27 @@ impl Editor {
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let line_height = f32::from(self.line_height());
         match event.delta {
-            // Trackpads report exact pixels and already feel smooth: follow them 1:1.
+            // Trackpads report exact pixels and already feel smooth: follow them 1:1. A swipe
+            // keeps to the direction it started in, so scrolling down doesn't drift sideways.
             ScrollDelta::Pixels(delta) => {
-                self.scroll.y -= f32::from(delta.y);
-                self.scroll.target_y = self.scroll.y;
-                self.scroll.x -= f32::from(delta.x);
+                if matches!(event.touch_phase, gpui::TouchPhase::Started) {
+                    self.scroll.swipe_sideways = None;
+                }
+                let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+                if self.scroll.swipe_sideways.is_none() && (dx.abs() > 1. || dy.abs() > 1.) {
+                    self.scroll.swipe_sideways = Some(dx.abs() > dy.abs());
+                }
+                match self.scroll.swipe_sideways {
+                    Some(true) => self.scroll.x -= dx,
+                    Some(false) => {
+                        self.scroll.y -= dy;
+                        self.scroll.target_y = self.scroll.y;
+                    }
+                    None => {}
+                }
+                if matches!(event.touch_phase, gpui::TouchPhase::Ended) {
+                    self.scroll.swipe_sideways = None;
+                }
             }
             // Mouse wheels jump in notches: glide to the new position instead.
             ScrollDelta::Lines(delta) => {
@@ -1828,8 +1932,15 @@ impl Editor {
     fn caret_bounds(&self, offset: usize) -> Option<Bounds<Pixels>> {
         let layout = self.layout.as_ref()?;
         let (line, col) = self.buffer.point(offset);
-        let (row, x) =
-            crate::element::position(&layout.rows, layout.first_row, &self.wrap, layout.char_width, line, col);
+        let (row, x) = crate::element::position(
+            &layout.rows,
+            layout.first_row,
+            &self.wrap,
+            &self.buffer,
+            layout.char_width,
+            line,
+            col,
+        );
         Some(Bounds::new(
             point(layout.text_origin.x + x, layout.text_origin.y + layout.line_height * row as f32),
             size(px(2.), layout.line_height),

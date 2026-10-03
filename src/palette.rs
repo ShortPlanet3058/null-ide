@@ -951,7 +951,7 @@ impl Render for Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
 
     actions!(test, [One, Two]);
 

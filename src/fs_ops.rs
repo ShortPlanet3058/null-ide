@@ -51,9 +51,9 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     if target == path {
         return Ok(target);
     }
-    // On case-insensitive disks "readme" and "README" are the same file: allow changing case.
-    let same_file_other_case = target.to_string_lossy().to_lowercase() == path.to_string_lossy().to_lowercase();
-    if target.exists() && !same_file_other_case {
+    // On case-insensitive disks "readme" and "README" are the same file: changing case is
+    // fine. On case-sensitive ones they can be two files, and the other one must stay.
+    if target.exists() && !same_file(path, &target) {
         return Err(format!("{} already exists", new_name.trim()));
     }
     std::fs::rename(path, &target).map_err(|e| format!("Couldn't rename: {e}"))?;
@@ -76,8 +76,34 @@ pub fn duplicate(path: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// Whether two paths name the same file on disk (one file under two spellings).
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows disks don't tell case apart.
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    }
+}
+
+/// Copies files and folders; a link is copied as a link, never followed, so a link to a
+/// folder above it can't make the copy go on forever.
 fn copy_recursively(from: &Path, to: &Path) -> std::io::Result<()> {
-    if from.is_dir() {
+    let kind = std::fs::symlink_metadata(from)?.file_type();
+    if kind.is_symlink() {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(std::fs::read_link(from)?, to);
+        #[cfg(not(unix))]
+        return std::fs::copy(from, to).map(|_| ());
+    }
+    if kind.is_dir() {
         std::fs::create_dir(to)?;
         for entry in std::fs::read_dir(from)? {
             let entry = entry?;
@@ -138,6 +164,24 @@ mod tests {
         let folder = create_dir(&dir, "src").unwrap();
         create_file(&folder, "lib.rs").unwrap();
         assert!(duplicate(&folder).unwrap().join("lib.rs").is_file());
+        // A link back to a folder above is copied as a link, not followed forever.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&dir, folder.join("up")).unwrap();
+            let copy = duplicate(&folder).unwrap();
+            assert!(std::fs::symlink_metadata(copy.join("up")).unwrap().file_type().is_symlink());
+        }
+        // Changing only the case renames; a different file with that name is never replaced.
+        let lower = create_file(&dir, "notes.md").unwrap();
+        let upper = dir.join("NOTES.md");
+        if upper.exists() {
+            // Case-insensitive disk: the same file.
+            assert_eq!(rename(&lower, "NOTES.md").unwrap(), upper);
+        } else {
+            std::fs::write(&upper, "keep me").unwrap();
+            assert!(rename(&lower, "NOTES.md").is_err());
+            assert_eq!(std::fs::read_to_string(&upper).unwrap(), "keep me");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

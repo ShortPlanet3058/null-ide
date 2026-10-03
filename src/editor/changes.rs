@@ -35,10 +35,12 @@ impl Editor {
             }
             return;
         };
-        let current = self.buffer.to_string();
+        // A rope copy is a few pointers; the text itself is only built after the pause, off this thread.
+        let current = self.buffer.rope().clone();
         self.git_diff_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
-            let hunks: Vec<Hunk> = cx.background_executor().spawn(async move { git::diff(&base, &current) }).await;
+            let hunks: Vec<Hunk> =
+                cx.background_executor().spawn(async move { git::diff(&base, &current.to_string()) }).await;
             this.update(cx, |this, cx| {
                 this.git_hunks = hunks;
                 cx.notify();

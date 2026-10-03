@@ -5,6 +5,7 @@
 //! With wrapping off and no blocks every line is one row, and all of this is a no-op.
 
 use crate::buffer::Buffer;
+use crate::editor::TAB_SIZE;
 use std::ops::Range;
 
 /// Continuation rows keep the line's indentation, unless that would leave less room than this.
@@ -22,7 +23,8 @@ pub struct BlockSpec {
 pub struct WrapMap {
     /// Characters per row, or None when wrapping is off.
     width: Option<usize>,
-    version: u64,
+    /// The buffer revision it matches.
+    revision: u64,
     lines: usize,
     blocks: Vec<BlockSpec>,
     /// Off: one row per line, nothing stored.
@@ -55,7 +57,7 @@ impl Default for WrapMap {
     fn default() -> Self {
         Self {
             width: None,
-            version: u64::MAX,
+            revision: u64::MAX,
             lines: 1,
             blocks: Vec::new(),
             general: false,
@@ -78,18 +80,20 @@ impl WrapMap {
     }
 
     /// Brings the map up to date with the text, the row width (None to stop wrapping)
-    /// and the blocks between lines.
+    /// and the blocks between lines. After typing, only the edited lines are wrapped again.
     pub fn update(&mut self, buffer: &Buffer, width: Option<usize>, blocks: &[BlockSpec]) {
         let width = width.map(|w| w.max(MIN_ROOM));
-        if width == self.width
-            && buffer.version() == self.version
-            && buffer.len_lines() == self.lines
-            && blocks == self.blocks.as_slice()
-        {
+        let same_layout = width == self.width && blocks == self.blocks.as_slice();
+        if same_layout && buffer.revision() == self.revision && buffer.len_lines() == self.lines {
+            return;
+        }
+        if same_layout && self.general && self.rewrap_edits(buffer) {
+            self.revision = buffer.revision();
+            self.place_rows();
             return;
         }
         self.width = width;
-        self.version = buffer.version();
+        self.revision = buffer.revision();
         self.lines = buffer.len_lines();
         self.blocks = blocks.to_vec();
         self.starts.clear();
@@ -100,28 +104,82 @@ impl WrapMap {
         if !self.general {
             return;
         }
+        match width {
+            Some(width) => {
+                let mut texts = buffer.rope().lines();
+                for _ in 0..self.lines {
+                    // Ropey may not yield the empty line after a final line break.
+                    let text: String = texts.next().map(line_chars).unwrap_or_default();
+                    let (starts, indent) = wrap_line(&text, width);
+                    self.starts.push(starts);
+                    self.indents.push(indent);
+                }
+            }
+            None => {
+                self.starts = vec![vec![0]; self.lines];
+                self.indents = vec![0; self.lines];
+            }
+        }
+        self.place_rows();
+    }
+
+    /// Follows the buffer's edits since the last update, wrapping again only the lines
+    /// they touched. False when it can't (the edits aren't known): wrap everything.
+    fn rewrap_edits(&mut self, buffer: &Buffer) -> bool {
+        let Some(edits) = buffer.edits_since(self.revision) else { return false };
+        // Lines to wrap again, in the text as it is now.
+        let mut dirty: Vec<Range<usize>> = Vec::new();
+        for edit in edits {
+            let (start, old_end, new_end) = (edit.start.0, edit.old_end.0, edit.new_end.0);
+            if old_end >= self.starts.len() {
+                return false;
+            }
+            let added = new_end as isize - old_end as isize;
+            self.starts.splice(start..=old_end, (start..=new_end).map(|_| vec![0]));
+            self.indents.splice(start..=old_end, (start..=new_end).map(|_| 0));
+            for range in &mut dirty {
+                if range.start > old_end {
+                    *range = (range.start as isize + added) as usize..(range.end as isize + added) as usize;
+                } else if range.end > start {
+                    // Overlapping the edit: from the edit's start (or before) to past its new lines.
+                    range.start = range.start.min(start);
+                    range.end = (range.end as isize + added).max(new_end as isize + 1) as usize;
+                }
+            }
+            dirty.push(start..new_end + 1);
+        }
+        self.lines = buffer.len_lines();
+        if self.starts.len() != self.lines {
+            return false;
+        }
+        if let Some(width) = self.width {
+            for range in dirty {
+                for line in range.start.min(self.lines)..range.end.min(self.lines) {
+                    let text = line_chars(buffer.rope().line(line));
+                    (self.starts[line], self.indents[line]) = wrap_line(&text, width);
+                }
+            }
+        }
+        true
+    }
+
+    /// Where each line's rows and each block's rows go, from the rows each line takes.
+    fn place_rows(&mut self) {
+        self.first_rows.clear();
+        self.block_rows.clear();
+        let blocks = &self.blocks;
         let mut order: Vec<usize> = (0..blocks.len()).collect();
         order.sort_by_key(|&i| blocks[i].before_line);
         let mut pending = order.into_iter().peekable();
         let mut row = 0;
-        let mut texts = buffer.rope().lines();
         for line in 0..self.lines {
             while let Some(&b) = pending.peek().filter(|&&b| blocks[b].before_line <= line) {
                 self.block_rows.push((row, b));
                 row += blocks[b].rows;
                 pending.next();
             }
-            // Ropey may not yield the empty line after a final line break.
-            let text: String =
-                texts.next().map(|l| l.chars().filter(|c| *c != '\n' && *c != '\r').collect()).unwrap_or_default();
-            let (starts, indent) = match width {
-                Some(width) => wrap_line(&text, width),
-                None => (vec![0], 0),
-            };
             self.first_rows.push(row);
-            row += starts.len();
-            self.starts.push(starts);
-            self.indents.push(indent);
+            row += self.starts[line].len();
         }
         for b in pending {
             self.block_rows.push((row, b));
@@ -185,16 +243,20 @@ impl WrapMap {
         Row { line, cols: starts[i]..end, indent: if i > 0 { self.indents[line] } else { 0 }, last, block: None }
     }
 
-    /// Where a (line, column) shows: its row, and its column on that row counting the indent.
-    pub fn to_display(&self, line: usize, col: usize) -> (usize, usize) {
+    /// Where a (line, column) shows: its row, and its screen column on that row counting
+    /// the indent (and tabs at their full width).
+    pub fn to_display(&self, line: usize, col: usize, buffer: &Buffer) -> (usize, usize) {
+        let chars = |from: usize, to: usize| {
+            buffer.rope().line(line.min(buffer.len_lines() - 1)).chars().skip(from).take(to.saturating_sub(from))
+        };
         if !self.general {
-            return (line, col);
+            return (line, columns(chars(0, col)));
         }
         let line = line.min(self.lines - 1);
         let starts = &self.starts[line];
         let i = starts.partition_point(|&s| s <= col).saturating_sub(1);
         let indent = if i > 0 { self.indents[line] } else { 0 };
-        (self.first_rows[line] + i, col - starts[i] + indent)
+        (self.first_rows[line] + i, columns(chars(starts[i], col)) + indent)
     }
 
     /// The char offset shown at `col` on `row`. Past the end of a wrapped row, the caret
@@ -206,33 +268,75 @@ impl WrapMap {
             let below = self.blocks[block].before_line;
             return if below >= self.lines { buffer.len_chars() } else { buffer.line_to_char(below) };
         }
-        let col = row.cols.start + col.saturating_sub(row.indent);
+        let shown = buffer.rope().line(row.line).chars().skip(row.cols.start).take(row.cols.len());
+        let col = row.cols.start.saturating_add(char_at_column(shown, col.saturating_sub(row.indent)));
         let max = if row.last { row.cols.end } else { row.cols.end.saturating_sub(1).max(row.cols.start) };
         buffer.offset(row.line, col.min(max))
     }
 }
 
+/// A line's text without its line break.
+fn line_chars(line: ropey::RopeSlice) -> String {
+    line.chars().filter(|c| *c != '\n' && *c != '\r').collect()
+}
+
+/// How many columns a char takes at column `col` of a row: a tab reaches the next tab
+/// stop (stops count from the row's start), anything else takes one.
+pub fn char_columns(c: char, col: usize) -> usize {
+    if c == '\t' { TAB_SIZE - col % TAB_SIZE } else { 1 }
+}
+
+/// The columns `chars` take on screen.
+fn columns(chars: impl Iterator<Item = char>) -> usize {
+    chars.fold(0, |col, c| col + char_columns(c, col))
+}
+
+/// Which of `chars` shows at screen column `target`: past the end, their count; on a
+/// tab, whichever edge of it is nearer.
+fn char_at_column(chars: impl Iterator<Item = char>, target: usize) -> usize {
+    let mut col = 0;
+    for (i, c) in chars.enumerate() {
+        let w = char_columns(c, col);
+        if target < col + w {
+            return if target - col > (w - 1) / 2 && w > 1 { i + 1 } else { i };
+        }
+        col += w;
+    }
+    usize::MAX
+}
+
 /// Where a line's rows start, and how far its continuation rows are indented.
 /// Breaks go after a space when one fits, so words stay whole; a word longer than
-/// the row is cut where the row ends.
+/// the row is cut where the row ends. Widths are screen columns: a tab counts to its stop.
 fn wrap_line(text: &str, width: usize) -> (Vec<usize>, usize) {
     let chars: Vec<char> = text.chars().collect();
     let mut starts = vec![0];
-    if chars.len() <= width {
+    if chars.len() <= width && !chars.contains(&'\t') {
         return (starts, 0);
     }
     let lead = chars.iter().take_while(|c| **c == ' ' || **c == '\t').count();
-    let indent = if lead + MIN_ROOM <= width { lead } else { 0 };
+    let lead_columns = columns(chars[..lead].iter().copied());
+    let indent = if lead_columns + MIN_ROOM <= width { lead_columns } else { 0 };
     let mut start = 0;
     loop {
         let room = if starts.len() == 1 { width } else { width - indent };
-        if chars.len() - start <= room {
+        // How many chars from `start` fit in the room.
+        let (mut col, mut fit) = (0, start);
+        while fit < chars.len() {
+            let w = char_columns(chars[fit], col);
+            if col + w > room {
+                break;
+            }
+            col += w;
+            fit += 1;
+        }
+        if fit >= chars.len() {
             break;
         }
-        let limit = start + room;
+        let limit = fit.max(start + 1);
         let after_space = |i: &usize| chars[*i - 1] == ' ' && chars[*i] != ' ';
         let after_punct = |i: &usize| matches!(chars[*i - 1], ',' | ';' | '(' | '[' | '{' | '.' | '/' | '-');
-        let earliest = start + room / 3;
+        let earliest = start + (limit - start) / 3;
         let brk = (earliest.max(start + 1)..=limit)
             .rev()
             .find(after_space)
@@ -247,6 +351,52 @@ fn wrap_line(text: &str, width: usize) -> (Vec<usize>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edits_rewrap_only_their_lines_and_match_a_fresh_map() {
+        let long = "word ".repeat(12);
+        let mut buffer = Buffer::from_text(&format!("a\n{long}\nb\n{long}\nc"));
+        let blocks = [BlockSpec { before_line: 3, rows: 2 }];
+        let mut map = WrapMap::default();
+        map.update(&buffer, Some(20), &blocks);
+        // Join two lines, split one, type on a wrapped one: three edits before the next update.
+        let b = buffer.line_to_char(2);
+        buffer.replace(b - 1..b, "");
+        let at = buffer.offset(0, 1);
+        buffer.replace(at..at, "\nnew line\n");
+        let at = buffer.offset(3, 3);
+        buffer.replace(at..at, &"more words ".repeat(4));
+        // Then lines removed across the edited ones.
+        let (from, to) = (buffer.offset(2, 2), buffer.offset(4, 1));
+        buffer.replace(from..to, "");
+        map.update(&buffer, Some(20), &blocks);
+        let mut fresh = WrapMap::default();
+        fresh.update(&buffer, Some(20), &blocks);
+        assert_eq!(map.lines, fresh.lines);
+        assert_eq!(map.starts, fresh.starts);
+        assert_eq!(map.indents, fresh.indents);
+        assert_eq!(map.first_rows, fresh.first_rows);
+        assert_eq!(map.block_rows, fresh.block_rows);
+    }
+
+    #[test]
+    fn tabs_take_their_full_width() {
+        let buffer = Buffer::from_text("\tx\n    y\na\tb");
+        let map = WrapMap::default();
+        // Under the tab's x, the spaces' y: both at column 4.
+        assert_eq!(map.to_display(0, 1, &buffer), (0, 4));
+        assert_eq!(map.to_display(1, 4, &buffer), (1, 4));
+        assert_eq!(map.to_offset(0, 4, &buffer), buffer.offset(0, 1));
+        // Inside a tab, the nearer edge.
+        assert_eq!(map.to_offset(0, 1, &buffer), buffer.offset(0, 0));
+        assert_eq!(map.to_offset(0, 3, &buffer), buffer.offset(0, 1));
+        // A tab after a char reaches the same stop.
+        assert_eq!(map.to_display(2, 2, &buffer), (2, 4));
+        // Wrapping counts a tab's columns.
+        let (starts, indent) = wrap_line(&format!("\t\t{}", "word ".repeat(6)), 24);
+        assert_eq!(indent, 0);
+        assert!(starts[1] <= 2 + 16, "{starts:?}");
+    }
 
     #[test]
     fn breaks_after_spaces_and_cuts_long_words() {
@@ -277,7 +427,7 @@ mod tests {
         assert_eq!(map.rows(), 1 + 3 + 1 + 1);
         assert_eq!(map.first_row(2), 4);
         assert_eq!(map.line_of_row(3), 1);
-        assert_eq!(map.to_display(1, 22), (2, 2));
+        assert_eq!(map.to_display(1, 22, &buffer), (2, 2));
         assert_eq!(map.to_offset(2, 2, &buffer), buffer.offset(1, 22));
         // Past the end of a wrapped row: stays on that row.
         assert_eq!(map.to_offset(1, 50, &buffer), buffer.offset(1, 19));
@@ -286,7 +436,7 @@ mod tests {
 
         map.update(&buffer, None, &[]);
         assert_eq!(map.rows(), 4);
-        assert_eq!(map.to_display(1, 22), (1, 22));
+        assert_eq!(map.to_display(1, 22, &buffer), (1, 22));
     }
 
     #[test]
@@ -304,7 +454,7 @@ mod tests {
         assert_eq!(map.block_at(3), None);
         assert_eq!(map.block_at(5), Some((1, 0)));
         assert_eq!(map.row(2, &buffer).block, Some((0, 1)));
-        assert_eq!(map.to_display(2, 0), (4, 0));
+        assert_eq!(map.to_display(2, 0, &buffer), (4, 0));
         assert_eq!(map.line_of_row(4), 2);
         // A block's row leads to the line below it.
         assert_eq!(map.to_offset(1, 3, &buffer), buffer.line_to_char(1));
