@@ -37,6 +37,10 @@ pub struct WrapMap {
     indents: Vec<usize>,
     /// The first text row of each line (after any blocks above it), then the total number of rows.
     first_rows: Vec<usize>,
+    /// Lines folded away: they take no rows. Sorted, not overlapping.
+    hidden: Vec<Range<usize>>,
+    /// The hidden lines changed since the rows were last placed.
+    hidden_changed: bool,
 }
 
 /// One row on screen: part (or all) of a line.
@@ -65,6 +69,8 @@ impl Default for WrapMap {
             starts: Vec::new(),
             indents: Vec::new(),
             first_rows: Vec::new(),
+            hidden: Vec::new(),
+            hidden_changed: false,
         }
     }
 }
@@ -79,19 +85,36 @@ impl WrapMap {
         self.width.is_some()
     }
 
+    /// Hides these lines (folded code), from the next update.
+    pub fn set_hidden(&mut self, hidden: Vec<Range<usize>>) {
+        if hidden != self.hidden {
+            self.hidden = hidden;
+            self.hidden_changed = true;
+        }
+    }
+
+    pub fn is_hidden(&self, line: usize) -> bool {
+        let i = self.hidden.partition_point(|r| r.end <= line);
+        self.hidden.get(i).is_some_and(|r| r.contains(&line))
+    }
+
     /// Brings the map up to date with the text, the row width (None to stop wrapping)
     /// and the blocks between lines. After typing, only the edited lines are wrapped again.
     pub fn update(&mut self, buffer: &Buffer, width: Option<usize>, blocks: &[BlockSpec]) {
         let width = width.map(|w| w.max(MIN_ROOM));
         let same_layout = width == self.width && blocks == self.blocks.as_slice();
-        if same_layout && buffer.revision() == self.revision && buffer.len_lines() == self.lines {
+        if same_layout && !self.hidden_changed && buffer.revision() == self.revision && buffer.len_lines() == self.lines
+        {
             return;
         }
-        if same_layout && self.general && self.rewrap_edits(buffer) {
+        let general = width.is_some() || !blocks.is_empty() || !self.hidden.is_empty();
+        if same_layout && self.general && general && self.rewrap_edits(buffer) {
             self.revision = buffer.revision();
+            self.hidden_changed = false;
             self.place_rows();
             return;
         }
+        self.hidden_changed = false;
         self.width = width;
         self.revision = buffer.revision();
         self.lines = buffer.len_lines();
@@ -100,7 +123,7 @@ impl WrapMap {
         self.indents.clear();
         self.first_rows.clear();
         self.block_rows.clear();
-        self.general = width.is_some() || !blocks.is_empty();
+        self.general = general;
         if !self.general {
             return;
         }
@@ -171,6 +194,7 @@ impl WrapMap {
         let mut order: Vec<usize> = (0..blocks.len()).collect();
         order.sort_by_key(|&i| blocks[i].before_line);
         let mut pending = order.into_iter().peekable();
+        let mut hidden = self.hidden.iter().peekable();
         let mut row = 0;
         for line in 0..self.lines {
             while let Some(&b) = pending.peek().filter(|&&b| blocks[b].before_line <= line) {
@@ -179,7 +203,12 @@ impl WrapMap {
                 pending.next();
             }
             self.first_rows.push(row);
-            row += self.starts[line].len();
+            while hidden.peek().is_some_and(|r| r.end <= line) {
+                hidden.next();
+            }
+            if !hidden.peek().is_some_and(|r| r.contains(&line)) {
+                row += self.starts[line].len();
+            }
         }
         for b in pending {
             self.block_rows.push((row, b));
@@ -205,6 +234,9 @@ impl WrapMap {
         }
         let line = line.min(self.lines.saturating_sub(1));
         let start = self.first_rows[line];
+        if self.is_hidden(line) {
+            return start..start;
+        }
         start..start + self.starts[line].len()
     }
 
@@ -377,6 +409,24 @@ mod tests {
         assert_eq!(map.indents, fresh.indents);
         assert_eq!(map.first_rows, fresh.first_rows);
         assert_eq!(map.block_rows, fresh.block_rows);
+    }
+
+    #[test]
+    fn folded_lines_take_no_rows() {
+        let buffer = Buffer::from_text("fn a() {\n    one\n    two\n}\nend");
+        let mut map = WrapMap::default();
+        map.set_hidden(vec![1..3]);
+        map.update(&buffer, None, &[]);
+        assert_eq!(map.rows(), 3);
+        // Row 1 is the closing line, row 2 the last.
+        assert_eq!(map.line_of_row(1), 3);
+        assert_eq!(map.to_display(3, 0, &buffer), (1, 0));
+        assert_eq!(map.to_offset(2, 0, &buffer), buffer.line_to_char(4));
+        assert!(map.text_rows(2).is_empty());
+        // Unfolding brings them back.
+        map.set_hidden(Vec::new());
+        map.update(&buffer, None, &[]);
+        assert_eq!(map.rows(), 5);
     }
 
     #[test]

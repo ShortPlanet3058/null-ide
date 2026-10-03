@@ -187,6 +187,35 @@ impl Highlighter {
     }
 }
 
+impl Highlighter {
+    /// Code that can fold, as line ranges: from the line a block opens on to the line it
+    /// closes on, at least one line apart (the lines between are what folding hides). One
+    /// per opening line, the longest. Call [`Self::sync`] first.
+    pub fn fold_ranges(&self) -> Vec<Range<usize>> {
+        let Some(tree) = &self.tree else { return Vec::new() };
+        let mut ends: std::collections::BTreeMap<usize, usize> = Default::default();
+        let mut cursor = tree.walk();
+        'walk: loop {
+            let node = cursor.node();
+            let (start, end) = (node.start_position().row, node.end_position().row);
+            // A node on one or two lines has nothing to hide; neither does the whole file.
+            if node.is_named() && end > start + 1 && node.parent().is_some() {
+                let longest = ends.entry(start).or_insert(end);
+                *longest = (*longest).max(end);
+            }
+            if end > start + 1 && cursor.goto_first_child() {
+                continue;
+            }
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    break 'walk;
+                }
+            }
+        }
+        ends.into_iter().map(|(start, end)| start..end).collect()
+    }
+}
+
 fn input_edit(e: &Edit) -> InputEdit {
     let point = |(row, column): (usize, usize)| Point { row, column };
     InputEdit {
@@ -254,6 +283,15 @@ pub(crate) mod tests {
             incremental.iter().any(|(r, s)| &text[r.clone()] == "\"é\"" && *s == Syntax::String),
             "{incremental:?}"
         );
+    }
+
+    #[test]
+    fn blocks_fold_from_their_first_line_to_their_last() {
+        let language = crate::languages::for_path(std::path::Path::new("a.rs")).unwrap();
+        let mut highlighter = Highlighter::new(language).unwrap();
+        let buffer = Buffer::from_text("fn a() {\n    if x {\n        y();\n    }\n}\nfn b() {}\n");
+        highlighter.sync(&buffer);
+        assert_eq!(highlighter.fold_ranges(), vec![0..4, 1..3]);
     }
 
     #[test]

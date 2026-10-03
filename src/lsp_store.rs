@@ -264,6 +264,16 @@ impl LspStore {
                     publish_diagnostics: Some(PublishDiagnosticsClientCapabilities::default()),
                     rename: Some(lsp_types::RenameClientCapabilities::default()),
                     references: Some(Default::default()),
+                    signature_help: Some(lsp_types::SignatureHelpClientCapabilities {
+                        signature_information: Some(lsp_types::SignatureInformationSettings {
+                            documentation_format: Some(vec![MarkupKind::PlainText]),
+                            parameter_information: Some(lsp_types::ParameterInformationSettings {
+                                label_offset_support: Some(true),
+                            }),
+                            active_parameter_support: Some(true),
+                        }),
+                        ..Default::default()
+                    }),
                     formatting: Some(Default::default()),
                     completion: Some(CompletionClientCapabilities {
                         // Plain text only: Null doesn't do snippet placeholders yet.
@@ -437,6 +447,22 @@ impl LspStore {
 
     fn position_params(path: &Path, position: Position) -> Option<TextDocumentPositionParams> {
         Some(TextDocumentPositionParams { text_document: TextDocumentIdentifier { uri: uri_for(path)? }, position })
+    }
+
+    /// The signature of the call around `position`, with the parameter it's at.
+    pub fn signature_help(
+        &self,
+        path: &Path,
+        position: Position,
+    ) -> impl Future<Output = Option<lsp_types::SignatureHelp>> + use<> {
+        let request = self.server_for(path).zip(Self::position_params(path, position)).map(|(server, params)| {
+            server.request::<lsp_types::request::SignatureHelpRequest>(lsp_types::SignatureHelpParams {
+                context: None,
+                text_document_position_params: params,
+                work_done_progress_params: Default::default(),
+            })
+        });
+        async move { request?.await.ok().flatten() }
     }
 
     pub fn hover(&self, path: &Path, position: Position) -> impl Future<Output = Option<Hover>> + use<> {

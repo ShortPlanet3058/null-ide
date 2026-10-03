@@ -24,11 +24,16 @@ pub struct ProjectContext {
 
 impl gpui::Global for ProjectContext {}
 
-/// One definition: the file it's in and its signature line.
+/// One definition: the file it's in, its signature line, where it is, and what it's called.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Definition {
     pub path: PathBuf,
     pub line: String,
+    /// Zero-based line number.
+    pub row: usize,
+    pub name: String,
+    /// The word that defines it, as the language writes it: `fn`, `class`, `struct`...
+    pub kind: &'static str,
 }
 
 /// Signature lines for the common languages, matched at the start of a line.
@@ -56,15 +61,67 @@ const SOURCE_EXTENSIONS: &[&str] = &[
 /// Words that start a C-looking line without it being a function.
 const NOT_FUNCTIONS: &[&str] = &["return", "if", "while", "for", "switch", "else", "do", "sizeof", "case"];
 
+/// How a definition line names what it defines, most specific first: (pattern, kind).
+/// A kind of "" takes the keyword the pattern matched.
+static NAMES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    [
+        (r"#\s*define\s+([A-Za-z_]\w*)", "macro"),
+        (r"\btypedef\b.*?([A-Za-z_]\w*)\s*;", "type"),
+        (r"\bfunc\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)", "func"),
+        (r"\b(fn|def|class|function\s*\*?|struct|enum|trait|interface|type|mod|union)\s+([A-Za-z_$][\w$]*)", ""),
+        (r"\b(const|static|let)\s+(?:mut\s+)?([A-Za-z_$][\w$]*)", ""),
+        (r"([A-Za-z_]\w*)\s*\(", "fn"),
+    ]
+    .into_iter()
+    .map(|(pattern, kind)| (Regex::new(pattern).unwrap(), kind))
+    .collect()
+});
+
+/// The name a definition line defines, and its kind.
+fn name_and_kind(line: &str) -> Option<(String, &'static str)> {
+    NAMES.iter().find_map(|(regex, kind)| {
+        let caps = regex.captures(line)?;
+        if kind.is_empty() {
+            let keyword = caps.get(1)?.as_str().split_whitespace().next()?.trim_end_matches('*');
+            let keyword = [
+                "fn",
+                "def",
+                "class",
+                "function",
+                "struct",
+                "enum",
+                "trait",
+                "interface",
+                "type",
+                "mod",
+                "union",
+                "const",
+                "static",
+                "let",
+            ]
+            .into_iter()
+            .find(|k| *k == keyword)?;
+            Some((caps.get(2)?.as_str().to_string(), keyword))
+        } else {
+            Some((caps.get(1)?.as_str().to_string(), *kind))
+        }
+    })
+}
+
 /// The definitions in one file's text.
 pub fn definitions_in(path: &Path, text: &str) -> Vec<Definition> {
     text.lines()
-        .filter(|l| l.len() < 220 && DEFINITION.is_match(l))
-        .filter(|l| {
+        .enumerate()
+        .filter(|(_, l)| l.len() < 220 && DEFINITION.is_match(l))
+        .filter(|(_, l)| {
             let first = l.split_whitespace().next().unwrap_or("");
             !NOT_FUNCTIONS.contains(&first.trim_start_matches('*'))
         })
-        .map(|l| Definition { path: path.to_path_buf(), line: l.trim().trim_end_matches('{').trim_end().to_string() })
+        .filter_map(|(row, l)| {
+            let line = l.trim().trim_end_matches('{').trim_end().to_string();
+            let (name, kind) = name_and_kind(&line)?;
+            Some(Definition { path: path.to_path_buf(), line, row, name, kind })
+        })
         .collect()
 }
 
@@ -172,8 +229,49 @@ mod tests {
     }
 
     #[test]
+    fn definitions_know_their_name_kind_and_line() {
+        let found = |path: &str, text: &str| -> Vec<(String, &'static str, usize)> {
+            definitions_in(Path::new(path), text).into_iter().map(|d| (d.name, d.kind, d.row)).collect()
+        };
+        assert_eq!(
+            found(
+                "a.rs",
+                "use x;\npub async fn parse(s: &str) {}\nimpl A {\n    fn len(&self) {}\n}\npub struct Ast;\nconst MAX: u8 = 1;\n"
+            ),
+            [
+                ("parse".into(), "fn", 1),
+                ("len".into(), "fn", 3),
+                ("Ast".into(), "struct", 5),
+                ("MAX".into(), "const", 6)
+            ]
+        );
+        assert_eq!(
+            found("a.py", "class Store:\n    def load(self):\n"),
+            [("Store".into(), "class", 0), ("load".into(), "def", 1)]
+        );
+        assert_eq!(
+            found("a.go", "func (s *Server) Start() error {\nfunc main() {\n"),
+            [("Start".into(), "func", 0), ("main".into(), "func", 1)]
+        );
+        assert_eq!(
+            found("a.c", "#define BUF 64\ntypedef struct s_list t_list;\nvoid my_putchar(char c)\n"),
+            [("BUF".into(), "macro", 0), ("t_list".into(), "type", 1), ("my_putchar".into(), "fn", 2)]
+        );
+        assert_eq!(
+            found("a.ts", "export function* gen() {}\nexport const run = () => 1;\n"),
+            [("gen".into(), "function", 0), ("run".into(), "const", 1)]
+        );
+    }
+
+    #[test]
     fn the_outline_starts_with_the_nearest_files() {
-        let d = |p: &str, l: &str| Definition { path: PathBuf::from(p), line: l.into() };
+        let d = |p: &str, l: &str| Definition {
+            path: PathBuf::from(p),
+            line: l.into(),
+            row: 0,
+            name: String::new(),
+            kind: "fn",
+        };
         let defs =
             [d("/p/far/x.c", "int far(void)"), d("/p/src/near.c", "int near(void)"), d("/p/src/me.c", "int me(void)")];
         let outline = outline_for(&defs, Path::new("/p/src/me.c"), Path::new("/p"), "//");

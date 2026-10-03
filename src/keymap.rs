@@ -70,8 +70,14 @@ impl Keymap {
                 KeyBinding::new("ctrl-g", AddNextOccurrence, editor),
                 KeyBinding::new("ctrl-secondary-g", SelectAllOccurrences, editor),
                 KeyBinding::new("secondary-b", GoToDefinition, editor),
+                KeyBinding::new("secondary-f12", crate::workspace::GoToSymbol, workspace),
+                KeyBinding::new("secondary-alt-o", crate::workspace::GoToSymbolInProject, workspace),
             ],
             Keymap::Sublime => vec![
+                // ⌘R is rename elsewhere; in Sublime it lists the file's symbols.
+                KeyBinding::new("secondary-r", crate::workspace::GoToSymbol, editor),
+                KeyBinding::new("secondary-r", crate::workspace::GoToSymbol, workspace),
+                KeyBinding::new("secondary-shift-r", crate::workspace::GoToSymbolInProject, workspace),
                 KeyBinding::new("secondary-shift-d", DuplicateLineDown, editor),
                 KeyBinding::new("ctrl-shift-k", DeleteLine, editor),
                 KeyBinding::new("ctrl-secondary-up", MoveLineUp, editor),
