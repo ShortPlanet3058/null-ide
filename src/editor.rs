@@ -347,7 +347,8 @@ pub struct Editor {
     pub marked: Option<Range<usize>>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
-    last_edit: Option<(EditKind, Instant)>,
+    /// The last edit, for grouping undo steps: its kind, when, and where the caret ended.
+    last_edit: Option<(EditKind, Instant, usize)>,
     pub scroll: Scroll,
     pub caret: CaretMotion,
     /// Last caret move or edit. The caret stays solid until it has been idle a moment.
@@ -919,7 +920,7 @@ impl Editor {
         }
         self.wrap.update(&self.buffer, self.wrap.width(), &self.block_specs());
         let (line, col) = self.buffer.point(self.selection.head);
-        let (row, display_col) = self.wrap.to_display(line, col);
+        let (row, display_col) = self.wrap.to_display(line, col, &self.buffer);
         let goal = self.goal_column.unwrap_or(display_col);
         let last = self.wrap.rows() - 1;
         let mut target = row as isize + lines;
@@ -1113,7 +1114,7 @@ impl Editor {
             return;
         }
         let now = Instant::now();
-        let grouped = matches!(self.last_edit, Some((last, at)) if last == kind && kind != EditKind::Other && now - at < UNDO_GROUP);
+        let grouped = matches!(self.last_edit, Some((last, at, _)) if last == kind && kind != EditKind::Other && now - at < UNDO_GROUP);
         if !grouped {
             let (selection, extra) = match &mut self.batch {
                 Some(batch) => (batch.before[0], batch.before[1..].to_vec()),
@@ -1130,7 +1131,7 @@ impl Editor {
             }
         }
         self.redo_stack.clear();
-        self.last_edit = Some((kind, now));
+        self.last_edit = Some((kind, now, self.selection.head));
         if let Some(batch) = &mut self.batch {
             batch.recorded = true;
         }
@@ -1140,14 +1141,40 @@ impl Editor {
         if kind == EditKind::Other {
             self.close_completion(cx);
         }
+        if self.starts_undo_step(&range, text, kind) {
+            self.last_edit = None;
+        }
         self.record_undo(kind);
         let end = self.buffer.replace(range, text);
+        if let Some((_, _, caret)) = &mut self.last_edit
+            && self.batch.is_none()
+        {
+            *caret = end;
+        }
         self.selection = Selection::caret(end);
         self.marked = None;
         self.goal_column = None;
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
+    }
+
+    /// Whether this edit starts a new undo step even right after another of its kind:
+    /// undo takes back a word at a time, and never more than one place's typing.
+    fn starts_undo_step(&self, range: &Range<usize>, text: &str, kind: EditKind) -> bool {
+        let Some((last, _, caret)) = self.last_edit else { return false };
+        if last != kind || kind == EditKind::Other {
+            return false;
+        }
+        // Typing somewhere else (with several cursors, every cursor moves: skip that).
+        let elsewhere = self.batch.is_none() && range.start != caret && range.end != caret;
+        // A new line, or a new word after a space.
+        let new_line = text.contains('\n');
+        let new_word = kind == EditKind::Typing
+            && text.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && range.start > 0
+            && self.buffer.char_at(range.start - 1).is_some_and(char::is_whitespace);
+        elsewhere || new_line || new_word
     }
 
     fn delete_or(&mut self, range: impl FnOnce(&Self) -> Range<usize>, cx: &mut Context<Self>) {
@@ -1527,7 +1554,7 @@ impl Editor {
         let x = position.x - layout.text_origin.x;
         match row.checked_sub(layout.first_row).and_then(|i| layout.rows.get(i)) {
             Some(r) => {
-                let byte = r.shaped.closest_index_for_x(x - r.x);
+                let byte = r.text_byte(r.shaped.closest_index_for_x(x - r.x));
                 // The row can show more than its text (a ghost completion): clicks past it land at its end.
                 let chars = r.text.get(..byte).map_or(r.text.chars().count(), |t| t.chars().count());
                 let col = r.row.cols.start + chars;
@@ -1860,8 +1887,15 @@ impl Editor {
     fn caret_bounds(&self, offset: usize) -> Option<Bounds<Pixels>> {
         let layout = self.layout.as_ref()?;
         let (line, col) = self.buffer.point(offset);
-        let (row, x) =
-            crate::element::position(&layout.rows, layout.first_row, &self.wrap, layout.char_width, line, col);
+        let (row, x) = crate::element::position(
+            &layout.rows,
+            layout.first_row,
+            &self.wrap,
+            &self.buffer,
+            layout.char_width,
+            line,
+            col,
+        );
         Some(Bounds::new(
             point(layout.text_origin.x + x, layout.text_origin.y + layout.line_height * row as f32),
             size(px(2.), layout.line_height),

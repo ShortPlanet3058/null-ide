@@ -31,6 +31,63 @@ pub struct RowLayout {
     pub shaped: ShapedLine,
     /// Where the text starts: past the indent on a continuation row.
     pub x: Pixels,
+    /// Tabs, drawn as spaces: each one's byte in `text`, and the bytes it gained.
+    pub tabs: Vec<(usize, usize)>,
+}
+
+impl RowLayout {
+    /// Where a byte of `text` is in the text as shown.
+    pub fn shown_byte(&self, byte: usize) -> usize {
+        byte + self.tabs.iter().take_while(|(b, _)| *b < byte).map(|(_, g)| g).sum::<usize>()
+    }
+
+    /// The byte of `text` shown at `shown`; inside a tab's spaces, its nearer edge.
+    pub fn text_byte(&self, shown: usize) -> usize {
+        let mut gained = 0;
+        for &(byte, extra) in &self.tabs {
+            let start = byte + gained;
+            if shown <= start {
+                break;
+            }
+            if shown <= start + extra {
+                return if shown - start <= extra / 2 { byte } else { byte + 1 };
+            }
+            gained += extra;
+        }
+        shown - gained
+    }
+}
+
+/// Tabs drawn as spaces up to the next tab stop: the text as shown, the runs stretched
+/// to match, and each tab's byte with the bytes it gained.
+fn expand_tabs(text: &str, runs: &[TextRun]) -> (String, Vec<TextRun>, Vec<(usize, usize)>) {
+    if !text.contains('\t') {
+        return (text.to_string(), runs.to_vec(), Vec::new());
+    }
+    let mut shown = String::with_capacity(text.len() + 8);
+    let mut tabs = Vec::new();
+    let mut col = 0;
+    for (byte, c) in text.char_indices() {
+        let width = crate::wrap::char_columns(c, col);
+        if c == '\t' {
+            shown.extend(std::iter::repeat_n(' ', width));
+            tabs.push((byte, width - 1));
+        } else {
+            shown.push(c);
+        }
+        col += width;
+    }
+    let mut start = 0;
+    let runs = runs
+        .iter()
+        .map(|run| {
+            let end = start + run.len;
+            let gained: usize = tabs.iter().filter(|(b, _)| (start..end).contains(b)).map(|(_, g)| g).sum();
+            start = end;
+            TextRun { len: run.len + gained, ..run.clone() }
+        })
+        .collect();
+    (shown, runs, tabs)
 }
 
 /// The row a (line, column) is on, and its x position from the text's left edge.
@@ -38,15 +95,16 @@ pub fn position(
     rows: &[RowLayout],
     first_row: usize,
     wrap: &WrapMap,
+    buffer: &crate::buffer::Buffer,
     char_width: Pixels,
     line: usize,
     col: usize,
 ) -> (usize, Pixels) {
-    let (row, display_col) = wrap.to_display(line, col);
+    let (row, display_col) = wrap.to_display(line, col, buffer);
     match row.checked_sub(first_row).and_then(|i| rows.get(i)) {
         Some(r) if r.row.line == line && r.row.block.is_none() => {
             let col = col.saturating_sub(r.row.cols.start);
-            (row, r.x + r.shaped.x_for_index(byte_of_column(&r.text, col)))
+            (row, r.x + r.shaped.x_for_index(r.shown_byte(byte_of_column(&r.text, col))))
         }
         _ => (row, char_width * display_col as f32),
     }
@@ -184,6 +242,11 @@ impl Element for EditorElement {
             let font = font(code_font.clone());
             let text_system = window.text_system().clone();
             let shape = |text: String, runs: &[TextRun]| text_system.shape_line(text.into(), font_size, runs, None);
+            // A row of text, with its tabs drawn as spaces.
+            let shape_row = |text: &str, runs: &[TextRun]| {
+                let (shown, runs, tabs) = expand_tabs(text, runs);
+                (shape(shown, &runs), tabs)
+            };
 
             let char_width = shape("0".repeat(10), &[run(10, &font, theme.foreground)]).width / 10.;
             let total_lines = editor.buffer.len_lines();
@@ -201,7 +264,7 @@ impl Element for EditorElement {
                 cx.global::<Settings>().word_wrap.then(|| ((text_width - BAR - cw) / cw).floor().max(1.) as usize);
             editor.wrap.update(&editor.buffer, wrap_width, &editor.block_specs());
             let total_rows = editor.wrap.rows();
-            let (caret_row, _) = editor.wrap.to_display(caret_line, caret_col);
+            let (caret_row, _) = editor.wrap.to_display(caret_line, caret_col, &editor.buffer);
 
             // Vertical scroll: follow the caret after keyboard moves, then glide toward the target.
             let max_y = total_rows.saturating_sub(1) as f32 * lh;
@@ -281,14 +344,14 @@ impl Element for EditorElement {
                             crate::editor::BlockKind::Writing(lines) => {
                                 // The AI's new code, arriving: plain text on the "added" tint.
                                 let text = lines.get(i).cloned().unwrap_or_default();
-                                let shaped = shape(text.clone(), &[run(text.len(), &font, theme.foreground)]);
-                                return RowLayout { x: px(0.), row, text, shaped };
+                                let (shaped, tabs) = shape_row(&text, &[run(text.len(), &font, theme.foreground)]);
+                                return RowLayout { x: px(0.), row, text, shaped, tabs };
                             }
                             crate::editor::BlockKind::Ghost(lines) => {
                                 // The rest of a ghost completion: faint, nothing struck.
                                 let text = lines.get(i).cloned().unwrap_or_default();
-                                let shaped = shape(text.clone(), &[run(text.len(), &font, theme.faint)]);
-                                return RowLayout { x: px(0.), row, text, shaped };
+                                let (shaped, tabs) = shape_row(&text, &[run(text.len(), &font, theme.faint)]);
+                                return RowLayout { x: px(0.), row, text, shaped, tabs };
                             }
                             _ => String::new(),
                         };
@@ -298,8 +361,8 @@ impl Element for EditorElement {
                         struck.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: Some(theme.faint) });
                         let runs: Vec<TextRun> =
                             if indent > 0 { vec![run(indent, &font, theme.faint), struck] } else { vec![struck] };
-                        let shaped = shape(text.clone(), &runs);
-                        return RowLayout { x: px(0.), row, text, shaped };
+                        let (shaped, tabs) = shape_row(&text, &runs);
+                        return RowLayout { x: px(0.), row, text, shaped, tabs };
                     }
                     let i = row.line - lines_shown.start;
                     let line_text = &texts[i];
@@ -332,21 +395,23 @@ impl Element for EditorElement {
                         runs.push(run(ghost.len(), &font, theme.faint));
                         runs.extend(runs_for(after, line_byte + at, &editor.spans, &under_after, &theme, &font));
                         let shown = format!("{before}{ghost}{after}");
-                        let shaped = shape(shown, &runs);
-                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped };
+                        let (shaped, tabs) = shape_row(&shown, &runs);
+                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
                     }
                     // The code the AI is rewriting fades while the new code appears.
                     if editor.ai_writing_lines().is_some_and(|l| l.contains(&row.line)) {
-                        let shaped = shape(text.clone(), &[run(text.len(), &font, theme.faint)]);
-                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped };
+                        let (shaped, tabs) = shape_row(&text, &[run(text.len(), &font, theme.faint)]);
+                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
                     }
                     let runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
-                    let shaped = shape(text.clone(), &runs);
-                    RowLayout { x: char_width * row.indent as f32, row, text, shaped }
+                    let (shaped, tabs) = shape_row(&text, &runs);
+                    RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs }
                 })
                 .collect();
             let wrap = &editor.wrap;
-            let pos = |line: usize, col: usize| position(&row_layouts, visible.start, wrap, char_width, line, col);
+            let pos = |line: usize, col: usize| {
+                position(&row_layouts, visible.start, wrap, &editor.buffer, char_width, line, col)
+            };
             let row_of_line = |line: usize| wrap.first_row(line);
 
             // Horizontal scroll: keep the caret in view, never scroll past the longest visible
@@ -801,5 +866,35 @@ impl Element for EditorElement {
         for (mark, color) in &prepaint.scroll_marks {
             window.paint_quad(fill(*mark, *color));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tabs_show_as_spaces_to_the_next_stop() {
+        let font = gpui::font("Mono");
+        let text = "a\tb\t\tc";
+        let runs = [run(2, &font, gpui::black()), run(text.len() - 2, &font, gpui::white())];
+        let (shown, runs, tabs) = expand_tabs(text, &runs);
+        assert_eq!(shown, "a   b   ".to_string() + "    c");
+        assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), shown.len());
+        assert_eq!(runs[0].len, 4);
+        let row = RowLayout {
+            row: Row { line: 0, cols: 0..6, indent: 0, last: true, block: None },
+            text: text.into(),
+            shaped: ShapedLine::default(),
+            x: px(0.),
+            tabs,
+        };
+        // "b" is byte 2 of the text and byte 4 as shown, and back.
+        assert_eq!(row.shown_byte(2), 4);
+        assert_eq!(row.text_byte(4), 2);
+        assert_eq!(row.text_byte(row.shown_byte(5)), 5);
+        // A click inside a tab's spaces lands on its nearer edge.
+        assert_eq!(row.text_byte(2), 1);
+        assert_eq!(row.text_byte(3), 2);
     }
 }

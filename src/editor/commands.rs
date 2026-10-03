@@ -403,6 +403,34 @@ mod editor_tests {
     }
 
     #[gpui::test]
+    fn undo_takes_back_a_word_at_a_time(cx: &mut TestAppContext) {
+        use super::super::EditKind;
+        let e = editor(cx, "\n", "x.rs");
+        let type_at = |cx: &mut TestAppContext, text: &str| {
+            for c in text.chars() {
+                e.update(cx, |e, cx| {
+                    let at = e.selection.head;
+                    e.edit(at..at, &c.to_string(), EditKind::Typing, cx)
+                });
+            }
+        };
+        type_at(cx, "let total = 1;");
+        let undo = |cx: &mut TestAppContext| e.update(cx, |e, cx| e.step_history(true, cx));
+        undo(cx);
+        assert_eq!(text(cx, &e), "let total = \n");
+        // A symbol goes with the word before it.
+        undo(cx);
+        assert_eq!(text(cx, &e), "let \n");
+        // Typing somewhere else is its own step, even right away.
+        select(cx, &e, 0, 0);
+        type_at(cx, "a");
+        select(cx, &e, 5, 5);
+        type_at(cx, "b");
+        undo(cx);
+        assert_eq!(text(cx, &e), "alet \n");
+    }
+
+    #[gpui::test]
     fn toggles_comments_over_a_selection(cx: &mut TestAppContext) {
         let e = editor(cx, "fn a() {\n    one();\n    two();\n}\n", "x.rs");
         select(cx, &e, 9, 30); // lines 2-3
