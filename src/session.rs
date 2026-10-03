@@ -13,6 +13,8 @@ pub struct Session {
     pub active: Option<usize>,
     /// The tab the right side showed, when the window was split.
     pub shown_right: Option<usize>,
+    /// How much of the width the left side took, when split.
+    pub split_ratio: Option<f32>,
     /// Folders expanded in the file tree.
     pub expanded: Vec<PathBuf>,
     /// Files opened lately, most recent first, for ⌘P.
@@ -31,6 +33,8 @@ pub struct TabState {
     pub top_line: usize,
     /// 1 for the right side of a split window.
     pub side: usize,
+    /// Folded regions, as (first line, last line).
+    pub folds: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]

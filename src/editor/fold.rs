@@ -44,6 +44,19 @@ impl Editor {
         &self.folds.foldable.as_ref().unwrap().1
     }
 
+    /// The folded regions, as (first line, last line), to save with the session.
+    pub fn folded_regions(&self) -> Vec<(usize, usize)> {
+        self.folds.folded.iter().map(|r| (r.start, r.end)).collect()
+    }
+
+    /// Folds these regions again (from a session), skipping any the text no longer has.
+    pub fn restore_folds(&mut self, regions: &[(usize, usize)], cx: &mut Context<Self>) {
+        let lines = self.buffer.len_lines();
+        self.folds.folded = regions.iter().filter(|(a, b)| a + 1 < *b && *b < lines).map(|&(a, b)| a..b).collect();
+        self.folds.folded.sort_by_key(|r| r.start);
+        self.apply_folds(cx);
+    }
+
     pub fn is_folded(&self, line: usize) -> bool {
         self.folds.folded.iter().any(|r| r.start == line)
     }
