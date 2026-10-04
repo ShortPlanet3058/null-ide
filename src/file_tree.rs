@@ -102,6 +102,12 @@ pub enum FileTreeEvent {
         from: PathBuf,
         to: PathBuf,
     },
+    /// A file is to be renamed: the workspace lets its language server update the code
+    /// that names it, then calls [`FileTree::finish_rename`].
+    RenameRequested {
+        from: PathBuf,
+        to: PathBuf,
+    },
     Trashed(PathBuf),
     /// Something to tell the person, like a failed operation.
     Notice(String),
@@ -216,6 +222,9 @@ pub struct FileTree {
     /// Files changed since the last commit, and the folders holding any.
     git: HashMap<PathBuf, crate::git::FileStatus>,
     git_folders: HashSet<PathBuf>,
+    /// Files aren't renamed straight away: the workspace is asked first (see
+    /// [`FileTreeEvent::RenameRequested`]).
+    pub ask_before_renaming: bool,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -233,6 +242,7 @@ impl FileTree {
             selected: None,
             edit: None,
             menu: None,
+            ask_before_renaming: false,
             scroll: UniformListScrollHandle::new(),
             git: HashMap::new(),
             git_folders: HashSet::new(),
@@ -559,6 +569,26 @@ impl FileTree {
         let result = match &edit.kind {
             EditKind::NewFile { dir } => fs_ops::create_file(dir, &name).map(|p| (None, p)),
             EditKind::NewFolder { dir } => fs_ops::create_dir(dir, &name).map(|p| (None, p)),
+            // A file's rename waits for the workspace (its code may need updating first).
+            EditKind::Rename { path } if self.ask_before_renaming && path.is_file() => {
+                let from = path.clone();
+                match fs_ops::rename_target(&from, &name) {
+                    Ok(to) => {
+                        self.edit = None;
+                        self.rebuild();
+                        window.focus(&self.focus_handle);
+                        if to != from {
+                            cx.emit(FileTreeEvent::RenameRequested { from, to });
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(edit) = &mut self.edit {
+                            edit.error = Some(error);
+                        }
+                    }
+                }
+                return cx.notify();
+            }
             EditKind::Rename { path } => fs_ops::rename(path, &name).map(|p| (Some(path.clone()), p)),
         };
         match result {
@@ -585,6 +615,20 @@ impl FileTree {
             }
         }
         cx.notify();
+    }
+
+    /// Renames a file the workspace was asked about (see [`FileTreeEvent::RenameRequested`]).
+    pub fn finish_rename(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) -> Result<(), String> {
+        let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let to = fs_ops::rename(from, &name)?;
+        self.children.clear();
+        self.expand_to(&to);
+        self.selected = Some(to.clone());
+        self.rebuild();
+        self.reveal_selected();
+        cx.emit(FileTreeEvent::Renamed { from: from.to_path_buf(), to });
+        cx.notify();
+        Ok(())
     }
 
     fn cancel_edit(&mut self, _: &CancelEdit, window: &mut Window, cx: &mut Context<Self>) {

@@ -437,7 +437,12 @@ impl Workspace {
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
         let lsp = cx.new(|_| LspStore::new(root.clone()));
         let ignore_rules = crate::project_index::ignore_rules(&root);
-        let tree = cx.new(|cx| FileTree::new(root, cx));
+        let tree = cx.new(|cx| {
+            let mut tree = FileTree::new(root, cx);
+            // Renaming a file can update the code that names it: the workspace sees to it.
+            tree.ask_before_renaming = true;
+            tree
+        });
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) | FileTreeEvent::Created(path) => this.open_file(path.clone(), window, cx),
@@ -446,6 +451,7 @@ impl Workspace {
                     window.focus(&this.tree.focus_handle(cx));
                 }
                 FileTreeEvent::Renamed { from, to } => this.paths_renamed(from, to, cx),
+                FileTreeEvent::RenameRequested { from, to } => this.rename_file(from.clone(), to.clone(), cx),
                 FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
                 FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),
             }),
@@ -1210,6 +1216,40 @@ impl Workspace {
     }
 
     /// Points open tabs at their new location after a file or folder was renamed.
+    /// Renames a file, first letting its language server update the code that names it
+    /// (`mod parser;`, imports). A server that's slow to answer doesn't hold it up long.
+    fn rename_file(&mut self, from: PathBuf, to: PathBuf, cx: &mut Context<Self>) {
+        const WAIT: Duration = Duration::from_secs(2);
+        let request = self.lsp.read(cx).will_rename(&from, &to);
+        cx.spawn(async move |this, cx| {
+            let timeout = cx.background_executor().timer(WAIT);
+            let edit = futures::select_biased! {
+                edit = futures::FutureExt::fuse(request) => edit,
+                _ = futures::FutureExt::fuse(timeout) => None,
+            };
+            this.update(cx, |this, cx| {
+                let changed = edit.map(|edit| this.apply_edit_to_files(edit, cx));
+                let result = this.tree.update(cx, |tree, cx| tree.finish_rename(&from, &to, cx));
+                if let Err(error) = result {
+                    return this.show_notice(error, cx);
+                }
+                this.lsp.read(cx).did_rename(&from, &to);
+                match changed {
+                    Some((_, _, failed)) if !failed.is_empty() => {
+                        this.show_notice(format!("Renamed, but couldn't update {}", failed.join(", ")), cx)
+                    }
+                    Some((_, files, _)) if files > 0 => {
+                        let which = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
+                        this.show_notice(format!("Renamed, and updated {which} that named it"), cx)
+                    }
+                    _ => {}
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn paths_renamed(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             let moved = tab.editor.read(cx).path().and_then(|p| moved_path(p, from, to));
@@ -4802,6 +4842,33 @@ mod tests {
             w.run_tab_menu_item(CloseToTheRight, window, cx);
             assert_eq!(w.tabs.len(), 1);
             assert!(w.tab_menu.is_none());
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn renaming_a_file_without_a_server_just_renames_it(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "hello\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let (from, to) = (dir.join("notes.txt"), dir.join("ideas.txt"));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(from.clone(), window, cx);
+            w.rename_file(from.clone(), to.clone(), cx);
+        });
+        cx.run_until_parked();
+        assert!(!from.exists() && to.exists());
+        workspace.update(cx, |w, cx| {
+            assert_eq!(w.active_editor().unwrap().read(cx).path(), Some(to.as_path()));
         });
         std::fs::remove_dir_all(&dir).ok();
     }

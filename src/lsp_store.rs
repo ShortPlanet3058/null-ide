@@ -323,6 +323,12 @@ impl LspStore {
                 window: Some(WindowClientCapabilities { work_done_progress: Some(true), ..Default::default() }),
                 workspace: Some(lsp_types::WorkspaceClientCapabilities {
                     apply_edit: Some(true),
+                    // Renaming a file can update the code that names it (`mod parser;`).
+                    file_operations: Some(lsp_types::WorkspaceFileOperationsClientCapabilities {
+                        will_rename: Some(true),
+                        did_rename: Some(true),
+                        ..Default::default()
+                    }),
                     workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
                         document_changes: Some(true),
                         ..Default::default()
@@ -638,6 +644,29 @@ impl LspStore {
         async move {
             let Some(request) = request else { return Vec::new() };
             request.await.ok().flatten().unwrap_or_default()
+        }
+    }
+
+    /// The edits to make before renaming `from` to `to`, so the code naming it still does.
+    pub fn will_rename(
+        &self,
+        from: &Path,
+        to: &Path,
+    ) -> impl Future<Output = Option<lsp_types::WorkspaceEdit>> + use<> {
+        let request = self.server_for(from).zip(uri_for(from)).zip(uri_for(to)).map(|((server, old), new)| {
+            server.request::<lsp_types::request::WillRenameFiles>(lsp_types::RenameFilesParams {
+                files: vec![lsp_types::FileRename { old_uri: old.to_string(), new_uri: new.to_string() }],
+            })
+        });
+        async move { request?.await.ok().flatten() }
+    }
+
+    /// Tells the server a file was renamed.
+    pub fn did_rename(&self, from: &Path, to: &Path) {
+        if let Some(((server, old), new)) = self.server_for(from).zip(uri_for(from)).zip(uri_for(to)) {
+            server.notify::<lsp_types::notification::DidRenameFiles>(lsp_types::RenameFilesParams {
+                files: vec![lsp_types::FileRename { old_uri: old.to_string(), new_uri: new.to_string() }],
+            });
         }
     }
 

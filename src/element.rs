@@ -1294,7 +1294,7 @@ mod tests {
 mod timing {
     use super::*;
     use crate::buffer::Buffer;
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
 
     /// Not a check: how long a keystroke takes on a big file, from the edit to the editor
     /// drawn again (the test platform shapes text for free, so this is Null's own work).
