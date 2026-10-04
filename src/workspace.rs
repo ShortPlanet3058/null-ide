@@ -62,6 +62,7 @@ actions!(
         ToggleInlayHints,
         ToggleFocusMode,
         RunTask,
+        OpenRecent,
         NextProblem,
         ToggleIndentGuides,
         ToggleStickyScroll,
@@ -118,6 +119,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("secondary-shift-b", RunTask, ctx),
+        KeyBinding::new("alt-secondary-o", OpenRecent, ctx),
         KeyBinding::new("f8", NextProblem, ctx),
         KeyBinding::new("shift-f8", PreviousProblem, ctx),
         KeyBinding::new("ctrl-tab", NextTab, ctx),
@@ -157,6 +159,7 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-shift-]", NextTab, ctx),
             KeyBinding::new("cmd-shift-[", PreviousTab, ctx),
             KeyBinding::new("ctrl--", GoBack, ctx),
+            KeyBinding::new("ctrl-r", OpenRecent, ctx),
             KeyBinding::new("ctrl-shift--", GoForward, ctx),
             KeyBinding::new("ctrl-_", GoForward, ctx),
         ]);
@@ -396,6 +399,8 @@ pub struct Workspace {
     navigating: bool,
     /// Commands run from ⌘⇧B, the last first.
     recent_runs: Vec<String>,
+    /// The projects for the list about to open.
+    pending_projects: Vec<PathBuf>,
     /// The tasks for the list about to open.
     pending_tasks: Vec<crate::tasks::ProjectTask>,
     /// The branches for the branch list about to open.
@@ -546,6 +551,7 @@ impl Workspace {
             pending_branches: Vec::new(),
             recent_runs: Vec::new(),
             pending_tasks: Vec::new(),
+            pending_projects: Vec::new(),
             focus_mode: false,
             tab_menu: None,
             back: Vec::new(),
@@ -2003,6 +2009,7 @@ impl Workspace {
             (File, "New File in Project…".into(), Box::new(crate::file_tree::NewFile)),
             (File, "New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
             (File, "Open File or Folder…".into(), Box::new(Open)),
+            (File, "Open Recent…".into(), Box::new(OpenRecent)),
             (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
             (Go, "Go to File…".into(), Box::new(TogglePalette)),
             (Go, "Go to Symbol in Project…".into(), Box::new(GoToSymbolInProject)),
@@ -2253,6 +2260,7 @@ impl Workspace {
             locations,
             branches: std::mem::take(&mut self.pending_branches),
             tasks: std::mem::take(&mut self.pending_tasks),
+            projects: std::mem::take(&mut self.pending_projects),
         };
         let palette = cx.new(|cx| Palette::new(options, cx));
         let subscription = cx.subscribe_in(&palette, window, |this, palette, event, window, cx| match event {
@@ -2261,6 +2269,11 @@ impl Workspace {
                 let branch = branch.clone();
                 this.close_palette(window, cx);
                 this.change_branch(Ok(branch), cx);
+            }
+            PaletteEvent::OpenProject(path) => {
+                let path = path.clone();
+                this.close_palette(window, cx);
+                this.open_paths(vec![path], window, cx);
             }
             PaletteEvent::RunCommand(command) => {
                 let command = command.clone();
@@ -2959,6 +2972,17 @@ impl Workspace {
             found.extend(list.into_iter().map(|d| (path.clone(), d)));
         }
         found
+    }
+
+    /// ⌥⌘O: projects opened lately (not this one), to switch to.
+    fn open_recent(&mut self, _: &OpenRecent, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let projects: Vec<PathBuf> = crate::session::recent_projects().into_iter().filter(|p| *p != root).collect();
+        if projects.is_empty() {
+            return self.show_notice("No other projects opened lately".into(), cx);
+        }
+        self.pending_projects = projects;
+        self.open_palette_with(PaletteKind::Projects, None, Vec::new(), window, cx);
     }
 
     /// ⌘⇧B: the project's tasks (the last run first), to run one in the terminal.
@@ -3898,6 +3922,7 @@ impl Workspace {
                     .flex_col()
                     .gap(px(12.))
                     .children(hint(&Open, "Open a file or folder"))
+                    .children(hint(&OpenRecent, "Open a recent project"))
                     .children(hint(&TogglePalette, "Find a file"))
                     .children(hint(&ToggleSidebar, "Show or hide the files")),
             )
@@ -4416,6 +4441,7 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
+            .on_action(cx.listener(Self::open_recent))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::next_terminal))
             .on_action(cx.listener(Self::next_problem))
