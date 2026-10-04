@@ -2863,8 +2863,25 @@ impl Workspace {
     fn show_problems(&mut self, _: &ShowProblems, window: &mut Window, cx: &mut Context<Self>) {
         use crate::palette::{Location, LocationKind};
         use lsp_types::DiagnosticSeverity as S;
-        let found: Vec<(PathBuf, lsp_types::Diagnostic)> =
-            self.lsp.read(cx).all_diagnostics().map(|(p, d)| (p.clone(), d.clone())).collect();
+        // Open files say where their problems are now, edits since included.
+        let mut open: Vec<(PathBuf, Vec<lsp_types::Diagnostic>)> = Vec::new();
+        for tab in &self.tabs {
+            let editor = tab.editor.read(cx);
+            // A file open on both sides counts once.
+            if let Some(path) = editor.path().filter(|p| !open.iter().any(|(o, _)| o == p)) {
+                open.push((path.to_path_buf(), editor.current_diagnostics(cx)));
+            }
+        }
+        let mut found: Vec<(PathBuf, lsp_types::Diagnostic)> = self
+            .lsp
+            .read(cx)
+            .all_diagnostics()
+            .filter(|(p, _)| !open.iter().any(|(o, _)| o == *p))
+            .map(|(p, d)| (p.clone(), d.clone()))
+            .collect();
+        for (path, list) in open {
+            found.extend(list.into_iter().map(|d| (path.clone(), d)));
+        }
         let mut locations: Vec<Location> = found
             .into_iter()
             .filter_map(|(path, d)| {

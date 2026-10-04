@@ -368,6 +368,7 @@ pub struct Editor {
     spans_for: Option<(u64, Range<usize>)>,
     /// `problems()` for a (diagnostics version, buffer revision).
     problems_cache: std::cell::RefCell<Option<((u64, u64), std::rc::Rc<Vec<intel::Problem>>)>>,
+    pinned: std::cell::RefCell<intel::Pinned>,
     /// The main cursor: the one the view follows. Any others are in `extra`.
     pub selection: Selection,
     goal_column: Option<usize>,
@@ -471,6 +472,7 @@ impl Editor {
             spans_for: None,
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
             problems_cache: Default::default(),
+            pinned: Default::default(),
             selection: Selection::caret(0),
             goal_column: None,
             extra: Vec::new(),

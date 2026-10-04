@@ -68,21 +68,27 @@ impl Editor {
             lsp_types::Range { start: self.lsp_position(selection.start), end: self.lsp_position(selection.end) };
         // The problems on the lines around the caret, so the server offers their fixes.
         let lines = range.start.line..=range.end.line;
-        let diagnostics: Vec<_> = lsp
-            .read(cx)
-            .diagnostics(&path)
+        let problems: Vec<_> = self
+            .problems(cx)
             .iter()
-            .filter(|d| d.range.start.line <= *lines.end() && d.range.end.line >= *lines.start())
+            .filter(|p| {
+                let (start, end) = (self.lsp_position(p.range.start).line, self.lsp_position(p.range.end).line);
+                start <= *lines.end() && end >= *lines.start()
+            })
             .cloned()
             .collect();
         // The caret only has to be on the problem's line, not on the problem itself.
-        let inside = |r: &lsp_types::Range| r.start <= range.start && range.end <= r.end;
+        let inside = |p: &super::intel::Problem| p.range.start <= selection.start && selection.end <= p.range.end;
         if selection.is_empty()
-            && !diagnostics.iter().any(|d| inside(&d.range))
-            && let Some(first) = diagnostics.first()
+            && !problems.iter().any(inside)
+            && let Some(first) = problems.first()
         {
-            range = first.range;
+            range = lsp_types::Range {
+                start: self.lsp_position(first.range.start),
+                end: self.lsp_position(first.range.end),
+            };
         }
+        let diagnostics = problems.into_iter().map(|p| p.diagnostic).collect();
         let request = lsp.read(cx).code_actions(&path, range, diagnostics);
         let version = self.buffer.version();
         self.close_completion(cx);
@@ -105,9 +111,11 @@ impl Editor {
 
     /// Whether the caret's line has a problem the server reported.
     pub fn caret_on_problem(&self, cx: &App) -> bool {
-        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return false };
-        let line = self.lsp_position(self.selection.head).line;
-        lsp.read(cx).diagnostics(path).iter().any(|d| d.range.start.line <= line && line <= d.range.end.line)
+        let line = self.buffer.point(self.selection.head).0;
+        self.problems(cx).iter().any(|p| {
+            let (start, end) = (self.buffer.point(p.range.start).0, self.buffer.point(p.range.end).0);
+            start <= line && line <= end
+        })
     }
 
     pub(super) fn close_fixes(&mut self, cx: &mut Context<Self>) {

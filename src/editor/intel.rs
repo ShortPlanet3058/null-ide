@@ -37,6 +37,43 @@ pub struct Problem {
     pub range: Range<usize>,
     pub severity: DiagnosticSeverity,
     pub message: String,
+    /// As the server sent it, to hand back when asking for fixes.
+    pub diagnostic: lsp_types::Diagnostic,
+}
+
+/// The server's problems for this file, each pinned to its text (byte ranges) so it
+/// moves with edits until the server says otherwise. None for a problem whose text
+/// was deleted: it stays gone even when the server repeats it unchanged.
+#[derive(Default)]
+pub(super) struct Pinned {
+    version: u64,
+    revision: u64,
+    items: Vec<(lsp_types::Diagnostic, Option<Range<usize>>)>,
+}
+
+/// Where a byte range ends up after `edit`, or None once the text it covered is replaced.
+fn map_range(range: Range<usize>, edit: &crate::buffer::Edit) -> Option<Range<usize>> {
+    let (start, old_end, new_end) = (edit.start_byte, edit.old_end_byte, edit.new_end_byte);
+    if start < old_end && start <= range.start && range.end <= old_end {
+        return None;
+    }
+    let shift = |p: usize| p - old_end + new_end;
+    // Typing right before a problem pushes it along; typing right after leaves it be.
+    let first = if range.start < start {
+        range.start
+    } else if range.start >= old_end {
+        shift(range.start)
+    } else {
+        start
+    };
+    let last = if range.end <= start {
+        range.end
+    } else if range.end >= old_end {
+        shift(range.end)
+    } else {
+        new_end
+    };
+    Some(first..last.max(first))
 }
 
 impl Editor {
@@ -132,18 +169,75 @@ impl Editor {
         {
             return problems.clone();
         }
-        let problems: Rc<Vec<Problem>> = Rc::new(
-            lsp.diagnostics(path)
+        let (version, revision) = key;
+        let mut pinned = self.pinned.borrow_mut();
+        // Bring the pinned problems up to the current text.
+        let mut lost_track = false;
+        if pinned.revision != revision {
+            match self.buffer.edits_since(pinned.revision) {
+                Some(edits) => {
+                    let edits: Vec<_> = edits.collect();
+                    for (_, range) in &mut pinned.items {
+                        *range = range.take().and_then(|r| edits.iter().try_fold(r, |r, e| map_range(r, e)));
+                    }
+                }
+                // After an undo (or too many edits to follow), go by the server's positions.
+                None => lost_track = true,
+            }
+            pinned.revision = revision;
+        }
+        // New problems from the server: ones it repeats unchanged (rust-analyzer resends
+        // cargo check's until the next save) keep their pinned place.
+        if pinned.version != version || lost_track {
+            let rope = self.buffer.rope();
+            let byte = |p: Position| rope.char_to_byte(self.offset_from_lsp(p).min(rope.len_chars()));
+            let mut previous = std::mem::take(&mut pinned.items);
+            pinned.items = lsp
+                .diagnostics(path)
                 .iter()
-                .map(|d| Problem {
-                    range: self.offset_from_lsp(d.range.start)..self.offset_from_lsp(d.range.end),
-                    severity: d.severity.unwrap_or(DiagnosticSeverity::ERROR),
-                    message: d.message.clone(),
+                .map(|d| {
+                    let kept = (!lost_track)
+                        .then(|| previous.iter().position(|(old, _)| old == d))
+                        .flatten()
+                        .map(|i| previous.swap_remove(i).1);
+                    (d.clone(), kept.unwrap_or_else(|| Some(byte(d.range.start)..byte(d.range.end))))
+                })
+                .collect();
+            pinned.version = version;
+        }
+        let rope = self.buffer.rope();
+        let char_at = |b: usize| rope.byte_to_char(b.min(rope.len_bytes()));
+        let problems: Rc<Vec<Problem>> = Rc::new(
+            pinned
+                .items
+                .iter()
+                .filter_map(|(d, range)| {
+                    let range = range.clone()?;
+                    Some(Problem {
+                        range: char_at(range.start)..char_at(range.end),
+                        severity: d.severity.unwrap_or(DiagnosticSeverity::ERROR),
+                        message: d.message.clone(),
+                        diagnostic: d.clone(),
+                    })
                 })
                 .collect(),
         );
         *self.problems_cache.borrow_mut() = Some((key, problems.clone()));
         problems
+    }
+
+    /// This file's problems as a server would describe them for the text as it is now.
+    pub fn current_diagnostics(&self, cx: &App) -> Vec<lsp_types::Diagnostic> {
+        self.problems(cx)
+            .iter()
+            .map(|p| lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: self.lsp_position(p.range.start),
+                    end: self.lsp_position(p.range.end),
+                },
+                ..p.diagnostic.clone()
+            })
+            .collect()
     }
 
     /// Shows, moves or hides the hover card to match the mouse and the Alt key.
@@ -442,6 +536,37 @@ mod tests {
     use super::*;
     use lsp_types::{MarkupContent, MarkupKind};
 
+    fn insert(at: usize, len: usize) -> crate::buffer::Edit {
+        edit(at, at, at + len)
+    }
+
+    fn edit(start: usize, old_end: usize, new_end: usize) -> crate::buffer::Edit {
+        crate::buffer::Edit {
+            start_byte: start,
+            old_end_byte: old_end,
+            new_end_byte: new_end,
+            start: (0, 0),
+            old_end: (0, 0),
+            new_end: (0, 0),
+            lsp_range: None,
+            text: String::new(),
+        }
+    }
+
+    #[test]
+    fn problems_move_with_the_text() {
+        // Typed before: pushed along. Typed right after: left be. Typed inside: grows.
+        assert_eq!(map_range(10..15, &insert(2, 3)), Some(13..18));
+        assert_eq!(map_range(10..15, &insert(10, 3)), Some(13..18));
+        assert_eq!(map_range(10..15, &insert(15, 3)), Some(10..15));
+        assert_eq!(map_range(10..15, &insert(12, 3)), Some(10..18));
+        // Text before it deleted: pulled back. Its own text replaced: gone.
+        assert_eq!(map_range(10..15, &edit(0, 4, 0)), Some(6..11));
+        assert_eq!(map_range(10..15, &edit(8, 16, 9)), None);
+        // Part of it deleted: what's left.
+        assert_eq!(map_range(10..15, &edit(12, 20, 12)), Some(10..12));
+    }
+
     #[test]
     fn splits_rust_analyzer_style_hover() {
         let value = "```rust\nnull_ide::buffer\n```\n\n```rust\npub struct Buffer\n```\n\n---\n\nText **storage**, see [ropey](https://x).";
@@ -452,5 +577,49 @@ mod tests {
             texts,
             vec![(true, "null_ide::buffer"), (true, "pub struct Buffer"), (false, "Text storage, see ropey.")]
         );
+    }
+
+    #[gpui::test]
+    fn problems_stay_on_their_text_until_the_server_says_otherwise(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        use gpui::AppContext as _;
+        use lsp_types::{Diagnostic, Range as LspRange};
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let path = std::path::PathBuf::from("/tmp/x.rs");
+        let lsp = cx.new(|_| LspStore::new("/tmp".into()));
+        let (e, cx) = cx
+            .add_window_view(|_, cx| Editor::new(Buffer::from_text("fn main() {\n    x\n}\n"), Some(path.clone()), cx));
+        let stale = Diagnostic {
+            range: LspRange { start: Position::new(1, 4), end: Position::new(1, 5) },
+            message: "cannot find value `x`".into(),
+            ..Default::default()
+        };
+        let publish = |list: Vec<Diagnostic>, cx: &mut gpui::VisualTestContext| {
+            lsp.update(cx, |lsp, _| lsp.set_diagnostics(path.clone(), list));
+        };
+        publish(vec![stale.clone()], cx);
+        e.update(cx, |e, cx| {
+            e.lsp = Some(lsp.clone());
+            let x = e.buffer.offset(1, 4);
+            assert_eq!(e.problems(cx)[0].range, x..x + 1);
+            // A line added above: the problem goes down with `x`.
+            e.buffer.replace(0..0, "// note\n");
+            assert_eq!(e.problems(cx)[0].range, x + 8..x + 9);
+        });
+        // The server repeats it unchanged: it stays on `x`.
+        publish(vec![stale.clone()], cx);
+        e.update(cx, |e, cx| {
+            let x = e.buffer.offset(2, 4);
+            assert_eq!(e.problems(cx)[0].range, x..x + 1);
+            // `x` deleted: the problem goes, and a repeat doesn't bring it back.
+            e.buffer.replace(x..x + 1, "");
+            assert!(e.problems(cx).is_empty());
+        });
+        publish(vec![stale], cx);
+        e.update(cx, |e, cx| assert!(e.problems(cx).is_empty()));
     }
 }
