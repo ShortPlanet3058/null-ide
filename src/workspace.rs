@@ -83,6 +83,8 @@ actions!(
         ShowFiles,
         ToggleAutocomplete,
         ToggleTerminal,
+        NewTerminal,
+        NextTerminal,
         GoToLine,
         GoToSymbol,
         GoToSymbolInProject,
@@ -129,6 +131,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-secondary-left", MoveTabLeft, ctx),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
+        KeyBinding::new("ctrl-shift-`", NewTerminal, ctx),
+        KeyBinding::new("ctrl-~", NewTerminal, ctx),
         KeyBinding::new("ctrl-g", GoToLine, ctx),
         KeyBinding::new("secondary-shift-m", ShowProblems, ctx),
         KeyBinding::new("secondary-shift-o", GoToSymbol, ctx),
@@ -373,7 +377,9 @@ pub struct Workspace {
     notice: Option<(String, Instant)>,
     notice_task: Option<Task<()>>,
     /// The terminal, once opened. It keeps running while the panel is hidden.
-    terminal: Option<(Entity<TerminalView>, Subscription)>,
+    /// The shells open in the terminal panel, and the one shown.
+    terminals: Vec<(Entity<TerminalView>, Subscription)>,
+    active_terminal: usize,
     terminal_open: Transition,
     /// The current git branch of the project, if it's a repository.
     branch: Option<String>,
@@ -469,7 +475,8 @@ impl Workspace {
             ready_since: None,
             branch: None,
             branch_task: None,
-            terminal: None,
+            terminals: Vec::new(),
+            active_terminal: 0,
             terminal_open: Transition::new(false),
             recently_closed: Vec::new(),
             recent_files: Vec::new(),
@@ -1961,6 +1968,8 @@ impl Workspace {
             (Go, "Previous Change".into(), Box::new(crate::editor::PreviousChange)),
             (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
+            (View, "New Terminal".into(), Box::new(NewTerminal)),
+            (View, "Next Terminal".into(), Box::new(NextTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
         ];
         if self.active.is_some() {
@@ -2877,85 +2886,186 @@ impl Workspace {
         if !self.terminal_open.on {
             self.toggle_terminal(&ToggleTerminal, window, cx);
         }
-        if let Some((terminal, _)) = &self.terminal {
+        if let Some(terminal) = self.terminal().cloned() {
             terminal.update(cx, |terminal, cx| terminal.run_command(&command, cx));
             window.focus(&terminal.focus_handle(cx));
         }
     }
 
+    /// The terminal shown in the panel.
+    fn terminal(&self) -> Option<&Entity<TerminalView>> {
+        self.terminals.get(self.active_terminal).map(|(t, _)| t)
+    }
+
+    /// Starts a shell in the project folder, as the terminal shown.
+    fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let shell = match Shell::start(root) {
+            Ok(shell) => shell,
+            Err(err) => {
+                self.show_notice(format!("Couldn't start a terminal: {err}"), cx);
+                return false;
+            }
+        };
+        let terminal = cx.new(|cx| TerminalView::new(shell, cx));
+        let subscription = cx.subscribe_in(&terminal, window, |this, terminal, event, window, cx| match event {
+            TerminalEvent::TitleChanged => cx.notify(),
+            // The shell exited (e.g. `exit`): its tab goes; with none left, so does the panel.
+            TerminalEvent::Exited => this.remove_terminal(terminal.entity_id(), window, cx),
+        });
+        self.terminals.push((terminal, subscription));
+        self.active_terminal = self.terminals.len() - 1;
+        true
+    }
+
+    fn remove_terminal(&mut self, id: gpui::EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.terminals.iter().position(|(t, _)| t.entity_id() == id) else { return };
+        // Its subscription goes with it.
+        drop(self.terminals.remove(ix));
+        if self.active_terminal > ix || self.active_terminal >= self.terminals.len() {
+            self.active_terminal = self.active_terminal.saturating_sub(1);
+        }
+        match self.terminal().cloned() {
+            Some(next) if self.terminal_open.on => window.focus(&next.focus_handle(cx)),
+            Some(_) => {}
+            None => {
+                self.terminal_open.set(false, TERMINAL_SLIDE, TERMINAL_SLIDE);
+                self.focus_main(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// ⌃⇧`: another terminal, beside the ones open.
+    fn new_terminal(&mut self, _: &NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.add_terminal(window, cx) {
+            return;
+        }
+        self.terminal_open.set(true, TERMINAL_SLIDE, TERMINAL_SLIDE);
+        if let Some(terminal) = self.terminal() {
+            window.focus(&terminal.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    fn show_terminal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix < self.terminals.len() {
+            self.active_terminal = ix;
+            if let Some(terminal) = self.terminal() {
+                window.focus(&terminal.focus_handle(cx));
+            }
+            cx.notify();
+        }
+    }
+
+    fn next_terminal(&mut self, _: &NextTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminals.is_empty() {
+            self.show_terminal((self.active_terminal + 1) % self.terminals.len(), window, cx);
+        }
+    }
+
     fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_open.on {
-            let had_focus = self.terminal.as_ref().is_some_and(|(t, _)| t.focus_handle(cx).is_focused(window));
+            let had_focus = self.terminal().is_some_and(|t| t.focus_handle(cx).is_focused(window));
             self.terminal_open.set(false, TERMINAL_SLIDE, TERMINAL_SLIDE);
             if had_focus {
                 self.focus_main(window, cx);
             }
             return cx.notify();
         }
-        if self.terminal.is_none() {
-            let root = self.tree.read(cx).root().to_path_buf();
-            let shell = match Shell::start(root) {
-                Ok(shell) => shell,
-                Err(err) => return self.show_notice(format!("Couldn't start a terminal: {err}"), cx),
-            };
-            let terminal = cx.new(|cx| TerminalView::new(shell, cx));
-            let subscription = cx.subscribe_in(&terminal, window, |this, _, event, window, cx| match event {
-                TerminalEvent::TitleChanged => cx.notify(),
-                // The shell exited (e.g. `exit`): close the panel; the next toggle starts a new one.
-                TerminalEvent::Exited => {
-                    this.terminal = None;
-                    this.terminal_open.set(false, TERMINAL_SLIDE, TERMINAL_SLIDE);
-                    this.focus_main(window, cx);
-                    cx.notify();
-                }
-            });
-            self.terminal = Some((terminal, subscription));
+        if self.terminals.is_empty() && !self.add_terminal(window, cx) {
+            return;
         }
         self.terminal_open.set(true, TERMINAL_SLIDE, TERMINAL_SLIDE);
-        if let Some((terminal, _)) = &self.terminal {
+        if let Some(terminal) = self.terminal() {
             window.focus(&terminal.focus_handle(cx));
         }
         cx.notify();
     }
 
+    /// A terminal's tab: its shell's folder, from the title it sets ("user@host:~/a/b" → "b").
+    fn terminal_label(title: &str, ix: usize) -> String {
+        let path = title.rsplit(':').next().unwrap_or(title).trim();
+        let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("").trim();
+        if name.is_empty() { format!("Terminal {}", ix + 1) } else { name.to_string() }
+    }
+
     fn render_terminal_panel(&self, height: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (terminal, _) = self.terminal.as_ref()?;
+        let terminal = self.terminal()?;
         if height < 0.5 {
             return None;
         }
         let theme = cx.global::<Theme>();
         let title = terminal.read(cx).title.clone();
+        let icon_button = |id: &'static str, icon: &'static str| {
+            div()
+                .id(id)
+                .size(px(20.))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded(px(ui::R_KEY))
+                .cursor_pointer()
+                .group(id)
+                .hover(|s| s.bg(theme.hairline))
+                .child(
+                    svg()
+                        .path(icon)
+                        .size(px(12.))
+                        .text_color(theme.muted)
+                        .group_hover(id, |s| s.text_color(theme.foreground)),
+                )
+                .active(|s| s.opacity(0.7))
+        };
+        // One terminal: its name and title. More: a tab each.
+        let several = self.terminals.len() > 1;
+        let tabs = self.terminals.iter().enumerate().map(|(ix, (t, _))| {
+            let active = ix == self.active_terminal;
+            let label = Self::terminal_label(&t.read(cx).title, ix);
+            div()
+                .id(("terminal-tab", ix))
+                .h(px(22.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(px(ui::R_KEY))
+                .cursor_pointer()
+                .whitespace_nowrap()
+                .text_color(if active { theme.foreground } else { theme.muted })
+                .when(active, |d| d.bg(theme.hairline))
+                .when(!active, |d| d.hover(|s| s.text_color(theme.foreground)))
+                .child(label)
+                .active(|s| s.opacity(0.7))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_terminal(ix, window, cx)))
+        });
         let header = div()
             .h(px(28.))
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(px(6.))
             .px(px(12.))
             .text_size(px(ui::T_SM))
             .text_color(theme.muted)
-            .child(div().text_color(theme.foreground).child("Terminal"))
-            .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(title))
+            .map(|bar| {
+                if several {
+                    bar.children(tabs).child(div().flex_1())
+                } else {
+                    bar.child(div().text_color(theme.foreground).child("Terminal"))
+                        .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(title))
+                }
+            })
             .child(
-                div()
-                    .id("close-terminal")
+                icon_button("new-terminal", "icons/plus.svg")
+                    .tooltip(ui::tip("New terminal", Some(Box::new(NewTerminal))))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.new_terminal(&NewTerminal, window, cx)),
+                    ),
+            )
+            .child(
+                icon_button("close-terminal", "icons/x.svg")
                     .tooltip(ui::tip("Hide the terminal", Some(Box::new(ToggleTerminal))))
-                    .size(px(20.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(ui::R_KEY))
-                    .cursor_pointer()
-                    .group("close-terminal")
-                    .hover(|s| s.bg(theme.hairline))
-                    .child(
-                        svg()
-                            .path("icons/x.svg")
-                            .size(px(12.))
-                            .text_color(theme.muted)
-                            .group_hover("close-terminal", |s| s.text_color(theme.foreground)),
-                    )
-                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_terminal(&ToggleTerminal, window, cx)
                     })),
@@ -4083,6 +4193,8 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
+            .on_action(cx.listener(Self::new_terminal))
+            .on_action(cx.listener(Self::next_terminal))
             .on_action(cx.listener(Self::next_problem))
             .on_action(cx.listener(|_, _: &ToggleIndentGuides, _, cx| {
                 settings::update(cx, |s| s.indent_guides = !s.indent_guides)
@@ -4454,6 +4566,13 @@ mod tests {
         cx.simulate_keystrokes("shift-f8");
         workspace.update(cx, |w, cx| assert_eq!(at(w, cx), ("b.txt".into(), 1)));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn terminal_tabs_are_named_after_their_folder() {
+        assert_eq!(Workspace::terminal_label("ada@mac:~/code/null", 0), "null");
+        assert_eq!(Workspace::terminal_label("ada@mac:/tmp/", 1), "tmp");
+        assert_eq!(Workspace::terminal_label("", 2), "Terminal 3");
     }
 
     #[gpui::test]
