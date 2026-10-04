@@ -83,7 +83,7 @@ const CHEVRON: &str = "icons/chevron-right.svg";
 const TURN: Duration = Duration::from_millis(160);
 /// Never worth showing in a project tree.
 const ALWAYS_HIDDEN: &[&str] = &[".git", ".DS_Store"];
-const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
+pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Reveal in Finder"
 } else if cfg!(target_os = "windows") {
     "Reveal in File Explorer"
