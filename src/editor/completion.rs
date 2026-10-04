@@ -5,9 +5,7 @@ use crate::fuzzy;
 use crate::settings::Settings;
 use gpui::{Context, ScrollHandle};
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit, InsertTextFormat};
-use regex::Regex;
 use std::ops::Range;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Wait for a pause in typing before asking, so the list doesn't flicker.
@@ -21,6 +19,8 @@ pub struct Suggestion {
     filter: String,
     sort: String,
     insert: String,
+    /// `insert` is a snippet, with placeholders to fill in.
+    snippet: bool,
     /// Where the server wants `insert` to go, if it said.
     range: Option<lsp_types::Range>,
     extra_edits: Vec<lsp_types::TextEdit>,
@@ -47,8 +47,6 @@ impl CompletionMenu {
     }
 }
 
-static SNIPPET_TABSTOP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{\d+:([^}]*)\}|\$\{\d+\}|\$\d+").unwrap());
-
 impl Suggestion {
     fn from_lsp(item: CompletionItem) -> Self {
         let (insert, range) = match item.text_edit {
@@ -56,12 +54,7 @@ impl Suggestion {
             Some(CompletionTextEdit::InsertAndReplace(edit)) => (edit.new_text, Some(edit.replace)),
             None => (item.insert_text.clone().unwrap_or_else(|| item.label.clone()), None),
         };
-        // Placeholders aren't supported yet: keep their default text.
-        let insert = if item.insert_text_format == Some(InsertTextFormat::SNIPPET) {
-            SNIPPET_TABSTOP.replace_all(&insert, "$1").into_owned()
-        } else {
-            insert
-        };
+        let snippet = item.insert_text_format == Some(InsertTextFormat::SNIPPET);
         let detail = item.label_details.as_ref().and_then(|d| d.description.clone()).or(item.detail.clone());
         Self {
             filter: item.filter_text.clone().unwrap_or_else(|| item.label.clone()),
@@ -70,6 +63,7 @@ impl Suggestion {
             detail,
             kind: item.kind,
             insert,
+            snippet,
             range,
             extra_edits: item.additional_text_edits.unwrap_or_default(),
         }
@@ -232,7 +226,9 @@ impl Editor {
         let start = suggestion.range.map_or(menu.word_start, |r| self.offset_from_lsp(r.start).min(caret));
         // Accepting in the middle of a word replaces the rest of it too (fo|obar → foobar).
         let end = suggestion.range.map_or(caret, |r| self.offset_from_lsp(r.end).max(caret));
-        let mut edits: Vec<(Range<usize>, String)> = vec![(start..end, suggestion.insert.clone())];
+        let parsed = suggestion.snippet.then(|| super::snippet::parse(&suggestion.insert));
+        let text = parsed.as_ref().map_or_else(|| suggestion.insert.clone(), |p| p.text.clone());
+        let mut edits: Vec<(Range<usize>, String)> = vec![(start..end, text.clone())];
         for edit in &suggestion.extra_edits {
             let range = self.offset_from_lsp(edit.range.start)..self.offset_from_lsp(edit.range.end);
             if range.end <= start || range.start >= caret {
@@ -245,7 +241,8 @@ impl Editor {
             .filter(|(r, _)| r.end <= start)
             .map(|(r, t)| t.chars().count() as isize - r.len() as isize)
             .sum();
-        let landing = (start as isize + shift) as usize + suggestion.insert.chars().count();
+        let inserted_at = (start as isize + shift) as usize;
+        let landing = inserted_at + text.chars().count();
 
         self.record_undo(EditKind::Other);
         edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
@@ -256,6 +253,9 @@ impl Editor {
         self.selection = Selection::caret(landing);
         self.marked = None;
         self.goal_column = None;
+        if let Some(parsed) = parsed {
+            self.start_snippet(inserted_at, parsed, cx);
+        }
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
@@ -268,7 +268,7 @@ mod tests {
     use lsp_types::{Position, TextEdit};
 
     #[test]
-    fn snippets_keep_their_default_text() {
+    fn snippets_are_kept_to_fill_in() {
         let item = CompletionItem {
             label: "push(…)".into(),
             insert_text: Some("push(${1:value})$0".into()),
@@ -276,7 +276,7 @@ mod tests {
             ..Default::default()
         };
         let s = Suggestion::from_lsp(item);
-        assert_eq!(s.insert, "push(value)");
+        assert_eq!((s.insert.as_str(), s.snippet), ("push(${1:value})$0", true));
         assert_eq!(s.filter, "push(…)");
     }
 
