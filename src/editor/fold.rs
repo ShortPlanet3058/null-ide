@@ -28,6 +28,14 @@ pub(super) struct Folds {
 }
 
 impl Editor {
+    /// The blocks around `line` (start above it, end below it), innermost first. Cheap:
+    /// a walk up the syntax tree from the line.
+    pub fn blocks_around(&mut self, line: usize) -> Vec<Range<usize>> {
+        let Some(highlighter) = &mut self.highlighter else { return Vec::new() };
+        highlighter.sync(&self.buffer);
+        highlighter.blocks_around(line)
+    }
+
     /// The regions that can fold, worked out again only after edits.
     pub fn foldable(&mut self) -> &[Range<usize>] {
         let revision = self.buffer.revision();

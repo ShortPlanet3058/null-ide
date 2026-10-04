@@ -196,6 +196,24 @@ impl Highlighter {
     /// Code that can fold, as line ranges: from the line a block opens on to the line it
     /// closes on, at least one line apart (the lines between are what folding hides). One
     /// per opening line, the longest. Call [`Self::sync`] first.
+    /// The foldable blocks (as [`Self::fold_ranges`] finds them) that start above `line`
+    /// and end below it, innermost first: a walk up from the line, not over the file.
+    pub fn blocks_around(&self, line: usize) -> Vec<Range<usize>> {
+        let Some(tree) = &self.tree else { return Vec::new() };
+        let point = Point { row: line, column: 0 };
+        let Some(mut node) = tree.root_node().descendant_for_point_range(point, point) else { return Vec::new() };
+        let mut found = Vec::new();
+        loop {
+            let (start, end) = (node.start_position().row, node.end_position().row);
+            let Some(parent) = node.parent() else { break };
+            if node.is_named() && end > start + 1 && start < line && line < end {
+                found.push(start..end);
+            }
+            node = parent;
+        }
+        found
+    }
+
     pub fn fold_ranges(&self) -> Vec<Range<usize>> {
         let Some(tree) = &self.tree else { return Vec::new() };
         let mut ends: std::collections::BTreeMap<usize, usize> = Default::default();
@@ -358,5 +376,55 @@ mod language_tests {
         assert!(spans.contains(&("const".into(), Syntax::Keyword)), "{spans:?}");
         assert!(spans.contains(&("1".into(), Syntax::Number)), "{spans:?}");
         assert!(spans.iter().any(|(t, s)| t == "interface" && *s == Syntax::Keyword), "{spans:?}");
+    }
+}
+
+#[cfg(test)]
+mod timing {
+    use super::*;
+
+    /// Not a check: how long the work after each keystroke takes on a big file.
+    /// `cargo test --release timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn keystroke_costs_on_a_big_file() {
+        let source = std::fs::read_to_string("src/workspace.rs").unwrap();
+        let language = crate::languages::for_path(std::path::Path::new("a.rs")).unwrap();
+        let mut highlighter = Highlighter::new(language).unwrap();
+        let mut buffer = Buffer::from_text(&source);
+        highlighter.sync(&buffer);
+        let at = buffer.offset(3000, 8);
+        let mut sync = std::time::Duration::ZERO;
+        let mut folds = std::time::Duration::ZERO;
+        let mut blocks = std::time::Duration::ZERO;
+        for i in 0..20 {
+            buffer.replace(at + i..at + i, "x");
+            let t = std::time::Instant::now();
+            highlighter.sync(&buffer);
+            sync += t.elapsed();
+            let t = std::time::Instant::now();
+            let ranges = highlighter.fold_ranges();
+            folds += t.elapsed();
+            assert!(!ranges.is_empty());
+            let t = std::time::Instant::now();
+            let around = highlighter.blocks_around(3000);
+            blocks += t.elapsed();
+            // The same blocks as the whole-file walk finds around that line.
+            let mut expected: Vec<_> = ranges.into_iter().filter(|r| r.start < 3000 && 3000 < r.end).collect();
+            let mut got = around.clone();
+            got.sort_by_key(|r| r.start);
+            got.dedup_by_key(|r| r.start);
+            expected.sort_by_key(|r| r.start);
+            assert_eq!(
+                got.iter().map(|r| r.start).collect::<Vec<_>>(),
+                expected.iter().map(|r| r.start).collect::<Vec<_>>()
+            );
+        }
+        println!(
+            "per keystroke: reparse {:?}, all fold ranges {:?}, blocks around a line {:?}",
+            sync / 20,
+            folds / 20,
+            blocks / 20
+        );
     }
 }

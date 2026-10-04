@@ -199,12 +199,16 @@ const MAX_STICKY: usize = 3;
 /// on below it), outermost first, at most `max`, innermost kept. `line_at(n)` is the line
 /// on the nth row from the top; pinned lines cover rows, so the top line is the first
 /// one they leave showing.
-fn sticky_lines(foldable: &[Range<usize>], line_at: impl Fn(usize) -> Option<usize>, max: usize) -> Vec<usize> {
+fn sticky_lines(
+    mut blocks_around: impl FnMut(usize) -> Vec<Range<usize>>,
+    line_at: impl Fn(usize) -> Option<usize>,
+    max: usize,
+) -> Vec<usize> {
     let mut covered = 0;
     loop {
         let Some(top) = line_at(covered) else { return Vec::new() };
         let mut starts: Vec<usize> =
-            foldable.iter().filter(|r| r.start < top && top < r.end).map(|r| r.start).collect();
+            blocks_around(top).into_iter().filter(|r| r.start < top && top < r.end).map(|r| r.start).collect();
         starts.sort_unstable();
         starts.dedup();
         let keep = starts.len().saturating_sub(max);
@@ -1003,11 +1007,11 @@ impl Element for EditorElement {
             // sight at the top, over the code.
             let mut sticky_rows: Vec<(Bounds<Pixels>, usize)> = Vec::new();
             let sticky = if cx.global::<Settings>().sticky_scroll && editor.scroll.y > 0. {
-                let foldable = editor.foldable().to_vec();
                 let shown_rows: Vec<usize> = row_layouts.iter().map(|r| r.row.line).collect();
                 // The top row can be half scrolled away: count from the first fully shown.
                 let skip = usize::from(row_top(visible.start) < text_bounds.top());
-                let lines = sticky_lines(&foldable, |n| shown_rows.get(n + skip).copied(), MAX_STICKY);
+                let lines =
+                    sticky_lines(|line| editor.blocks_around(line), |n| shown_rows.get(n + skip).copied(), MAX_STICKY);
                 (!lines.is_empty()).then(|| {
                     let top = bounds.top();
                     let band = Bounds::new(
@@ -1209,17 +1213,18 @@ mod tests {
     fn pins_the_blocks_the_view_is_inside() {
         // impl 0..30 { fn 2..20 { for 4..15 { … } } fn 22..28 { … } }
         let foldable = [0..30, 2..20, 4..15, 22..28];
+        let around = |line: usize| foldable.iter().filter(|r| r.start < line && line < r.end).cloned().collect();
         let from = |top: usize| move |n: usize| Some(top + n);
         // Inside the loop: impl, fn and for, and the pins cover the rows they hide.
-        assert_eq!(sticky_lines(&foldable, from(5), 3), [0, 2, 4]);
+        assert_eq!(sticky_lines(around, from(5), 3), [0, 2, 4]);
         // Just under the impl's first line: only the impl.
-        assert_eq!(sticky_lines(&foldable, from(1), 3), [0]);
+        assert_eq!(sticky_lines(around, from(1), 3), [0]);
         // At most two: the innermost two.
-        assert_eq!(sticky_lines(&foldable, from(5), 2), [2, 4]);
+        assert_eq!(sticky_lines(around, from(5), 2), [2, 4]);
         // Near a block's end, once the pins would hide it, it lets go.
-        assert_eq!(sticky_lines(&foldable, from(13), 3), [0, 2]);
-        assert_eq!(sticky_lines(&foldable, from(20), 3), [0]);
-        assert!(sticky_lines(&foldable, from(0), 3).is_empty());
+        assert_eq!(sticky_lines(around, from(13), 3), [0, 2]);
+        assert_eq!(sticky_lines(around, from(20), 3), [0]);
+        assert!(sticky_lines(around, from(0), 3).is_empty());
     }
 
     #[test]
