@@ -399,7 +399,7 @@ impl Welcome {
                     .pb(px(48.))
                     .child(div().text_size(px(15.)).text_color(theme.muted).child("A calm place to write code."))
                     .child(
-                        Self::primary("begin", "Begin", &theme).on_click(
+                        Self::primary("begin", "Begin", &theme).active(|s| s.opacity(0.7)).on_click(
                             cx.listener(|this, _: &ClickEvent, window, cx| this.next(&WelcomeNext, window, cx)),
                         ),
                     )
@@ -411,6 +411,7 @@ impl Welcome {
                             .cursor_pointer()
                             .hover(|d| d.text_color(theme.muted))
                             .child("Skip setup")
+                            .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish(cx))),
                     ),
             )
@@ -464,6 +465,7 @@ impl Welcome {
                             .cursor_pointer()
                             .child(ui::theme_preview_scaled(name, settings.theme == name, &theme, 1.45))
                             .child(div().text_size(px(ui::T_SM)).text_color(theme.faint).child(name.note()))
+                            .active(|s| s.opacity(0.7))
                             .on_click(
                                 cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.theme = name)),
                             )
@@ -483,9 +485,11 @@ impl Welcome {
                     .grid_cols(2)
                     .gap(px(10.))
                     .children(Keymap::ALL.into_iter().enumerate().map(|(i, k)| {
-                        Self::card(("keymap", i), k.label(), k.summary(), settings.keymap == k, &theme).on_click(
-                            cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.keymap = k)),
-                        )
+                        Self::card(("keymap", i), k.label(), k.summary(), settings.keymap == k, &theme)
+                            .active(|s| s.opacity(0.7))
+                            .on_click(
+                                cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.keymap = k)),
+                            )
                     }))
                     .into_any_element(),
             ),
@@ -503,14 +507,14 @@ impl Welcome {
                         .flex_col()
                         .gap(px(10.))
                         .children(PRESENCE.into_iter().enumerate().map(|(i, (choice, title, line))| {
-                            Self::card(("presence", i), title, line, now == choice, &theme).on_click(cx.listener(
-                                move |_, _: &ClickEvent, _, cx| {
+                            Self::card(("presence", i), title, line, now == choice, &theme)
+                                .active(|s| s.opacity(0.7))
+                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                                     settings::update(cx, |s| {
                                         s.ai.enabled = choice != Presence::Off;
                                         s.ai.completions = choice == Presence::WhileTyping;
                                     })
-                                },
-                            ))
+                                }))
                         }))
                         .into_any_element(),
                 )
@@ -574,6 +578,7 @@ impl Welcome {
                             .cursor_pointer()
                             .hover(|d| d.bg(theme.hairline).text_color(theme.foreground))
                             .child("Back")
+                            .active(|s| s.opacity(0.7))
                             .on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| this.back(&WelcomeBack, window, cx)),
                             ),
@@ -585,9 +590,11 @@ impl Welcome {
                             .children((0..count).map(|i| div().size(px(6.)).rounded_full().bg(dot(i)))),
                     )
                     .child(
-                        Self::primary("next", if last { "Start coding" } else { "Continue" }, &theme).on_click(
-                            cx.listener(|this, _: &ClickEvent, window, cx| this.next(&WelcomeNext, window, cx)),
-                        ),
+                        Self::primary("next", if last { "Start coding" } else { "Continue" }, &theme)
+                            .active(|s| s.opacity(0.7))
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| this.next(&WelcomeNext, window, cx)),
+                            ),
                     ),
             )
             .into_any_element()
@@ -646,6 +653,7 @@ impl Welcome {
                         .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(theme.hairline)))
                         .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(label))
                         .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child("{ 0O 1lI } => ;"))
+                        .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                             settings::update(cx, |s| s.code_font = family.to_string())
                         }))
@@ -659,7 +667,7 @@ impl Welcome {
                     .text_size(px(ui::T_MD))
                     .text_color(theme.muted)
                     .child("Size")
-                    .child(stepper("smaller", "−").on_click(step_size(-1.)))
+                    .child(stepper("smaller", "−").active(|s| s.opacity(0.7)).on_click(step_size(-1.)))
                     .child(
                         div()
                             .w(px(48.))
@@ -667,7 +675,7 @@ impl Welcome {
                             .text_color(theme.foreground)
                             .child(format!("{:.0} px", settings.font_size)),
                     )
-                    .child(stepper("bigger", "+").on_click(step_size(1.))),
+                    .child(stepper("bigger", "+").active(|s| s.opacity(0.7)).on_click(step_size(1.))),
             )
             .child(Self::type_preview(settings, theme, cx.global::<crate::fonts::Fonts>().code.clone()))
             .into_any_element()
@@ -699,6 +707,7 @@ impl Welcome {
                             .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(theme.hairline)))
                             .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(id.label()))
                             .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(line))
+                            .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.key.update(cx, |input, cx| input.set_text("", cx));
                                 settings::update(cx, |s| {

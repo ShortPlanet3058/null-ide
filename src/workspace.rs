@@ -2144,10 +2144,10 @@ impl Workspace {
             .pt(px(10.))
             .child(
                 ui::segmented(theme)
-                    .child(tab("files", "Files", !searching).on_click(
+                    .child(tab("files", "Files", !searching).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
                     ))
-                    .child(tab("search", "Search", searching).on_click(
+                    .child(tab("search", "Search", searching).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
                     )),
             )
@@ -2298,6 +2298,7 @@ impl Workspace {
             .child(
                 div()
                     .id("close-terminal")
+                    .tooltip(ui::tip("Hide the terminal", Some(Box::new(ToggleTerminal))))
                     .size(px(20.))
                     .flex()
                     .items_center()
@@ -2313,6 +2314,7 @@ impl Workspace {
                             .text_color(theme.muted)
                             .group_hover("close-terminal", |s| s.text_color(theme.foreground)),
                     )
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_terminal(&ToggleTerminal, window, cx)
                     })),
@@ -2653,6 +2655,7 @@ impl Workspace {
                         .cursor_pointer()
                         .child(div().text_color(theme.faint).child(text))
                         .child(div().text_color(theme.caret).child(if failed { "Retry" } else { "Install" }))
+                        .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.install_language_server(cx)))
                         .into_any_element(),
                 )
@@ -2734,6 +2737,7 @@ impl Workspace {
                 // Unsaved: a small dot, which turns into the close button under the pointer.
                 let close = div()
                     .id(("close", ix))
+                    .tooltip(ui::tip("Close", Some(Box::new(CloseTab))))
                     .relative()
                     .size(px(16.))
                     .flex_none()
@@ -2761,6 +2765,7 @@ impl Workspace {
                             .group_hover(group.clone(), |s| s.visible())
                             .child(svg().path("icons/x.svg").size(px(10.)).text_color(theme.muted)),
                     )
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         this.close_tab_at(ix, window, cx);
@@ -2802,6 +2807,7 @@ impl Workspace {
                             .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
                     )
                     .child(close)
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(ix, window, cx)))
                     // Middle-click closes, as in browsers.
                     .on_mouse_down(
@@ -3145,6 +3151,7 @@ impl Render for Workspace {
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.foreground))
                         .child(label)
+                        .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.show_commands_for("indent with", window, cx)
                         }))
@@ -3157,6 +3164,7 @@ impl Render for Workspace {
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme.foreground))
                             .child("CRLF")
+                            .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.show_commands_for("line endings", window, cx)
                             })),
@@ -3197,15 +3205,16 @@ impl Render for Workspace {
                                     .text_color(theme.muted)
                                     .hover(|s| s.text_color(theme.foreground))
                                     .child("Stop")
+                                    .active(|s| s.opacity(0.7))
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                         this.stop_ai_task(&StopAiTask, window, cx)
                                     })),
                             )
                         })
                         .when(reviewing, |d| {
-                            d.cursor_pointer().on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.review_ai_task(&ReviewAiTask, window, cx)
-                            }))
+                            d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
+                            ))
                         })
                 }))
                 .when(ai_provider != ProviderId::Off, |bar| {
@@ -3222,6 +3231,7 @@ impl Render for Workspace {
                             .hover(|s| s.text_color(theme.foreground))
                             .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
                             .child(format!("AI · {}", ai_provider.label()))
+                            .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.open_settings_at(Some(Section::Ai), window, cx)
                             })),
@@ -3239,6 +3249,7 @@ impl Render for Workspace {
                             .whitespace_nowrap()
                             .gap(px(10.))
                             .cursor_pointer()
+                            .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.show_problems(&ShowProblems, window, cx)
                             }))

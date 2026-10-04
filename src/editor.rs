@@ -1705,6 +1705,7 @@ impl Editor {
                             .child(detail)
                     }))
                 })
+                .active(|s| s.opacity(0.7))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.accept_completion(ix, cx)))
         });
         let list = div()

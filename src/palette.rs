@@ -872,6 +872,7 @@ impl Palette {
                     cx.notify();
                 }
             }))
+            .active(|s| s.opacity(0.7))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.confirm_at(ix, cx)))
             .into_any_element()
     }

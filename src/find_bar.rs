@@ -5,8 +5,8 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
 use crate::ui;
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString, Subscription, Transformation,
-    WeakEntity, Window, actions, div, prelude::*, px, radians, svg,
+    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString, Subscription,
+    Transformation, WeakEntity, Window, actions, div, prelude::*, px, radians, svg,
 };
 
 actions!(
@@ -189,10 +189,38 @@ impl FindBar {
             .items_center()
             .justify_center()
             .rounded(px(ui::R_ROW))
-            .text_color(theme.muted)
-            .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
-            .child(svg().path(icon).size(px(14.)).with_transformation(Transformation::rotate(radians(turn))))
+            .cursor_pointer()
+            .group(id)
+            .hover(|s| s.bg(theme.hairline))
+            // An icon takes its own colour (it doesn't inherit the text's).
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(14.))
+                    .text_color(theme.muted)
+                    .group_hover(id, |s| s.text_color(theme.foreground))
+                    .with_transformation(Transformation::rotate(radians(turn))),
+            )
+            .active(|s| s.opacity(0.7))
+            .tooltip({
+                let (label, action) = Self::tooltip_for(id);
+                ui::tip(label, action)
+            })
             .on_click(on_click)
+    }
+
+    /// What each button is called, and the action whose keys it shows.
+    fn tooltip_for(id: &str) -> (&'static str, Option<Box<dyn gpui::Action>>) {
+        match id {
+            "toggle-replace" => ("Replace", Some(Box::new(DeployReplace))),
+            "case" => ("Match case", Some(Box::new(ToggleCaseSensitive))),
+            "word" => ("Whole word", Some(Box::new(ToggleWholeWord))),
+            "regex" => ("Regular expression", Some(Box::new(ToggleRegex))),
+            "previous" => ("Previous match", Some(Box::new(FindPrevious))),
+            "next" => ("Next match", Some(Box::new(FindNext))),
+            "close" => ("Close", Some(Box::new(CloseFind))),
+            _ => ("", None),
+        }
     }
 
     fn toggle(
@@ -219,10 +247,16 @@ impl FindBar {
             .when(on, |b| b.bg(theme.accent_soft))
             .when(!on, |b| b.hover(|s| s.bg(theme.hairline).text_color(theme.foreground)))
             .child(label)
+            .tooltip({
+                let (label, action) = Self::tooltip_for(id);
+                ui::tip(label, action)
+            })
+            .active(|s| s.opacity(0.7))
             .on_click(on_click)
     }
 
-    fn field(input: Entity<TextInput>, invalid: bool, theme: &Theme) -> impl IntoElement {
+    /// A field, with something quiet at its right end (the match count) when given.
+    fn field(input: Entity<TextInput>, invalid: bool, theme: &Theme, trailing: Option<AnyElement>) -> impl IntoElement {
         div()
             .flex_1()
             .min_w_0()
@@ -230,12 +264,14 @@ impl FindBar {
             .px(px(8.))
             .flex()
             .items_center()
+            .gap(px(8.))
             .rounded(px(ui::R_ROW))
             .bg(theme.background)
             .border_1()
             .border_color(if invalid { theme.error } else { theme.hairline })
             .overflow_hidden()
-            .child(input)
+            .child(div().flex_1().min_w_0().overflow_hidden().child(input))
+            .children(trailing)
     }
 }
 
@@ -293,7 +329,19 @@ impl Render for FindBar {
                     cx.notify();
                 }),
             ))
-            .child(Self::field(self.find.clone(), invalid, &theme))
+            .child(Self::field(
+                self.find.clone(),
+                invalid,
+                &theme,
+                (!status.is_empty()).then(|| {
+                    div()
+                        .flex_none()
+                        .text_size(px(ui::T_SM))
+                        .text_color(if invalid { theme.error } else { theme.muted })
+                        .child(status.clone())
+                        .into_any_element()
+                }),
+            ))
             .child(Self::toggle(
                 "case",
                 "Aa",
@@ -318,15 +366,6 @@ impl Render for FindBar {
                 code_font.clone(),
                 act(|this, window, cx| this.toggle_regex(&ToggleRegex, window, cx)),
             ))
-            .child(
-                div()
-                    .w(px(78.))
-                    .flex_none()
-                    .text_right()
-                    .text_size(px(ui::T_SM))
-                    .text_color(if invalid { theme.error } else { theme.muted })
-                    .child(status),
-            )
             .child(Self::icon_button(
                 "previous",
                 CHEVRON,
@@ -372,13 +411,16 @@ impl Render for FindBar {
                 self.replace.clone(),
                 false,
                 &theme,
+                None,
             )))
             .child(
                 text_button("replace-one", "Replace")
+                    .active(|s| s.opacity(0.7))
                     .on_click(act(|this, window, cx| this.replace_next(&ReplaceNext, window, cx))),
             )
             .child(
                 text_button("replace-all", "Replace all")
+                    .active(|s| s.opacity(0.7))
                     .on_click(act(|this, window, cx| this.replace_all(&ReplaceAll, window, cx))),
             );
 
