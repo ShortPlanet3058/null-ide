@@ -189,6 +189,75 @@ fn explain_switch_error(error: &str) -> String {
     }
 }
 
+/// Who last changed a line, and when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineBlame {
+    /// "You" for the person committing here.
+    pub author: String,
+    /// Seconds since 1970.
+    pub time: i64,
+    pub summary: String,
+}
+
+/// Who last changed line `line` (from 0) of `path`, reading the file as `text` (so
+/// unsaved edits don't shift the lines). None for a line not committed yet, or a file
+/// git doesn't follow.
+pub fn blame_line(path: &Path, text: &str, line: usize) -> Option<LineBlame> {
+    use std::io::Write;
+    let dir = path.parent()?;
+    let name = path.file_name()?.to_str()?;
+    let range = format!("{},{}", line + 1, line + 1);
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["blame", "--porcelain", "-L", &range, "--contents", "-", "--", name])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(text.as_bytes()).ok()?;
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let out = String::from_utf8_lossy(&output.stdout);
+    let mut lines = out.lines();
+    let commit = lines.next()?.split(' ').next()?;
+    if commit.chars().all(|c| c == '0') {
+        return None;
+    }
+    let field = |key: &str| out.lines().find_map(|l| l.strip_prefix(key)).map(str::to_string);
+    let author = field("author ")?;
+    let me = git(dir, &["config", "user.name"]).map(|n| n.trim().to_string());
+    Some(LineBlame {
+        author: if me.as_deref() == Some(author.as_str()) { "You".into() } else { author },
+        time: field("author-time ")?.parse().ok()?,
+        summary: field("summary ").unwrap_or_default(),
+    })
+}
+
+/// How long ago `time` was, in words: "just now", "5 minutes ago", "3 days ago"…
+pub fn ago(time: i64, now: i64) -> String {
+    let seconds = (now - time).max(0);
+    let units = [
+        (31_536_000, "year"),
+        (2_592_000, "month"),
+        (604_800, "week"),
+        (86_400, "day"),
+        (3_600, "hour"),
+        (60, "minute"),
+    ];
+    for (size, unit) in units {
+        let n = seconds / size;
+        if n >= 1 {
+            return if n == 1 { format!("1 {unit} ago") } else { format!("{n} {unit}s ago") };
+        }
+    }
+    "just now".into()
+}
+
 /// Runs git, with its own words when it fails.
 fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
@@ -336,6 +405,35 @@ mod tests {
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\n");
         assert!(create_branch(&repo, "main").unwrap_err().contains("already exists"));
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn says_who_changed_a_line_and_when() {
+        let repo = std::env::temp_dir().join(format!("null-git-blame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        if run(&repo, &["init", "-q"]).is_err() {
+            return; // No git here.
+        }
+        run(&repo, &["config", "user.name", "Ada"]).unwrap();
+        run(&repo, &["config", "user.email", "ada@example.com"]).unwrap();
+        let file = repo.join("a.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        commit_all(&repo, "First lines").unwrap();
+        // A line typed above (not saved): the next line is still the committed "one".
+        let blame = blame_line(&file, "new\none\ntwo\n", 1).unwrap();
+        assert_eq!((blame.author.as_str(), blame.summary.as_str()), ("You", "First lines"));
+        assert!(blame_line(&file, "new\none\ntwo\n", 0).is_none());
+        assert!(blame_line(&repo.join("untracked.txt"), "x\n", 0).is_none());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn says_how_long_ago() {
+        assert_eq!(ago(1000, 1010), "just now");
+        assert_eq!(ago(0, 60), "1 minute ago");
+        assert_eq!(ago(0, 3 * 86_400 + 5), "3 days ago");
+        assert_eq!(ago(0, 2 * 31_536_000), "2 years ago");
     }
 
     #[test]

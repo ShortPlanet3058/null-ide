@@ -38,6 +38,8 @@ pub struct Settings {
     pub keymap: crate::keymap::Keymap,
     /// Set once the first-launch welcome has been seen.
     pub welcomed: bool,
+    /// At the end of the caret's line, faintly: who last changed it, when, and why.
+    pub line_blame: bool,
     /// Show suggestions while typing. Ctrl+Space asks for them either way.
     pub autocomplete: bool,
     /// Where AI answers come from. Off until a provider is chosen.
@@ -62,6 +64,7 @@ impl Default for Settings {
             keymap: Default::default(),
             welcomed: false,
             autocomplete: true,
+            line_blame: true,
             ai: Default::default(),
         }
     }
