@@ -267,6 +267,7 @@ impl LspStore {
                     rename: Some(lsp_types::RenameClientCapabilities::default()),
                     references: Some(Default::default()),
                     document_highlight: Some(Default::default()),
+                    inlay_hint: Some(Default::default()),
                     signature_help: Some(lsp_types::SignatureHelpClientCapabilities {
                         signature_information: Some(lsp_types::SignatureInformationSettings {
                             documentation_format: Some(vec![MarkupKind::PlainText]),
@@ -584,6 +585,25 @@ impl LspStore {
                 work_done_progress_params: Default::default(),
                 partial_result_params: Default::default(),
                 context: lsp_types::ReferenceContext { include_declaration: true },
+            })
+        });
+        async move {
+            let Some(request) = request else { return Vec::new() };
+            request.await.ok().flatten().unwrap_or_default()
+        }
+    }
+
+    /// The type and parameter hints for `range` of a file.
+    pub fn inlay_hints(
+        &self,
+        path: &Path,
+        range: lsp_types::Range,
+    ) -> impl Future<Output = Vec<lsp_types::InlayHint>> + use<> {
+        let request = self.server_for(path).zip(uri_for(path)).map(|(server, uri)| {
+            server.request::<lsp_types::request::InlayHintRequest>(lsp_types::InlayHintParams {
+                text_document: TextDocumentIdentifier { uri },
+                range,
+                work_done_progress_params: Default::default(),
             })
         });
         async move {

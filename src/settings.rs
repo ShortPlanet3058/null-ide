@@ -40,6 +40,8 @@ pub struct Settings {
     pub welcomed: bool,
     /// At the end of the caret's line, faintly: who last changed it, when, and why.
     pub line_blame: bool,
+    /// Type hints from the language server inside the code (`x: i32`), faintly.
+    pub inlay_hints: bool,
     /// Show suggestions while typing. Ctrl+Space asks for them either way.
     pub autocomplete: bool,
     /// Where AI answers come from. Off until a provider is chosen.
@@ -65,6 +67,7 @@ impl Default for Settings {
             welcomed: false,
             autocomplete: true,
             line_blame: true,
+            inlay_hints: false,
             ai: Default::default(),
         }
     }

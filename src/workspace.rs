@@ -59,6 +59,7 @@ actions!(
         ToggleFormatOnSave,
         AutoSaveOff,
         ToggleLineBlame,
+        ToggleInlayHints,
         AutoSaveAfterPause,
         AutoSaveWhenLeaving,
         OpenSettings,
@@ -1900,6 +1901,7 @@ impl Workspace {
                 toggle(settings.line_blame, "Hide Who Changed the Line", "Show Who Changed the Line"),
                 Box::new(ToggleLineBlame),
             ),
+            (View, toggle(settings.inlay_hints, "Hide Type Hints", "Show Type Hints"), Box::new(ToggleInlayHints)),
             (File, "Commit All Changes…".into(), Box::new(CommitAll)),
             (File, "Push".into(), Box::new(PushBranch)),
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
@@ -3935,6 +3937,9 @@ impl Render for Workspace {
             }))
             .on_action(
                 cx.listener(|_, _: &ToggleLineBlame, _, cx| settings::update(cx, |s| s.line_blame = !s.line_blame)),
+            )
+            .on_action(
+                cx.listener(|_, _: &ToggleInlayHints, _, cx| settings::update(cx, |s| s.inlay_hints = !s.inlay_hints)),
             )
             .on_action(cx.listener(|_, _: &AutoSaveAfterPause, _, cx| {
                 settings::update(cx, |s| s.auto_save = AutoSave::AfterPause)

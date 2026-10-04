@@ -6,6 +6,7 @@ mod cursors;
 mod fixes;
 mod fold;
 mod ghost;
+mod hints;
 mod intel;
 mod marks;
 mod refactor;
@@ -443,6 +444,8 @@ pub struct Editor {
     completion_task: Option<Task<()>>,
     /// ⌘.'s list of quick fixes.
     fix_menu: Option<fixes::FixMenu>,
+    /// Type hints from the language server.
+    hints: hints::Hints,
     /// Other uses of the symbol at the caret.
     symbol_marks: marks::SymbolMarks,
     /// The snippet being filled in, if any.
@@ -548,6 +551,7 @@ impl Editor {
             expansions: Default::default(),
             snippet: None,
             symbol_marks: Default::default(),
+            hints: Default::default(),
             fixes_task: None,
             signature: Default::default(),
             folds: Default::default(),
@@ -681,6 +685,7 @@ impl Editor {
         self.ai_text_changed();
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
+        self.hints_after_edit();
         self.close_hover(cx);
         self.close_fixes(cx);
     }
