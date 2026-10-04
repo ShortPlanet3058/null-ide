@@ -141,6 +141,11 @@ impl Highlighter {
         self.revision = buffer.revision();
     }
 
+    /// The syntax tree, as of the last [`Self::sync`].
+    pub fn tree(&self) -> Option<&Tree> {
+        self.tree.as_ref()
+    }
+
     /// The coloured spans within `range` (bytes). Call [`Self::sync`] first.
     pub fn spans(&self, rope: &Rope, range: Range<usize>) -> Vec<Span> {
         let Some(tree) = &self.tree else { return Vec::new() };

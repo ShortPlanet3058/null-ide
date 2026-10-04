@@ -31,7 +31,7 @@ impl Editor {
 
     /// Replaces whole lines in one undo step, then places the selection with `place`,
     /// which gets the (line, column) of the old anchor and head.
-    fn rewrite_lines(
+    pub(super) fn rewrite_lines(
         &mut self,
         lines: Range<usize>,
         new_lines: Vec<String>,
@@ -57,7 +57,7 @@ impl Editor {
         self.touch(cx);
     }
 
-    fn line_texts(&self, lines: &Range<usize>) -> Vec<String> {
+    pub(super) fn line_texts(&self, lines: &Range<usize>) -> Vec<String> {
         lines.clone().map(|l| self.buffer.line_text(l)).collect()
     }
 

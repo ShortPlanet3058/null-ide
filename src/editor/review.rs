@@ -210,7 +210,7 @@ mod tests {
 mod editor_tests {
     use super::*;
     use crate::buffer::Buffer;
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
     use std::path::PathBuf;
 
     #[gpui::test]

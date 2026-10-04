@@ -1,0 +1,359 @@
+//! Commands that work with the shape of the code: growing the selection to the
+//! enclosing piece of syntax and back, jumping between brackets, starting a line above
+//! or below, joining lines, sorting them, and changing case.
+
+use super::{EditKind, Editor, Selection};
+use gpui::{App, Context, KeyBinding, Window, actions};
+use std::ops::Range;
+
+actions!(
+    structure,
+    [
+        ExpandSelection,
+        ShrinkSelection,
+        GoToMatchingBracket,
+        NewlineBelow,
+        NewlineAbove,
+        JoinLines,
+        SortLines,
+        UpperCase,
+        LowerCase
+    ]
+);
+
+pub fn bind_keys(cx: &mut App) {
+    let ctx = Some("Editor");
+    let (expand, shrink) = if cfg!(target_os = "macos") {
+        ("ctrl-shift-cmd-right", "ctrl-shift-cmd-left")
+    } else {
+        ("alt-shift-right", "alt-shift-left")
+    };
+    cx.bind_keys([
+        KeyBinding::new(expand, ExpandSelection, ctx),
+        KeyBinding::new(shrink, ShrinkSelection, ctx),
+        KeyBinding::new("secondary-shift-\\", GoToMatchingBracket, ctx),
+        KeyBinding::new("secondary-enter", NewlineBelow, ctx),
+        KeyBinding::new("secondary-shift-enter", NewlineAbove, ctx),
+        KeyBinding::new("ctrl-j", JoinLines, ctx),
+    ]);
+}
+
+/// Selections grown by [`ExpandSelection`], to shrink back through.
+#[derive(Default)]
+pub(super) struct Expansions {
+    /// The selection before each step, last step last.
+    before: Vec<Selection>,
+    /// Where the last step left the selection: if it moved since, the steps are forgotten.
+    at: Option<Selection>,
+}
+
+/// The smallest range in `ranges` (innermost first) that holds `selection` and is larger.
+fn next_larger(selection: &Range<usize>, ranges: impl Iterator<Item = Range<usize>>) -> Option<Range<usize>> {
+    ranges
+        .filter(|r| r.start <= selection.start && selection.end <= r.end)
+        .find(|r| r.start < selection.start || selection.end < r.end)
+}
+
+impl Editor {
+    pub(super) fn expand_selection(&mut self, _: &ExpandSelection, _: &mut Window, cx: &mut Context<Self>) {
+        self.single_cursor();
+        let current = self.selection;
+        let range = current.range();
+        let Some(larger) = self.syntax_parent(&range).or_else(|| self.plain_parent(&range)) else { return };
+        if self.expansions.at != Some(current) {
+            self.expansions.before.clear();
+        }
+        self.expansions.before.push(current);
+        self.selection = Selection { anchor: larger.start, head: larger.end };
+        self.expansions.at = Some(self.selection);
+        self.goal_column = None;
+        self.touch(cx);
+    }
+
+    pub(super) fn shrink_selection(&mut self, _: &ShrinkSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if self.expansions.at != Some(self.selection) {
+            self.expansions.before.clear();
+            return;
+        }
+        let Some(previous) = self.expansions.before.pop() else { return };
+        self.selection = previous;
+        self.expansions.at = (!self.expansions.before.is_empty()).then_some(previous);
+        self.goal_column = None;
+        self.touch(cx);
+    }
+
+    /// The piece of syntax just around `range` (chars), from the file's syntax tree.
+    fn syntax_parent(&mut self, range: &Range<usize>) -> Option<Range<usize>> {
+        let highlighter = self.highlighter.as_mut()?;
+        highlighter.sync(&self.buffer);
+        let tree = highlighter.tree()?;
+        let rope = self.buffer.rope();
+        let bytes = rope.char_to_byte(range.start)..rope.char_to_byte(range.end);
+        let mut node = tree.root_node().descendant_for_byte_range(bytes.start, bytes.end)?;
+        let mut ranges = Vec::new();
+        loop {
+            ranges.push(node.start_byte()..node.end_byte());
+            let Some(parent) = node.parent() else { break };
+            node = parent;
+        }
+        let larger = next_larger(&bytes, ranges.into_iter())?;
+        Some(rope.byte_to_char(larger.start)..rope.byte_to_char(larger.end))
+    }
+
+    /// Without a syntax tree: the word, then the line, then everything.
+    fn plain_parent(&self, range: &Range<usize>) -> Option<Range<usize>> {
+        let word = self.word_at(range.start);
+        let first = self.buffer.point(range.start).0;
+        let last = self.buffer.point(range.end).0;
+        let line = self.buffer.line_to_char(first)..self.buffer.line_to_char(last) + self.buffer.line_len(last);
+        let all = 0..self.buffer.len_chars();
+        next_larger(range, [word, line, all].into_iter())
+    }
+
+    /// ⌘⇧\: to the bracket matching the one at the caret, or to the opening one around it.
+    pub(super) fn go_to_matching_bracket(&mut self, _: &GoToMatchingBracket, _: &mut Window, cx: &mut Context<Self>) {
+        self.single_cursor();
+        let target = match self.matching_brackets() {
+            Some((at, other)) => {
+                let head = self.selection.head;
+                // From either side of one bracket to the same side of the other.
+                if head == at + 1 { other + 1 } else { other }
+            }
+            None => match self.enclosing_open_bracket() {
+                Some(open) => open,
+                None => return,
+            },
+        };
+        self.selection = Selection::caret(target);
+        self.goal_column = None;
+        self.touch(cx);
+    }
+
+    fn enclosing_open_bracket(&self) -> Option<usize> {
+        const LIMIT: usize = 20_000;
+        let mut chars = self.buffer.rope().chars_at(self.selection.head);
+        let mut depth = 0i32;
+        let mut i = self.selection.head;
+        for _ in 0..LIMIT {
+            let c = chars.prev()?;
+            i -= 1;
+            match c {
+                ')' | ']' | '}' => depth += 1,
+                '(' | '[' | '{' if depth == 0 => return Some(i),
+                '(' | '[' | '{' => depth -= 1,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The indentation of `line`, plus one level if it opens a block.
+    fn indent_after(&self, line: usize) -> String {
+        let text = self.buffer.line_text(line);
+        let indent: String = text.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        let trimmed = text.trim_end();
+        let opens = trimmed.ends_with(['{', '(', '[']) || (trimmed.ends_with(':') && self.language_name() == "Python");
+        if opens { format!("{indent}{}", self.style.indent.unit()) } else { indent }
+    }
+
+    /// ⌘↵: a new line below this one, wherever the caret is in it.
+    pub(super) fn newline_below(&mut self, _: &NewlineBelow, _: &mut Window, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| {
+            let line = this.buffer.point(this.selection.head).0;
+            let end = this.buffer.line_to_char(line) + this.buffer.line_len(line);
+            let text = format!("{}{}", this.style.line_ending.text(), this.indent_after(line));
+            this.edit(end..end, &text, EditKind::Other, cx);
+            this.selection = Selection::caret(end + text.chars().count());
+        });
+        self.touch(cx);
+    }
+
+    /// ⌘⇧↵: a new line above this one.
+    pub(super) fn newline_above(&mut self, _: &NewlineAbove, _: &mut Window, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| {
+            let line = this.buffer.point(this.selection.head).0;
+            let start = this.buffer.line_to_char(line);
+            let text = this.buffer.line_text(line);
+            let indent: String = text.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            let insert = format!("{indent}{}", this.style.line_ending.text());
+            this.edit(start..start, &insert, EditKind::Other, cx);
+            this.selection = Selection::caret(start + indent.chars().count());
+        });
+        self.touch(cx);
+    }
+
+    /// ⌃J: the next line joins this one (or the selected lines join into one), with one
+    /// space between and the indentation dropped.
+    pub(super) fn join_lines(&mut self, _: &JoinLines, _: &mut Window, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| {
+            let mut lines = this.selected_lines();
+            if lines.len() < 2 {
+                lines.end = (lines.start + 2).min(this.buffer.len_lines());
+            }
+            if lines.len() < 2 {
+                return;
+            }
+            let texts: Vec<String> = lines.clone().map(|l| this.buffer.line_text(l)).collect();
+            let (joined, caret) = join(&texts);
+            let start = this.buffer.line_to_char(lines.start);
+            let last = lines.end - 1;
+            let end = this.buffer.line_to_char(last) + this.buffer.line_len(last);
+            this.edit(start..end, &joined, EditKind::Other, cx);
+            this.selection = Selection::caret(start + caret);
+        });
+        self.touch(cx);
+    }
+
+    /// The selected lines, in order (letters before case, then as written).
+    pub(super) fn sort_lines(&mut self, _: &SortLines, _: &mut Window, cx: &mut Context<Self>) {
+        let lines = self.selected_lines();
+        if lines.len() < 2 {
+            let at = self.selection.head;
+            return self.show_notice(at, "Select the lines to sort.".into(), cx);
+        }
+        let mut texts = self.line_texts(&lines);
+        texts.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
+        let end_col = |l: usize| self.buffer.line_len(l);
+        let (first, last) = (lines.start, lines.end - 1);
+        let last_len = end_col(last).max(texts.last().map_or(0, |t| t.chars().count()));
+        self.rewrite_lines(lines, texts, move |(l, c)| (l, if l == last { c.min(last_len) } else { c }), cx);
+        // The sorted lines stay selected.
+        let start = self.buffer.line_to_char(first);
+        let end = self.buffer.line_to_char(last) + self.buffer.line_len(last);
+        self.selection = Selection { anchor: start, head: end };
+        cx.notify();
+    }
+
+    pub(super) fn upper_case(&mut self, _: &UpperCase, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_case(str::to_uppercase, cx);
+    }
+
+    pub(super) fn lower_case(&mut self, _: &LowerCase, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_case(str::to_lowercase, cx);
+    }
+
+    /// The selection (or the word at the caret) in another case, still selected.
+    fn change_case(&mut self, change: fn(&str) -> String, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| {
+            let range =
+                if this.selection.is_empty() { this.word_at(this.selection.head) } else { this.selection.range() };
+            if range.is_empty() {
+                return;
+            }
+            let text = change(&this.buffer.slice(range.clone()));
+            let len = text.chars().count();
+            this.edit(range.clone(), &text, EditKind::Other, cx);
+            this.selection = Selection { anchor: range.start, head: range.start + len };
+        });
+        self.touch(cx);
+    }
+}
+
+/// Lines joined into one, and where the caret goes: the last place two lines met.
+fn join(lines: &[String]) -> (String, usize) {
+    let mut joined = lines[0].trim_end().to_string();
+    let mut caret = joined.chars().count();
+    for line in &lines[1..] {
+        let line = line.trim();
+        caret = joined.chars().count();
+        if line.is_empty() {
+            continue;
+        }
+        // No space inside parentheses and brackets, nor before a comma (braces keep theirs).
+        let tight = joined.is_empty() || joined.ends_with(['(', '[']) || line.starts_with([')', ']', ',', ';', '.']);
+        if !tight {
+            joined.push(' ');
+        }
+        joined.push_str(line);
+    }
+    (joined, caret)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::Buffer;
+    use gpui::TestAppContext;
+    use std::path::PathBuf;
+
+    fn editor<'a>(cx: &'a mut TestAppContext, text: &str) -> (gpui::Entity<Editor>, &'a mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("x.rs")), cx))
+    }
+
+    fn selected(e: &Editor) -> String {
+        e.buffer.slice(e.selection.range())
+    }
+
+    #[gpui::test]
+    fn selection_grows_by_syntax_and_shrinks_back(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "fn main() {\n    let x = foo(10, 2);\n}\n");
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(e.buffer.offset(1, 17));
+            let mut steps = Vec::new();
+            for _ in 0..4 {
+                e.expand_selection(&ExpandSelection, window, cx);
+                steps.push(selected(e));
+            }
+            assert_eq!(steps, ["10", "(10, 2)", "foo(10, 2)", "let x = foo(10, 2);"]);
+            e.shrink_selection(&ShrinkSelection, window, cx);
+            e.shrink_selection(&ShrinkSelection, window, cx);
+            assert_eq!(selected(e), "(10, 2)");
+            // Moving the caret forgets the steps.
+            e.selection = Selection::caret(0);
+            e.shrink_selection(&ShrinkSelection, window, cx);
+            assert_eq!(e.selection, Selection::caret(0));
+        });
+    }
+
+    #[gpui::test]
+    fn lines_open_join_sort_and_change_case(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "fn a() {\n    b\n}\n");
+        e.update_in(cx, |e, window, cx| {
+            // ⌘↵ from the middle of a line that opens a block: the new line is indented.
+            e.selection = Selection::caret(3);
+            e.newline_below(&NewlineBelow, window, cx);
+            assert_eq!(e.buffer.to_string(), "fn a() {\n    \n    b\n}\n");
+            assert_eq!(e.caret_point(), (1, 4));
+            e.newline_above(&NewlineAbove, window, cx);
+            assert_eq!(e.buffer.to_string(), "fn a() {\n    \n    \n    b\n}\n");
+            // ⌃J pulls the next line up.
+            e.selection = Selection::caret(e.buffer.offset(0, 0));
+            e.join_lines(&JoinLines, window, cx);
+            e.join_lines(&JoinLines, window, cx);
+            e.join_lines(&JoinLines, window, cx);
+            assert_eq!(e.buffer.to_string(), "fn a() { b\n}\n");
+            e.selection = Selection::caret(9);
+            e.upper_case(&UpperCase, window, cx);
+            assert_eq!(e.buffer.to_string(), "fn a() { B\n}\n");
+            // ⌘⇧\ from after `{` to after `}`, then back.
+            e.selection = Selection::caret(8);
+            e.go_to_matching_bracket(&GoToMatchingBracket, window, cx);
+            assert_eq!(e.selection.head, 12);
+            e.buffer.replace(0..e.buffer.len_chars(), "pear\nApple\nfig\n");
+            e.selection = Selection { anchor: 0, head: 15 };
+            e.sort_lines(&SortLines, window, cx);
+            assert_eq!(e.buffer.to_string(), "Apple\nfig\npear\n");
+        });
+    }
+
+    #[test]
+    fn grows_to_the_next_larger_range() {
+        let ranges = || [3..5, 3..5, 2..9, 0..20].into_iter();
+        assert_eq!(next_larger(&(4..4), ranges()), Some(3..5));
+        // A range already selected grows past the ones the same size.
+        assert_eq!(next_larger(&(3..5), ranges()), Some(2..9));
+        assert_eq!(next_larger(&(0..20), ranges()), None);
+    }
+
+    #[test]
+    fn joins_lines_with_one_space() {
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(join(&lines(&["let x = foo(", "    a,", "    b", ");"])), ("let x = foo(a, b);".into(), 16));
+        assert_eq!(join(&lines(&["one  ", "", "  two"])), ("one two".into(), 3));
+    }
+}
