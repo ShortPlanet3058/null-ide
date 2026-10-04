@@ -486,6 +486,27 @@ impl SettingsPanel {
                 },
                 &theme,
             ),
+            Self::heading("Saving", &theme),
+            Self::row(
+                "Save automatically",
+                Some("Files with a name save by themselves; ⌘S still formats first when that's on"),
+                {
+                    use crate::settings::AutoSave;
+                    Self::choices(
+                        "auto-save",
+                        vec![
+                            (AutoSave::Off, "Off".into()),
+                            (AutoSave::AfterPause, "After a pause".into()),
+                            (AutoSave::WhenLeaving, "When leaving the file".into()),
+                        ],
+                        s.auto_save,
+                        &theme,
+                        cx,
+                        |_, mode, cx| settings::update(cx, |s| s.auto_save = mode),
+                    )
+                },
+                &theme,
+            ),
             Self::heading("Code intelligence", &theme),
             Self::row(
                 "Format on save",
