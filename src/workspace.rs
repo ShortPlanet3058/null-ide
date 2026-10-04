@@ -964,6 +964,27 @@ impl Workspace {
 
     // ---------- back and forward ----------
 
+    /// Places a server named, as rows to pick from: each with its line's code, in order.
+    fn location_rows(&self, found: Vec<lsp_types::Location>, cx: &App) -> Vec<crate::palette::Location> {
+        let mut rows: Vec<crate::palette::Location> = found
+            .into_iter()
+            .filter_map(|l| {
+                let path = crate::lsp::path_for(&l.uri)?;
+                let text = self.line_text(&path, l.range.start.line as usize, cx);
+                Some(crate::palette::Location {
+                    path,
+                    position: l.range.start,
+                    text: text.trim().to_string(),
+                    kind: crate::palette::LocationKind::Reference,
+                })
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            (&a.path, a.position.line, a.position.character).cmp(&(&b.path, b.position.line, b.position.character))
+        });
+        rows
+    }
+
     /// The caret in the current file, as a place to come back to.
     fn here(&self, cx: &App) -> Option<Place> {
         let editor = self.active_editor()?.read(cx);
@@ -1385,27 +1406,7 @@ impl Workspace {
                     cx.spawn_in(window, async move |this, cx| {
                         let found = request.await;
                         this.update_in(cx, |this, window, cx| {
-                            let locations: Vec<_> = found
-                                .into_iter()
-                                .filter_map(|l| {
-                                    let path = crate::lsp::path_for(&l.uri)?;
-                                    let text = this.line_text(&path, l.range.start.line as usize, cx);
-                                    Some(crate::palette::Location {
-                                        path,
-                                        position: l.range.start,
-                                        text: text.trim().to_string(),
-                                        kind: crate::palette::LocationKind::Reference,
-                                    })
-                                })
-                                .collect();
-                            let mut locations = locations;
-                            locations.sort_by(|a, b| {
-                                (&a.path, a.position.line, a.position.character).cmp(&(
-                                    &b.path,
-                                    b.position.line,
-                                    b.position.character,
-                                ))
-                            });
+                            let locations = this.location_rows(found, cx);
                             if locations.len() <= 1 {
                                 return this.show_notice(format!("{name} isn't used anywhere else"), cx);
                             }
@@ -1415,6 +1416,10 @@ impl Workspace {
                         .ok();
                     })
                     .detach();
+                }
+                EditorEvent::ShowLocations { title, locations } => {
+                    let rows = this.location_rows(locations.clone(), cx);
+                    this.open_locations(title.clone(), rows, window, cx);
                 }
                 EditorEvent::GoTo { path, range } => {
                     let range = *range;
@@ -2073,6 +2078,8 @@ impl Workspace {
                 (Go, "Go to Symbol…".into(), Box::new(GoToSymbol)),
                 (Go, "Go to Definition".into(), Box::new(GoToDefinition)),
                 (Go, "Find References".into(), Box::new(crate::editor::FindReferences)),
+                (Go, "Go to Implementation".into(), Box::new(crate::editor::GoToImplementation)),
+                (Go, "Go to Type Definition".into(), Box::new(crate::editor::GoToTypeDefinition)),
                 (Go, "Show Problems".into(), Box::new(ShowProblems)),
                 (Edit, "Rename Symbol".into(), Box::new(crate::editor::RenameSymbol)),
                 (Edit, "Quick Fix…".into(), Box::new(crate::editor::QuickFix)),

@@ -158,6 +158,8 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Go to Matching Bracket", crate::editor::GoToMatchingBracket),
                 MenuItem::separator(),
                 MenuItem::action("Go to Definition", GoToDefinition),
+                MenuItem::action("Go to Type Definition", crate::editor::GoToTypeDefinition),
+                MenuItem::action("Go to Implementation", crate::editor::GoToImplementation),
                 MenuItem::action("Find References", crate::editor::FindReferences),
                 MenuItem::action("Rename Symbol", crate::editor::RenameSymbol),
                 MenuItem::action("Quick Fix…", crate::editor::QuickFix),
