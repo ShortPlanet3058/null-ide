@@ -459,6 +459,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Sticky scroll",
+                Some("Inside a long function or block, its first line stays at the top"),
+                Self::toggle("sticky-scroll", s.sticky_scroll, &theme, cx, |s| s.sticky_scroll = !s.sticky_scroll),
+                &theme,
+            ),
+            Self::row(
                 "Who changed the line",
                 Some("At the end of the caret's line, faintly: who last changed it, when, and why. From git"),
                 Self::toggle("line-blame", s.line_blame, &theme, cx, |s| s.line_blame = !s.line_blame),

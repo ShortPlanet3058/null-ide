@@ -64,6 +64,7 @@ actions!(
         RunTask,
         NextProblem,
         ToggleIndentGuides,
+        ToggleStickyScroll,
         PreviousProblem,
         AutoSaveAfterPause,
         AutoSaveWhenLeaving,
@@ -1961,6 +1962,11 @@ impl Workspace {
                 View,
                 toggle(settings.indent_guides, "Hide Indent Guides", "Show Indent Guides"),
                 Box::new(ToggleIndentGuides),
+            ),
+            (
+                View,
+                toggle(settings.sticky_scroll, "Turn Off Sticky Scroll", "Turn On Sticky Scroll"),
+                Box::new(ToggleStickyScroll),
             ),
             (Go, "Next Problem".into(), Box::new(NextProblem)),
             (Go, "Previous Problem".into(), Box::new(PreviousProblem)),
@@ -4196,6 +4202,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::next_terminal))
             .on_action(cx.listener(Self::next_problem))
+            .on_action(cx.listener(|_, _: &ToggleStickyScroll, _, cx| {
+                settings::update(cx, |s| s.sticky_scroll = !s.sticky_scroll)
+            }))
             .on_action(cx.listener(|_, _: &ToggleIndentGuides, _, cx| {
                 settings::update(cx, |s| s.indent_guides = !s.indent_guides)
             }))

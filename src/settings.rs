@@ -42,6 +42,8 @@ pub struct Settings {
     pub line_blame: bool,
     /// Faint lines down the indentation, one per level.
     pub indent_guides: bool,
+    /// Keep the first lines of the blocks scrolled into pinned at the top.
+    pub sticky_scroll: bool,
     /// Type hints from the language server inside the code (`x: i32`), faintly.
     pub inlay_hints: bool,
     /// Show suggestions while typing. Ctrl+Space asks for them either way.
@@ -71,6 +73,7 @@ impl Default for Settings {
             line_blame: true,
             inlay_hints: false,
             indent_guides: true,
+            sticky_scroll: true,
             ai: Default::default(),
         }
     }
