@@ -57,7 +57,8 @@ impl Editor {
         }
         self.symbol_marks.ranges.clear();
         self.symbol_marks.task = None;
-        if !self.selection.is_empty() || !self.extra.is_empty() {
+        let wanted = cx.global::<crate::settings::Settings>().symbol_marks;
+        if !wanted || !self.selection.is_empty() || !self.extra.is_empty() {
             return;
         }
         let word = self.word_at(caret);

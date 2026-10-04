@@ -420,6 +420,12 @@ impl SettingsPanel {
                 }),
                 &theme,
             ),
+            Self::row(
+                "Ligatures",
+                Some("Join characters like -> and != into one symbol, if the code font has them"),
+                Self::toggle("ligatures", s.ligatures, &theme, cx, |s| s.ligatures = !s.ligatures),
+                &theme,
+            ),
             Self::heading("Window", &theme),
             Self::row(
                 "Show the sidebar",
@@ -453,30 +459,6 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
-                "Indent guides",
-                Some("Faint lines down the indentation, to see what's inside what"),
-                Self::toggle("indent-guides", s.indent_guides, &theme, cx, |s| s.indent_guides = !s.indent_guides),
-                &theme,
-            ),
-            Self::row(
-                "Sticky scroll",
-                Some("Inside a long function or block, its first line stays at the top"),
-                Self::toggle("sticky-scroll", s.sticky_scroll, &theme, cx, |s| s.sticky_scroll = !s.sticky_scroll),
-                &theme,
-            ),
-            Self::row(
-                "Who changed the line",
-                Some("At the end of the caret's line, faintly: who last changed it, when, and why. From git"),
-                Self::toggle("line-blame", s.line_blame, &theme, cx, |s| s.line_blame = !s.line_blame),
-                &theme,
-            ),
-            Self::row(
-                "Ligatures",
-                Some("Join characters like -> and != into one symbol, if the code font has them"),
-                Self::toggle("ligatures", s.ligatures, &theme, cx, |s| s.ligatures = !s.ligatures),
-                &theme,
-            ),
-            Self::row(
                 "Indentation",
                 Some("For new files, and files that don't show their own. Files keep theirs, and .editorconfig wins"),
                 {
@@ -504,6 +486,31 @@ impl SettingsPanel {
                 },
                 &theme,
             ),
+            Self::heading("Around the code", &theme),
+            Self::row(
+                "Indent guides",
+                Some("Faint lines down the indentation, to see what's inside what"),
+                Self::toggle("indent-guides", s.indent_guides, &theme, cx, |s| s.indent_guides = !s.indent_guides),
+                &theme,
+            ),
+            Self::row(
+                "Sticky scroll",
+                Some("Inside a long function or block, its first line stays at the top"),
+                Self::toggle("sticky-scroll", s.sticky_scroll, &theme, cx, |s| s.sticky_scroll = !s.sticky_scroll),
+                &theme,
+            ),
+            Self::row(
+                "Other uses of a name",
+                Some("With the caret on a name, its other uses in the file get a soft tint"),
+                Self::toggle("symbol-marks", s.symbol_marks, &theme, cx, |s| s.symbol_marks = !s.symbol_marks),
+                &theme,
+            ),
+            Self::row(
+                "Who changed the line",
+                Some("At the end of the caret's line, faintly: who last changed it, when, and why. From git"),
+                Self::toggle("line-blame", s.line_blame, &theme, cx, |s| s.line_blame = !s.line_blame),
+                &theme,
+            ),
             Self::heading("Saving", &theme),
             Self::row(
                 "Save automatically",
@@ -525,7 +532,6 @@ impl SettingsPanel {
                 },
                 &theme,
             ),
-            Self::heading("Code intelligence", &theme),
             Self::row(
                 "Format on save",
                 Some(&format!(
@@ -535,12 +541,7 @@ impl SettingsPanel {
                 Self::toggle("format-on-save", s.format_on_save, &theme, cx, |s| s.format_on_save = !s.format_on_save),
                 &theme,
             ),
-            Self::row(
-                "Type hints",
-                Some("Types and parameter names inside the code, faintly, from the language server"),
-                Self::toggle("inlay-hints", s.inlay_hints, &theme, cx, |s| s.inlay_hints = !s.inlay_hints),
-                &theme,
-            ),
+            Self::heading("Code intelligence", &theme),
             Self::row(
                 "Suggestions while typing",
                 Some(&format!(
@@ -548,6 +549,12 @@ impl SettingsPanel {
                     key(&crate::editor::ShowCompletions, cx)
                 )),
                 Self::toggle("autocomplete", s.autocomplete, &theme, cx, |s| s.autocomplete = !s.autocomplete),
+                &theme,
+            ),
+            Self::row(
+                "Type hints",
+                Some("Types and parameter names inside the code, faintly, from the language server"),
+                Self::toggle("inlay-hints", s.inlay_hints, &theme, cx, |s| s.inlay_hints = !s.inlay_hints),
                 &theme,
             ),
         ]

@@ -44,6 +44,8 @@ pub struct Settings {
     pub indent_guides: bool,
     /// Keep the first lines of the blocks scrolled into pinned at the top.
     pub sticky_scroll: bool,
+    /// Tint the other uses of the name at the caret.
+    pub symbol_marks: bool,
     /// Type hints from the language server inside the code (`x: i32`), faintly.
     pub inlay_hints: bool,
     /// Show suggestions while typing. Ctrl+Space asks for them either way.
@@ -74,6 +76,7 @@ impl Default for Settings {
             inlay_hints: false,
             indent_guides: true,
             sticky_scroll: true,
+            symbol_marks: true,
             ai: Default::default(),
         }
     }
