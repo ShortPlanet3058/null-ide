@@ -115,6 +115,8 @@ actions!(
         SelectAllOccurrences,
         AddCursorAbove,
         AddCursorBelow,
+        AddCursorsToLineEnds,
+        UndoCursor,
     ]
 );
 
@@ -185,6 +187,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
         KeyBinding::new("secondary-alt-up", AddCursorAbove, ctx),
         KeyBinding::new("secondary-alt-down", AddCursorBelow, ctx),
+        KeyBinding::new("alt-shift-i", AddCursorsToLineEnds, ctx),
+        KeyBinding::new("secondary-u", UndoCursor, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -452,6 +456,8 @@ pub struct Editor {
     symbol_marks: marks::SymbolMarks,
     /// The snippet being filled in, if any.
     snippet: Option<snippet::Session>,
+    /// Cursors as they were before each one was added, for ⌘U.
+    cursor_history: Vec<(Selection, Vec<Cursor>)>,
     /// ⌃⇧⌘→'s steps, to shrink back through.
     expansions: structure::Expansions,
     fixes_task: Option<Task<()>>,
@@ -551,6 +557,7 @@ impl Editor {
             completion_task: None,
             fix_menu: None,
             expansions: Default::default(),
+            cursor_history: Vec::new(),
             snippet: None,
             symbol_marks: Default::default(),
             hints: Default::default(),
@@ -688,6 +695,8 @@ impl Editor {
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
         self.hints_after_edit();
+        // Cursors from before an edit aren't somewhere to go back to.
+        self.cursor_history.clear();
         self.close_hover(cx);
         self.close_fixes(cx);
     }
@@ -1904,6 +1913,24 @@ impl Editor {
         }
     }
 
+    /// The column under a window position on its line, counting past the line's end as
+    /// if it went on in spaces (a box selection can reach beyond short lines).
+    fn column_at_x(&self, position: Point<Pixels>) -> Option<usize> {
+        let layout = self.layout.as_ref()?;
+        let offset = self.offset_at(position);
+        let (line, col) = self.buffer.point(offset);
+        let len = self.buffer.line_len(line);
+        if col < len {
+            return Some(col);
+        }
+        // Past the end: the line's width on screen, then whole columns beyond it.
+        let text = self.buffer.line_text(line);
+        let width = text.chars().fold(0, |c, ch| c + crate::wrap::char_columns(ch, c));
+        let x = f32::from(position.x - layout.text_origin.x) / f32::from(layout.char_width);
+        let screen_col = x.round().max(0.) as usize;
+        Some(len + screen_col.saturating_sub(width))
+    }
+
     fn line_range(&self, offset: usize) -> Range<usize> {
         let (line, _) = self.buffer.point(offset);
         let end = if line + 1 < self.buffer.len_lines() {
@@ -1933,6 +1960,17 @@ impl Editor {
             return self.set_caret_point((line, indent), cx);
         }
         let offset = self.offset_at(event.position);
+        // ⌥⇧-drag selects a box: the same columns on every line it crosses.
+        if event.modifiers.alt && event.modifiers.shift && event.click_count == 1 {
+            self.remember_cursors();
+            let line = self.buffer.point(offset).0;
+            let column = self.column_at_x(event.position).unwrap_or_else(|| self.buffer.point(offset).1);
+            self.hover_suppressed = true;
+            self.single_cursor();
+            self.selection = Selection::caret(offset);
+            self.dragging = Some(DragUnit::Column(line, column));
+            return self.touch(cx);
+        }
         // Cmd+Shift+click (Ctrl+Shift elsewhere) adds a cursor, or removes the one clicked.
         // Not Alt+click: holding Alt opens the info card.
         let add_cursor = event.modifiers.secondary() && event.modifiers.shift;
@@ -1945,9 +1983,14 @@ impl Editor {
             DragUnit::Word(range) | DragUnit::Line(range) => {
                 self.selection = Selection { anchor: range.start, head: range.end }
             }
-            DragUnit::Char if add_cursor => self.toggle_cursor_at(offset),
+            DragUnit::Char if add_cursor => {
+                self.remember_cursors();
+                self.toggle_cursor_at(offset)
+            }
             DragUnit::Char if event.modifiers.shift => self.selection.head = offset,
             DragUnit::Char => self.selection = Selection::caret(offset),
+            // Started above, before this match.
+            DragUnit::Column(..) => {}
         }
         if !(add_cursor || event.modifiers.shift) {
             self.single_cursor();
@@ -2049,6 +2092,14 @@ impl Editor {
             None => return,
             Some(DragUnit::Char) => {
                 self.selection.head = offset;
+                self.touch(cx);
+                self.reveal_only = true;
+                return;
+            }
+            &Some(DragUnit::Column(line, column)) => {
+                let to_line = self.buffer.point(offset).0;
+                let to_column = self.column_at_x(position).unwrap_or_else(|| self.buffer.point(offset).1);
+                self.select_box((line, column), (to_line, to_column));
                 self.touch(cx);
                 self.reveal_only = true;
                 return;
@@ -2214,7 +2265,17 @@ impl Editor {
     }
 
     fn add_next_occurrence_action(&mut self, _: &AddNextOccurrence, _: &mut Window, cx: &mut Context<Self>) {
+        self.remember_cursors();
         self.add_next_occurrence(cx);
+    }
+
+    fn add_cursors_to_line_ends(&mut self, _: &AddCursorsToLineEnds, _: &mut Window, cx: &mut Context<Self>) {
+        self.remember_cursors();
+        self.cursors_at_line_ends(cx);
+    }
+
+    fn undo_cursor(&mut self, _: &UndoCursor, _: &mut Window, cx: &mut Context<Self>) {
+        self.restore_cursors(cx);
     }
 
     fn select_all_occurrences_action(&mut self, _: &SelectAllOccurrences, _: &mut Window, cx: &mut Context<Self>) {
@@ -2222,10 +2283,12 @@ impl Editor {
     }
 
     fn add_cursor_above(&mut self, _: &AddCursorAbove, _: &mut Window, cx: &mut Context<Self>) {
+        self.remember_cursors();
         self.add_cursor_vertically(false, cx);
     }
 
     fn add_cursor_below(&mut self, _: &AddCursorBelow, _: &mut Window, cx: &mut Context<Self>) {
+        self.remember_cursors();
         self.add_cursor_vertically(true, cx);
     }
 
@@ -2325,6 +2388,8 @@ impl Editor {
 /// What a mouse drag selects by, set by the click that started it.
 enum DragUnit {
     Char,
+    /// ⌥⇧-drag: a box from this (line, column), a cursor on each line.
+    Column(usize, usize),
     Word(Range<usize>),
     Line(Range<usize>),
 }
@@ -2648,6 +2713,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::delete_line))
             .on_action(cx.listener(Self::select_line_action))
             .on_action(cx.listener(Self::add_next_occurrence_action))
+            .on_action(cx.listener(Self::add_cursors_to_line_ends))
+            .on_action(cx.listener(Self::undo_cursor))
             .on_action(cx.listener(Self::select_all_occurrences_action))
             .on_action(cx.listener(Self::add_cursor_above))
             .on_action(cx.listener(Self::add_cursor_below))

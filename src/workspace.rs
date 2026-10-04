@@ -2027,6 +2027,8 @@ impl Workspace {
                 (Cursors, "Select All Occurrences".into(), Box::new(crate::editor::SelectAllOccurrences)),
                 (Cursors, "Add Cursor Above".into(), Box::new(crate::editor::AddCursorAbove)),
                 (Cursors, "Add Cursor Below".into(), Box::new(crate::editor::AddCursorBelow)),
+                (Cursors, "Add Cursors to Line Ends".into(), Box::new(crate::editor::AddCursorsToLineEnds)),
+                (Cursors, "Undo Last Cursor".into(), Box::new(crate::editor::UndoCursor)),
                 (Go, "Go to Line…".into(), Box::new(GoToLine)),
                 (Go, "Go to Symbol…".into(), Box::new(GoToSymbol)),
                 (Go, "Go to Definition".into(), Box::new(GoToDefinition)),

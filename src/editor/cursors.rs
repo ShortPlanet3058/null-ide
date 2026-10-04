@@ -157,6 +157,69 @@ impl Editor {
 
     // ---------- adding cursors ----------
 
+    /// Before adding a cursor: how they were, for ⌘U to go back to.
+    pub(super) fn remember_cursors(&mut self) {
+        const KEPT: usize = 50;
+        self.cursor_history.push((self.selection, self.extra.clone()));
+        if self.cursor_history.len() > KEPT {
+            self.cursor_history.remove(0);
+        }
+    }
+
+    /// ⌘U: the cursors as they were before the last one was added.
+    pub(super) fn restore_cursors(&mut self, cx: &mut Context<Self>) {
+        let Some((selection, extra)) = self.cursor_history.pop() else { return };
+        let len = self.buffer.len_chars();
+        let fit = |s: Selection| Selection { anchor: s.anchor.min(len), head: s.head.min(len) };
+        self.selection = fit(selection);
+        self.extra = extra.into_iter().map(|c| Cursor { selection: fit(c.selection), goal: c.goal }).collect();
+        self.goal_column = None;
+        self.touch(cx);
+    }
+
+    /// ⌥⇧I: a cursor at the end of each line the selection covers.
+    pub(super) fn cursors_at_line_ends(&mut self, cx: &mut Context<Self>) {
+        let lines = self.selected_lines();
+        if lines.len() < 2 {
+            return;
+        }
+        let cursors = lines
+            .clone()
+            .map(|line| {
+                let end = self.buffer.line_to_char(line) + self.buffer.line_len(line);
+                (Cursor::new(Selection::caret(end)), line + 1 == lines.end)
+            })
+            .collect();
+        self.set_cursors(cursors);
+        self.touch(cx);
+    }
+
+    /// A box from `from` to `to` (line, column): the same columns selected on every line
+    /// between, the cursor on `to`'s line the main one. Lines that end before the box
+    /// starts are left out (unless it's no wider than a caret: then they get one at their end).
+    pub(super) fn select_box(&mut self, from: (usize, usize), to: (usize, usize)) {
+        let (first, last) = (from.0.min(to.0), from.0.max(to.0));
+        let (left, right) = (from.1.min(to.1), from.1.max(to.1));
+        let mut cursors = Vec::new();
+        for line in first..=last.min(self.buffer.len_lines().saturating_sub(1)) {
+            let len = self.buffer.line_len(line);
+            if left >= len && left != right {
+                continue;
+            }
+            let at = |col: usize| self.buffer.offset(line, col.min(len));
+            let selection = Selection { anchor: at(from.1), head: at(to.1) };
+            cursors.push((Cursor::new(selection), line == to.0));
+        }
+        if !cursors.iter().any(|(_, main)| *main)
+            && let Some(last) = cursors.last_mut()
+        {
+            last.1 = true;
+        }
+        if !cursors.is_empty() {
+            self.set_cursors(cursors);
+        }
+    }
+
     /// Cmd+Shift+click: adds a cursor there, or removes the one already there.
     pub(super) fn toggle_cursor_at(&mut self, offset: usize) {
         if !self.extra.is_empty() {
@@ -411,6 +474,48 @@ mod tests {
         // Brackets close themselves at every cursor.
         type_text(cx, &e, "(");
         assert_eq!(text(cx, &e), "o-(ne\nt-(wo\nt-(hree\n");
+    }
+
+    #[gpui::test]
+    fn a_box_selects_the_same_columns_on_each_line(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "abcd\nabcdef\na\nabcd\n");
+        // From column 1 of the first line to column 3 of the fourth: "bc" on each line
+        // long enough; the one-letter line is left out.
+        e.update(cx, |e, _| e.select_box((0, 1), (3, 3)));
+        assert_eq!(cursor_count(cx, &e), 3);
+        type_text(cx, &e, "X");
+        assert_eq!(text(cx, &e), "aXd\naXdef\na\naXd\n");
+        // No wider than a caret: every line gets one, short ones at their end.
+        e.update(cx, |e, _| e.select_box((0, 2), (2, 2)));
+        assert_eq!(cursor_count(cx, &e), 3);
+        type_text(cx, &e, "|");
+        assert_eq!(text(cx, &e), "aX|d\naX|def\na|\naXd\n");
+    }
+
+    #[gpui::test]
+    fn cursors_at_line_ends_and_undo_cursor(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "let a = 1\nlet b = 2\nlet c = 3\n");
+        e.update(cx, |e, cx| {
+            e.selection = Selection { anchor: 0, head: 25 };
+            e.remember_cursors();
+            e.cursors_at_line_ends(cx);
+        });
+        assert_eq!(cursor_count(cx, &e), 3);
+        type_text(cx, &e, ";");
+        assert_eq!(text(cx, &e), "let a = 1;\nlet b = 2;\nlet c = 3;\n");
+        // ⌘D on `let` three times (the word, then two more), then ⌘U takes the last back.
+        e.update(cx, |e, cx| {
+            e.selection = Selection::caret(0);
+            e.single_cursor();
+            e.add_next_occurrence(cx);
+            e.remember_cursors();
+            e.add_next_occurrence(cx);
+            e.remember_cursors();
+            e.add_next_occurrence(cx);
+        });
+        assert_eq!(cursor_count(cx, &e), 3);
+        e.update(cx, |e, cx| e.restore_cursors(cx));
+        assert_eq!(cursor_count(cx, &e), 2);
     }
 
     #[gpui::test]

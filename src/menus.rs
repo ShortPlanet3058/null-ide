@@ -141,6 +141,8 @@ pub fn set(cx: &mut App) {
                         MenuItem::action("Select All Occurrences", SelectAllOccurrences),
                         MenuItem::action("Add Cursor Above", AddCursorAbove),
                         MenuItem::action("Add Cursor Below", AddCursorBelow),
+                        MenuItem::action("Add Cursors to Line Ends", crate::editor::AddCursorsToLineEnds),
+                        MenuItem::action("Undo Last Cursor", crate::editor::UndoCursor),
                     ],
                 }),
                 MenuItem::separator(),
