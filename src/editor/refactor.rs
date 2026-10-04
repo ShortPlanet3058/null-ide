@@ -40,34 +40,55 @@ pub(super) struct Renaming {
 /// Applies a server's edits to a buffer, last first so earlier positions stay right.
 /// Positions are lines and UTF-16 columns, as servers count.
 pub fn apply_edits(buffer: &mut Buffer, edits: &[TextEdit]) {
-    let offset = |buffer: &Buffer, p: Position| {
-        let line = p.line as usize;
-        if line >= buffer.len_lines() {
-            return buffer.len_chars();
-        }
-        buffer.offset(line, buffer.utf16_to_column(line, p.character as usize))
-    };
-    let mut ranges: Vec<(Range<usize>, &str)> = edits
-        .iter()
-        .map(|e| (offset(buffer, e.range.start)..offset(buffer, e.range.end), e.new_text.as_str()))
-        .collect();
+    let mut ranges = edit_ranges(buffer, edits);
     ranges.sort_by_key(|(r, _)| std::cmp::Reverse((r.start, r.end)));
     for (range, text) in ranges {
         buffer.replace(range, text);
     }
 }
 
+/// The character ranges a server's edits replace, with their new text.
+fn edit_ranges<'a>(buffer: &Buffer, edits: &'a [TextEdit]) -> Vec<(Range<usize>, &'a str)> {
+    let offset = |p: Position| {
+        let line = p.line as usize;
+        if line >= buffer.len_lines() {
+            return buffer.len_chars();
+        }
+        buffer.offset(line, buffer.utf16_to_column(line, p.character as usize))
+    };
+    edits.iter().map(|e| (offset(e.range.start)..offset(e.range.end), e.new_text.as_str())).collect()
+}
+
+/// Where `caret` ends up once `edits` are applied: shifted by the edits before it, or
+/// None when one of them rewrites the text around it.
+fn caret_after(caret: usize, edits: &[(Range<usize>, &str)]) -> Option<usize> {
+    let mut shift = 0isize;
+    for (range, text) in edits {
+        if range.start < caret && caret < range.end {
+            return None;
+        }
+        if range.end <= caret && range.start < caret {
+            shift += text.chars().count() as isize - range.len() as isize;
+        }
+    }
+    Some((caret as isize + shift).max(0) as usize)
+}
+
 impl Editor {
-    /// Applies a server's edits as one undo step, keeping the caret on the same line and column.
+    /// Applies a server's edits as one undo step.
     pub fn apply_lsp_edits(&mut self, edits: &[TextEdit], cx: &mut Context<Self>) {
         if edits.is_empty() {
             return;
         }
+        // The caret stays with its text (below an added import, say); where an edit
+        // rewrites the text around it (formatting), it keeps its line and column.
         let (line, col) = self.caret_point();
+        let moved = caret_after(self.selection.head, &edit_ranges(&self.buffer, edits));
         self.record_undo(EditKind::Other);
         apply_edits(&mut self.buffer, edits);
         self.single_cursor();
-        self.selection = Selection::caret(self.buffer.offset(line, col));
+        let caret = moved.unwrap_or_else(|| self.buffer.offset(line, col)).min(self.buffer.len_chars());
+        self.selection = Selection::caret(caret);
         self.goal_column = None;
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
@@ -237,5 +258,17 @@ mod tests {
         // A formatter's edit at the end of the file.
         apply_edits(&mut buffer, &[edit(2, 0, 2, 0, "\n")]);
         assert_eq!(buffer.to_string(), "let total = 1;\nprint(total);\n\n");
+    }
+
+    #[test]
+    fn the_caret_follows_its_text() {
+        let buffer = Buffer::from_text("fn main() {\n    x\n}\n");
+        let caret = buffer.offset(1, 5);
+        // An import added above: the caret moves down with its line.
+        let import = [edit(0, 0, 0, 0, "use a::b;\n")];
+        assert_eq!(caret_after(caret, &edit_ranges(&buffer, &import)), Some(caret + 10));
+        // An edit after it leaves it alone; one around it gives up.
+        assert_eq!(caret_after(caret, &edit_ranges(&buffer, &[edit(2, 0, 2, 1, "}}")])), Some(caret));
+        assert_eq!(caret_after(caret, &edit_ranges(&buffer, &[edit(0, 0, 3, 0, "")])), None);
     }
 }

@@ -3,6 +3,7 @@ mod changes;
 mod commands;
 mod completion;
 mod cursors;
+mod fixes;
 mod fold;
 mod ghost;
 mod intel;
@@ -13,6 +14,7 @@ mod signature;
 pub use assist::{Block, BlockKind};
 pub use completion::CompletionMenu;
 pub use cursors::Cursor;
+pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::HoverCard;
@@ -116,6 +118,7 @@ const UNDO_GROUP: Duration = Duration::from_millis(1000);
 pub fn bind_refactor_keys(cx: &mut App) {
     refactor::bind_keys(cx);
     fold::bind_keys(cx);
+    fixes::bind_keys(cx);
 }
 
 pub fn bind_ai_keys(cx: &mut App) {
@@ -276,6 +279,8 @@ pub enum EditorEvent {
     },
     /// Every change of a review was kept or undone.
     Reviewed,
+    /// A quick fix was picked: the workspace works out its edits and applies them.
+    CodeAction(lsp_types::CodeActionOrCommand),
     /// Show where the symbol at `position` is used.
     FindReferences {
         position: lsp_types::Position,
@@ -422,6 +427,9 @@ pub struct Editor {
     scrollbar_drag: Option<Pixels>,
     pub completion: Option<CompletionMenu>,
     completion_task: Option<Task<()>>,
+    /// ⌘.'s list of quick fixes.
+    fix_menu: Option<fixes::FixMenu>,
+    fixes_task: Option<Task<()>>,
     /// Parameter hints while typing a call.
     signature: signature::Signature,
     folds: fold::Folds,
@@ -512,6 +520,8 @@ impl Editor {
             scrollbar_drag: None,
             completion: None,
             completion_task: None,
+            fix_menu: None,
+            fixes_task: None,
             signature: Default::default(),
             folds: Default::default(),
             git_base: None,
@@ -633,6 +643,7 @@ impl Editor {
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
         self.close_hover(cx);
+        self.close_fixes(cx);
     }
 
     /// Brings everything derived from the text up to date after it changes. Colours
@@ -2054,15 +2065,26 @@ impl Editor {
         self.show_completions_now(cx);
     }
 
+    // The suggestion list's keys also drive ⌘.'s list of fixes while it's open.
+
     fn completion_next(&mut self, _: &CompletionNext, _: &mut Window, cx: &mut Context<Self>) {
+        if self.fix_menu.is_some() {
+            return self.move_fix(1, cx);
+        }
         self.move_completion(1, cx);
     }
 
     fn completion_previous(&mut self, _: &CompletionPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        if self.fix_menu.is_some() {
+            return self.move_fix(-1, cx);
+        }
         self.move_completion(-1, cx);
     }
 
     fn confirm_completion(&mut self, _: &ConfirmCompletion, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.fix_menu {
+            return self.accept_fix(menu.selected, cx);
+        }
         let selected = self.completion.as_ref().map_or(0, |m| m.selected);
         self.accept_completion(selected, cx);
     }
@@ -2160,6 +2182,7 @@ impl Editor {
 
     fn cancel_completion(&mut self, _: &CancelCompletion, _: &mut Window, cx: &mut Context<Self>) {
         self.close_completion(cx);
+        self.close_fixes(cx);
     }
 
     fn go_to_definition(&mut self, _: &GoToDefinition, _: &mut Window, cx: &mut Context<Self>) {
@@ -2433,7 +2456,7 @@ impl Render for Editor {
         let find_bar = self.find_bar.clone();
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add("Editor");
-        if self.completion.is_some() {
+        if self.completion.is_some() || self.fix_menu.is_some() {
             key_context.add("showing_completions");
         }
         self.ai_key_context(&mut key_context);
@@ -2511,6 +2534,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::close_note_action))
             .on_action(cx.listener(Self::accept_ghost_action))
             .on_action(cx.listener(Self::rename_symbol))
+            .on_action(cx.listener(Self::quick_fix))
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::format_document))
             .on_action(cx.listener(Self::accept_ghost_word))
@@ -2542,6 +2566,7 @@ impl Render for Editor {
         let hover = self.render_hover(cx);
         let rename = self.render_rename(cx);
         let completions = self.render_completions(cx);
+        let fixes = self.render_fixes(cx);
         let signature = self.render_signature(cx);
         let ai_blocks = self.render_ai_blocks(cx);
         div()
@@ -2554,6 +2579,7 @@ impl Render for Editor {
             .children(hover)
             .children(rename)
             .children(completions)
+            .children(fixes)
             .children(signature)
             .children(ai_blocks)
     }
