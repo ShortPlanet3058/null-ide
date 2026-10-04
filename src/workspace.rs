@@ -36,6 +36,10 @@ actions!(
         MoveTabLeft,
         OpenOnOtherSide,
         NewAiTask,
+        ReviewChanges,
+        CommitAll,
+        PushBranch,
+        RevertAllChanges,
         ShowWelcome,
         InstallShellCommand,
         ReviewAiTask,
@@ -101,6 +105,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-h", ReplaceInProject, ctx),
         // Arrows rather than ⌘\, which takes several keys on many layouts.
         KeyBinding::new("alt-secondary-i", NewAiTask, ctx),
+        KeyBinding::new("ctrl-shift-g", ReviewChanges, ctx),
         KeyBinding::new("ctrl-secondary-right", MoveTabRight, ctx),
         KeyBinding::new("ctrl-alt-secondary-right", OpenOnOtherSide, ctx),
         KeyBinding::new("ctrl-secondary-left", MoveTabLeft, ctx),
@@ -293,6 +298,11 @@ pub struct Workspace {
     /// The editor and its view (caret line, column, top line) before a symbol list
     /// started showing places in it.
     view_before_preview: Option<(Entity<Editor>, (usize, usize, usize))>,
+    /// What git says changed since the last commit, and the task reading it.
+    git_status: Vec<(PathBuf, git::FileStatus)>,
+    git_status_task: Option<Task<()>>,
+    /// The list of changes is open: opening a file from it shows its changes.
+    git_listing: bool,
     /// The AI task running or waiting for review, if any.
     ai_task: Option<AiTaskRun>,
     /// Commands the next palette list shows after its places (a task's "Keep all").
@@ -413,6 +423,9 @@ impl Workspace {
             twin_seen: Default::default(),
             view_before_preview: None,
             ai_task: None,
+            git_status: Vec::new(),
+            git_status_task: None,
+            git_listing: false,
             pending_commands: Vec::new(),
             ignore_rules,
             key_prompt: None,
@@ -672,6 +685,8 @@ impl Workspace {
         }
         if git_changed {
             self.refresh_git(cx);
+        } else if !visible.is_empty() {
+            self.refresh_git_status(cx);
         }
     }
 
@@ -689,6 +704,223 @@ impl Workspace {
         for tab in &self.tabs {
             tab.editor.update(cx, |editor, cx| editor.reload_git_base(cx));
         }
+        self.refresh_git_status(cx);
+    }
+
+    /// Asks git what changed (off the main thread), for the tree and the status bar.
+    fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        self.git_status_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(120)).await;
+            let changed = cx.background_executor().spawn(async move { git::status(&root) }).await;
+            this.update(cx, |this, cx| {
+                this.tree.update(cx, |tree, cx| tree.set_git_status(changed.clone(), cx));
+                this.git_status = changed;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    // ---------- git ----------
+
+    /// ⌃⇧G: the files changed since the last commit, to open one by one (each shows its
+    /// changes, to keep or revert), then commit, push or revert them all.
+    fn review_changes(&mut self, _: &ReviewChanges, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_status.is_empty() {
+            let message = if self.branch.is_some() {
+                "Nothing changed since the last commit."
+            } else {
+                "This folder isn't a git repository."
+            };
+            return self.show_notice(message.into(), cx);
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        let changed = self.git_status.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            // Lines added and removed in each, read off the main thread.
+            let rows = cx
+                .background_executor()
+                .spawn(async move {
+                    changed
+                        .into_iter()
+                        .map(|(path, status)| {
+                            let before = git::committed_text(&path).unwrap_or_default();
+                            let after = std::fs::read_to_string(&path).unwrap_or_default();
+                            let (added, removed) = crate::ai_task::line_counts(&before, &after);
+                            (path, status, added, removed)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                use crate::ai_task::ChangeKind;
+                use crate::palette::{Category, Command, Location, LocationKind};
+                let locations = rows
+                    .into_iter()
+                    .map(|(path, status, added, removed)| Location {
+                        text: path.strip_prefix(&root).unwrap_or(&path).display().to_string(),
+                        path,
+                        position: lsp_types::Position::default(),
+                        kind: LocationKind::FileChange(
+                            match status {
+                                git::FileStatus::Added => ChangeKind::Added,
+                                git::FileStatus::Deleted => ChangeKind::Deleted,
+                                _ => ChangeKind::Changed,
+                            },
+                            added,
+                            removed,
+                        ),
+                    })
+                    .collect();
+                let command = |label: &str, action: Box<dyn Action>| Command {
+                    category: Category::File,
+                    label: label.to_string().into(),
+                    action,
+                    keys: None,
+                };
+                this.pending_commands = vec![
+                    command("Commit All Changes…", Box::new(CommitAll)),
+                    command("Push", Box::new(PushBranch)),
+                    command("Revert All Changes…", Box::new(RevertAllChanges)),
+                ];
+                let title = match &this.branch {
+                    Some(branch) => format!("Changes on {branch}"),
+                    None => "Changes".to_string(),
+                };
+                this.open_locations(title, locations, window, cx);
+                this.git_listing = true;
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// From the changes list: the file opens with its changes since the last commit, to
+    /// keep or revert one by one. A deleted file is restored.
+    fn review_git_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(&(_, status)) = self.git_status.iter().find(|(p, _)| p == path) else { return false };
+        if status == git::FileStatus::Deleted {
+            let root = self.tree.read(cx).root().to_path_buf();
+            let message = match git::revert(&root, path, status) {
+                Ok(()) => format!("Restored {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                Err(error) => format!("Couldn't restore it: {error}"),
+            };
+            self.show_notice(message, cx);
+            self.refresh_git_status(cx);
+            return true;
+        }
+        let before = git::committed_text(path).unwrap_or_default();
+        self.open_file(path.to_path_buf(), window, cx);
+        if let Some(editor) = self.active_editor().cloned() {
+            editor.update(cx, |editor, cx| editor.start_review(before, cx));
+        }
+        true
+    }
+
+    /// Asks for a message, then commits every change (open files saved first).
+    fn commit_all(&mut self, _: &CommitAll, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_status.is_empty() {
+            return self.show_notice("Nothing to commit.".into(), cx);
+        }
+        let count = self.git_status.len();
+        let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
+        let branch = self.branch.clone().unwrap_or_default();
+        self.open_palette_with(
+            PaletteKind::Commit,
+            Some(format!("Commits every change on {branch}: {files}. Open files are saved first.")),
+            Vec::new(),
+            window,
+            cx,
+        );
+    }
+
+    fn commit_with(&mut self, message: String, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            let dirty = tab.editor.read(cx).buffer.is_dirty() && tab.editor.read(cx).path().is_some();
+            if dirty {
+                tab.editor.update(cx, |editor, cx| editor.save_to_disk(cx));
+            }
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::commit_all(&root, &message) }).await;
+            this.update(cx, |this, cx| {
+                let notice = match result {
+                    Ok(id) => format!("Committed {id}."),
+                    Err(error) => format!("Couldn't commit: {error}"),
+                };
+                this.show_notice(notice, cx);
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn push_branch(&mut self, _: &PushBranch, _: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        self.show_notice("Pushing…".into(), cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::push(&root) }).await;
+            this.update(cx, |this, cx| {
+                let notice = match result {
+                    Ok(branch) => format!("Pushed {branch}."),
+                    Err(error) => format!("Couldn't push: {error}"),
+                };
+                this.show_notice(notice, cx);
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Every change back to the last commit, after asking (new files go to the Trash).
+    fn revert_all_changes(&mut self, _: &RevertAllChanges, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.git_status.len();
+        if count == 0 {
+            return;
+        }
+        let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Revert every change in {files}?"),
+            Some("They go back to the last commit. New files go to the Trash."),
+            &["Revert", "Cancel"],
+            cx,
+        );
+        let changed = self.git_status.clone();
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let failed: Vec<String> = cx
+                .background_executor()
+                .spawn(async move {
+                    changed
+                        .iter()
+                        .filter_map(|(path, status)| {
+                            git::revert(&root, path, *status).err().map(|e| format!("{}: {e}", path.display()))
+                        })
+                        .collect()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let notice = if failed.is_empty() { "Reverted every change.".to_string() } else { failed.join("; ") };
+                this.show_notice(notice, cx);
+                for tab in &this.tabs {
+                    tab.editor.update(cx, |editor, cx| {
+                        editor.end_review(cx);
+                        editor.reload_from_disk(cx);
+                    });
+                }
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Points open tabs at their new location after a file or folder was renamed.
@@ -838,6 +1070,7 @@ impl Workspace {
                 }
                 // Hand edits to the settings file take effect when saved.
                 EditorEvent::Saved => {
+                    this.refresh_git_status(cx);
                     // Saving (and tidying) one copy saves the other: same text, same file.
                     this.sync_twins(&editor, cx);
                     for twin in this.twins_of(&editor, cx) {
@@ -1445,6 +1678,9 @@ impl Workspace {
             (Go, "Go to File…".into(), Box::new(TogglePalette)),
             (Go, "Go to Symbol in Project…".into(), Box::new(GoToSymbolInProject)),
             (Go, "Search in Project…".into(), Box::new(SearchProject)),
+            (File, "Review Changes…".into(), Box::new(ReviewChanges)),
+            (File, "Commit All Changes…".into(), Box::new(CommitAll)),
+            (File, "Push".into(), Box::new(PushBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
             (View, toggle(settings.word_wrap, "Stop Wrapping Lines", "Wrap Lines"), Box::new(ToggleWordWrap)),
@@ -1626,6 +1862,11 @@ impl Workspace {
         let palette = cx.new(|cx| Palette::new(options, cx));
         let subscription = cx.subscribe_in(&palette, window, |this, palette, event, window, cx| match event {
             PaletteEvent::Dismissed => this.close_palette(window, cx),
+            PaletteEvent::Commit(message) => {
+                let message = message.clone();
+                this.close_palette(window, cx);
+                this.commit_with(message, cx);
+            }
             PaletteEvent::StartTask(text) => {
                 let text = text.clone();
                 this.close_palette(window, cx);
@@ -1642,6 +1883,9 @@ impl Workspace {
                 this.view_before_preview = None;
                 this.close_palette(window, cx);
                 if this.review_file(&path, window, cx) {
+                    return;
+                }
+                if std::mem::take(&mut this.git_listing) && this.review_git_file(&path, window, cx) {
                     return;
                 }
                 this.open_file(path, window, cx);
@@ -1742,6 +1986,7 @@ impl Workspace {
     /// Closes whichever floating layer is open (the palette or the Settings window)
     /// and puts focus back where it was.
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.git_listing = false;
         // Leaving a symbol list without choosing: the view goes back to where it was.
         if let Some((editor, (line, column, top))) = self.view_before_preview.take() {
             editor.update(cx, |editor, cx| editor.restore_view(line, column, top, cx));
@@ -3118,148 +3363,161 @@ impl Render for Workspace {
             .child(div().w(px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
 
         let mut items = status_items.into_iter();
-        let status =
-            div()
-                .h(px(28.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(16.))
-                .px(px(16.))
-                .border_t_1()
-                .border_color(theme.hairline)
-                .bg(theme.surface)
-                .text_size(px(12.))
-                .text_color(theme.muted)
-                .opacity(opacity)
-                .children(self.branch.clone().map(|branch| {
+        let status = div()
+            .h(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .px(px(16.))
+            .border_t_1()
+            .border_color(theme.hairline)
+            .bg(theme.surface)
+            .text_size(px(12.))
+            .text_color(theme.muted)
+            .opacity(opacity)
+            .children(self.branch.clone().map(|branch| {
+                // The branch, and how many files changed: a click lists them.
+                let changed = self.git_status.len();
+                div()
+                    .id("branch")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .tooltip(ui::tip("Review changes", Some(Box::new(ReviewChanges))))
+                    .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
+                    .child(branch)
+                    .when(changed > 0, |d| d.child(div().text_color(theme.git_modified).child(format!("· {changed}"))))
+                    .active(|s| s.opacity(0.7))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.review_changes(&ReviewChanges, window, cx)),
+                    )
+            }))
+            .child(div().flex_1().min_w_0().truncate().children(items.next()))
+            .children(lsp_status)
+            .children(indent_label.map(|label| {
+                div()
+                    .id("status-indent")
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(label)
+                    .active(|s| s.opacity(0.7))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_commands_for("indent with", window, cx)
+                        }),
+                    )
+            }))
+            .when(crlf, |bar| {
+                bar.child(
                     div()
-                        .flex()
+                        .id("status-crlf")
                         .flex_none()
-                        .items_center()
-                        .gap(px(5.))
-                        .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
-                        .child(branch)
-                }))
-                .child(div().flex_1().min_w_0().truncate().children(items.next()))
-                .children(lsp_status)
-                .children(indent_label.map(|label| {
-                    div()
-                        .id("status-indent")
-                        .flex_none()
-                        .whitespace_nowrap()
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.foreground))
-                        .child(label)
+                        .child("CRLF")
                         .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.show_commands_for("indent with", window, cx)
-                        }))
-                }))
-                .when(crlf, |bar| {
-                    bar.child(
-                        div()
-                            .id("status-crlf")
-                            .flex_none()
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child("CRLF")
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.show_commands_for("line endings", window, cx)
-                            })),
-                    )
-                })
-                .children(self.ai_task.as_ref().map(|run| {
-                    // One line for a task: what it's at, then how many files to review.
-                    let text: String = match &run.state {
-                        TaskState::Starting => "Starting the task…".into(),
-                        TaskState::Running(Some(file)) => {
-                            let name =
-                                Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
-                            format!("Working on {name}…")
-                        }
-                        TaskState::Running(None) => format!("{}…", run.title.trim()),
-                        TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
-                        TaskState::Review(changes) => format!("Review {} files", changes.len()),
-                    };
-                    let reviewing = matches!(run.state, TaskState::Review(_));
+                            this.show_commands_for("line endings", window, cx)
+                        })),
+                )
+            })
+            .children(self.ai_task.as_ref().map(|run| {
+                // One line for a task: what it's at, then how many files to review.
+                let text: String = match &run.state {
+                    TaskState::Starting => "Starting the task…".into(),
+                    TaskState::Running(Some(file)) => {
+                        let name =
+                            Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                        format!("Working on {name}…")
+                    }
+                    TaskState::Running(None) => format!("{}…", run.title.trim()),
+                    TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
+                    TaskState::Review(changes) => format!("Review {} files", changes.len()),
+                };
+                let reviewing = matches!(run.state, TaskState::Review(_));
+                div()
+                    .id("ai-task")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .whitespace_nowrap()
+                    .max_w(px(320.))
+                    .text_color(theme.foreground)
+                    .child(div().flex_none().text_color(theme.caret).child("✦"))
+                    .child(div().min_w_0().truncate().child(text))
+                    // While it works, only "Stop" stops it; once done, the line opens the review.
+                    .when(!reviewing, |d| {
+                        d.child(
+                            div()
+                                .id("stop-ai-task")
+                                .flex_none()
+                                .cursor_pointer()
+                                .text_color(theme.muted)
+                                .hover(|s| s.text_color(theme.foreground))
+                                .child("Stop")
+                                .active(|s| s.opacity(0.7))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.stop_ai_task(&StopAiTask, window, cx)
+                                })),
+                        )
+                    })
+                    .when(reviewing, |d| {
+                        d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
+                        ))
+                    })
+            }))
+            .when(ai_provider != ProviderId::Off, |bar| {
+                bar.child(
                     div()
-                        .id("ai-task")
+                        .id("ai-status")
                         .flex()
                         .flex_none()
                         .items_center()
                         .gap(px(6.))
                         .whitespace_nowrap()
-                        .max_w(px(320.))
-                        .text_color(theme.foreground)
-                        .child(div().flex_none().text_color(theme.caret).child("✦"))
-                        .child(div().min_w_0().truncate().child(text))
-                        // While it works, only "Stop" stops it; once done, the line opens the review.
-                        .when(!reviewing, |d| {
-                            d.child(
-                                div()
-                                    .id("stop-ai-task")
-                                    .flex_none()
-                                    .cursor_pointer()
-                                    .text_color(theme.muted)
-                                    .hover(|s| s.text_color(theme.foreground))
-                                    .child("Stop")
-                                    .active(|s| s.opacity(0.7))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.stop_ai_task(&StopAiTask, window, cx)
-                                    })),
-                            )
-                        })
-                        .when(reviewing, |d| {
-                            d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
-                                |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
-                            ))
-                        })
-                }))
-                .when(ai_provider != ProviderId::Off, |bar| {
-                    bar.child(
-                        div()
-                            .id("ai-status")
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(6.))
-                            .whitespace_nowrap()
-                            .cursor_pointer()
-                            .text_color(theme.muted)
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
-                            .child(format!("AI · {}", ai_provider.label()))
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_settings_at(Some(Section::Ai), window, cx)
-                            })),
-                    )
-                })
-                .when(problems != (0, 0), |bar| {
-                    let (errors, warnings) = problems;
-                    let plural =
-                        |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
-                    bar.child(
-                        div()
-                            .id("problems")
-                            .flex()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .gap(px(10.))
-                            .cursor_pointer()
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        .cursor_pointer()
+                        .text_color(theme.muted)
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
+                        .child(format!("AI · {}", ai_provider.label()))
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_settings_at(Some(Section::Ai), window, cx)
+                        })),
+                )
+            })
+            .when(problems != (0, 0), |bar| {
+                let (errors, warnings) = problems;
+                let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+                bar.child(
+                    div()
+                        .id("problems")
+                        .flex()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .gap(px(10.))
+                        .cursor_pointer()
+                        .active(|s| s.opacity(0.7))
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.show_problems(&ShowProblems, window, cx)
-                            }))
-                            .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
-                            .when(warnings > 0, |d| {
-                                d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
                             }),
-                    )
-                })
-                .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
+                        )
+                        .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
+                        .when(warnings > 0, |d| {
+                            d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
+                        }),
+                )
+            })
+            .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
 
         div()
             .key_context("Workspace")
@@ -3278,6 +3536,10 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_problems))
             .on_action(cx.listener(Self::replace_in_project))
             .on_action(cx.listener(Self::new_ai_task))
+            .on_action(cx.listener(Self::review_changes))
+            .on_action(cx.listener(Self::commit_all))
+            .on_action(cx.listener(Self::push_branch))
+            .on_action(cx.listener(Self::revert_all_changes))
             .on_action(cx.listener(|this, _: &ShowWelcome, window, cx| this.show_welcome(window, cx)))
             .on_action(cx.listener(Self::install_shell_command))
             .on_action(cx.listener(Self::review_ai_task))

@@ -30,6 +30,90 @@ pub fn is_state_change(path: &Path) -> bool {
     }
 }
 
+/// How a file stands against the last commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileStatus {
+    Modified,
+    /// New: not in the last commit (untracked, or added).
+    Added,
+    Deleted,
+    /// Both sides of a merge changed it.
+    Conflicted,
+}
+
+/// Every changed file under `root`, by absolute path (untracked ones included, ignored
+/// ones not). Empty outside a repository.
+pub fn status(root: &Path) -> Vec<(std::path::PathBuf, FileStatus)> {
+    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| std::path::PathBuf::from(t.trim())) else {
+        return Vec::new();
+    };
+    let Some(out) = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]) else { return Vec::new() };
+    let mut entries = out.split('\0').filter(|e| !e.is_empty());
+    let mut found = Vec::new();
+    while let Some(entry) = entries.next() {
+        let (code, path) = entry.split_at(entry.len().min(3));
+        let (x, y) = (code.chars().next().unwrap_or(' '), code.chars().nth(1).unwrap_or(' '));
+        // A rename lists its old path next: skip it.
+        if x == 'R' || x == 'C' {
+            entries.next();
+        }
+        let status = match (x, y) {
+            ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => FileStatus::Conflicted,
+            ('?', '?') | ('A', _) => FileStatus::Added,
+            ('D', _) | (_, 'D') => FileStatus::Deleted,
+            _ => FileStatus::Modified,
+        };
+        found.push((top.join(path), status));
+    }
+    found
+}
+
+/// Commits every change (new files included) with `message`; returns the short commit id.
+pub fn commit_all(root: &Path, message: &str) -> Result<String, String> {
+    run(root, &["add", "-A"])?;
+    run(root, &["commit", "-q", "-m", message])?;
+    Ok(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default().trim().to_string())
+}
+
+/// Pushes the branch to where it's tracked (or sets that up on `origin`). Never asks
+/// for a password in a terminal that isn't there: it fails with git's message instead.
+pub fn push(root: &Path) -> Result<String, String> {
+    let branch = current_branch(root).ok_or("Not on a branch.")?;
+    let tracked = git(root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).is_some();
+    if tracked {
+        run(root, &["push", "-q"])?
+    } else {
+        run(root, &["push", "-q", "-u", "origin", &branch])?
+    };
+    Ok(branch)
+}
+
+/// A file back as it was in the last commit; a new file goes to the Trash.
+pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String> {
+    if status == FileStatus::Added {
+        return crate::fs_ops::move_to_trash(path);
+    }
+    let path = path.to_string_lossy();
+    run(root, &["restore", "--source=HEAD", "--staged", "--worktree", "--", &path]).map(|_| ())
+}
+
+/// Runs git, with its own words when it fails.
+fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let error = String::from_utf8_lossy(&output.stderr);
+    let message: Vec<&str> = error.lines().filter(|l| !l.trim().is_empty()).take(3).collect();
+    Err(message.join(" ").trim().to_string())
+}
+
 pub fn current_branch(dir: &Path) -> Option<String> {
     let name = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
     // A detached HEAD reports "HEAD": show the short commit instead.
@@ -94,6 +178,43 @@ mod tests {
         assert_eq!(committed_text(&dir.join("link/src/a.rs")).as_deref(), Some("committed\n"));
         assert_eq!(committed_text(&repo.join("src/new.rs")), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn status_commit_and_revert() {
+        let repo = std::env::temp_dir().join(format!("null-git-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        if run(&repo, &["init", "-q"]).is_err() {
+            return; // No git here.
+        }
+        run(&repo, &["config", "user.name", "t"]).unwrap();
+        run(&repo, &["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "one\n").unwrap();
+        std::fs::write(repo.join("gone.txt"), "x\n").unwrap();
+        assert!(commit_all(&repo, "first").unwrap().len() >= 7);
+        std::fs::write(repo.join("src/a.rs"), "two\n").unwrap();
+        std::fs::write(repo.join("src/new.rs"), "new\n").unwrap();
+        std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        let mut found: Vec<(String, FileStatus)> = status(&repo)
+            .into_iter()
+            .map(|(p, s)| (p.file_name().unwrap().to_string_lossy().into_owned(), s))
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            found,
+            vec![
+                ("a.rs".into(), FileStatus::Modified),
+                ("gone.txt".into(), FileStatus::Deleted),
+                ("new.rs".into(), FileStatus::Added),
+            ]
+        );
+        revert(&repo, &repo.join("src/a.rs"), FileStatus::Modified).unwrap();
+        assert_eq!(std::fs::read_to_string(repo.join("src/a.rs")).unwrap(), "one\n");
+        revert(&repo, &repo.join("gone.txt"), FileStatus::Deleted).unwrap();
+        assert!(repo.join("gone.txt").exists());
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
