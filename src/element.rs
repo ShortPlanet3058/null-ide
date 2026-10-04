@@ -114,6 +114,8 @@ pub fn position(
 
 /// What a folded line shows after its text.
 pub const FOLDED: &str = " ⋯";
+/// Space between a line's end and who last changed it.
+const BLAME_GAP: &str = "      ";
 
 /// Draws an [`Editor`]: gutter, current line, selection, text and caret.
 pub struct EditorElement {
@@ -353,6 +355,7 @@ impl Element for EditorElement {
                 }
             }
 
+            let show_blame = cx.global::<crate::settings::Settings>().line_blame;
             let row_layouts: Vec<RowLayout> = rows
                 .into_iter()
                 .map(|row| {
@@ -423,6 +426,18 @@ impl Element for EditorElement {
                         return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
                     }
                     let mut runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
+                    // Who last changed the caret's line, faintly after its end.
+                    if row.last
+                        && show_blame
+                        && !editor.is_folded(row.line)
+                        && let Some((line, blame)) = editor.line_blame()
+                        && line == row.line
+                    {
+                        let note = format!("{BLAME_GAP}{blame}");
+                        runs.push(run(note.len(), &font, theme.faint));
+                        let (shaped, tabs) = shape_row(&format!("{text}{note}"), &runs);
+                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
+                    }
                     // A folded line ends in "⋯", standing in for the lines it hides.
                     if row.last && editor.is_folded(row.line) {
                         runs.push(run(FOLDED.len(), &font, theme.muted));

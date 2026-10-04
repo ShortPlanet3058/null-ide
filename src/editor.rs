@@ -457,6 +457,9 @@ pub struct Editor {
     git_base: Option<std::sync::Arc<str>>,
     pub git_hunks: Vec<crate::git::Hunk>,
     git_base_task: Option<Task<()>>,
+    /// Who last changed the caret's line, once it rests there.
+    blame: Option<changes::Blame>,
+    blame_task: Option<Task<()>>,
     git_diff_task: Option<Task<()>>,
     /// ⌘I: the field while it's open, a change until it's kept or undone, an answer.
     prompt: Option<assist::Prompting>,
@@ -551,6 +554,8 @@ impl Editor {
             git_base: None,
             git_hunks: Vec::new(),
             git_base_task: None,
+            blame: None,
+            blame_task: None,
             git_diff_task: None,
             prompt: None,
             ai_change: None,
@@ -927,6 +932,7 @@ impl Editor {
         self.signature_after_move(cx);
         self.unfold_around_caret(cx);
         self.refresh_symbol_marks(cx);
+        self.refresh_blame(cx);
         self.last_activity = Instant::now();
         self.autoscroll = true;
         cx.notify();

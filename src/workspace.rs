@@ -58,6 +58,7 @@ actions!(
         ShowProblems,
         ToggleFormatOnSave,
         AutoSaveOff,
+        ToggleLineBlame,
         AutoSaveAfterPause,
         AutoSaveWhenLeaving,
         OpenSettings,
@@ -1894,6 +1895,11 @@ impl Workspace {
             (Go, "Back".into(), Box::new(GoBack)),
             (Go, "Forward".into(), Box::new(GoForward)),
             (File, "Review Changes…".into(), Box::new(ReviewChanges)),
+            (
+                View,
+                toggle(settings.line_blame, "Hide Who Changed the Line", "Show Who Changed the Line"),
+                Box::new(ToggleLineBlame),
+            ),
             (File, "Commit All Changes…".into(), Box::new(CommitAll)),
             (File, "Push".into(), Box::new(PushBranch)),
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
@@ -3927,6 +3933,9 @@ impl Render for Workspace {
                 this.auto_saves.clear();
                 settings::update(cx, |s| s.auto_save = AutoSave::Off)
             }))
+            .on_action(
+                cx.listener(|_, _: &ToggleLineBlame, _, cx| settings::update(cx, |s| s.line_blame = !s.line_blame)),
+            )
             .on_action(cx.listener(|_, _: &AutoSaveAfterPause, _, cx| {
                 settings::update(cx, |s| s.auto_save = AutoSave::AfterPause)
             }))

@@ -453,6 +453,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Who changed the line",
+                Some("At the end of the caret's line, faintly: who last changed it, when, and why. From git"),
+                Self::toggle("line-blame", s.line_blame, &theme, cx, |s| s.line_blame = !s.line_blame),
+                &theme,
+            ),
+            Self::row(
                 "Ligatures",
                 Some("Join characters like -> and != into one symbol, if the code font has them"),
                 Self::toggle("ligatures", s.ligatures, &theme, cx, |s| s.ligatures = !s.ligatures),
