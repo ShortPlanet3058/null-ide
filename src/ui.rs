@@ -4,7 +4,7 @@
 //! Colour rule: `faint` is for decoration only; any text meant to be read uses `muted`.
 
 use crate::theme::{Syntax, Theme, ThemeName};
-use gpui::{AnyElement, Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px};
+use gpui::{AnyElement, AppContext as _, Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px};
 
 // Corner radii: a row inside a panel is rounded by the panel's radius minus its padding.
 /// Key caps, tiny buttons.
@@ -140,4 +140,45 @@ pub fn theme_preview_scaled(name: ThemeName, active: bool, theme: &Theme, scale:
                 .text_color(if active { theme.foreground } else { theme.muted })
                 .child(name.label()),
         )
+}
+
+/// A tooltip: what a control does, and its shortcut when it has one. Small and quiet,
+/// for controls that show only an icon or a symbol.
+pub struct Tip {
+    label: SharedString,
+    keys: Option<String>,
+}
+
+impl gpui::Render for Tip {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        let theme = cx.global::<Theme>();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(R_ROW))
+            .bg(theme.raised)
+            .border_1()
+            .border_color(theme.line_strong)
+            .shadow_md()
+            .font_family(cx.global::<crate::fonts::Fonts>().ui.clone())
+            .text_size(px(T_SM))
+            .text_color(theme.foreground)
+            .child(self.label.clone())
+            .children(self.keys.clone().map(|k| div().text_color(theme.muted).child(k)))
+    }
+}
+
+/// Builds a tooltip for `.tooltip(...)`: `label`, and the keys bound to `action` (read when
+/// it shows, so another keymap shows its own).
+pub fn tip(
+    label: &'static str,
+    action: Option<Box<dyn gpui::Action>>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    move |_, cx| {
+        let keys = action.as_ref().and_then(|a| crate::palette::shortcut(a.as_ref(), cx));
+        cx.new(|_| Tip { label: label.into(), keys }).into()
+    }
 }

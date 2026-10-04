@@ -454,8 +454,14 @@ impl ProjectSearch {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.global::<Theme>();
+        let tip = match id {
+            "case" => "Match case",
+            "word" => "Whole word",
+            _ => "Regular expression",
+        };
         div()
             .id(id)
+            .tooltip(ui::tip(tip, None))
             .h(px(22.))
             .min_w(px(24.))
             .px(px(4.))

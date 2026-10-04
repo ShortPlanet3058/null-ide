@@ -202,7 +202,25 @@ impl FindBar {
                     .with_transformation(Transformation::rotate(radians(turn))),
             )
             .active(|s| s.opacity(0.7))
+            .tooltip({
+                let (label, action) = Self::tooltip_for(id);
+                ui::tip(label, action)
+            })
             .on_click(on_click)
+    }
+
+    /// What each button is called, and the action whose keys it shows.
+    fn tooltip_for(id: &str) -> (&'static str, Option<Box<dyn gpui::Action>>) {
+        match id {
+            "toggle-replace" => ("Replace", Some(Box::new(DeployReplace))),
+            "case" => ("Match case", Some(Box::new(ToggleCaseSensitive))),
+            "word" => ("Whole word", Some(Box::new(ToggleWholeWord))),
+            "regex" => ("Regular expression", Some(Box::new(ToggleRegex))),
+            "previous" => ("Previous match", Some(Box::new(FindPrevious))),
+            "next" => ("Next match", Some(Box::new(FindNext))),
+            "close" => ("Close", Some(Box::new(CloseFind))),
+            _ => ("", None),
+        }
     }
 
     fn toggle(
@@ -229,6 +247,10 @@ impl FindBar {
             .when(on, |b| b.bg(theme.accent_soft))
             .when(!on, |b| b.hover(|s| s.bg(theme.hairline).text_color(theme.foreground)))
             .child(label)
+            .tooltip({
+                let (label, action) = Self::tooltip_for(id);
+                ui::tip(label, action)
+            })
             .active(|s| s.opacity(0.7))
             .on_click(on_click)
     }

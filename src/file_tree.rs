@@ -932,8 +932,14 @@ impl Render for FileTree {
         let theme = cx.global::<Theme>();
         let title = self.root.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default();
         let header_button = |id: &'static str, icon: &'static str| {
+            let (label, action): (&'static str, Box<dyn gpui::Action>) = match id {
+                "tree-new-file" => ("New file", Box::new(NewFile)),
+                "tree-new-folder" => ("New folder", Box::new(NewFolder)),
+                _ => ("Collapse all folders", Box::new(CollapseAll)),
+            };
             div()
                 .id(id)
+                .tooltip(crate::ui::tip(label, Some(action)))
                 .size(px(20.))
                 .flex()
                 .items_center()

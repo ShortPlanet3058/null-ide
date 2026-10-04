@@ -2298,6 +2298,7 @@ impl Workspace {
             .child(
                 div()
                     .id("close-terminal")
+                    .tooltip(ui::tip("Hide the terminal", Some(Box::new(ToggleTerminal))))
                     .size(px(20.))
                     .flex()
                     .items_center()
@@ -2736,6 +2737,7 @@ impl Workspace {
                 // Unsaved: a small dot, which turns into the close button under the pointer.
                 let close = div()
                     .id(("close", ix))
+                    .tooltip(ui::tip("Close", Some(Box::new(CloseTab))))
                     .relative()
                     .size(px(16.))
                     .flex_none()
