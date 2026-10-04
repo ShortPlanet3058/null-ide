@@ -46,17 +46,23 @@ pub fn create_dir(dir: &Path, name: &str) -> Result<PathBuf, String> {
 }
 
 pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
-    check_name(new_name, false)?;
-    let target = path.with_file_name(new_name.trim());
+    let target = rename_target(path, new_name)?;
     if target == path {
         return Ok(target);
     }
+    std::fs::rename(path, &target).map_err(|e| format!("Couldn't rename: {e}"))?;
+    Ok(target)
+}
+
+/// Where renaming `path` to `new_name` would put it, if that's allowed.
+pub fn rename_target(path: &Path, new_name: &str) -> Result<PathBuf, String> {
+    check_name(new_name, false)?;
+    let target = path.with_file_name(new_name.trim());
     // On case-insensitive disks "readme" and "README" are the same file: changing case is
     // fine. On case-sensitive ones they can be two files, and the other one must stay.
-    if target.exists() && !same_file(path, &target) {
+    if target != path && target.exists() && !same_file(path, &target) {
         return Err(format!("{} already exists", new_name.trim()));
     }
-    std::fs::rename(path, &target).map_err(|e| format!("Couldn't rename: {e}"))?;
     Ok(target)
 }
 
