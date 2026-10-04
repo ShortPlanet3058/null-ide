@@ -65,6 +65,7 @@ actions!(
         NextProblem,
         ToggleIndentGuides,
         ToggleStickyScroll,
+        ToggleSymbolMarks,
         PreviousProblem,
         AutoSaveAfterPause,
         AutoSaveWhenLeaving,
@@ -1967,6 +1968,11 @@ impl Workspace {
                 View,
                 toggle(settings.sticky_scroll, "Turn Off Sticky Scroll", "Turn On Sticky Scroll"),
                 Box::new(ToggleStickyScroll),
+            ),
+            (
+                View,
+                toggle(settings.symbol_marks, "Stop Marking Other Uses of a Name", "Mark Other Uses of a Name"),
+                Box::new(ToggleSymbolMarks),
             ),
             (Go, "Next Problem".into(), Box::new(NextProblem)),
             (Go, "Previous Problem".into(), Box::new(PreviousProblem)),
@@ -4202,6 +4208,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::next_terminal))
             .on_action(cx.listener(Self::next_problem))
+            .on_action(
+                cx.listener(|_, _: &ToggleSymbolMarks, _, cx| {
+                    settings::update(cx, |s| s.symbol_marks = !s.symbol_marks)
+                }),
+            )
             .on_action(cx.listener(|_, _: &ToggleStickyScroll, _, cx| {
                 settings::update(cx, |s| s.sticky_scroll = !s.sticky_scroll)
             }))

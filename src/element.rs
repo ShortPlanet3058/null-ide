@@ -851,7 +851,9 @@ impl Element for EditorElement {
             }
 
             // Other uses of the symbol at the caret, on screen.
-            let symbol_marks: Vec<Bounds<Pixels>> = {
+            let symbol_marks: Vec<Bounds<Pixels>> = if !cx.global::<Settings>().symbol_marks {
+                Vec::new()
+            } else {
                 let first_char = editor.buffer.line_to_char(lines_shown.start);
                 let last_char = editor.buffer.line_to_char(lines_shown.end);
                 editor
