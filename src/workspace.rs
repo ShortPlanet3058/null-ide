@@ -1222,19 +1222,28 @@ impl Workspace {
     }
 
     /// Points open tabs at their new location after a file or folder was renamed.
-    /// Renames a file, first letting its language server update the code that names it
-    /// (`mod parser;`, imports). A server that's slow to answer doesn't hold it up long.
+    /// Renames a file or folder, first letting language servers update the code that names
+    /// it (`mod parser;`, imports). A server that's slow to answer doesn't hold it up long.
     fn rename_file(&mut self, from: PathBuf, to: PathBuf, cx: &mut Context<Self>) {
         const WAIT: Duration = Duration::from_secs(2);
         let request = self.lsp.read(cx).will_rename(&from, &to);
         cx.spawn(async move |this, cx| {
             let timeout = cx.background_executor().timer(WAIT);
-            let edit = futures::select_biased! {
-                edit = futures::FutureExt::fuse(request) => edit,
-                _ = futures::FutureExt::fuse(timeout) => None,
+            let edits = futures::select_biased! {
+                edits = futures::FutureExt::fuse(request) => edits,
+                _ = futures::FutureExt::fuse(timeout) => Vec::new(),
             };
             this.update(cx, |this, cx| {
-                let changed = edit.map(|edit| this.apply_edit_to_files(edit, cx));
+                // What every server asked for, as one: the files changed and those that couldn't be.
+                let changed = (!edits.is_empty()).then(|| {
+                    edits.into_iter().map(|edit| this.apply_edit_to_files(edit, cx)).fold(
+                        (0, 0, Vec::new()),
+                        |(places, files, mut failed), (p, f, mut x)| {
+                            failed.append(&mut x);
+                            (places + p, files + f, failed)
+                        },
+                    )
+                });
                 let result = this.tree.update(cx, |tree, cx| tree.finish_rename(&from, &to, cx));
                 if let Err(error) = result {
                     return this.show_notice(error, cx);
@@ -2131,6 +2140,7 @@ impl Workspace {
                 (Edit, "Rename Symbol".into(), Box::new(crate::editor::RenameSymbol)),
                 (Edit, "Quick Fix…".into(), Box::new(crate::editor::QuickFix)),
                 (Edit, "Format Document".into(), Box::new(crate::editor::FormatDocument)),
+                (Edit, "Format Selection".into(), Box::new(crate::editor::FormatSelection)),
                 (
                     Edit,
                     toggle(settings.format_on_save, "Stop Formatting on Save", "Format on Save"),

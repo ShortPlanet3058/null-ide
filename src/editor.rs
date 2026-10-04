@@ -22,7 +22,7 @@ pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::HoverCard;
-pub use refactor::{FindReferences, FormatDocument, RenameSymbol, apply_edits};
+pub use refactor::{FindReferences, FormatDocument, FormatSelection, RenameSymbol, apply_edits};
 pub use review::{KeepHunk, UndoHunk};
 pub use structure::{
     ExpandSelection, GoToMatchingBracket, JoinLines, LowerCase, NewlineAbove, NewlineBelow, NextChange, PreviousChange,
@@ -2723,6 +2723,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::lower_case))
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::format_document))
+            .on_action(cx.listener(Self::format_selection))
             .on_action(cx.listener(Self::accept_ghost_word))
             .on_action(cx.listener(Self::accept_ghost_line))
             .on_action(cx.listener(Self::next_ghost))

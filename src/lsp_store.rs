@@ -289,6 +289,7 @@ impl LspStore {
                         ..Default::default()
                     }),
                     formatting: Some(Default::default()),
+                    range_formatting: Some(Default::default()),
                     code_action: Some(lsp_types::CodeActionClientCapabilities {
                         code_action_literal_support: Some(lsp_types::CodeActionLiteralSupport {
                             code_action_kind: lsp_types::CodeActionKindLiteralSupport {
@@ -647,26 +648,58 @@ impl LspStore {
         }
     }
 
-    /// The edits to make before renaming `from` to `to`, so the code naming it still does.
-    pub fn will_rename(
-        &self,
-        from: &Path,
-        to: &Path,
-    ) -> impl Future<Output = Option<lsp_types::WorkspaceEdit>> + use<> {
-        let request = self.server_for(from).zip(uri_for(from)).zip(uri_for(to)).map(|((server, old), new)| {
-            server.request::<lsp_types::request::WillRenameFiles>(lsp_types::RenameFilesParams {
-                files: vec![lsp_types::FileRename { old_uri: old.to_string(), new_uri: new.to_string() }],
+    /// The servers that care about renaming `path`: its language's, or for a folder,
+    /// every one running (a folder can hold a module).
+    fn servers_for_rename(&self, path: &Path) -> Vec<Arc<LanguageServer>> {
+        if let Some(server) = self.server_for(path) {
+            return vec![server];
+        }
+        if path.is_file() {
+            return Vec::new();
+        }
+        self.servers
+            .values()
+            .filter_map(|state| match state {
+                ServerState::Running { server } => Some(server.clone()),
+                _ => None,
             })
-        });
-        async move { request?.await.ok().flatten() }
+            .collect()
     }
 
-    /// Tells the server a file was renamed.
+    fn rename_params(from: &Path, to: &Path) -> Option<lsp_types::RenameFilesParams> {
+        let (old, new) = (uri_for(from)?, uri_for(to)?);
+        Some(lsp_types::RenameFilesParams {
+            files: vec![lsp_types::FileRename { old_uri: old.to_string(), new_uri: new.to_string() }],
+        })
+    }
+
+    /// The edits to make before renaming `from` to `to`, so the code naming it still does.
+    pub fn will_rename(&self, from: &Path, to: &Path) -> impl Future<Output = Vec<lsp_types::WorkspaceEdit>> + use<> {
+        let requests: Vec<_> = match Self::rename_params(from, to) {
+            Some(params) => self
+                .servers_for_rename(from)
+                .into_iter()
+                .map(|server| server.request::<lsp_types::request::WillRenameFiles>(params.clone()))
+                .collect(),
+            None => Vec::new(),
+        };
+        async move {
+            let mut edits = Vec::new();
+            for request in requests {
+                if let Ok(Some(edit)) = request.await {
+                    edits.push(edit);
+                }
+            }
+            edits
+        }
+    }
+
+    /// Tells the servers a file or folder was renamed.
     pub fn did_rename(&self, from: &Path, to: &Path) {
-        if let Some(((server, old), new)) = self.server_for(from).zip(uri_for(from)).zip(uri_for(to)) {
-            server.notify::<lsp_types::notification::DidRenameFiles>(lsp_types::RenameFilesParams {
-                files: vec![lsp_types::FileRename { old_uri: old.to_string(), new_uri: new.to_string() }],
-            });
+        let Some(params) = Self::rename_params(from, to) else { return };
+        // Renamed already: the servers are found from the new path.
+        for server in self.servers_for_rename(to) {
+            server.notify::<lsp_types::notification::DidRenameFiles>(params.clone());
         }
     }
 
@@ -720,19 +753,49 @@ impl LspStore {
         tab_size: u32,
         insert_spaces: bool,
     ) -> impl Future<Output = Vec<lsp_types::TextEdit>> + use<> {
+        self.format_part(path, None, tab_size, insert_spaces)
+    }
+
+    /// Whether the server for `path` can format part of a file.
+    pub fn formats_ranges(&self, path: &Path) -> bool {
+        self.server_for(path).is_some_and(|s| s.formats_ranges())
+    }
+
+    /// The edits that format `range` of the file (the whole of it without one).
+    pub fn format_part(
+        &self,
+        path: &Path,
+        range: Option<lsp_types::Range>,
+        tab_size: u32,
+        insert_spaces: bool,
+    ) -> impl Future<Output = Vec<lsp_types::TextEdit>> + use<> {
+        let options = lsp_types::FormattingOptions {
+            tab_size,
+            insert_spaces,
+            trim_trailing_whitespace: Some(true),
+            insert_final_newline: Some(true),
+            trim_final_newlines: Some(true),
+            ..Default::default()
+        };
         let request = self.server_for(path).zip(uri_for(path)).map(|(server, uri)| {
-            server.request::<Formatting>(lsp_types::DocumentFormattingParams {
-                text_document: TextDocumentIdentifier { uri },
-                options: lsp_types::FormattingOptions {
-                    tab_size,
-                    insert_spaces,
-                    trim_trailing_whitespace: Some(true),
-                    insert_final_newline: Some(true),
-                    trim_final_newlines: Some(true),
-                    ..Default::default()
-                },
-                work_done_progress_params: Default::default(),
-            })
+            let text_document = TextDocumentIdentifier { uri };
+            match range {
+                None => server
+                    .request::<Formatting>(lsp_types::DocumentFormattingParams {
+                        text_document,
+                        options,
+                        work_done_progress_params: Default::default(),
+                    })
+                    .boxed_local(),
+                Some(range) => server
+                    .request::<lsp_types::request::RangeFormatting>(lsp_types::DocumentRangeFormattingParams {
+                        text_document,
+                        range,
+                        options,
+                        work_done_progress_params: Default::default(),
+                    })
+                    .boxed_local(),
+            }
         });
         async move {
             let Some(request) = request else { return Vec::new() };

@@ -41,6 +41,8 @@ pub struct LanguageServer {
     pending: Pending,
     /// Whether it takes just the changed parts of a file, rather than all of it each time.
     incremental: AtomicBool,
+    /// Whether it can format part of a file, not only all of it.
+    range_formatting: AtomicBool,
 }
 
 impl LanguageServer {
@@ -57,6 +59,16 @@ impl LanguageServer {
             None => None,
         };
         self.incremental.store(kind == Some(Kind::INCREMENTAL), Ordering::Relaxed);
+        let ranges = match &capabilities.document_range_formatting_provider {
+            Some(lsp_types::OneOf::Left(on)) => *on,
+            Some(lsp_types::OneOf::Right(_)) => true,
+            None => false,
+        };
+        self.range_formatting.store(ranges, Ordering::Relaxed);
+    }
+
+    pub fn formats_ranges(&self) -> bool {
+        self.range_formatting.load(Ordering::Relaxed)
     }
 
     /// Starts `program` in `root` and returns it with a stream of its messages.
@@ -115,6 +127,7 @@ impl LanguageServer {
             next_id: AtomicI64::new(1),
             pending,
             incremental: AtomicBool::new(false),
+            range_formatting: AtomicBool::new(false),
         };
         Ok((server, rx))
     }
