@@ -705,6 +705,13 @@ impl LspStore {
         }
     }
 
+    /// Problems for a file, as a server would publish them.
+    #[cfg(test)]
+    pub fn set_diagnostics(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>) {
+        self.diagnostics.insert(path, diagnostics);
+        self.diagnostics_version += 1;
+    }
+
     /// Every problem the servers have reported, by file.
     pub fn all_diagnostics(&self) -> impl Iterator<Item = (&PathBuf, &Diagnostic)> {
         self.diagnostics.iter().flat_map(|(path, list)| list.iter().map(move |d| (path, d)))
