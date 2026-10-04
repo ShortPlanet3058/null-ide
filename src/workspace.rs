@@ -60,6 +60,7 @@ actions!(
         AutoSaveOff,
         ToggleLineBlame,
         ToggleInlayHints,
+        ToggleFocusMode,
         AutoSaveAfterPause,
         AutoSaveWhenLeaving,
         OpenSettings,
@@ -107,6 +108,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-o", Open, ctx),
         KeyBinding::new("secondary-w", CloseTab, ctx),
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
+        KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("ctrl-tab", NextTab, ctx),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, ctx),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
@@ -190,6 +192,8 @@ const SIDEBAR_SLIDE: Duration = Duration::from_millis(260);
 const TERMINAL_HEIGHT: f32 = 300.;
 const TERMINAL_SLIDE: Duration = Duration::from_millis(240);
 /// Room for the window buttons at the left of the title bar.
+/// How many characters wide Focus mode's column of text is.
+const FOCUS_COLUMNS: f32 = 100.;
 const TITLEBAR_INSET: f32 = if cfg!(target_os = "macos") { 84. } else { 12. };
 
 fn smoothstep(t: f32) -> f32 {
@@ -331,6 +335,8 @@ pub struct Workspace {
     git_status_task: Option<Task<()>>,
     /// The list of changes is open: opening a file from it shows its changes.
     git_listing: bool,
+    /// Only the code: no sidebar, tabs, status bar or terminal, the text centered.
+    focus_mode: bool,
     /// Places to go back and forward to, most recent last.
     back: Vec<Place>,
     forward: Vec<Place>,
@@ -473,6 +479,7 @@ impl Workspace {
             git_status_task: None,
             git_listing: false,
             pending_branches: Vec::new(),
+            focus_mode: false,
             back: Vec::new(),
             forward: Vec::new(),
             navigating: false,
@@ -1928,6 +1935,7 @@ impl Workspace {
                 Box::new(ToggleAutocomplete),
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
+            (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
@@ -3165,6 +3173,17 @@ impl Workspace {
         self.open_locations(title, locations, window, cx);
     }
 
+    /// ⌥⌘↵: only the code, or everything back.
+    fn toggle_focus_mode(&mut self, _: &ToggleFocusMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_mode = !self.focus_mode;
+        if self.focus_mode {
+            let keys = crate::palette::shortcut(&ToggleFocusMode, cx).unwrap_or_default();
+            self.show_notice(format!("Focus mode · {keys} to come back"), cx);
+        }
+        self.focus_main(window, cx);
+        cx.notify();
+    }
+
     /// The first-launch screen: look, shortcuts and AI.
     pub fn show_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let welcome = cx.new(Welcome::new);
@@ -3524,7 +3543,8 @@ impl Render for Workspace {
         }
         let opacity = DIMMED + (1. - DIMMED) * chrome;
         let full_width = SIDEBAR_WIDTH + (SEARCH_SIDEBAR_WIDTH - SIDEBAR_WIDTH) * searching;
-        let sidebar_width = full_width * sidebar;
+        // Focus mode hides the sidebar without changing the setting.
+        let sidebar_width = if self.focus_mode { 0. } else { full_width * sidebar };
         let switch = self.render_sidebar_switch(cx);
         let sidebar_content = if self.sidebar_search.on {
             div().flex_1().min_h_0().pt(px(6.)).child(self.project_search.clone())
@@ -3564,7 +3584,8 @@ impl Render for Workspace {
         let split = self.is_split();
         let tabs_left = self.render_tabs(0, cx);
         let tabs_right = split.then(|| self.render_tabs(1, cx));
-        let terminal_panel = self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx);
+        let terminal_panel =
+            (!self.focus_mode).then(|| self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx)).flatten();
         // One editor, or two side by side, each side making its tab current when clicked into.
         let pane = |this: &Self, side: usize, cx: &mut Context<Self>| -> AnyElement {
             let content = match this.shown_editor(side) {
@@ -3589,7 +3610,17 @@ impl Render for Workspace {
                 .into_any_element()
         };
         let theme_now = cx.global::<Theme>().clone();
-        let body = if split {
+        let body = if self.focus_mode {
+            // Only the side being worked in, its text in a column down the middle.
+            let side = self.focused_side();
+            let font_size = cx.global::<Settings>().font_size;
+            let column = font_size * 0.62 * FOCUS_COLUMNS + 90.;
+            div()
+                .size_full()
+                .flex()
+                .justify_center()
+                .child(div().h_full().w_full().max_w(px(column)).pt(px(24.)).child(pane(self, side, cx)))
+        } else if split {
             let left = div().w(relative(self.split_ratio)).h_full().flex_none().child(pane(self, 0, cx));
             let right = div().flex_1().min_w_0().h_full().child(pane(self, 1, cx));
             // The line between the sides: drag it to resize them.
@@ -3941,6 +3972,7 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|_, _: &ToggleInlayHints, _, cx| settings::update(cx, |s| s.inlay_hints = !s.inlay_hints)),
             )
+            .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(|_, _: &AutoSaveAfterPause, _, cx| {
                 settings::update(cx, |s| s.auto_save = AutoSave::AfterPause)
             }))
@@ -3989,7 +4021,14 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_files))
             .on_action(cx.listener(Self::quit))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .child(titlebar)
+            // In Focus mode, only a strip to drag the window by.
+            .map(|root| {
+                if self.focus_mode {
+                    root.child(div().h(px(40.)).flex_none().window_control_area(WindowControlArea::Drag))
+                } else {
+                    root.child(titlebar)
+                }
+            })
             .child(
                 div().flex_1().min_h_0().flex().child(sidebar_panel).child(
                     div()
@@ -4001,7 +4040,7 @@ impl Render for Workspace {
                         .children(terminal_panel),
                 ),
             )
-            .child(status)
+            .when(!self.focus_mode, |root| root.child(status))
             .when_some(overlay, |root, layer| {
                 root.child(
                     div()
@@ -4222,6 +4261,33 @@ mod tests {
         workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("b.txt"), window, cx));
         cx.run_until_parked();
         assert_eq!(disk("a.txt"), "21a\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn focus_mode_comes_and_goes_with_its_key(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-focus-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        let keys = if cfg!(target_os = "macos") { "alt-cmd-enter" } else { "ctrl-alt-enter" };
+        cx.simulate_keystrokes(keys);
+        workspace.update(cx, |w, cx| {
+            assert!(w.focus_mode);
+            // The sidebar setting stays as it was, for when Focus mode ends.
+            assert!(cx.global::<Settings>().sidebar_visible);
+        });
+        cx.simulate_keystrokes(keys);
+        workspace.update(cx, |w, _| assert!(!w.focus_mode));
         std::fs::remove_dir_all(&dir).ok();
     }
 

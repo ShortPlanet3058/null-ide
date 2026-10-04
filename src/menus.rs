@@ -173,6 +173,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Go to Symbol in Project…", crate::workspace::GoToSymbolInProject),
                 MenuItem::action("Go to Line…", GoToLine),
                 MenuItem::separator(),
+                MenuItem::action("Focus Mode", crate::workspace::ToggleFocusMode),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Terminal", ToggleTerminal),
                 MenuItem::action("Next Tab", NextTab),
