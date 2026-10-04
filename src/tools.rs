@@ -12,6 +12,10 @@ pub fn data_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("NULL_DATA_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
+    // Tests never touch the real folder (sessions, installed servers).
+    if cfg!(test) {
+        return Some(std::env::temp_dir().join(format!("null-test-data-{}", std::process::id())));
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos") {
         Some(home?.join("Library/Application Support/Null"))

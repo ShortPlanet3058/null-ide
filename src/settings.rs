@@ -32,6 +32,8 @@ pub struct Settings {
     pub ligatures: bool,
     /// Format the file with its language server when saving with ⌘S.
     pub format_on_save: bool,
+    /// Save files without ⌘S: never, after a pause in typing, or when leaving them.
+    pub auto_save: AutoSave,
     /// Whose shortcuts to use: Null's own, or another editor's.
     pub keymap: crate::keymap::Keymap,
     /// Set once the first-launch welcome has been seen.
@@ -56,6 +58,7 @@ impl Default for Settings {
             indent_with_tabs: false,
             ligatures: true,
             format_on_save: false,
+            auto_save: AutoSave::Off,
             keymap: Default::default(),
             welcomed: false,
             autocomplete: true,
@@ -65,6 +68,23 @@ impl Default for Settings {
 }
 
 impl Global for Settings {}
+
+/// When files save by themselves. Only files with a name: a new one waits for ⌘S.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSave {
+    #[default]
+    Off,
+    /// A second after typing stops.
+    AfterPause,
+    /// On switching to another tab, or to another app.
+    WhenLeaving,
+}
+
+impl AutoSave {
+    /// How long typing has to stop before saving, in [`AutoSave::AfterPause`].
+    pub const PAUSE: std::time::Duration = std::time::Duration::from_millis(1000);
+}
 
 impl Settings {
     /// The indentation new files get, and files that don't show their own.
@@ -79,6 +99,11 @@ impl Settings {
     /// `~/.config/null/settings.json` on macOS and Linux (or `$XDG_CONFIG_HOME/null`),
     /// `%APPDATA%\Null\settings.json` on Windows.
     pub fn path() -> Option<PathBuf> {
+        // Tests never read or write the real settings.
+        if cfg!(test) {
+            let dir = std::env::temp_dir().join(format!("null-test-config-{}", std::process::id()));
+            return Some(dir.join("settings.json"));
+        }
         let dir = if cfg!(target_os = "windows") {
             PathBuf::from(std::env::var_os("APPDATA")?).join("Null")
         } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {

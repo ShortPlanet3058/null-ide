@@ -9,6 +9,7 @@ use crate::lsp_store::{LspStore, Readiness};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
 use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
+use crate::settings::AutoSave;
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::settings_panel::{Section, SettingsPanel, SettingsPanelEvent, Shortcut};
 use crate::terminal::{Shell, TerminalEvent, TerminalView};
@@ -56,6 +57,9 @@ actions!(
         ToggleAi,
         ShowProblems,
         ToggleFormatOnSave,
+        AutoSaveOff,
+        AutoSaveAfterPause,
+        AutoSaveWhenLeaving,
         OpenSettings,
         OpenSettingsFile,
         IncreaseFontSize,
@@ -338,6 +342,8 @@ pub struct Workspace {
     pending_commands: Vec<crate::palette::Command>,
     /// For a file open on both sides: each copy's buffer revision last passed to the other.
     twin_seen: std::collections::HashMap<gpui::EntityId, u64>,
+    /// Saves waiting for a pause in typing, by editor.
+    auto_saves: std::collections::HashMap<gpui::EntityId, Task<()>>,
     /// Changed source files waiting to be read again.
     reindex_pending: HashSet<PathBuf>,
     /// What the project's .gitignore leaves out of the index.
@@ -458,6 +464,7 @@ impl Workspace {
             reindex_task: None,
             reindex_pending: HashSet::new(),
             twin_seen: Default::default(),
+            auto_saves: Default::default(),
             view_before_preview: None,
             ai_task: None,
             git_status: Vec::new(),
@@ -491,6 +498,10 @@ impl Workspace {
         }));
         workspace._subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if !window.is_window_active() {
+                // Off to another app: files save now when they save by themselves.
+                if cx.global::<Settings>().auto_save != AutoSave::Off {
+                    this.save_named_tabs(cx);
+                }
                 this.save_session(cx);
             }
         }));
@@ -992,6 +1003,27 @@ impl Workspace {
         .detach();
     }
 
+    /// Saves `editor` once typing has paused, unless it's typed in again first.
+    fn save_after_pause(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let weak = editor.downgrade();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AutoSave::PAUSE).await;
+            if let Some(editor) = weak.upgrade() {
+                cx.update(|cx| Self::save_if_named(&editor, cx)).ok();
+                this.update(cx, |this, _| this.auto_saves.remove(&editor.entity_id())).ok();
+            }
+        });
+        self.auto_saves.insert(editor.entity_id(), task);
+    }
+
+    /// Saves a file with unsaved changes, if it has a name to save under.
+    fn save_if_named(editor: &Entity<Editor>, cx: &mut App) {
+        let e = editor.read(cx);
+        if e.buffer.is_dirty() && e.path().is_some() {
+            editor.update(cx, |editor, cx| editor.save_to_disk(cx));
+        }
+    }
+
     /// Saves every open file that has a name.
     fn save_named_tabs(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
@@ -1222,6 +1254,9 @@ impl Workspace {
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited => {
+                    if cx.global::<Settings>().auto_save == AutoSave::AfterPause {
+                        this.save_after_pause(&editor, cx);
+                    }
                     this.sync_twins(&editor, cx);
                     this.share_unsaved(&editor, cx);
                     if cx.global::<Settings>().fade_bars_while_typing {
@@ -1433,10 +1468,13 @@ impl Workspace {
     /// Makes tab `ix` the current one; `focus` also moves the keyboard to it.
     fn show_tab(&mut self, ix: usize, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix) else { return };
-        // Leaving a file: Back comes back here.
-        if self.active_editor().is_some_and(|e| *e != tab.editor) {
+        // Leaving a file: Back comes back here, and it saves if files save when left.
+        if let Some(leaving) = self.active_editor().filter(|e| **e != tab.editor).cloned() {
             let here = self.here(cx);
             self.remember_place(here);
+            if cx.global::<Settings>().auto_save == AutoSave::WhenLeaving {
+                Self::save_if_named(&leaving, cx);
+            }
         }
         let Some(tab) = self.tabs.get(ix) else { return };
         self.active = Some(ix);
@@ -1941,6 +1979,24 @@ impl Workspace {
                     Edit,
                     toggle(settings.format_on_save, "Stop Formatting on Save", "Format on Save"),
                     Box::new(ToggleFormatOnSave),
+                ),
+                (
+                    File,
+                    format!("Save Automatically After a Pause{}", current(settings.auto_save == AutoSave::AfterPause)),
+                    Box::new(AutoSaveAfterPause),
+                ),
+                (
+                    File,
+                    format!(
+                        "Save Automatically When Leaving a File{}",
+                        current(settings.auto_save == AutoSave::WhenLeaving)
+                    ),
+                    Box::new(AutoSaveWhenLeaving),
+                ),
+                (
+                    File,
+                    format!("Don't Save Automatically{}", current(settings.auto_save == AutoSave::Off)),
+                    Box::new(AutoSaveOff),
                 ),
                 (Go, "Show Info at Cursor".into(), Box::new(ShowInfo)),
                 (Go, "Next Tab".into(), Box::new(NextTab)),
@@ -3867,6 +3923,16 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &ToggleFormatOnSave, _, cx| {
                 settings::update(cx, |s| s.format_on_save = !s.format_on_save)
             }))
+            .on_action(cx.listener(|this, _: &AutoSaveOff, _, cx| {
+                this.auto_saves.clear();
+                settings::update(cx, |s| s.auto_save = AutoSave::Off)
+            }))
+            .on_action(cx.listener(|_, _: &AutoSaveAfterPause, _, cx| {
+                settings::update(cx, |s| s.auto_save = AutoSave::AfterPause)
+            }))
+            .on_action(cx.listener(|_, _: &AutoSaveWhenLeaving, _, cx| {
+                settings::update(cx, |s| s.auto_save = AutoSave::WhenLeaving)
+            }))
             .on_action(cx.listener(Self::ask_ai))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::close_tab))
@@ -4103,6 +4169,45 @@ mod tests {
         workspace.update(cx, |w, cx| assert_eq!(at(w, cx), ("b.txt".into(), 20)));
         cx.simulate_keystrokes(forward);
         workspace.update(cx, |w, cx| assert_eq!(at(w, cx), ("a.txt".into(), 10)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn files_save_by_themselves_when_asked(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-autosave-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings { auto_save: AutoSave::AfterPause, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let disk = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        let a = workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.txt"), window, cx);
+            w.active_editor().unwrap().clone()
+        });
+        // After a pause: saved a moment after typing stops, not before.
+        a.update(cx, |e, cx| e.type_text_for_test(0, "1", cx));
+        cx.run_until_parked();
+        assert_eq!(disk("a.txt"), "a\n");
+        cx.executor().advance_clock(AutoSave::PAUSE * 2);
+        cx.run_until_parked();
+        assert_eq!(disk("a.txt"), "1a\n");
+        // When leaving: saved on switching to another file.
+        cx.update(|_, cx| crate::settings::update(cx, |s| s.auto_save = AutoSave::WhenLeaving));
+        a.update(cx, |e, cx| e.type_text_for_test(0, "2", cx));
+        cx.executor().advance_clock(AutoSave::PAUSE * 2);
+        cx.run_until_parked();
+        assert_eq!(disk("a.txt"), "1a\n");
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("b.txt"), window, cx));
+        cx.run_until_parked();
+        assert_eq!(disk("a.txt"), "21a\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 
