@@ -165,6 +165,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Rename Symbol", crate::editor::RenameSymbol),
                 MenuItem::action("Quick Fix…", crate::editor::QuickFix),
                 MenuItem::action("Format Document", crate::editor::FormatDocument),
+                MenuItem::action("Format Selection", crate::editor::FormatSelection),
                 MenuItem::action("Show Problems", crate::workspace::ShowProblems),
                 MenuItem::action("Next Problem", crate::workspace::NextProblem),
                 MenuItem::action("Previous Problem", crate::workspace::PreviousProblem),

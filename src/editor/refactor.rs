@@ -13,7 +13,7 @@ use gpui::{
 use lsp_types::{Position, TextEdit};
 use std::ops::Range;
 
-actions!(refactor, [RenameSymbol, FindReferences, FormatDocument, ConfirmRename, CancelRename]);
+actions!(refactor, [RenameSymbol, FindReferences, FormatDocument, FormatSelection, ConfirmRename, CancelRename]);
 
 pub fn bind_keys(cx: &mut App) {
     let editor = Some("Editor");
@@ -186,11 +186,59 @@ impl Editor {
 
     // ---------- format ----------
 
+    /// ⌥⇧F: the file, or with some text selected, just that.
     pub(super) fn format_document(&mut self, _: &FormatDocument, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(message) = self.not_ready_message(cx) {
             return self.show_notice(self.selection.head, message, cx);
         }
+        if !self.selection.is_empty() && self.extra.is_empty() {
+            return self.format_selection_now(cx);
+        }
         self.format_then(false, cx);
+    }
+
+    pub(super) fn format_selection(&mut self, _: &FormatSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(message) = self.not_ready_message(cx) {
+            return self.show_notice(self.selection.head, message, cx);
+        }
+        if self.selection.is_empty() {
+            return self.show_notice(self.selection.head, "Select the code to format.".into(), cx);
+        }
+        self.format_selection_now(cx);
+    }
+
+    /// Formats the selected code, if the language server can format part of a file.
+    fn format_selection_now(&mut self, cx: &mut Context<Self>) {
+        let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else { return };
+        let at = self.selection.head;
+        if !lsp.read(cx).formats_ranges(&path) {
+            let label = crate::lsp_store::LspStore::language_label(&path).unwrap_or("This language");
+            let message =
+                format!("{label} support formats whole files only: with nothing selected, it formats this one.");
+            return self.show_notice(at, message, cx);
+        }
+        let selected = self.selection.range();
+        let range = lsp_types::Range { start: self.lsp_position(selected.start), end: self.lsp_position(selected.end) };
+        let version = self.buffer.version();
+        let request = lsp.read(cx).format_part(
+            &path,
+            Some(range),
+            self.style.indent.width() as u32,
+            self.style.indent != crate::file_style::Indent::Tabs,
+        );
+        self.format_task = Some(cx.spawn(async move |this, cx| {
+            let edits = request.await;
+            this.update(cx, |this, cx| {
+                if this.buffer.version() != version {
+                    return;
+                }
+                if edits.is_empty() {
+                    return this.show_notice(at, "Already formatted.".into(), cx);
+                }
+                this.apply_lsp_edits(&edits, cx);
+            })
+            .ok();
+        }));
     }
 
     /// Formats the file with its language server, then saves it if `save`. A server
