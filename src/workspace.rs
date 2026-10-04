@@ -166,6 +166,43 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(keys);
 }
 
+/// What a tab's right-click menu offers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TabMenuItem {
+    Close,
+    CloseOthers,
+    CloseToTheRight,
+    CopyPath,
+    CopyRelativePath,
+    Reveal,
+    OtherSide,
+}
+
+impl TabMenuItem {
+    fn label(self) -> &'static str {
+        match self {
+            TabMenuItem::Close => "Close",
+            TabMenuItem::CloseOthers => "Close Others",
+            TabMenuItem::CloseToTheRight => "Close Tabs to the Right",
+            TabMenuItem::CopyPath => "Copy Path",
+            TabMenuItem::CopyRelativePath => "Copy Relative Path",
+            TabMenuItem::Reveal => crate::file_tree::REVEAL_LABEL,
+            TabMenuItem::OtherSide => "Open on the Other Side Too",
+        }
+    }
+
+    /// Items that start a group get a line above them.
+    fn starts_group(self) -> bool {
+        matches!(self, TabMenuItem::CopyPath | TabMenuItem::OtherSide)
+    }
+}
+
+/// A tab's right-click menu: the tab, and where the click was.
+struct TabMenu {
+    editor: Entity<Editor>,
+    position: Point<Pixels>,
+}
+
 /// A place visited, to come back to with Back and Forward.
 #[derive(Clone, Debug, PartialEq)]
 struct Place {
@@ -348,6 +385,8 @@ pub struct Workspace {
     git_status_task: Option<Task<()>>,
     /// The list of changes is open: opening a file from it shows its changes.
     git_listing: bool,
+    /// A tab's right-click menu, while open.
+    tab_menu: Option<TabMenu>,
     /// Only the code: no sidebar, tabs, status bar or terminal, the text centered.
     focus_mode: bool,
     /// Places to go back and forward to, most recent last.
@@ -502,6 +541,7 @@ impl Workspace {
             recent_runs: Vec::new(),
             pending_tasks: Vec::new(),
             focus_mode: false,
+            tab_menu: None,
             back: Vec::new(),
             forward: Vec::new(),
             navigating: false,
@@ -3653,6 +3693,16 @@ impl Workspace {
                     .child(close)
                     .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(ix, window, cx)))
+                    // Right-click: what can be done with the tab.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            if let Some(tab) = this.tabs.get(ix) {
+                                this.tab_menu = Some(TabMenu { editor: tab.editor.clone(), position: event.position });
+                                cx.notify();
+                            }
+                        }),
+                    )
                     // Middle-click closes, as in browsers.
                     .on_mouse_down(
                         MouseButton::Middle,
@@ -3660,6 +3710,117 @@ impl Workspace {
                     )
             }))
             .into_any_element()
+    }
+
+    /// The items a tab's menu shows: closing, its path, the other side.
+    fn tab_menu_items(&self, editor: &Entity<Editor>, cx: &App) -> Vec<TabMenuItem> {
+        use TabMenuItem::*;
+        let Some(ix) = self.tabs.iter().position(|t| &t.editor == editor) else { return Vec::new() };
+        let mut items = vec![Close];
+        if self.tabs.len() > 1 {
+            items.push(CloseOthers);
+        }
+        let side = self.side_tabs(self.tabs[ix].side);
+        if side.last() != Some(&ix) {
+            items.push(CloseToTheRight);
+        }
+        if editor.read(cx).path().is_some() {
+            items.extend([CopyPath, CopyRelativePath, Reveal, OtherSide]);
+        }
+        items
+    }
+
+    fn run_tab_menu_item(&mut self, item: TabMenuItem, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.tab_menu.take() else { return };
+        let editor = menu.editor;
+        let Some(ix) = self.tabs.iter().position(|t| t.editor == editor) else { return };
+        let path = editor.read(cx).path().map(Path::to_path_buf);
+        match item {
+            TabMenuItem::Close => self.close_tab_at(ix, window, cx),
+            TabMenuItem::CloseOthers => {
+                let others = self.tabs.iter().map(|t| t.editor.clone()).filter(|e| *e != editor).collect();
+                self.confirm_unsaved(CloseAction::CloseTabs(others), window, cx);
+            }
+            TabMenuItem::CloseToTheRight => {
+                let side = self.side_tabs(self.tabs[ix].side);
+                let after = side.iter().skip_while(|&&i| i != ix).skip(1);
+                let editors = after.map(|&i| self.tabs[i].editor.clone()).collect();
+                self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
+            }
+            TabMenuItem::CopyPath => {
+                if let Some(path) = path {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.display().to_string()));
+                }
+            }
+            TabMenuItem::CopyRelativePath => {
+                if let Some(path) = path {
+                    let root = self.tree.read(cx).root().to_path_buf();
+                    let relative = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(relative));
+                }
+            }
+            TabMenuItem::Reveal => {
+                if let Some(path) = path {
+                    cx.reveal_path(&path);
+                }
+            }
+            TabMenuItem::OtherSide => {
+                self.activate(ix, window, cx);
+                self.open_on_other_side(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn render_tab_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.tab_menu.as_ref()?;
+        let theme = cx.global::<Theme>();
+        let items = self.tab_menu_items(&menu.editor, cx).into_iter().enumerate().map(|(i, item)| {
+            div()
+                .when(item.starts_group() && i > 0, |d| {
+                    d.mt(px(4.)).pt(px(4.)).border_t_1().border_color(theme.hairline)
+                })
+                .child(
+                    div()
+                        .id(("tab-menu", i))
+                        .h(px(26.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(ui::R_ROW))
+                        .cursor_pointer()
+                        .text_color(theme.foreground)
+                        .hover(|s| s.bg(theme.accent_soft))
+                        .child(item.label())
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.run_tab_menu_item(item, window, cx)
+                        })),
+                )
+        });
+        Some(
+            gpui::deferred(
+                gpui::anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(
+                    div()
+                        .occlude()
+                        .min_w(px(220.))
+                        .p(px(4.))
+                        .rounded(px(ui::R_POPOVER))
+                        .bg(theme.raised)
+                        .border_1()
+                        .border_color(theme.hairline)
+                        .shadow_lg()
+                        .text_size(px(ui::T_MD))
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.tab_menu = None;
+                            cx.notify();
+                        }))
+                        .children(items),
+                ),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -3921,6 +4082,7 @@ impl Render for Workspace {
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
         // The welcome covers the whole window; the rest float over the work.
         let welcome = self.welcome.as_ref().map(|(w, _)| w.clone());
+        let tab_menu = self.render_tab_menu(cx);
         let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
@@ -4290,6 +4452,7 @@ impl Render for Workspace {
                 ),
             )
             .when(!self.focus_mode, |root| root.child(status))
+            .children(tab_menu)
             .when_some(overlay, |root, layer| {
                 root.child(
                     div()
@@ -4595,6 +4758,45 @@ mod tests {
         assert_eq!(Workspace::terminal_label("ada@mac:~/code/null", 0), "null");
         assert_eq!(Workspace::terminal_label("ada@mac:/tmp/", 1), "tmp");
         assert_eq!(Workspace::terminal_label("", 2), "Terminal 3");
+    }
+
+    #[gpui::test]
+    fn a_tab_s_menu_closes_to_the_right_and_copies_its_path(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-tab-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        for name in ["a.txt", "b.txt", "src/c.txt"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            for name in ["a.txt", "b.txt", "src/c.txt"] {
+                w.open_file(dir.join(name), window, cx);
+            }
+            use TabMenuItem::*;
+            let (first, last) = (w.tabs[0].editor.clone(), w.tabs[2].editor.clone());
+            // The last tab has nothing to its right.
+            assert!(!w.tab_menu_items(&last, cx).contains(&CloseToTheRight));
+            assert_eq!(
+                w.tab_menu_items(&first, cx),
+                [Close, CloseOthers, CloseToTheRight, CopyPath, CopyRelativePath, Reveal, OtherSide]
+            );
+            w.tab_menu = Some(TabMenu { editor: last.clone(), position: Default::default() });
+            w.run_tab_menu_item(CopyRelativePath, window, cx);
+            assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()), Some("src/c.txt".into()));
+            w.tab_menu = Some(TabMenu { editor: first.clone(), position: Default::default() });
+            w.run_tab_menu_item(CloseToTheRight, window, cx);
+            assert_eq!(w.tabs.len(), 1);
+            assert!(w.tab_menu.is_none());
+        });
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[gpui::test]
