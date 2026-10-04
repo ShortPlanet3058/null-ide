@@ -84,6 +84,8 @@ struct Progress {
 
 pub enum LspEvent {
     DiagnosticsChanged,
+    /// A server asked for edits to files, while running a quick fix's command.
+    ApplyEdit(lsp_types::WorkspaceEdit),
     /// A server finished installing (its name), or failed to (why).
     Installed(Result<&'static str, String>),
 }
@@ -275,6 +277,25 @@ impl LspStore {
                         ..Default::default()
                     }),
                     formatting: Some(Default::default()),
+                    code_action: Some(lsp_types::CodeActionClientCapabilities {
+                        code_action_literal_support: Some(lsp_types::CodeActionLiteralSupport {
+                            code_action_kind: lsp_types::CodeActionKindLiteralSupport {
+                                value_set: ["", "quickfix", "refactor", "refactor.extract", "refactor.inline"]
+                                    .into_iter()
+                                    .chain(["refactor.rewrite", "source", "source.organizeImports"])
+                                    .map(String::from)
+                                    .collect(),
+                            },
+                        }),
+                        // Edits are worked out when one is picked, so asking stays quick.
+                        resolve_support: Some(lsp_types::CodeActionCapabilityResolveSupport {
+                            properties: vec!["edit".into()],
+                        }),
+                        data_support: Some(true),
+                        is_preferred_support: Some(true),
+                        disabled_support: Some(true),
+                        ..Default::default()
+                    }),
                     completion: Some(CompletionClientCapabilities {
                         // Plain text only: Null doesn't do snippet placeholders yet.
                         completion_item: Some(CompletionItemCapability {
@@ -288,6 +309,14 @@ impl LspStore {
                     ..Default::default()
                 }),
                 window: Some(WindowClientCapabilities { work_done_progress: Some(true), ..Default::default() }),
+                workspace: Some(lsp_types::WorkspaceClientCapabilities {
+                    apply_edit: Some(true),
+                    workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                        document_changes: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -356,6 +385,14 @@ impl LspStore {
                     "workspace/configuration" => {
                         let count = params["items"].as_array().map_or(0, Vec::len);
                         Value::Array(vec![Value::Null; count])
+                    }
+                    "workspace/applyEdit" => {
+                        let edit = serde_json::from_value::<lsp_types::ApplyWorkspaceEditParams>(params);
+                        let applied = edit.is_ok();
+                        if let Ok(edit) = edit {
+                            cx.emit(LspEvent::ApplyEdit(edit.edit));
+                        }
+                        serde_json::json!({ "applied": applied })
                     }
                     _ => Value::Null,
                 };
@@ -602,6 +639,69 @@ impl LspStore {
         async move {
             let Some(request) = request else { return Vec::new() };
             request.await.ok().flatten().unwrap_or_default()
+        }
+    }
+
+    /// The fixes and refactorings the server offers for `range`, given the problems there.
+    pub fn code_actions(
+        &self,
+        path: &Path,
+        range: lsp_types::Range,
+        diagnostics: Vec<Diagnostic>,
+    ) -> impl Future<Output = Vec<lsp_types::CodeActionOrCommand>> + use<> {
+        let request = self.server_for(path).zip(uri_for(path)).map(|(server, uri)| {
+            server.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
+                text_document: TextDocumentIdentifier { uri },
+                range,
+                context: lsp_types::CodeActionContext {
+                    diagnostics,
+                    only: None,
+                    trigger_kind: Some(lsp_types::CodeActionTriggerKind::INVOKED),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+        });
+        async move {
+            let Some(request) = request else { return Vec::new() };
+            request.await.ok().flatten().unwrap_or_default()
+        }
+    }
+
+    /// Fills in the edit of an action that came without one.
+    pub fn resolve_code_action(
+        &self,
+        path: &Path,
+        action: lsp_types::CodeAction,
+    ) -> impl Future<Output = Result<lsp_types::CodeAction, String>> + use<> {
+        let request =
+            self.server_for(path).map(|server| server.request::<lsp_types::request::CodeActionResolveRequest>(action));
+        async move {
+            match request {
+                Some(request) => request.await,
+                None => Err("No language server for this file.".into()),
+            }
+        }
+    }
+
+    /// Runs a server command (a fix that works through the server, which then sends edits).
+    pub fn execute_command(
+        &self,
+        path: &Path,
+        command: lsp_types::Command,
+    ) -> impl Future<Output = Result<(), String>> + use<> {
+        let request = self.server_for(path).map(|server| {
+            server.request::<lsp_types::request::ExecuteCommand>(lsp_types::ExecuteCommandParams {
+                command: command.command,
+                arguments: command.arguments.unwrap_or_default(),
+                work_done_progress_params: Default::default(),
+            })
+        });
+        async move {
+            match request {
+                Some(request) => request.await.map(|_| ()),
+                None => Err("No language server for this file.".into()),
+            }
         }
     }
 

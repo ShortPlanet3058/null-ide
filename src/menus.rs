@@ -143,6 +143,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Go to Definition", GoToDefinition),
                 MenuItem::action("Find References", crate::editor::FindReferences),
                 MenuItem::action("Rename Symbol", crate::editor::RenameSymbol),
+                MenuItem::action("Quick Fix…", crate::editor::QuickFix),
                 MenuItem::action("Format Document", crate::editor::FormatDocument),
                 MenuItem::action("Show Problems", crate::workspace::ShowProblems),
                 MenuItem::action("Show Info at Cursor", ShowInfo),

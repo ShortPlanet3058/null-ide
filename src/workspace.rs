@@ -350,14 +350,16 @@ impl Workspace {
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
             cx.observe(&lsp, |_, _, cx| cx.notify()),
-            cx.subscribe(&lsp, |this, _, event, cx| {
-                if let crate::lsp_store::LspEvent::Installed(result) = event {
+            cx.subscribe(&lsp, |this, _, event, cx| match event {
+                crate::lsp_store::LspEvent::Installed(result) => {
                     let message = match result {
                         Ok(name) => format!("{name} is installed"),
                         Err(reason) => reason.clone(),
                     };
                     this.show_notice(message, cx);
                 }
+                crate::lsp_store::LspEvent::ApplyEdit(edit) => this.apply_fix_edit(edit.clone(), cx),
+                crate::lsp_store::LspEvent::DiagnosticsChanged => {}
             }),
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
                 ProjectSearchEvent::Open { path, line, columns, query, keep_focus } => {
@@ -1106,6 +1108,10 @@ impl Workspace {
                     })
                     .detach();
                 }
+                EditorEvent::CodeAction(fix) => {
+                    let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
+                    this.run_fix(path, fix.clone(), cx);
+                }
                 EditorEvent::FindReferences { position, name } => {
                     let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
                     let request = this.lsp.read(cx).references(&path, *position);
@@ -1748,6 +1754,7 @@ impl Workspace {
                 (Go, "Find References".into(), Box::new(crate::editor::FindReferences)),
                 (Go, "Show Problems".into(), Box::new(ShowProblems)),
                 (Edit, "Rename Symbol".into(), Box::new(crate::editor::RenameSymbol)),
+                (Edit, "Quick Fix…".into(), Box::new(crate::editor::QuickFix)),
                 (Edit, "Format Document".into(), Box::new(crate::editor::FormatDocument)),
                 (
                     Edit,
@@ -2654,7 +2661,77 @@ impl Workspace {
 
     /// Applies a rename (or any multi-file change) from a language server: open files as
     /// one undo step each, others written on disk.
+    /// A quick fix: its edits (worked out now if the server left them for later), then
+    /// its command, which may send more edits.
+    fn run_fix(&mut self, path: PathBuf, fix: lsp_types::CodeActionOrCommand, cx: &mut Context<Self>) {
+        let lsp = self.lsp.clone();
+        cx.spawn(async move |this, cx| {
+            let (edit, command) = match fix {
+                lsp_types::CodeActionOrCommand::Command(command) => (None, Some(command)),
+                lsp_types::CodeActionOrCommand::CodeAction(action) => {
+                    let action = if action.edit.is_none() && action.data.is_some() {
+                        let Ok(request) = this.update(cx, |_, cx| lsp.read(cx).resolve_code_action(&path, action))
+                        else {
+                            return;
+                        };
+                        match request.await {
+                            Ok(action) => action,
+                            Err(error) => {
+                                this.update(cx, |this, cx| this.show_notice(format!("Couldn't fix it: {error}"), cx))
+                                    .ok();
+                                return;
+                            }
+                        }
+                    } else {
+                        action
+                    };
+                    (action.edit, action.command)
+                }
+            };
+            let Ok(request) = this.update(cx, |this, cx| {
+                if let Some(edit) = edit {
+                    this.apply_fix_edit(edit, cx);
+                }
+                command.map(|command| lsp.read(cx).execute_command(&path, command))
+            }) else {
+                return;
+            };
+            if let Some(request) = request {
+                // Commands only some editors have (opening a view, say) just fail: say nothing.
+                request.await.ok();
+            }
+        })
+        .detach();
+    }
+
+    /// A fix's edits: quiet when they stay in the open file.
+    fn apply_fix_edit(&mut self, edit: lsp_types::WorkspaceEdit, cx: &mut Context<Self>) {
+        let (_, files, failed) = self.apply_edit_to_files(edit, cx);
+        if !failed.is_empty() {
+            self.show_notice(format!("Couldn't write {}", failed.join(", ")), cx);
+        } else if files > 1 {
+            self.show_notice(format!("Changed {files} files"), cx);
+        }
+    }
+
     fn apply_workspace_edit(&mut self, edit: lsp_types::WorkspaceEdit, cx: &mut Context<Self>) {
+        let (places, files, failed) = self.apply_edit_to_files(edit, cx);
+        let message = match (places, failed.is_empty()) {
+            (0, _) => "Nothing to rename".to_string(),
+            (_, true) if files == 1 => format!("Renamed in {places} places"),
+            (_, true) => format!("Renamed in {places} places across {files} files"),
+            (_, false) => format!("Renamed, but couldn't write {}", failed.join(", ")),
+        };
+        self.show_notice(message, cx);
+    }
+
+    /// Applies edits to every file they touch: open ones in their tab (to undo), others
+    /// on disk. Returns how many places and files changed, and the files it couldn't write.
+    fn apply_edit_to_files(
+        &mut self,
+        edit: lsp_types::WorkspaceEdit,
+        cx: &mut Context<Self>,
+    ) -> (usize, usize, Vec<String>) {
         let mut by_file: Vec<(PathBuf, Vec<lsp_types::TextEdit>)> = Vec::new();
         let mut add = |uri: &lsp_types::Uri, edits: Vec<lsp_types::TextEdit>| {
             let Some(path) = crate::lsp::path_for(uri) else { return };
@@ -2705,13 +2782,7 @@ impl Workspace {
                 }
             }
         }
-        let message = match (places, failed.is_empty()) {
-            (0, _) => "Nothing to rename".to_string(),
-            (_, true) if files == 1 => format!("Renamed in {places} places"),
-            (_, true) => format!("Renamed in {places} places across {files} files"),
-            (_, false) => format!("Renamed, but couldn't write {}", failed.join(", ")),
-        };
-        self.show_notice(message, cx);
+        (places, files, failed)
     }
 
     /// Every error and warning the language servers found, errors first.
@@ -2925,6 +2996,11 @@ impl Workspace {
                         "Hold Alt over code for info · Ctrl+click to jump"
                     };
                     return Some(div().text_color(theme.muted).whitespace_nowrap().child(tip).into_any_element());
+                }
+                // On a problem: say how to fix it.
+                if self.active_editor().is_some_and(|e| e.read(cx).caret_on_problem(cx)) {
+                    let hint = if cfg!(target_os = "macos") { "⌘. to fix" } else { "Ctrl+. to fix" };
+                    return Some(div().text_color(theme.muted).whitespace_nowrap().child(hint).into_any_element());
                 }
                 checking.then(|| div().text_color(theme.faint).child("Checking…").into_any_element())
             }

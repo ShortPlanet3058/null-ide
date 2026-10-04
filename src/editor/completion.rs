@@ -206,6 +206,7 @@ impl Editor {
     }
 
     pub(super) fn close_completion(&mut self, cx: &mut Context<Self>) {
+        self.close_fixes(cx);
         self.completion_task = None;
         if self.completion.take().is_some() {
             cx.notify();
