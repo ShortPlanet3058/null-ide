@@ -176,6 +176,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Focus Mode", crate::workspace::ToggleFocusMode),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Terminal", ToggleTerminal),
+                MenuItem::action("Run Task…", crate::workspace::RunTask),
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Move Tab to the Right Side", crate::workspace::MoveTabRight),
                 MenuItem::action("Move Tab to the Left Side", crate::workspace::MoveTabLeft),
