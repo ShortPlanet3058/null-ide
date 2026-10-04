@@ -95,6 +95,8 @@ actions!(
         Redo,
         Save,
         GoToDefinition,
+        GoToTypeDefinition,
+        GoToImplementation,
         ShowInfo,
         ShowCompletions,
         CompletionNext,
@@ -170,6 +172,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-z", Redo, ctx),
         KeyBinding::new("secondary-s", Save, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
+        KeyBinding::new("secondary-f12", GoToImplementation, ctx),
         KeyBinding::new("secondary-shift-i", ShowInfo, ctx),
         KeyBinding::new("ctrl-space", ShowCompletions, ctx),
         KeyBinding::new("secondary-i", InlineAssist, ctx),
@@ -293,6 +296,11 @@ pub enum EditorEvent {
     },
     /// Every change of a review was kept or undone.
     Reviewed,
+    /// Several places to choose from (implementations): the workspace lists them.
+    ShowLocations {
+        title: String,
+        locations: Vec<lsp_types::Location>,
+    },
     /// The caret jumped within the file (to a definition): Back comes back to `from`.
     Jumped {
         from: (usize, usize),
@@ -2331,6 +2339,14 @@ impl Editor {
         self.go_to_definition_at(self.selection.head, cx);
     }
 
+    fn go_to_type_definition(&mut self, _: &GoToTypeDefinition, _: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_target(crate::lsp_store::Target::TypeDefinition, cx);
+    }
+
+    fn go_to_implementation(&mut self, _: &GoToImplementation, _: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_target(crate::lsp_store::Target::Implementation, cx);
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let line_height = f32::from(self.line_height());
         match event.delta {
@@ -2669,6 +2685,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::fold_all))
             .on_action(cx.listener(Self::unfold_all))
             .on_action(cx.listener(Self::go_to_definition))
+            .on_action(cx.listener(Self::go_to_type_definition))
+            .on_action(cx.listener(Self::go_to_implementation))
             .on_action(cx.listener(Self::show_info))
             .on_action(cx.listener(Self::show_completions))
             .on_action(cx.listener(Self::completion_next))

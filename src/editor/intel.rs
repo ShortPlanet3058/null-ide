@@ -461,6 +461,46 @@ impl Editor {
         on_text.then_some(offset)
     }
 
+    /// Where the symbol at the caret's type is defined, or where it's implemented: one
+    /// place is gone to, several are listed.
+    pub(super) fn go_to_target(&mut self, target: crate::lsp_store::Target, cx: &mut Context<Self>) {
+        use crate::lsp_store::Target;
+        let offset = self.selection.head;
+        if let Some(message) = self.not_ready_message(cx) {
+            return self.show_notice(offset, message, cx);
+        }
+        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return };
+        let request = lsp.read(cx).locations_of(target, path, self.lsp_position(offset));
+        let word = self.buffer.slice(self.word_at(offset));
+        self.definition_task = Some(cx.spawn(async move |this, cx| {
+            let found = request.await;
+            this.update(cx, |this, cx| match found.as_slice() {
+                [] => {
+                    let what = if target == Target::Implementation { "implementation" } else { "type definition" };
+                    this.show_notice(offset, format!("No {what} found here."), cx);
+                }
+                [location] => {
+                    let Some(target) = path_for(&location.uri) else { return };
+                    if this.path.as_deref() == Some(target.as_path()) {
+                        cx.emit(EditorEvent::Jumped { from: this.caret_point() });
+                        this.select_lsp_range(location.range, cx);
+                    } else {
+                        cx.emit(EditorEvent::GoTo { path: target, range: location.range });
+                    }
+                }
+                many => {
+                    let title = if target == Target::Implementation {
+                        format!("{} implementations of {word}", many.len())
+                    } else {
+                        format!("{} types of {word}", many.len())
+                    };
+                    cx.emit(EditorEvent::ShowLocations { title, locations: many.to_vec() });
+                }
+            })
+            .ok();
+        }));
+    }
+
     pub fn go_to_definition_at(&mut self, offset: usize, cx: &mut Context<Self>) {
         if let Some(message) = self.not_ready_message(cx) {
             self.show_notice(offset, message, cx);

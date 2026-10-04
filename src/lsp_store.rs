@@ -1,5 +1,5 @@
 use crate::lsp::{LanguageServer, ServerMessage, path_for, uri_for};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use gpui::{Context, EventEmitter, Task};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit, Initialized,
@@ -80,6 +80,14 @@ struct Progress {
     server: &'static str,
     title: String,
     percent: Option<u64>,
+}
+
+/// What a "go to" asks the server for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Definition,
+    TypeDefinition,
+    Implementation,
 }
 
 pub enum LspEvent {
@@ -266,6 +274,8 @@ impl LspStore {
                     publish_diagnostics: Some(PublishDiagnosticsClientCapabilities::default()),
                     rename: Some(lsp_types::RenameClientCapabilities::default()),
                     references: Some(Default::default()),
+                    type_definition: Some(Default::default()),
+                    implementation: Some(Default::default()),
                     document_highlight: Some(Default::default()),
                     inlay_hint: Some(Default::default()),
                     signature_help: Some(lsp_types::SignatureHelpClientCapabilities {
@@ -519,12 +529,31 @@ impl LspStore {
         path: &Path,
         position: Position,
     ) -> impl Future<Output = Vec<lsp_types::Location>> + use<> {
+        self.locations_of(Target::Definition, path, position)
+    }
+
+    /// Where the symbol at `position` is defined, its type is, or it's implemented.
+    pub fn locations_of(
+        &self,
+        target: Target,
+        path: &Path,
+        position: Position,
+    ) -> impl Future<Output = Vec<lsp_types::Location>> + use<> {
         let request = self.server_for(path).zip(Self::position_params(path, position)).map(|(server, params)| {
-            server.request::<GotoDefinition>(GotoDefinitionParams {
+            let params = GotoDefinitionParams {
                 text_document_position_params: params,
                 work_done_progress_params: Default::default(),
                 partial_result_params: Default::default(),
-            })
+            };
+            match target {
+                Target::Definition => server.request::<GotoDefinition>(params).boxed_local(),
+                Target::TypeDefinition => {
+                    server.request::<lsp_types::request::GotoTypeDefinition>(params).boxed_local()
+                }
+                Target::Implementation => {
+                    server.request::<lsp_types::request::GotoImplementation>(params).boxed_local()
+                }
+            }
         });
         async move {
             let Some(request) = request else { return Vec::new() };
