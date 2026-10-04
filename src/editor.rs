@@ -10,6 +10,7 @@ mod intel;
 mod refactor;
 mod review;
 mod signature;
+mod snippet;
 mod structure;
 
 pub use assist::{Block, BlockKind};
@@ -125,6 +126,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     fold::bind_keys(cx);
     fixes::bind_keys(cx);
     structure::bind_keys(cx);
+    snippet::bind_keys(cx);
 }
 
 pub fn bind_ai_keys(cx: &mut App) {
@@ -440,6 +442,8 @@ pub struct Editor {
     completion_task: Option<Task<()>>,
     /// ⌘.'s list of quick fixes.
     fix_menu: Option<fixes::FixMenu>,
+    /// The snippet being filled in, if any.
+    snippet: Option<snippet::Session>,
     /// ⌃⇧⌘→'s steps, to shrink back through.
     expansions: structure::Expansions,
     fixes_task: Option<Task<()>>,
@@ -536,6 +540,7 @@ impl Editor {
             completion_task: None,
             fix_menu: None,
             expansions: Default::default(),
+            snippet: None,
             fixes_task: None,
             signature: Default::default(),
             folds: Default::default(),
@@ -2484,6 +2489,9 @@ impl Render for Editor {
         if self.completion.is_some() || self.fix_menu.is_some() {
             key_context.add("showing_completions");
         }
+        if self.snippet.is_some() {
+            key_context.add("in_snippet");
+        }
         self.ai_key_context(&mut key_context);
         let text = div()
             .key_context(key_context)
@@ -2561,6 +2569,9 @@ impl Render for Editor {
             .on_action(cx.listener(Self::rename_symbol))
             .on_action(cx.listener(Self::quick_fix))
             .on_action(cx.listener(Self::expand_selection))
+            .on_action(cx.listener(Self::next_placeholder))
+            .on_action(cx.listener(Self::previous_placeholder))
+            .on_action(cx.listener(Self::end_snippet))
             .on_action(cx.listener(Self::shrink_selection))
             .on_action(cx.listener(Self::go_to_matching_bracket))
             .on_action(cx.listener(Self::newline_below))

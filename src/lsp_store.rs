@@ -297,9 +297,9 @@ impl LspStore {
                         ..Default::default()
                     }),
                     completion: Some(CompletionClientCapabilities {
-                        // Plain text only: Null doesn't do snippet placeholders yet.
+                        // Placeholders to fill in with ⇥ (see editor::snippet).
                         completion_item: Some(CompletionItemCapability {
-                            snippet_support: Some(false),
+                            snippet_support: Some(true),
                             label_details_support: Some(true),
                             ..Default::default()
                         }),
