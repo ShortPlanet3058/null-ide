@@ -274,6 +274,7 @@ impl SettingsPanel {
             .id(id)
             .cursor_pointer()
             .child(ui::switch(on, theme))
+            .active(|s| s.opacity(0.7))
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, &change)))
             .into_any_element()
     }
@@ -297,6 +298,7 @@ impl SettingsPanel {
                     .cursor_pointer()
                     .when(!active, |d| d.hover(|d| d.text_color(theme.foreground)))
                     .child(label)
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| pick(this, value, cx)))
             }))
             .into_any_element()
@@ -331,6 +333,7 @@ impl SettingsPanel {
         ui::theme_preview(name, name == current, &theme)
             .id(name.label())
             .cursor_pointer()
+            .active(|s| s.opacity(0.7))
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.theme = name)))
             .into_any_element()
     }
@@ -346,6 +349,7 @@ impl SettingsPanel {
             .gap(px(6.))
             .child(
                 Self::button("smaller", "−", &theme)
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.font_size -= 1.))),
             )
             .child(
@@ -358,10 +362,11 @@ impl SettingsPanel {
             )
             .child(
                 Self::button("bigger", "+", &theme)
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.font_size += 1.))),
             )
             .when(s.font_size != DEFAULT_FONT_SIZE, |d| {
-                d.child(Self::button("actual-size", "Reset", &theme).on_click(
+                d.child(Self::button("actual-size", "Reset", &theme).active(|s| s.opacity(0.7)).on_click(
                     cx.listener(|_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.font_size = DEFAULT_FONT_SIZE)),
                 ))
             });
@@ -537,6 +542,7 @@ impl SettingsPanel {
                     })
                     .child(r.model)
                     .child(div().text_color(theme.faint).child(r.note))
+                    .active(|s| s.opacity(0.7))
                     .on_click(move |_, _, cx| input.update(cx, |input, cx| input.set_text(r.model, cx)))
             }))
             .into_any_element()
@@ -587,6 +593,7 @@ impl SettingsPanel {
                     };
                     let control = if can.is_ok() {
                         Self::button(("install", i), "Install", &theme)
+                            .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.lsp.update(cx, |lsp, cx| lsp.install_server(server, cx))
                             }))
@@ -692,6 +699,7 @@ impl SettingsPanel {
                                             .child(id.description()),
                                     ),
                             )
+                            .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_provider(id, cx)))
                     }))
                     .into_any_element(),
@@ -725,9 +733,9 @@ impl SettingsPanel {
             rows.push(Self::row(
                 "API key",
                 Some(&status),
-                Self::button("api-key", label, &theme).on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                    cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::SetApiKey)))
-                })),
+                Self::button("api-key", label, &theme).active(|s| s.opacity(0.7)).on_click(cx.listener(
+                    |_, _: &ClickEvent, _, cx| cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::SetApiKey))),
+                )),
                 &theme,
             ));
         }
@@ -921,6 +929,7 @@ impl Render for SettingsPanel {
                     .when(active, |d| d.bg(theme.accent_soft).text_color(theme.foreground))
                     .when(!active, |d| d.text_color(theme.muted).hover(|d| d.text_color(theme.foreground)))
                     .child(section.label())
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.section = section;
                         cx.notify();
@@ -938,6 +947,7 @@ impl Render for SettingsPanel {
                     .cursor_pointer()
                     .hover(|d| d.text_color(theme.foreground))
                     .child("Edit as JSON…")
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
                         cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::OpenSettingsFile)))
                     })),

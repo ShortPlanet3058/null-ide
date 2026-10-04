@@ -846,6 +846,7 @@ impl FileTree {
                 } else {
                     row_el
                         .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
+                        .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click(ix, event.click_count(), window, cx)
                         }))
@@ -887,6 +888,7 @@ impl FileTree {
                         .hover(|s| s.bg(theme.accent_soft))
                         .child(div().flex_1().child(item.label()))
                         .children(item.keys().map(|k| div().text_size(px(ui::T_SM)).text_color(theme.muted).child(k)))
+                        .active(|s| s.opacity(0.7))
                         .on_click(
                             cx.listener(move |this, _: &ClickEvent, window, cx| this.run_menu_item(item, window, cx)),
                         ),
@@ -997,21 +999,29 @@ impl Render for FileTree {
                             .gap(px(2.))
                             .invisible()
                             .group_hover("tree-header", |s| s.visible())
-                            .child(header_button("tree-new-file", "icons/file-plus.svg").on_click(cx.listener(
-                                |this, _: &ClickEvent, window, cx| {
-                                    this.selected = None;
-                                    this.new_file(&NewFile, window, cx)
-                                },
-                            )))
-                            .child(header_button("tree-new-folder", "icons/folder-plus.svg").on_click(cx.listener(
-                                |this, _: &ClickEvent, window, cx| {
-                                    this.selected = None;
-                                    this.new_folder(&NewFolder, window, cx)
-                                },
-                            )))
-                            .child(header_button("tree-collapse", "icons/collapse.svg").on_click(cx.listener(
-                                |this, _: &ClickEvent, window, cx| this.collapse_all(&CollapseAll, window, cx),
-                            ))),
+                            .child(
+                                header_button("tree-new-file", "icons/file-plus.svg")
+                                    .active(|s| s.opacity(0.7))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.selected = None;
+                                        this.new_file(&NewFile, window, cx)
+                                    })),
+                            )
+                            .child(
+                                header_button("tree-new-folder", "icons/folder-plus.svg")
+                                    .active(|s| s.opacity(0.7))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.selected = None;
+                                        this.new_folder(&NewFolder, window, cx)
+                                    })),
+                            )
+                            .child(
+                                header_button("tree-collapse", "icons/collapse.svg")
+                                    .active(|s| s.opacity(0.7))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.collapse_all(&CollapseAll, window, cx)
+                                    })),
+                            ),
                     ),
             )
             .child(

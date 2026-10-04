@@ -361,6 +361,7 @@ impl ProjectSearch {
                             .text_color(theme.muted)
                             .child(file.matches.len().to_string()),
                     )
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, 0, false, cx)))
                     .into_any_element()
             }
@@ -430,12 +431,14 @@ impl ProjectSearch {
                                 .group_hover(group, |s| s.visible())
                                 .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
                                 .child("Replace")
+                                .active(|s| s.opacity(0.7))
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     cx.stop_propagation();
                                     this.replace_line(f, m, cx)
                                 })),
                         )
                     })
+                    .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, m, false, cx)))
                     .into_any_element()
             }
@@ -466,6 +469,7 @@ impl ProjectSearch {
             .when(on, |b| b.bg(theme.accent_soft))
             .when(!on, |b| b.hover(|s| s.bg(theme.hairline).text_color(theme.foreground)))
             .child(label)
+            .active(|s| s.opacity(0.7))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 flip(this);
                 this.search(cx);
@@ -710,6 +714,7 @@ impl Render for ProjectSearch {
                                         if self.show_replace { std::f32::consts::FRAC_PI_2 } else { 0. },
                                     ))),
                             )
+                            .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.show_replace = !this.show_replace;
                                 if this.show_replace {
@@ -762,6 +767,7 @@ impl Render for ProjectSearch {
                                     b.cursor_pointer()
                                         .text_color(theme.foreground)
                                         .hover(|s| s.bg(theme.hairline))
+                                        .active(|s| s.opacity(0.7))
                                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                             this.replace_all(&ReplaceAllResults, window, cx)
                                         }))
