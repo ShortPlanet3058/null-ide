@@ -213,6 +213,9 @@ pub struct FileTree {
     edit: Option<Edit>,
     menu: Option<Menu>,
     scroll: UniformListScrollHandle,
+    /// Files changed since the last commit, and the folders holding any.
+    git: HashMap<PathBuf, crate::git::FileStatus>,
+    git_folders: HashSet<PathBuf>,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -231,6 +234,8 @@ impl FileTree {
             edit: None,
             menu: None,
             scroll: UniformListScrollHandle::new(),
+            git: HashMap::new(),
+            git_folders: HashSet::new(),
         };
         tree.rebuild();
         tree
@@ -668,6 +673,21 @@ impl FileTree {
 
     // ---------- context menu ----------
 
+    /// What git says changed: those files are tinted, their folders get a dot.
+    pub fn set_git_status(&mut self, changed: Vec<(PathBuf, crate::git::FileStatus)>, cx: &mut Context<Self>) {
+        let git: HashMap<_, _> = changed.into_iter().collect();
+        if git == self.git {
+            return;
+        }
+        self.git_folders = git
+            .keys()
+            .flat_map(|p| p.ancestors().skip(1).take_while(|a| a.starts_with(&self.root) && *a != self.root))
+            .map(Path::to_path_buf)
+            .collect();
+        self.git = git;
+        cx.notify();
+    }
+
     fn open_menu(
         &mut self,
         target: Option<Entry>,
@@ -824,13 +844,22 @@ impl FileTree {
                 if turning {
                     window.request_animation_frame();
                 }
-                let color = if active || selected {
+                // Changed since the last commit: the name takes git's colour for it.
+                let changed = self.git.get(&entry.path).map(|status| match status {
+                    crate::git::FileStatus::Added => theme.git_added,
+                    crate::git::FileStatus::Conflicted => theme.error,
+                    _ => theme.git_modified,
+                });
+                let color = if let Some(changed) = changed {
+                    changed
+                } else if active || selected {
                     theme.foreground
                 } else if entry.ignored {
                     theme.faint
                 } else {
                     theme.muted
                 };
+                let holds_changes = entry.is_dir && self.git_folders.contains(&entry.path);
                 let dot = if active { theme.caret } else { theme.faint };
                 let path = entry.path.clone();
                 let menu_entry = entry.clone();
@@ -846,6 +875,10 @@ impl FileTree {
                 } else {
                     row_el
                         .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
+                        // A folder with changes inside: a small dot at the end.
+                        .when(holds_changes, |r| {
+                            r.child(div().flex_none().size(px(5.)).rounded_full().bg(theme.git_modified.opacity(0.8)))
+                        })
                         .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click(ix, event.click_count(), window, cx)

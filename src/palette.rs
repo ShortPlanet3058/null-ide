@@ -59,6 +59,8 @@ pub enum PaletteKind {
     Locations,
     /// A task for the AI, typed in one line.
     Task,
+    /// A commit message.
+    Commit,
 }
 
 /// What a place in the list is.
@@ -91,6 +93,7 @@ impl PaletteKind {
             PaletteKind::Line => "Go to line",
             PaletteKind::Locations => "Filter",
             PaletteKind::Task => "Describe the task",
+            PaletteKind::Commit => "Commit message",
         }
     }
 }
@@ -303,6 +306,8 @@ pub enum PaletteEvent {
     Preview(PathBuf, lsp_types::Position),
     /// Start an AI task with this description.
     StartTask(String),
+    /// Commit every change with this message.
+    Commit(String),
 }
 
 pub struct Palette {
@@ -335,7 +340,11 @@ impl EventEmitter<PaletteEvent> for Palette {}
 impl Palette {
     pub fn new(options: PaletteOptions, cx: &mut Context<Self>) -> Self {
         let kind = options.kind;
-        let placeholder = options.title.clone().unwrap_or_else(|| kind.placeholder().to_string());
+        // One-line entries keep their own placeholder; their title is the line under them.
+        let placeholder = match kind {
+            PaletteKind::Task | PaletteKind::Commit => kind.placeholder().to_string(),
+            _ => options.title.clone().unwrap_or_else(|| kind.placeholder().to_string()),
+        };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_rows(cx));
         if kind == PaletteKind::Files {
@@ -407,7 +416,7 @@ impl Palette {
         match self.kind {
             PaletteKind::Files => self.file_rows(&query),
             PaletteKind::Quick => self.quick_rows(&query),
-            PaletteKind::Line | PaletteKind::Task => {}
+            PaletteKind::Line | PaletteKind::Task | PaletteKind::Commit => {}
             PaletteKind::Locations => self.location_rows(&query),
         }
         self.selected = 0;
@@ -629,6 +638,12 @@ impl Palette {
             PaletteKind::Task => {
                 if !self.query.is_empty() {
                     cx.emit(PaletteEvent::StartTask(self.query.clone()));
+                }
+                return;
+            }
+            PaletteKind::Commit => {
+                if !self.query.is_empty() {
+                    cx.emit(PaletteEvent::Commit(self.query.clone()));
                 }
                 return;
             }
@@ -903,6 +918,7 @@ impl Palette {
             PaletteKind::Files => "↵ open",
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
+            PaletteKind::Commit => "↵ commit",
             PaletteKind::Quick => match self.selected_item() {
                 Some(Item::Quick(q)) if q.is_choice() => "←→ change",
                 Some(Item::Quick(Quick::AllSettings)) | Some(Item::Command(_)) => "↵ run",
@@ -1001,6 +1017,10 @@ impl Render for Palette {
                     (None, None) => "A line number".to_string(),
                 };
                 Some(self.render_message(text, self.line_target().is_some(), cx))
+            }
+            PaletteKind::Commit => {
+                let text = self.title.clone().unwrap_or_default();
+                Some(self.render_message(text, false, cx))
             }
             PaletteKind::Task => {
                 let text = match &self.title {
