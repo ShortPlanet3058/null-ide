@@ -34,6 +34,7 @@ actions!(
         NextTab,
         MoveTabRight,
         MoveTabLeft,
+        OpenOnOtherSide,
         NewAiTask,
         ShowWelcome,
         InstallShellCommand,
@@ -101,6 +102,7 @@ pub fn bind_keys(cx: &mut App) {
         // Arrows rather than ⌘\, which takes several keys on many layouts.
         KeyBinding::new("alt-secondary-i", NewAiTask, ctx),
         KeyBinding::new("ctrl-secondary-right", MoveTabRight, ctx),
+        KeyBinding::new("ctrl-alt-secondary-right", OpenOnOtherSide, ctx),
         KeyBinding::new("ctrl-secondary-left", MoveTabLeft, ctx),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
@@ -295,6 +297,8 @@ pub struct Workspace {
     ai_task: Option<AiTaskRun>,
     /// Commands the next palette list shows after its places (a task's "Keep all").
     pending_commands: Vec<crate::palette::Command>,
+    /// For a file open on both sides: each copy's buffer revision last passed to the other.
+    twin_seen: std::collections::HashMap<gpui::EntityId, u64>,
     /// Changed source files waiting to be read again.
     reindex_pending: HashSet<PathBuf>,
     /// What the project's .gitignore leaves out of the index.
@@ -406,6 +410,7 @@ impl Workspace {
             window_state: None,
             reindex_task: None,
             reindex_pending: HashSet::new(),
+            twin_seen: Default::default(),
             view_before_preview: None,
             ai_task: None,
             pending_commands: Vec::new(),
@@ -488,7 +493,16 @@ impl Workspace {
         self.tree.update(cx, |tree, cx| tree.expand_folders(&session.expanded, cx));
         self.window_state = session.window;
         for tab in &session.tabs {
-            self.open_file_on(tab.path.clone(), Some(tab.side.min(1)), window, cx);
+            let side = tab.side.min(1);
+            let other_side_copy = self
+                .tabs
+                .iter()
+                .find(|t| t.side != side && t.editor.read(cx).path() == Some(tab.path.as_path()))
+                .map(|t| t.editor.clone());
+            match other_side_copy {
+                Some(source) => self.add_twin(&source, side, window, cx),
+                None => self.open_file_on(tab.path.clone(), Some(side), window, cx),
+            }
             if let Some(editor) = self.active_editor() {
                 editor.update(cx, |editor, cx| {
                     editor.restore_folds(&tab.folds, cx);
@@ -717,13 +731,72 @@ impl Workspace {
 
     /// Opens a file on `side`, or the side being worked in.
     fn open_file_on(&mut self, path: PathBuf, side: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.tabs.iter().position(|tab| tab.editor.read(cx).path() == Some(path.as_path())) {
+        // Open on both sides: the copy on the side asked for (or being worked in).
+        let wanted = side.unwrap_or_else(|| self.focused_side());
+        let copies: Vec<usize> =
+            (0..self.tabs.len()).filter(|&i| self.tabs[i].editor.read(cx).path() == Some(path.as_path())).collect();
+        if let Some(&ix) = copies.iter().find(|&&i| self.tabs[i].side == wanted).or(copies.first()) {
             self.activate(ix, window, cx);
             return;
         }
         let lsp = self.lsp.clone();
         let editor = cx.new(|cx| Editor::open(path, Some(lsp), cx));
         self.add_tab_on(editor, side, window, cx);
+    }
+
+    /// The other copies of a file open on both sides.
+    fn twins_of(&self, editor: &Entity<Editor>, cx: &App) -> Vec<Entity<Editor>> {
+        let Some(path) = editor.read(cx).path() else { return Vec::new() };
+        self.tabs
+            .iter()
+            .filter(|t| &t.editor != editor && t.editor.read(cx).path() == Some(path))
+            .map(|t| t.editor.clone())
+            .collect()
+    }
+
+    /// ⌃⌥⌘→: the current file on the other side too, both copies kept the same as you type.
+    fn open_on_other_side(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.active else { return };
+        let source = self.tabs[ix].editor.clone();
+        if source.read(cx).path().is_none() {
+            return self.show_notice("Save the file first to open it on both sides".into(), cx);
+        }
+        let other = 1 - self.tabs[ix].side.min(1);
+        if let Some(twin) = self.twins_of(&source, cx).first()
+            && let Some(at) = self.tabs.iter().position(|t| &t.editor == twin)
+        {
+            return self.activate(at, window, cx);
+        }
+        self.add_twin(&source, other, window, cx);
+    }
+
+    fn add_twin(&mut self, source: &Entity<Editor>, side: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let lsp = self.lsp.clone();
+        let Some(from) = source.read(cx).twin_source() else { return };
+        let twin = cx.new(|cx| Editor::twin(from, Some(lsp), cx));
+        self.twin_seen.insert(source.entity_id(), source.read(cx).buffer.revision());
+        self.twin_seen.insert(twin.entity_id(), twin.read(cx).buffer.revision());
+        self.add_tab_on(twin, Some(side), window, cx);
+    }
+
+    /// Passes an edit in one copy of a file to its other copy.
+    fn sync_twins(&mut self, source: &Entity<Editor>, cx: &mut Context<Self>) {
+        let twins = self.twins_of(source, cx);
+        if twins.is_empty() {
+            return;
+        }
+        let (edits, text, revision, saved) = {
+            let buffer = &source.read(cx).buffer;
+            let since = self.twin_seen.get(&source.entity_id()).copied();
+            let edits = since.and_then(|s| buffer.edits_since(s).map(|e| e.cloned().collect::<Vec<_>>()));
+            (edits, buffer.rope().clone(), buffer.revision(), !buffer.is_dirty())
+        };
+        for twin in twins {
+            twin.update(cx, |twin, cx| twin.apply_twin_edits(edits.clone(), &text, saved, cx));
+            // What it just took from here isn't passed back.
+            self.twin_seen.insert(twin.entity_id(), twin.read(cx).buffer.revision());
+        }
+        self.twin_seen.insert(source.entity_id(), revision);
     }
 
     fn is_split(&self) -> bool {
@@ -755,6 +828,7 @@ impl Workspace {
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited => {
+                    this.sync_twins(&editor, cx);
                     this.share_unsaved(&editor, cx);
                     if cx.global::<Settings>().fade_bars_while_typing {
                         this.chrome.set(false, FADE_IN, FADE_OUT);
@@ -764,6 +838,14 @@ impl Workspace {
                 }
                 // Hand edits to the settings file take effect when saved.
                 EditorEvent::Saved => {
+                    // Saving (and tidying) one copy saves the other: same text, same file.
+                    this.sync_twins(&editor, cx);
+                    for twin in this.twins_of(&editor, cx) {
+                        twin.update(cx, |twin, cx| {
+                            twin.buffer.mark_saved();
+                            cx.notify();
+                        });
+                    }
                     this.share_unsaved(&editor, cx);
                     this.refresh_title(window, cx);
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
@@ -990,6 +1072,11 @@ impl Workspace {
             self.recently_closed.push(path.to_path_buf());
         }
         tab.editor.update(cx, |editor, cx| editor.release_lsp(cx));
+        self.twin_seen.remove(&tab.editor.entity_id());
+        // Its other copy, if any, talks to the language server now.
+        if let Some(twin) = self.twins_of(&tab.editor, cx).first() {
+            twin.update(cx, |twin, cx| twin.lead_lsp(cx));
+        }
         let was_active = self.active == Some(ix);
         if let Some(a) = self.active.filter(|&a| a > ix) {
             self.active = Some(a - 1);
@@ -1125,7 +1212,13 @@ impl Workspace {
             CloseAction::CloseTabs(editors) => editors.clone(),
             _ => self.tabs.iter().map(|tab| tab.editor.clone()).collect(),
         };
-        let dirty: Vec<Entity<Editor>> = scope.iter().filter(|e| e.read(cx).buffer.is_dirty()).cloned().collect();
+        // A copy of a file still open on the other side doesn't lose its changes by closing.
+        let dirty: Vec<Entity<Editor>> = scope
+            .iter()
+            .filter(|e| e.read(cx).buffer.is_dirty())
+            .filter(|e| !self.twins_of(e, cx).iter().any(|t| !scope.contains(t)))
+            .cloned()
+            .collect();
         if dirty.is_empty() {
             self.finish_close(action, window, cx);
             return true;
@@ -1429,6 +1522,7 @@ impl Workspace {
                 (Go, "Next Tab".into(), Box::new(NextTab)),
                 (View, "Move Tab to the Right Side".into(), Box::new(MoveTabRight)),
                 (View, "Move Tab to the Left Side".into(), Box::new(MoveTabLeft)),
+                (View, "Open on the Other Side Too".into(), Box::new(OpenOnOtherSide)),
                 (Go, "Previous Tab".into(), Box::new(PreviousTab)),
             ]);
         }
@@ -3181,6 +3275,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::undo_all_task_changes))
             .on_action(cx.listener(|this, _: &MoveTabRight, window, cx| this.move_tab_to(1, window, cx)))
             .on_action(cx.listener(|this, _: &MoveTabLeft, window, cx| this.move_tab_to(0, window, cx)))
+            .on_action(cx.listener(|this, _: &OpenOnOtherSide, window, cx| this.open_on_other_side(window, cx)))
             .on_action(cx.listener(Self::go_to_symbol))
             .on_action(cx.listener(Self::go_to_symbol_in_project))
             .on_action(cx.listener(|_, _: &ToggleFormatOnSave, _, cx| {
@@ -3370,6 +3465,49 @@ mod tests {
         assert!(given.lines().next().unwrap().ends_with("/new.txt"), "{given}");
         assert!(dir.join("new.txt").exists());
         assert_eq!(given.lines().count(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn a_file_open_on_both_sides_stays_the_same_on_both(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-twins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let (left, right) = workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.txt"), window, cx);
+            w.open_on_other_side(window, cx);
+            assert!(w.is_split());
+            (w.tabs[w.side_tabs(0)[0]].editor.clone(), w.tabs[w.side_tabs(1)[0]].editor.clone())
+        });
+        let text = |cx: &mut gpui::VisualTestContext, e: &Entity<Editor>| e.read_with(cx, |e, _| e.buffer.to_string());
+        // Typing on the left shows on the right, and the other way round.
+        left.update(cx, |e, cx| e.type_text_for_test(0, "zero\n", cx));
+        cx.run_until_parked();
+        assert_eq!(text(cx, &right), "zero\none\ntwo\n");
+        right.update(cx, |e, cx| e.type_text_for_test(e.buffer.len_chars(), "three\n", cx));
+        cx.run_until_parked();
+        assert_eq!(text(cx, &left), "zero\none\ntwo\nthree\n");
+        assert!(right.read_with(cx, |e, _| e.lsp_follower) && !left.read_with(cx, |e, _| e.lsp_follower));
+        // Saving one saves both.
+        left.update(cx, |e, cx| e.save_to_disk(cx));
+        cx.run_until_parked();
+        assert!(!right.read_with(cx, |e, _| e.buffer.is_dirty()));
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "zero\none\ntwo\nthree\n");
+        // Closing the first copy: the other one takes over the language server.
+        workspace.update_in(cx, |w, window, cx| {
+            let ix = w.side_tabs(0)[0];
+            w.remove_tab(ix, window, cx);
+        });
+        assert!(!right.read_with(cx, |e, _| e.lsp_follower));
         std::fs::remove_dir_all(&dir).ok();
     }
 
