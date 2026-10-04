@@ -1289,3 +1289,67 @@ mod tests {
         assert_eq!(gaps, vec![Gap { byte: 1, extra: 3, hint: true }, Gap { byte: 1, extra: 2, hint: false }]);
     }
 }
+
+#[cfg(test)]
+mod timing {
+    use super::*;
+    use crate::buffer::Buffer;
+    use gpui::{AppContext as _, TestAppContext};
+
+    /// Not a check: how long a keystroke takes on a big file, from the edit to the editor
+    /// drawn again (the test platform shapes text for free, so this is Null's own work).
+    /// `cargo test --release timing -- --ignored --nocapture`
+    #[gpui::test]
+    #[ignore]
+    fn keystroke_and_redraw_on_a_big_file(cx: &mut TestAppContext) {
+        let source = std::fs::read_to_string("src/workspace.rs").unwrap();
+        let none = Settings {
+            inlay_hints: false,
+            indent_guides: false,
+            sticky_scroll: false,
+            line_blame: false,
+            symbol_marks: false,
+            ..Settings::default()
+        };
+        let variants: Vec<(&str, Settings)> = vec![
+            ("nothing extra", none.clone()),
+            ("indent guides", Settings { indent_guides: true, ..none.clone() }),
+            ("sticky scroll", Settings { sticky_scroll: true, ..none.clone() }),
+            ("symbol marks", Settings { symbol_marks: true, ..none.clone() }),
+            ("type hints", Settings { inlay_hints: true, ..none.clone() }),
+            ("defaults", Settings::default()),
+        ];
+        cx.update(|cx| {
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            cx.set_global(none.clone());
+        });
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(Buffer::from_text(&source), Some(std::path::PathBuf::from("big.rs")), cx)
+        });
+        let size = gpui::size(px(1400.), px(900.));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            let editor = editor.clone();
+            cx.draw(Point::default(), size, move |_, _| gpui::AnyView::from(editor));
+        };
+        for (name, settings) in variants {
+            cx.update(|_, cx| cx.set_global(settings));
+            editor.update(cx, |e, cx| e.set_caret_point((3000, 8), cx));
+            draw(cx);
+            draw(cx);
+            let (mut edit, mut redraw) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+            for _ in 0..20 {
+                let t = std::time::Instant::now();
+                editor.update(cx, |e, cx| {
+                    let at = e.selection.head;
+                    e.type_text_for_test(at, "x", cx);
+                });
+                edit += t.elapsed();
+                let t = std::time::Instant::now();
+                draw(cx);
+                redraw += t.elapsed();
+            }
+            println!("{name:>14}: {:?} edit + {:?} redraw, per keystroke", edit / 20, redraw / 20);
+        }
+    }
+}

@@ -420,6 +420,13 @@ mod timing {
                 expected.iter().map(|r| r.start).collect::<Vec<_>>()
             );
         }
+        // Colours for the lines around the view (as many as the editor keeps: 120 each side).
+        let around = buffer.line_to_byte(3000 - 160)..buffer.line_to_byte(3000 + 160);
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            std::hint::black_box(highlighter.spans(buffer.rope(), around.clone()));
+        }
+        println!("colours for 320 lines: {:?}", t.elapsed() / 20);
         println!(
             "per keystroke: reparse {:?}, all fold ranges {:?}, blocks around a line {:?}",
             sync / 20,
