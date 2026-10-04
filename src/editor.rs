@@ -743,21 +743,28 @@ impl Editor {
     /// (only what changed is parsed again), then the lines around the view are
     /// coloured, with some room so scrolling a little needs nothing new.
     pub(crate) fn highlight_lines(&mut self, lines: Range<usize>) {
-        /// Lines coloured beyond the view on each side.
+        /// Lines coloured beyond the view on each side, so scrolling doesn't colour again…
         const ROOM: usize = 120;
+        /// …but after an edit, only a few: what's on screen is what's needed now (colouring
+        /// all the room took 3 ms a keystroke on a big file).
+        const ROOM_AFTER_EDIT: usize = 10;
         let Some(highlighter) = &mut self.highlighter else { return };
         let revision = self.buffer.revision();
         let wanted = self.buffer.line_to_byte(lines.start)..self.buffer.line_to_byte(lines.end);
-        if let Some((r, range)) = &self.spans_for
-            && *r == revision
-            && range.start <= wanted.start
-            && range.end >= wanted.end
-        {
-            return;
-        }
+        let edited = match &self.spans_for {
+            Some((r, range)) if *r == revision => {
+                if range.start <= wanted.start && range.end >= wanted.end {
+                    return;
+                }
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
         highlighter.sync(&self.buffer);
+        let room = if edited { ROOM_AFTER_EDIT } else { ROOM };
         let range =
-            self.buffer.line_to_byte(lines.start.saturating_sub(ROOM))..self.buffer.line_to_byte(lines.end + ROOM);
+            self.buffer.line_to_byte(lines.start.saturating_sub(room))..self.buffer.line_to_byte(lines.end + room);
         self.spans = highlighter.spans(self.buffer.rope(), range.clone());
         self.spans_for = Some((revision, range));
     }
