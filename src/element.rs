@@ -212,6 +212,8 @@ pub struct Prepaint {
     text_bounds: Bounds<Pixels>,
     line_height: Pixels,
     current_line: Option<Bounds<Pixels>>,
+    /// Faint lines down the indentation, one per level.
+    indent_guides: Vec<Bounds<Pixels>>,
     numbers: Vec<(ShapedLine, Point<Pixels>)>,
     /// Fold chevrons: where, and whether folded (pointing right) or open (down).
     chevrons: Vec<(Bounds<Pixels>, bool)>,
@@ -642,6 +644,47 @@ impl Element for EditorElement {
                 )
             });
 
+            // Indent guides: a faint line at each level a line is indented past. Blank lines
+            // take the smaller indentation of the lines around them, so guides run through.
+            let indent_guides: Vec<Bounds<Pixels>> = if cx.global::<Settings>().indent_guides {
+                let unit = editor.style.indent.width().max(1);
+                let indent_of = |text: &str| -> Option<usize> {
+                    if text.trim().is_empty() {
+                        return None;
+                    }
+                    let mut col = 0;
+                    for c in text.chars().take_while(|c| *c == ' ' || *c == '\t') {
+                        col += crate::wrap::char_columns(c, col);
+                    }
+                    Some(col)
+                };
+                let indents: Vec<Option<usize>> = texts.iter().map(|t| indent_of(t)).collect();
+                let levels: Vec<usize> = (0..indents.len())
+                    .map(|i| {
+                        let cols = indents[i].unwrap_or_else(|| {
+                            let before = indents[..i].iter().rev().find_map(|x| *x).unwrap_or(0);
+                            let after = indents[i + 1..].iter().find_map(|x| *x).unwrap_or(0);
+                            before.min(after)
+                        });
+                        cols / unit
+                    })
+                    .collect();
+                row_layouts
+                    .iter()
+                    .zip(visible.clone())
+                    .filter(|(r, _)| r.row.block.is_none())
+                    .flat_map(|(r, row)| {
+                        let level = levels.get(r.row.line - lines_shown.start).copied().unwrap_or(0);
+                        (0..level).map(move |k| {
+                            let x = origin.x + char_width * (k * unit) as f32;
+                            Bounds::new(point(x.round(), row_top(row)), size(px(1.), line_height))
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             // Fold chevrons: on folded lines always, on lines that can fold while the mouse
             // is over the gutter. Quiet otherwise.
             let chevrons = row_layouts
@@ -946,6 +989,7 @@ impl Element for EditorElement {
                 text_bounds,
                 line_height,
                 current_line,
+                indent_guides,
                 numbers,
                 chevrons,
                 lines,
@@ -1019,6 +1063,9 @@ impl Element for EditorElement {
             window.paint_svg(*bounds, "icons/chevron-right.svg".into(), turn, color, cx).ok();
         }
         window.with_content_mask(Some(ContentMask { bounds: prepaint.text_bounds }), |window| {
+            for rect in &prepaint.indent_guides {
+                window.paint_quad(fill(*rect, theme.hairline));
+            }
             for rect in &prepaint.symbol_marks {
                 window.paint_quad(fill(*rect, theme.find_match.opacity(0.6)).corner_radii(px(3.)));
             }

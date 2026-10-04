@@ -40,6 +40,8 @@ pub struct Settings {
     pub welcomed: bool,
     /// At the end of the caret's line, faintly: who last changed it, when, and why.
     pub line_blame: bool,
+    /// Faint lines down the indentation, one per level.
+    pub indent_guides: bool,
     /// Type hints from the language server inside the code (`x: i32`), faintly.
     pub inlay_hints: bool,
     /// Show suggestions while typing. Ctrl+Space asks for them either way.
@@ -68,6 +70,7 @@ impl Default for Settings {
             autocomplete: true,
             line_blame: true,
             inlay_hints: false,
+            indent_guides: true,
             ai: Default::default(),
         }
     }

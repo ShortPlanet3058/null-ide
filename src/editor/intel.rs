@@ -226,9 +226,12 @@ impl Editor {
         problems
     }
 
-    /// This file's problems as a server would describe them for the text as it is now.
-    pub fn current_diagnostics(&self, cx: &App) -> Vec<lsp_types::Diagnostic> {
-        self.problems(cx)
+    /// This file's problems as a server would describe them for the text as it is now;
+    /// None without a language server, which knows where they are as well as this does.
+    pub fn current_diagnostics(&self, cx: &App) -> Option<Vec<lsp_types::Diagnostic>> {
+        self.lsp.as_ref()?;
+        let found = self
+            .problems(cx)
             .iter()
             .map(|p| lsp_types::Diagnostic {
                 range: lsp_types::Range {
@@ -237,7 +240,8 @@ impl Editor {
                 },
                 ..p.diagnostic.clone()
             })
-            .collect()
+            .collect();
+        Some(found)
     }
 
     /// Shows, moves or hides the hover card to match the mouse and the Alt key.
