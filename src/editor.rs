@@ -316,6 +316,8 @@ pub struct Layout {
     /// The rows on screen (lines, or parts of lines when they wrap), from `first_row`.
     pub first_row: usize,
     pub rows: Vec<RowLayout>,
+    /// Lines pinned at the top by sticky scroll: where each is, and which line it is.
+    pub sticky: Vec<(Bounds<Pixels>, usize)>,
     /// None when everything fits and there's nothing to scroll.
     pub scrollbar: Option<ScrollbarLayout>,
 }
@@ -741,6 +743,24 @@ impl Editor {
             self.buffer.line_to_byte(lines.start.saturating_sub(ROOM))..self.buffer.line_to_byte(lines.end + ROOM);
         self.spans = highlighter.spans(self.buffer.rope(), range.clone());
         self.spans_for = Some((revision, range));
+    }
+
+    /// The colours of one line, for a line shown away from the others (pinned at the top).
+    pub(crate) fn line_spans(&mut self, line: usize) -> Vec<Span> {
+        let start = self.buffer.line_to_byte(line);
+        let end = self.buffer.line_to_byte(line + 1);
+        if let Some((revision, range)) = &self.spans_for
+            && *revision == self.buffer.revision()
+            && range.start <= start
+            && end <= range.end
+        {
+            // Positions stay in the whole text's bytes, as the other spans are.
+            let first = self.spans.partition_point(|(r, _)| r.end <= start);
+            return self.spans[first..].iter().take_while(|(r, _)| r.start < end).cloned().collect();
+        }
+        let Some(highlighter) = &mut self.highlighter else { return Vec::new() };
+        highlighter.sync(&self.buffer);
+        highlighter.spans(self.buffer.rope(), start..end)
     }
 
     // ---------- find & replace ----------
@@ -1903,6 +1923,14 @@ impl Editor {
         }
         if let Some(line) = self.fold_click(event.position) {
             return self.toggle_fold(line, cx);
+        }
+        // A line pinned at the top: go to it.
+        if let Some(&(_, line)) =
+            self.layout.as_ref().and_then(|l| l.sticky.iter().find(|(b, _)| b.contains(&event.position)))
+        {
+            cx.emit(EditorEvent::Jumped { from: self.caret_point() });
+            let indent = self.buffer.line_text(line).chars().take_while(|c| c.is_whitespace()).count();
+            return self.set_caret_point((line, indent), cx);
         }
         let offset = self.offset_at(event.position);
         // Cmd+Shift+click (Ctrl+Shift elsewhere) adds a cursor, or removes the one clicked.

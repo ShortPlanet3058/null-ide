@@ -192,6 +192,30 @@ pub fn position(
     }
 }
 
+/// How many lines of enclosing blocks can be pinned at the top.
+const MAX_STICKY: usize = 3;
+
+/// The first lines of the blocks the view is inside (started above the top line, go
+/// on below it), outermost first, at most `max`, innermost kept. `line_at(n)` is the line
+/// on the nth row from the top; pinned lines cover rows, so the top line is the first
+/// one they leave showing.
+fn sticky_lines(foldable: &[Range<usize>], line_at: impl Fn(usize) -> Option<usize>, max: usize) -> Vec<usize> {
+    let mut covered = 0;
+    loop {
+        let Some(top) = line_at(covered) else { return Vec::new() };
+        let mut starts: Vec<usize> =
+            foldable.iter().filter(|r| r.start < top && top < r.end).map(|r| r.start).collect();
+        starts.sort_unstable();
+        starts.dedup();
+        let keep = starts.len().saturating_sub(max);
+        starts.drain(..keep);
+        if starts.len() <= covered {
+            return starts;
+        }
+        covered = starts.len();
+    }
+}
+
 /// What a folded line shows after its text.
 pub const FOLDED: &str = " ⋯";
 /// Space between a line's end and who last changed it.
@@ -214,6 +238,9 @@ pub struct Prepaint {
     current_line: Option<Bounds<Pixels>>,
     /// Faint lines down the indentation, one per level.
     indent_guides: Vec<Bounds<Pixels>>,
+    /// The first lines of the blocks the view is inside, pinned at the top: the band
+    /// behind them, and each one's text and line number.
+    sticky: Option<(Bounds<Pixels>, Vec<(ShapedLine, Point<Pixels>, ShapedLine, Point<Pixels>)>)>,
     numbers: Vec<(ShapedLine, Point<Pixels>)>,
     /// Fold chevrons: where, and whether folded (pointing right) or open (down).
     chevrons: Vec<(Bounds<Pixels>, bool)>,
@@ -970,6 +997,46 @@ impl Element for EditorElement {
                 0.35
             };
 
+            // Sticky scroll: the blocks the view has scrolled into keep their first line in
+            // sight at the top, over the code.
+            let mut sticky_rows: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+            let sticky = if cx.global::<Settings>().sticky_scroll && editor.scroll.y > 0. {
+                let foldable = editor.foldable().to_vec();
+                let shown_rows: Vec<usize> = row_layouts.iter().map(|r| r.row.line).collect();
+                // The top row can be half scrolled away: count from the first fully shown.
+                let skip = usize::from(row_top(visible.start) < text_bounds.top());
+                let lines = sticky_lines(&foldable, |n| shown_rows.get(n + skip).copied(), MAX_STICKY);
+                (!lines.is_empty()).then(|| {
+                    let top = bounds.top();
+                    let band = Bounds::new(
+                        point(bounds.left(), top),
+                        size(bounds.size.width - px(BAR), line_height * lines.len() as f32),
+                    );
+                    let pinned = lines
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &line)| {
+                            let y = top + line_height * i as f32;
+                            let text = editor.buffer.line_text(line);
+                            let line_byte = editor.buffer.line_to_byte(line);
+                            let spans = editor.line_spans(line);
+                            let runs = runs_for(&text, line_byte, &spans, &[], &theme, &font);
+                            let (shaped, _) = shape_row(&text, &runs);
+                            let label = (line + 1).to_string();
+                            let number = shape(label.clone(), &[run(label.len(), &font, theme.faint)]);
+                            let number_x =
+                                bounds.left() + gutter_width - px(GUTTER_PADDING + FOLD_SPACE) - number.width;
+                            sticky_rows
+                                .push((Bounds::new(point(bounds.left(), y), size(band.size.width, line_height)), line));
+                            (shaped, point(origin.x, y), number, point(number_x, y))
+                        })
+                        .collect();
+                    (band, pinned)
+                })
+            } else {
+                None
+            };
+
             editor.layout = Some(Layout {
                 text_origin: origin,
                 text_bounds,
@@ -978,6 +1045,7 @@ impl Element for EditorElement {
                 char_width,
                 first_row: visible.start,
                 rows: row_layouts,
+                sticky: sticky_rows,
                 scrollbar: scrollbar.as_ref().map(|b| ScrollbarLayout {
                     track: b.track,
                     thumb: b.thumb,
@@ -990,6 +1058,7 @@ impl Element for EditorElement {
                 line_height,
                 current_line,
                 indent_guides,
+                sticky,
                 numbers,
                 chevrons,
                 lines,
@@ -1103,6 +1172,20 @@ impl Element for EditorElement {
                 window.paint_quad(fill(*rect, theme.caret.opacity(opacity)).corner_radii(px(1.)));
             }
         });
+        // The pinned first lines, over the code (and its gutter), with a line below them.
+        if let Some((band, pinned)) = &prepaint.sticky {
+            window.paint_quad(fill(*band, theme.background));
+            window.with_content_mask(Some(ContentMask { bounds: prepaint.text_bounds }), |window| {
+                for (text, origin, _, _) in pinned {
+                    text.paint(*origin, line_height, window, cx).ok();
+                }
+            });
+            for (_, _, number, at) in pinned {
+                number.paint(*at, line_height, window, cx).ok();
+            }
+            let rule = Bounds::new(point(band.left(), band.bottom()), size(band.size.width, px(1.)));
+            window.paint_quad(fill(rule, theme.hairline));
+        }
         if let Some((thumb, emphasis)) = prepaint.scroll_thumb {
             let thumb = Bounds::new(
                 point(thumb.left() + px(2.), thumb.top() + px(2.)),
@@ -1119,6 +1202,23 @@ impl Element for EditorElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pins_the_blocks_the_view_is_inside() {
+        // impl 0..30 { fn 2..20 { for 4..15 { … } } fn 22..28 { … } }
+        let foldable = [0..30, 2..20, 4..15, 22..28];
+        let from = |top: usize| move |n: usize| Some(top + n);
+        // Inside the loop: impl, fn and for, and the pins cover the rows they hide.
+        assert_eq!(sticky_lines(&foldable, from(5), 3), [0, 2, 4]);
+        // Just under the impl's first line: only the impl.
+        assert_eq!(sticky_lines(&foldable, from(1), 3), [0]);
+        // At most two: the innermost two.
+        assert_eq!(sticky_lines(&foldable, from(5), 2), [2, 4]);
+        // Near a block's end, once the pins would hide it, it lets go.
+        assert_eq!(sticky_lines(&foldable, from(13), 3), [0, 2]);
+        assert_eq!(sticky_lines(&foldable, from(20), 3), [0]);
+        assert!(sticky_lines(&foldable, from(0), 3).is_empty());
+    }
 
     #[test]
     fn tabs_show_as_spaces_to_the_next_stop() {
