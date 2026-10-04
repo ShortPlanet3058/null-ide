@@ -40,6 +40,7 @@ actions!(
         CommitAll,
         PushBranch,
         RevertAllChanges,
+        SwitchBranch,
         ShowWelcome,
         InstallShellCommand,
         ReviewAiTask,
@@ -303,6 +304,8 @@ pub struct Workspace {
     git_status_task: Option<Task<()>>,
     /// The list of changes is open: opening a file from it shows its changes.
     git_listing: bool,
+    /// The branches for the branch list about to open.
+    pending_branches: Vec<git::Branch>,
     /// The AI task running or waiting for review, if any.
     ai_task: Option<AiTaskRun>,
     /// Commands the next palette list shows after its places (a task's "Keep all").
@@ -428,6 +431,7 @@ impl Workspace {
             git_status: Vec::new(),
             git_status_task: None,
             git_listing: false,
+            pending_branches: Vec::new(),
             pending_commands: Vec::new(),
             ignore_rules,
             key_prompt: None,
@@ -784,6 +788,7 @@ impl Workspace {
                 this.pending_commands = vec![
                     command("Commit All Changes…", Box::new(CommitAll)),
                     command("Push", Box::new(PushBranch)),
+                    command("Switch Branch…", Box::new(SwitchBranch)),
                     command("Revert All Changes…", Box::new(RevertAllChanges)),
                 ];
                 let title = match &this.branch {
@@ -837,13 +842,64 @@ impl Workspace {
         );
     }
 
-    fn commit_with(&mut self, message: String, cx: &mut Context<Self>) {
+    /// The branches, to switch to one or start one.
+    fn switch_branch(&mut self, _: &SwitchBranch, window: &mut Window, cx: &mut Context<Self>) {
+        if self.branch.is_none() {
+            return self.show_notice("This folder isn't a git repository.".into(), cx);
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn_in(window, async move |this, cx| {
+            let branches = cx.background_executor().spawn(async move { git::branches(&root) }).await;
+            this.update_in(cx, |this, window, cx| {
+                this.pending_branches = branches;
+                this.open_palette_with(PaletteKind::Branch, None, Vec::new(), window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Switches to a branch (Ok) or starts one with that name (Err). Open files are saved
+    /// first, so git sees every change; it refuses if any would be lost.
+    fn change_branch(&mut self, target: Result<git::Branch, String>, cx: &mut Context<Self>) {
+        self.save_named_tabs(cx);
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match &target {
+                        Ok(branch) => git::switch_branch(&root, branch),
+                        Err(name) => git::create_branch(&root, name),
+                    }
+                    .map(|()| git::current_branch(&root).unwrap_or_default())
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let notice = match result {
+                    Ok(branch) => format!("On {branch}"),
+                    Err(error) => error,
+                };
+                this.show_notice(notice, cx);
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Saves every open file that has a name.
+    fn save_named_tabs(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             let dirty = tab.editor.read(cx).buffer.is_dirty() && tab.editor.read(cx).path().is_some();
             if dirty {
                 tab.editor.update(cx, |editor, cx| editor.save_to_disk(cx));
             }
         }
+    }
+
+    fn commit_with(&mut self, message: String, cx: &mut Context<Self>) {
+        self.save_named_tabs(cx);
         let root = self.tree.read(cx).root().to_path_buf();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { git::commit_all(&root, &message) }).await;
@@ -1687,6 +1743,7 @@ impl Workspace {
             (File, "Review Changes…".into(), Box::new(ReviewChanges)),
             (File, "Commit All Changes…".into(), Box::new(CommitAll)),
             (File, "Push".into(), Box::new(PushBranch)),
+            (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
             (View, toggle(settings.word_wrap, "Stop Wrapping Lines", "Wrap Lines"), Box::new(ToggleWordWrap)),
@@ -1865,10 +1922,21 @@ impl Workspace {
             terminal_open: self.terminal_open.on,
             title,
             locations,
+            branches: std::mem::take(&mut self.pending_branches),
         };
         let palette = cx.new(|cx| Palette::new(options, cx));
         let subscription = cx.subscribe_in(&palette, window, |this, palette, event, window, cx| match event {
             PaletteEvent::Dismissed => this.close_palette(window, cx),
+            PaletteEvent::SwitchBranch(branch) => {
+                let branch = branch.clone();
+                this.close_palette(window, cx);
+                this.change_branch(Ok(branch), cx);
+            }
+            PaletteEvent::CreateBranch(name) => {
+                let name = name.clone();
+                this.close_palette(window, cx);
+                this.change_branch(Err(name), cx);
+            }
             PaletteEvent::Commit(message) => {
                 let message = message.clone();
                 this.close_palette(window, cx);
@@ -3456,161 +3524,179 @@ impl Render for Workspace {
             .child(div().w(px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
 
         let mut items = status_items.into_iter();
-        let status = div()
-            .h(px(28.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(16.))
-            .px(px(16.))
-            .border_t_1()
-            .border_color(theme.hairline)
-            .bg(theme.surface)
-            .text_size(px(12.))
-            .text_color(theme.muted)
-            .opacity(opacity)
-            .children(self.branch.clone().map(|branch| {
-                // The branch, and how many files changed: a click lists them.
-                let changed = self.git_status.len();
-                div()
-                    .id("branch")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.))
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.foreground))
-                    .tooltip(ui::tip("Review changes", Some(Box::new(ReviewChanges))))
-                    .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
-                    .child(branch)
-                    .when(changed > 0, |d| d.child(div().text_color(theme.git_modified).child(format!("· {changed}"))))
-                    .active(|s| s.opacity(0.7))
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.review_changes(&ReviewChanges, window, cx)),
-                    )
-            }))
-            .child(div().flex_1().min_w_0().truncate().children(items.next()))
-            .children(lsp_status)
-            .children(indent_label.map(|label| {
-                div()
-                    .id("status-indent")
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.foreground))
-                    .child(label)
-                    .active(|s| s.opacity(0.7))
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.show_commands_for("indent with", window, cx)
-                        }),
-                    )
-            }))
-            .when(crlf, |bar| {
-                bar.child(
+        let status =
+            div()
+                .h(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .px(px(16.))
+                .border_t_1()
+                .border_color(theme.hairline)
+                .bg(theme.surface)
+                .text_size(px(12.))
+                .text_color(theme.muted)
+                .opacity(opacity)
+                .children(self.branch.clone().map(|branch| {
+                    // The branch (a click switches it), and how many files changed (a click lists them).
+                    let changed = self.git_status.len();
                     div()
-                        .id("status-crlf")
+                        .flex()
                         .flex_none()
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child("CRLF")
-                        .active(|s| s.opacity(0.7))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.show_commands_for("line endings", window, cx)
-                        })),
-                )
-            })
-            .children(self.ai_task.as_ref().map(|run| {
-                // One line for a task: what it's at, then how many files to review.
-                let text: String = match &run.state {
-                    TaskState::Starting => "Starting the task…".into(),
-                    TaskState::Running(Some(file)) => {
-                        let name =
-                            Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
-                        format!("Working on {name}…")
-                    }
-                    TaskState::Running(None) => format!("{}…", run.title.trim()),
-                    TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
-                    TaskState::Review(changes) => format!("Review {} files", changes.len()),
-                };
-                let reviewing = matches!(run.state, TaskState::Review(_));
-                div()
-                    .id("ai-task")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.))
-                    .whitespace_nowrap()
-                    .max_w(px(320.))
-                    .text_color(theme.foreground)
-                    .child(div().flex_none().text_color(theme.caret).child("✦"))
-                    .child(div().min_w_0().truncate().child(text))
-                    // While it works, only "Stop" stops it; once done, the line opens the review.
-                    .when(!reviewing, |d| {
-                        d.child(
+                        .items_center()
+                        .gap(px(5.))
+                        .child(
                             div()
-                                .id("stop-ai-task")
-                                .flex_none()
+                                .id("branch")
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
                                 .cursor_pointer()
-                                .text_color(theme.muted)
                                 .hover(|s| s.text_color(theme.foreground))
-                                .child("Stop")
+                                .tooltip(ui::tip("Switch branch", Some(Box::new(SwitchBranch))))
+                                .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
+                                .child(branch)
                                 .active(|s| s.opacity(0.7))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.stop_ai_task(&StopAiTask, window, cx)
+                                    this.switch_branch(&SwitchBranch, window, cx)
                                 })),
                         )
-                    })
-                    .when(reviewing, |d| {
-                        d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
-                        ))
-                    })
-            }))
-            .when(ai_provider != ProviderId::Off, |bar| {
-                bar.child(
+                        .when(changed > 0, |d| {
+                            d.child(
+                                div()
+                                    .id("changes")
+                                    .cursor_pointer()
+                                    .text_color(theme.git_modified)
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .tooltip(ui::tip("Review changes", Some(Box::new(ReviewChanges))))
+                                    .child(format!("· {changed}"))
+                                    .active(|s| s.opacity(0.7))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.review_changes(&ReviewChanges, window, cx)
+                                    })),
+                            )
+                        })
+                }))
+                .child(div().flex_1().min_w_0().truncate().children(items.next()))
+                .children(lsp_status)
+                .children(indent_label.map(|label| {
                     div()
-                        .id("ai-status")
+                        .id("status-indent")
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child(label)
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_commands_for("indent with", window, cx)
+                        }))
+                }))
+                .when(crlf, |bar| {
+                    bar.child(
+                        div()
+                            .id("status-crlf")
+                            .flex_none()
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child("CRLF")
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_commands_for("line endings", window, cx)
+                            })),
+                    )
+                })
+                .children(self.ai_task.as_ref().map(|run| {
+                    // One line for a task: what it's at, then how many files to review.
+                    let text: String = match &run.state {
+                        TaskState::Starting => "Starting the task…".into(),
+                        TaskState::Running(Some(file)) => {
+                            let name =
+                                Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                            format!("Working on {name}…")
+                        }
+                        TaskState::Running(None) => format!("{}…", run.title.trim()),
+                        TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
+                        TaskState::Review(changes) => format!("Review {} files", changes.len()),
+                    };
+                    let reviewing = matches!(run.state, TaskState::Review(_));
+                    div()
+                        .id("ai-task")
                         .flex()
                         .flex_none()
                         .items_center()
                         .gap(px(6.))
                         .whitespace_nowrap()
-                        .cursor_pointer()
-                        .text_color(theme.muted)
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
-                        .child(format!("AI · {}", ai_provider.label()))
-                        .active(|s| s.opacity(0.7))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.open_settings_at(Some(Section::Ai), window, cx)
-                        })),
-                )
-            })
-            .when(problems != (0, 0), |bar| {
-                let (errors, warnings) = problems;
-                let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
-                bar.child(
-                    div()
-                        .id("problems")
-                        .flex()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .gap(px(10.))
-                        .cursor_pointer()
-                        .active(|s| s.opacity(0.7))
-                        .on_click(
-                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                        .max_w(px(320.))
+                        .text_color(theme.foreground)
+                        .child(div().flex_none().text_color(theme.caret).child("✦"))
+                        .child(div().min_w_0().truncate().child(text))
+                        // While it works, only "Stop" stops it; once done, the line opens the review.
+                        .when(!reviewing, |d| {
+                            d.child(
+                                div()
+                                    .id("stop-ai-task")
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .text_color(theme.muted)
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .child("Stop")
+                                    .active(|s| s.opacity(0.7))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.stop_ai_task(&StopAiTask, window, cx)
+                                    })),
+                            )
+                        })
+                        .when(reviewing, |d| {
+                            d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
+                            ))
+                        })
+                }))
+                .when(ai_provider != ProviderId::Off, |bar| {
+                    bar.child(
+                        div()
+                            .id("ai-status")
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(6.))
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .text_color(theme.muted)
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
+                            .child(format!("AI · {}", ai_provider.label()))
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_settings_at(Some(Section::Ai), window, cx)
+                            })),
+                    )
+                })
+                .when(problems != (0, 0), |bar| {
+                    let (errors, warnings) = problems;
+                    let plural =
+                        |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+                    bar.child(
+                        div()
+                            .id("problems")
+                            .flex()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .gap(px(10.))
+                            .cursor_pointer()
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.show_problems(&ShowProblems, window, cx)
+                            }))
+                            .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
+                            .when(warnings > 0, |d| {
+                                d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
                             }),
-                        )
-                        .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
-                        .when(warnings > 0, |d| {
-                            d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
-                        }),
-                )
-            })
-            .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
+                    )
+                })
+                .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
 
         div()
             .key_context("Workspace")
@@ -3632,6 +3718,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::review_changes))
             .on_action(cx.listener(Self::commit_all))
             .on_action(cx.listener(Self::push_branch))
+            .on_action(cx.listener(Self::switch_branch))
             .on_action(cx.listener(Self::revert_all_changes))
             .on_action(cx.listener(|this, _: &ShowWelcome, window, cx| this.show_welcome(window, cx)))
             .on_action(cx.listener(Self::install_shell_command))

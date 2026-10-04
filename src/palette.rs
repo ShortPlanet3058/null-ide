@@ -61,6 +61,8 @@ pub enum PaletteKind {
     Task,
     /// A commit message.
     Commit,
+    /// The git branches, to switch to one or start a new one.
+    Branch,
 }
 
 /// What a place in the list is.
@@ -94,6 +96,7 @@ impl PaletteKind {
             PaletteKind::Locations => "Filter",
             PaletteKind::Task => "Describe the task",
             PaletteKind::Commit => "Commit message",
+            PaletteKind::Branch => "Switch to branch, or name a new one",
         }
     }
 }
@@ -258,6 +261,7 @@ pub struct PaletteOptions {
     /// For a list of places: what it is ("Problems", "References to x") and the places.
     pub title: Option<String>,
     pub locations: Vec<Location>,
+    pub branches: Vec<crate::git::Branch>,
 }
 
 struct FileEntry {
@@ -284,6 +288,9 @@ enum Item {
     /// ":42" typed in ⌘P.
     Line(usize),
     Location(usize),
+    Branch(usize),
+    /// Start a branch named after what's typed.
+    NewBranch,
 }
 
 struct Row {
@@ -308,6 +315,9 @@ pub enum PaletteEvent {
     StartTask(String),
     /// Commit every change with this message.
     Commit(String),
+    SwitchBranch(crate::git::Branch),
+    /// Start a branch with this name, here.
+    CreateBranch(String),
 }
 
 pub struct Palette {
@@ -322,6 +332,7 @@ pub struct Palette {
     terminal_open: bool,
     title: Option<String>,
     locations: Vec<Location>,
+    branches: Vec<crate::git::Branch>,
     /// Symbols of the open file: their line is enough, and moving through them shows each.
     in_file: bool,
     root: PathBuf,
@@ -381,6 +392,7 @@ impl Palette {
             in_file: matches!(options.locations.first(), Some(l) if matches!(l.kind, LocationKind::Symbol(_)))
                 && options.locations.iter().all(|l| Some(&l.path) == options.locations.first().map(|f| &f.path)),
             locations: options.locations,
+            branches: options.branches,
             root: options.root.clone(),
             rows: Vec::new(),
             selected: 0,
@@ -418,8 +430,15 @@ impl Palette {
             PaletteKind::Quick => self.quick_rows(&query),
             PaletteKind::Line | PaletteKind::Task | PaletteKind::Commit => {}
             PaletteKind::Locations => self.location_rows(&query),
+            PaletteKind::Branch => self.branch_rows(&query),
         }
         self.selected = 0;
+        // ↵ goes somewhere: past the branch you're on.
+        if let (Some(Row { item: Item::Branch(i), .. }), true) = (self.rows.first(), self.rows.len() > 1)
+            && self.branches[*i].current
+        {
+            self.selected = 1;
+        }
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.preview(cx);
         cx.notify();
@@ -465,6 +484,36 @@ impl Palette {
                 let highlights = fuzzy::score(&location.text, query).map(|(_, h)| h).unwrap_or_default();
                 self.push(Item::Location(i), highlights, false);
             }
+        }
+    }
+
+    /// Branches matching what's typed, most recent first; then, unless one has that exact
+    /// name, starting a new one with it.
+    fn branch_rows(&mut self, query: &str) {
+        let mut found: Vec<(i32, usize, Vec<usize>)> = self
+            .branches
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| {
+                // Before typing, the current branch leads, to say where you are.
+                if query.is_empty() {
+                    return Some((b.current as i32, i, Vec::new()));
+                }
+                fuzzy::score(&b.name, query).map(|(score, h)| (score, i, h))
+            })
+            .collect();
+        found.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
+        for (_, i, highlights) in found {
+            self.push(Item::Branch(i), highlights, false);
+        }
+        let name = crate::git::branch_name(query);
+        // Not when a branch has that name already, here or on a remote (switching makes it here).
+        let taken = |b: &crate::git::Branch| {
+            let short = if b.remote { b.name.split_once('/').map_or(b.name.as_str(), |(_, s)| s) } else { &b.name };
+            short == name
+        };
+        if !name.is_empty() && !self.branches.iter().any(taken) {
+            self.push(Item::NewBranch, Vec::new(), false);
         }
     }
 
@@ -647,7 +696,7 @@ impl Palette {
                 }
                 return;
             }
-            PaletteKind::Files | PaletteKind::Quick | PaletteKind::Locations => {}
+            PaletteKind::Files | PaletteKind::Quick | PaletteKind::Locations | PaletteKind::Branch => {}
         }
         let Some(item) = self.rows.get(ix).map(|r| r.item) else { return };
         match item {
@@ -663,6 +712,9 @@ impl Palette {
                 cx.emit(PaletteEvent::Run(Quick::AllSettings.action(cx.global::<Settings>())))
             }
             Item::Quick(quick) => cx.emit(PaletteEvent::Apply(quick.action(cx.global::<Settings>()))),
+            Item::Branch(i) if self.branches[i].current => cx.emit(PaletteEvent::Dismissed),
+            Item::Branch(i) => cx.emit(PaletteEvent::SwitchBranch(self.branches[i].clone())),
+            Item::NewBranch => cx.emit(PaletteEvent::CreateBranch(crate::git::branch_name(&self.query))),
         }
     }
 
@@ -781,6 +833,34 @@ impl Palette {
                 div().child(format!("Go to line {line}")).into_any_element(),
                 None,
             ),
+            Item::Branch(i) => {
+                let branch = &self.branches[i];
+                let marked = highlights_in(&branch.name, 0);
+                let note = if branch.current {
+                    "current".to_string()
+                } else if branch.remote {
+                    format!("remote · {}", branch.when)
+                } else {
+                    branch.when.clone()
+                };
+                let dot = if branch.current { theme.caret } else { accent };
+                (
+                    div().size(px(5.)).rounded_full().bg(dot).into_any_element(),
+                    div()
+                        .when(branch.remote, |d| d.text_color(dim))
+                        .child(StyledText::new(branch.name.clone()).with_highlights(marked))
+                        .into_any_element(),
+                    Some(div().text_color(dim).child(note).into_any_element()),
+                )
+            }
+            Item::NewBranch => {
+                let from = self.branches.iter().find(|b| b.current).map(|b| format!("from {}", b.name));
+                (
+                    div().text_size(px(13.)).text_color(accent).child("+").into_any_element(),
+                    div().child(format!("Create branch “{}”", crate::git::branch_name(&self.query))).into_any_element(),
+                    from.map(|f| div().text_color(dim).child(f).into_any_element()),
+                )
+            }
             Item::Location(i) => {
                 let location = &self.locations[i];
                 let color = match location.kind {
@@ -919,6 +999,10 @@ impl Palette {
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
             PaletteKind::Commit => "↵ commit",
+            PaletteKind::Branch => match self.selected_item() {
+                Some(Item::NewBranch) => "↵ create",
+                _ => "↵ switch",
+            },
             PaletteKind::Quick => match self.selected_item() {
                 Some(Item::Quick(q)) if q.is_choice() => "←→ change",
                 Some(Item::Quick(Quick::AllSettings)) | Some(Item::Command(_)) => "↵ run",
@@ -1134,6 +1218,7 @@ mod tests {
             terminal_open: false,
             title: None,
             locations: Vec::new(),
+            branches: Vec::new(),
         };
         cx.new(|cx| Palette::new(options, cx))
     }
@@ -1151,6 +1236,8 @@ mod tests {
                     Item::Command(i) => p.commands[i].label.to_string(),
                     Item::Quick(q) => format!("quick: {}", q.label()),
                     Item::Line(n) => format!("line {n}"),
+                    Item::Branch(i) => p.branches[i].name.clone(),
+                    Item::NewBranch => format!("new {}", crate::git::branch_name(&p.query)),
                     _ => "file".into(),
                 })
                 .collect()
@@ -1194,11 +1281,50 @@ mod tests {
             terminal_open: false,
             title: Some("2 uses of total".into()),
             locations: vec![place("a.rs", "let total = 1;"), place("b.rs", "print(total)")],
+            branches: Vec::new(),
         };
         let p = cx.new(|cx| Palette::new(options, cx));
         assert_eq!(p.read_with(cx, |p, _| p.rows.len()), 2);
         type_query(cx, &p, "b.rs");
         assert_eq!(p.read_with(cx, |p, _| p.rows.len()), 1);
+    }
+
+    #[gpui::test]
+    fn branches_filter_and_offer_a_new_one(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Settings::default()));
+        let branch = |name: &str, current: bool, remote: bool| crate::git::Branch {
+            name: name.into(),
+            current,
+            remote,
+            when: "2 days ago".into(),
+        };
+        let options = PaletteOptions {
+            kind: PaletteKind::Branch,
+            commands: Vec::new(),
+            root: PathBuf::from("/p"),
+            recent_files: Vec::new(),
+            recent_commands: Vec::new(),
+            line_count: None,
+            terminal_open: false,
+            title: None,
+            locations: Vec::new(),
+            branches: vec![
+                branch("main", true, false),
+                branch("feature/parser", false, false),
+                branch("origin/fix-ci", false, true),
+            ],
+        };
+        let p = cx.new(|cx| Palette::new(options, cx));
+        assert_eq!(items(cx, &p), ["main", "feature/parser", "origin/fix-ci"]);
+        // ↵ switches: the selection starts past the current branch.
+        assert_eq!(p.read_with(cx, |p, _| p.selected), 1);
+        type_query(cx, &p, "pars");
+        assert_eq!(items(cx, &p), ["feature/parser", "new pars"]);
+        // An existing name isn't offered as new, even one only on a remote.
+        type_query(cx, &p, "main");
+        assert_eq!(items(cx, &p), ["main"]);
+        type_query(cx, &p, "fix ci");
+        assert_eq!(items(cx, &p), ["origin/fix-ci"]);
     }
 
     #[test]
