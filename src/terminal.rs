@@ -88,6 +88,11 @@ impl Dimensions for GridSize {
     }
 }
 
+/// A new shell has started once its output is quiet this long…
+const SETTLE_QUIET: std::time::Duration = std::time::Duration::from_millis(300);
+/// …or, if it says nothing at all, after this long.
+const SETTLE_AT_MOST: std::time::Duration = std::time::Duration::from_secs(4);
+
 pub enum TerminalEvent {
     TitleChanged,
     Exited,
@@ -109,6 +114,13 @@ pub struct TerminalView {
     scroll_rest: f32,
     /// Where the grid was drawn last frame, for mouse selection.
     origin: Point<Pixels>,
+    /// Commands waiting for a new shell to finish starting, so they aren't echoed early.
+    queued: Vec<String>,
+    /// Whether the shell has started (its output went quiet after the first prompt).
+    settled: bool,
+    /// Whether the shell has written anything yet.
+    spoke: bool,
+    settle_task: Option<Task<()>>,
     _events: Task<()>,
 }
 
@@ -181,13 +193,51 @@ impl TerminalView {
             mouse_cell: None,
             scroll_rest: 0.,
             origin: Point::default(),
+            queued: Vec::new(),
+            settled: false,
+            spoke: false,
+            settle_task: None,
             _events: events,
         }
     }
 
+    /// Types `command` into the shell and presses Return; in a shell still starting,
+    /// once it has.
+    pub fn run_command(&mut self, command: &str, cx: &mut Context<Self>) {
+        if self.settled {
+            return self.write(format!("{command}\r").into_bytes());
+        }
+        self.queued.push(command.to_string());
+        // Before its first prompt, wait for it (but not forever: a silent shell gets it anyway).
+        let wait = if self.spoke { SETTLE_QUIET } else { SETTLE_AT_MOST };
+        self.settle_after(wait, cx);
+    }
+
+    /// The shell counts as started once its output has been quiet a moment.
+    fn settle_after(&mut self, wait: std::time::Duration, cx: &mut Context<Self>) {
+        self.settle_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, _| {
+                this.settled = true;
+                for command in std::mem::take(&mut this.queued) {
+                    this.write(format!("{command}\r").into_bytes());
+                }
+            })
+            .ok();
+        }));
+    }
+
     fn handle_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         match event {
-            TermEvent::Wakeup | TermEvent::CursorBlinkingChange | TermEvent::MouseCursorDirty => cx.notify(),
+            TermEvent::Wakeup => {
+                // Output while starting: the prompt is coming; wait for it to go quiet.
+                if !self.settled {
+                    self.spoke = true;
+                    self.settle_after(SETTLE_QUIET, cx);
+                }
+                cx.notify()
+            }
+            TermEvent::CursorBlinkingChange | TermEvent::MouseCursorDirty => cx.notify(),
             TermEvent::Title(title) => {
                 self.title = title;
                 cx.emit(TerminalEvent::TitleChanged);

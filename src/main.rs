@@ -28,6 +28,7 @@ mod servers;
 mod session;
 mod settings;
 mod settings_panel;
+mod tasks;
 mod terminal;
 mod text_input;
 mod theme;

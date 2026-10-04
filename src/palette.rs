@@ -63,6 +63,8 @@ pub enum PaletteKind {
     Commit,
     /// The git branches, to switch to one or start a new one.
     Branch,
+    /// The project's tasks, to run one in the terminal (or a command typed).
+    Run,
 }
 
 /// What a place in the list is.
@@ -97,6 +99,7 @@ impl PaletteKind {
             PaletteKind::Task => "Describe the task",
             PaletteKind::Commit => "Commit message",
             PaletteKind::Branch => "Switch to branch, or name a new one",
+            PaletteKind::Run => "Run a task, or type a command",
         }
     }
 }
@@ -262,6 +265,7 @@ pub struct PaletteOptions {
     pub title: Option<String>,
     pub locations: Vec<Location>,
     pub branches: Vec<crate::git::Branch>,
+    pub tasks: Vec<crate::tasks::ProjectTask>,
 }
 
 struct FileEntry {
@@ -291,6 +295,9 @@ enum Item {
     Branch(usize),
     /// Start a branch named after what's typed.
     NewBranch,
+    RunTask(usize),
+    /// Run what's typed, as a command.
+    RunTyped,
 }
 
 struct Row {
@@ -318,6 +325,8 @@ pub enum PaletteEvent {
     SwitchBranch(crate::git::Branch),
     /// Start a branch with this name, here.
     CreateBranch(String),
+    /// Run this command in the terminal.
+    RunCommand(String),
 }
 
 pub struct Palette {
@@ -333,6 +342,7 @@ pub struct Palette {
     title: Option<String>,
     locations: Vec<Location>,
     branches: Vec<crate::git::Branch>,
+    tasks: Vec<crate::tasks::ProjectTask>,
     /// Symbols of the open file: their line is enough, and moving through them shows each.
     in_file: bool,
     root: PathBuf,
@@ -393,6 +403,7 @@ impl Palette {
                 && options.locations.iter().all(|l| Some(&l.path) == options.locations.first().map(|f| &f.path)),
             locations: options.locations,
             branches: options.branches,
+            tasks: options.tasks,
             root: options.root.clone(),
             rows: Vec::new(),
             selected: 0,
@@ -431,6 +442,7 @@ impl Palette {
             PaletteKind::Line | PaletteKind::Task | PaletteKind::Commit => {}
             PaletteKind::Locations => self.location_rows(&query),
             PaletteKind::Branch => self.branch_rows(&query),
+            PaletteKind::Run => self.task_rows(&query),
         }
         self.selected = 0;
         // ↵ goes somewhere: past the branch you're on.
@@ -514,6 +526,29 @@ impl Palette {
         };
         if !name.is_empty() && !self.branches.iter().any(taken) {
             self.push(Item::NewBranch, Vec::new(), false);
+        }
+    }
+
+    /// Tasks matching what's typed (in order before typing: the last run first); then,
+    /// unless a task is exactly that, running what's typed.
+    fn task_rows(&mut self, query: &str) {
+        let mut found: Vec<(i32, usize, Vec<usize>)> = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                if query.is_empty() {
+                    return Some((0, i, Vec::new()));
+                }
+                fuzzy::score(&t.label, query).map(|(score, h)| (score, i, h))
+            })
+            .collect();
+        found.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
+        for (_, i, highlights) in found {
+            self.push(Item::RunTask(i), highlights, false);
+        }
+        if !query.is_empty() && !self.tasks.iter().any(|t| t.command == query) {
+            self.push(Item::RunTyped, Vec::new(), false);
         }
     }
 
@@ -696,7 +731,11 @@ impl Palette {
                 }
                 return;
             }
-            PaletteKind::Files | PaletteKind::Quick | PaletteKind::Locations | PaletteKind::Branch => {}
+            PaletteKind::Files
+            | PaletteKind::Quick
+            | PaletteKind::Locations
+            | PaletteKind::Branch
+            | PaletteKind::Run => {}
         }
         let Some(item) = self.rows.get(ix).map(|r| r.item) else { return };
         match item {
@@ -715,6 +754,8 @@ impl Palette {
             Item::Branch(i) if self.branches[i].current => cx.emit(PaletteEvent::Dismissed),
             Item::Branch(i) => cx.emit(PaletteEvent::SwitchBranch(self.branches[i].clone())),
             Item::NewBranch => cx.emit(PaletteEvent::CreateBranch(crate::git::branch_name(&self.query))),
+            Item::RunTask(i) => cx.emit(PaletteEvent::RunCommand(self.tasks[i].command.clone())),
+            Item::RunTyped => cx.emit(PaletteEvent::RunCommand(self.query.clone())),
         }
     }
 
@@ -853,6 +894,27 @@ impl Palette {
                     Some(div().text_color(dim).child(note).into_any_element()),
                 )
             }
+            Item::RunTask(i) => {
+                let task = &self.tasks[i];
+                (
+                    div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
+                    div()
+                        .font_family(cx.global::<crate::fonts::Fonts>().code.clone())
+                        .text_size(px(ui::T_MD))
+                        .child(StyledText::new(task.label.clone()).with_highlights(highlights_in(&task.label, 0)))
+                        .into_any_element(),
+                    Some(div().text_color(dim).child(task.source).into_any_element()),
+                )
+            }
+            Item::RunTyped => (
+                div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
+                div()
+                    .font_family(cx.global::<crate::fonts::Fonts>().code.clone())
+                    .text_size(px(ui::T_MD))
+                    .child(self.query.clone())
+                    .into_any_element(),
+                Some(div().text_color(dim).child("in the terminal").into_any_element()),
+            ),
             Item::NewBranch => {
                 let from = self.branches.iter().find(|b| b.current).map(|b| format!("from {}", b.name));
                 (
@@ -999,6 +1061,7 @@ impl Palette {
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
             PaletteKind::Commit => "↵ commit",
+            PaletteKind::Run => "↵ run",
             PaletteKind::Branch => match self.selected_item() {
                 Some(Item::NewBranch) => "↵ create",
                 _ => "↵ switch",
@@ -1219,6 +1282,7 @@ mod tests {
             title: None,
             locations: Vec::new(),
             branches: Vec::new(),
+            tasks: Vec::new(),
         };
         cx.new(|cx| Palette::new(options, cx))
     }
@@ -1238,6 +1302,8 @@ mod tests {
                     Item::Line(n) => format!("line {n}"),
                     Item::Branch(i) => p.branches[i].name.clone(),
                     Item::NewBranch => format!("new {}", crate::git::branch_name(&p.query)),
+                    Item::RunTask(i) => p.tasks[i].command.clone(),
+                    Item::RunTyped => format!("typed {}", p.query),
                     _ => "file".into(),
                 })
                 .collect()
@@ -1282,6 +1348,7 @@ mod tests {
             title: Some("2 uses of total".into()),
             locations: vec![place("a.rs", "let total = 1;"), place("b.rs", "print(total)")],
             branches: Vec::new(),
+            tasks: Vec::new(),
         };
         let p = cx.new(|cx| Palette::new(options, cx));
         assert_eq!(p.read_with(cx, |p, _| p.rows.len()), 2);
@@ -1313,6 +1380,7 @@ mod tests {
                 branch("feature/parser", false, false),
                 branch("origin/fix-ci", false, true),
             ],
+            tasks: Vec::new(),
         };
         let p = cx.new(|cx| Palette::new(options, cx));
         assert_eq!(items(cx, &p), ["main", "feature/parser", "origin/fix-ci"]);
@@ -1325,6 +1393,36 @@ mod tests {
         assert_eq!(items(cx, &p), ["main"]);
         type_query(cx, &p, "fix ci");
         assert_eq!(items(cx, &p), ["origin/fix-ci"]);
+    }
+
+    #[gpui::test]
+    fn tasks_filter_and_anything_typed_runs(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Settings::default()));
+        let task = |command: &str| crate::tasks::ProjectTask {
+            label: command.into(),
+            command: command.into(),
+            source: "Cargo",
+        };
+        let options = PaletteOptions {
+            kind: PaletteKind::Run,
+            commands: Vec::new(),
+            root: PathBuf::from("/p"),
+            recent_files: Vec::new(),
+            recent_commands: Vec::new(),
+            line_count: None,
+            terminal_open: false,
+            title: None,
+            locations: Vec::new(),
+            branches: Vec::new(),
+            tasks: vec![task("cargo run"), task("cargo test"), task("cargo build")],
+        };
+        let p = cx.new(|cx| Palette::new(options, cx));
+        assert_eq!(items(cx, &p), ["cargo run", "cargo test", "cargo build"]);
+        type_query(cx, &p, "test");
+        assert_eq!(items(cx, &p), ["cargo test", "typed test"]);
+        // A task's exact command isn't offered twice.
+        type_query(cx, &p, "cargo test");
+        assert_eq!(items(cx, &p), ["cargo test"]);
     }
 
     #[test]

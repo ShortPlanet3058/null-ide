@@ -61,6 +61,7 @@ actions!(
         ToggleLineBlame,
         ToggleInlayHints,
         ToggleFocusMode,
+        RunTask,
         AutoSaveAfterPause,
         AutoSaveWhenLeaving,
         OpenSettings,
@@ -109,6 +110,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-w", CloseTab, ctx),
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
+        KeyBinding::new("secondary-shift-b", RunTask, ctx),
         KeyBinding::new("ctrl-tab", NextTab, ctx),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, ctx),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
@@ -342,6 +344,10 @@ pub struct Workspace {
     forward: Vec<Place>,
     /// Going back or forward: the moves it makes aren't places to remember.
     navigating: bool,
+    /// Commands run from ⌘⇧B, the last first.
+    recent_runs: Vec<String>,
+    /// The tasks for the list about to open.
+    pending_tasks: Vec<crate::tasks::ProjectTask>,
     /// The branches for the branch list about to open.
     pending_branches: Vec<git::Branch>,
     /// The AI task running or waiting for review, if any.
@@ -479,6 +485,8 @@ impl Workspace {
             git_status_task: None,
             git_listing: false,
             pending_branches: Vec::new(),
+            recent_runs: Vec::new(),
+            pending_tasks: Vec::new(),
             focus_mode: false,
             back: Vec::new(),
             forward: Vec::new(),
@@ -1936,6 +1944,7 @@ impl Workspace {
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
+            (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
@@ -2119,6 +2128,7 @@ impl Workspace {
             title,
             locations,
             branches: std::mem::take(&mut self.pending_branches),
+            tasks: std::mem::take(&mut self.pending_tasks),
         };
         let palette = cx.new(|cx| Palette::new(options, cx));
         let subscription = cx.subscribe_in(&palette, window, |this, palette, event, window, cx| match event {
@@ -2127,6 +2137,11 @@ impl Workspace {
                 let branch = branch.clone();
                 this.close_palette(window, cx);
                 this.change_branch(Ok(branch), cx);
+            }
+            PaletteEvent::RunCommand(command) => {
+                let command = command.clone();
+                this.close_palette(window, cx);
+                this.run_in_terminal(command, window, cx);
             }
             PaletteEvent::CreateBranch(name) => {
                 let name = name.clone();
@@ -2754,6 +2769,38 @@ impl Workspace {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// ⌘⇧B: the project's tasks (the last run first), to run one in the terminal.
+    fn run_task(&mut self, _: &RunTask, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let mut tasks = crate::tasks::find(&root);
+        // Run lately: first, whether the project lists them or they were typed.
+        for command in self.recent_runs.iter().rev() {
+            let task = match tasks.iter().position(|t| &t.command == command) {
+                Some(i) => tasks.remove(i),
+                None => {
+                    crate::tasks::ProjectTask { label: command.clone(), command: command.clone(), source: "run lately" }
+                }
+            };
+            tasks.insert(0, task);
+        }
+        self.pending_tasks = tasks;
+        self.open_palette_with(PaletteKind::Run, None, Vec::new(), window, cx);
+    }
+
+    /// Types `command` into the terminal (opening it first if needed) and runs it.
+    fn run_in_terminal(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.recent_runs.retain(|c| c != &command);
+        self.recent_runs.insert(0, command.clone());
+        self.recent_runs.truncate(10);
+        if !self.terminal_open.on {
+            self.toggle_terminal(&ToggleTerminal, window, cx);
+        }
+        if let Some((terminal, _)) = &self.terminal {
+            terminal.update(cx, |terminal, cx| terminal.run_command(&command, cx));
+            window.focus(&terminal.focus_handle(cx));
+        }
     }
 
     fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
@@ -3973,6 +4020,7 @@ impl Render for Workspace {
                 cx.listener(|_, _: &ToggleInlayHints, _, cx| settings::update(cx, |s| s.inlay_hints = !s.inlay_hints)),
             )
             .on_action(cx.listener(Self::toggle_focus_mode))
+            .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(|_, _: &AutoSaveAfterPause, _, cx| {
                 settings::update(cx, |s| s.auto_save = AutoSave::AfterPause)
             }))
