@@ -166,10 +166,15 @@ applies changes itself. Models and addresses can be changed in Settings → AI.
 
 ## Fonts
 
-Null ships with [Geist Mono](https://github.com/vercel/geist-font) for code and
-[Instrument Sans](https://github.com/Instrument/instrument-sans) for the interface, both under
-the SIL Open Font License 1.1 (see `assets/fonts/*/OFL.txt`). Any installed font can be used
-instead: pick one in Settings → Appearance, or set `code_font` and `ui_font` in the JSON.
+Null ships with [Geist Mono](https://github.com/vercel/geist-font) for code (the default) and
+[Instrument Sans](https://github.com/Instrument/instrument-sans) for the interface, plus four
+more code fonts so every platform has the same choice:
+[Commit Mono](https://github.com/eigilnikolajsen/commit-mono),
+[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono),
+[IBM Plex Mono](https://github.com/IBM/plex) and
+[Source Code Pro](https://github.com/adobe-fonts/source-code-pro). All are under the SIL Open
+Font License 1.1 (see `assets/fonts/*/OFL.txt`). Any installed font can be used instead: pick
+one in Settings → Appearance, or set `code_font` and `ui_font` in the JSON.
 
 ## License
 

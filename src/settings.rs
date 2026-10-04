@@ -45,7 +45,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: ThemeName::Oled,
+            theme: ThemeName::Null,
             code_font: DEFAULT_CODE_FONT.into(),
             ui_font: DEFAULT_UI_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn round_trips_through_json() {
-        let settings = Settings { theme: ThemeName::Graphite, font_size: 16., ..Default::default() };
+        let settings = Settings { theme: ThemeName::Ash, font_size: 16., ..Default::default() };
         let text = serde_json::to_string(&settings).unwrap();
         assert_eq!(Settings::parse(&text).unwrap(), settings);
     }
