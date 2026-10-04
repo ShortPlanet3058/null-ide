@@ -672,6 +672,18 @@ impl Editor {
         self.buffer.point(self.selection.head)
     }
 
+    /// Brings back unsaved text kept from last time: the whole text replaced, as one edit
+    /// that can be undone, and the file unsaved.
+    pub fn restore_unsaved(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.buffer.to_string() == text {
+            return;
+        }
+        let caret = self.caret_point();
+        let all = 0..self.buffer.len_chars();
+        self.edit(all, text, EditKind::Other, cx);
+        self.set_caret_point(caret, cx);
+    }
+
     /// Puts the caret at a line and column (kept within the text), and shows it.
     pub fn set_caret_point(&mut self, (line, column): (usize, usize), cx: &mut Context<Self>) {
         let line = line.min(self.buffer.len_lines().saturating_sub(1));

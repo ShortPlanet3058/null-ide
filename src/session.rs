@@ -102,6 +102,53 @@ impl Session {
     }
 }
 
+/// Unsaved work, kept in Null's own folder until it's saved or let go, so a crash or a
+/// forced quit doesn't lose it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Backup {
+    /// The file it's the unsaved text of; None for a new file with no name yet.
+    pub path: Option<PathBuf>,
+    pub text: String,
+    /// The file on disk when the backup was made, to tell if it changed since.
+    pub disk: Option<u64>,
+}
+
+/// A fingerprint of a file's contents (None when there's no such file).
+pub fn disk_fingerprint(path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn backups_file(root: &Path) -> Option<PathBuf> {
+    Some(file_in(&crate::tools::data_dir()?.join("backups"), root))
+}
+
+/// Keeps `backups` as the project's unsaved work; none removes the file.
+pub fn save_backups(root: &Path, backups: &[Backup]) {
+    let Some(file) = backups_file(root) else { return };
+    if backups.is_empty() {
+        std::fs::remove_file(&file).ok();
+        return;
+    }
+    let Ok(text) = serde_json::to_string(backups) else { return };
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    // Write then rename: a crash mid-write mustn't lose the backup it replaces.
+    let temp = file.with_extension("json.tmp");
+    if std::fs::write(&temp, text).is_ok() {
+        std::fs::rename(&temp, &file).ok();
+    }
+}
+
+/// The unsaved work left from last time (a crash, or a forced quit).
+pub fn load_backups(root: &Path) -> Vec<Backup> {
+    let Some(file) = backups_file(root) else { return Vec::new() };
+    std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
 fn last_project_file() -> Option<PathBuf> {
     Some(sessions_dir()?.join("last-project"))
 }
