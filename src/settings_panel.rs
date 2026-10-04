@@ -524,6 +524,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Type hints",
+                Some("Types and parameter names inside the code, faintly, from the language server"),
+                Self::toggle("inlay-hints", s.inlay_hints, &theme, cx, |s| s.inlay_hints = !s.inlay_hints),
+                &theme,
+            ),
+            Self::row(
                 "Suggestions while typing",
                 Some(&format!(
                     "From the language server. {} asks for them either way",

@@ -33,28 +33,40 @@ pub struct RowLayout {
     pub shaped: ShapedLine,
     /// Where the text starts: past the indent on a continuation row.
     pub x: Pixels,
-    /// Tabs, drawn as spaces: each one's byte in `text`, and the bytes it gained.
-    pub tabs: Vec<(usize, usize)>,
+    /// What's shown that isn't in `text`: tabs drawn as spaces, and hints.
+    pub gaps: Vec<Gap>,
+}
+
+/// Text shown in a row that isn't in it, at a byte of the row's text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gap {
+    pub byte: usize,
+    /// Bytes shown beyond the text's own.
+    pub extra: usize,
+    /// A hint, shown before the byte's character; else the byte is a tab, drawn wider.
+    pub hint: bool,
 }
 
 impl RowLayout {
     /// Where a byte of `text` is in the text as shown.
+    /// A caret before a hinted character sits before the hint.
     pub fn shown_byte(&self, byte: usize) -> usize {
-        byte + self.tabs.iter().take_while(|(b, _)| *b < byte).map(|(_, g)| g).sum::<usize>()
+        byte + self.gaps.iter().take_while(|g| g.byte < byte).map(|g| g.extra).sum::<usize>()
     }
 
-    /// The byte of `text` shown at `shown`; inside a tab's spaces, its nearer edge.
+    /// The byte of `text` shown at `shown`; inside a tab's spaces, its nearer edge;
+    /// on a hint, the character it stands before.
     pub fn text_byte(&self, shown: usize) -> usize {
         let mut gained = 0;
-        for &(byte, extra) in &self.tabs {
-            let start = byte + gained;
+        for gap in &self.gaps {
+            let start = gap.byte + gained;
             if shown <= start {
                 break;
             }
-            if shown <= start + extra {
-                return if shown - start <= extra / 2 { byte } else { byte + 1 };
+            if shown <= start + gap.extra {
+                return if gap.hint || shown - start <= gap.extra / 2 { gap.byte } else { gap.byte + 1 };
             }
-            gained += extra;
+            gained += gap.extra;
         }
         shown - gained
     }
@@ -90,6 +102,74 @@ fn expand_tabs(text: &str, runs: &[TextRun]) -> (String, Vec<TextRun>, Vec<(usiz
         })
         .collect();
     (shown, runs, tabs)
+}
+
+/// Puts hints into a row's text, each before the byte it belongs to: the text as
+/// shown, runs to match (the hints in `hint_run`'s style), and each hint's (byte, length).
+fn insert_hints(
+    text: &str,
+    runs: &[TextRun],
+    hints: &[(usize, String)],
+    hint_run: impl Fn(usize) -> TextRun,
+) -> (String, Vec<TextRun>, Vec<(usize, usize)>) {
+    if hints.is_empty() {
+        return (text.to_string(), runs.to_vec(), Vec::new());
+    }
+    let mut shown = String::with_capacity(text.len() + 16);
+    let mut out = Vec::with_capacity(runs.len() + hints.len() * 2);
+    let mut placed = Vec::with_capacity(hints.len());
+    let mut hints = hints.iter().peekable();
+    let mut at = 0;
+    for run in runs {
+        let end = at + run.len;
+        let mut from = at;
+        // Hints inside this run (or at its start) split it.
+        while let Some((byte, hint)) = hints.next_if(|(b, _)| *b < end || (*b == end && end == text.len())) {
+            let byte = (*byte).clamp(from, end);
+            if byte > from {
+                out.push(TextRun { len: byte - from, ..run.clone() });
+                shown.push_str(&text[from..byte]);
+            }
+            out.push(hint_run(hint.len()));
+            shown.push_str(hint);
+            placed.push((byte, hint.len()));
+            from = byte;
+        }
+        if end > from {
+            out.push(TextRun { len: end - from, ..run.clone() });
+            shown.push_str(&text[from..end]);
+        }
+        at = end;
+    }
+    // Hints past the end of the text (or a row without runs) go at the end.
+    for (_, hint) in hints {
+        out.push(hint_run(hint.len()));
+        shown.push_str(hint);
+        placed.push((text.len(), hint.len()));
+    }
+    (shown, out, placed)
+}
+
+/// The gaps of a row from its hints (byte, length in the text) and its tabs (byte in
+/// the text as shown with the hints, bytes gained).
+fn gaps_of(hints: &[(usize, usize)], tabs: &[(usize, usize)]) -> Vec<Gap> {
+    let mut gaps: Vec<Gap> = hints.iter().map(|&(byte, extra)| Gap { byte, extra, hint: true }).collect();
+    for &(shown, extra) in tabs {
+        // Back to the text's own bytes: take off the hints shown before it. A hint
+        // starts at its byte plus the hints before it.
+        let mut hinted = 0;
+        let mut before = 0;
+        for &(byte, len) in hints {
+            if byte + hinted < shown {
+                before += len;
+            }
+            hinted += len;
+        }
+        gaps.push(Gap { byte: shown - before, extra, hint: false });
+    }
+    // At the same byte, the hint comes first: it's shown before the tab.
+    gaps.sort_by_key(|g| (g.byte, !g.hint));
+    gaps
 }
 
 /// The row a (line, column) is on, and its x position from the text's left edge.
@@ -260,8 +340,29 @@ impl Element for EditorElement {
             // A row of text, with its tabs drawn as spaces.
             let shape_row = |text: &str, runs: &[TextRun]| {
                 let (shown, runs, tabs) = expand_tabs(text, runs);
-                (shape(shown, &runs), tabs)
+                (shape(shown, &runs), gaps_of(&[], &tabs))
             };
+            // Type hints: faint, on a soft background, in the code's own font.
+            let hint_style =
+                |len: usize| TextRun { background_color: Some(theme.hairline), ..run(len, &font, theme.faint) };
+            // A row with its hints in, then `suffix` (a fold's ⋯, who changed the line).
+            let shape_hinted = |text: &str,
+                                runs: &[TextRun],
+                                hints: &[(usize, String)],
+                                suffix: Option<TextRun>,
+                                suffix_text: &str| {
+                let (mut shown, mut runs, placed) = insert_hints(text, runs, hints, hint_style);
+                if let Some(run) = suffix {
+                    shown.push_str(suffix_text);
+                    runs.push(run);
+                }
+                let (shown, runs, tabs) = expand_tabs(&shown, &runs);
+                (shape(shown, &runs), gaps_of(&placed, &tabs))
+            };
+            let show_hints = cx.global::<Settings>().inlay_hints;
+            if show_hints {
+                editor.ensure_hints(cx);
+            }
 
             let char_width = shape("0".repeat(10), &[run(10, &font, theme.foreground)]).width / 10.;
             let total_lines = editor.buffer.len_lines();
@@ -367,13 +468,13 @@ impl Element for EditorElement {
                                 // The AI's new code, arriving: plain text on the "added" tint.
                                 let text = lines.get(i).cloned().unwrap_or_default();
                                 let (shaped, tabs) = shape_row(&text, &[run(text.len(), &font, theme.foreground)]);
-                                return RowLayout { x: px(0.), row, text, shaped, tabs };
+                                return RowLayout { x: px(0.), row, text, shaped, gaps: tabs };
                             }
                             crate::editor::BlockKind::Ghost(lines) => {
                                 // The rest of a ghost completion: faint, nothing struck.
                                 let text = lines.get(i).cloned().unwrap_or_default();
                                 let (shaped, tabs) = shape_row(&text, &[run(text.len(), &font, theme.faint)]);
-                                return RowLayout { x: px(0.), row, text, shaped, tabs };
+                                return RowLayout { x: px(0.), row, text, shaped, gaps: tabs };
                             }
                             _ => String::new(),
                         };
@@ -384,7 +485,7 @@ impl Element for EditorElement {
                         let runs: Vec<TextRun> =
                             if indent > 0 { vec![run(indent, &font, theme.faint), struck] } else { vec![struck] };
                         let (shaped, tabs) = shape_row(&text, &runs);
-                        return RowLayout { x: px(0.), row, text, shaped, tabs };
+                        return RowLayout { x: px(0.), row, text, shaped, gaps: tabs };
                     }
                     let i = row.line - lines_shown.start;
                     let line_text = &texts[i];
@@ -418,34 +519,42 @@ impl Element for EditorElement {
                         runs.extend(runs_for(after, line_byte + at, &editor.spans, &under_after, &theme, &font));
                         let shown = format!("{before}{ghost}{after}");
                         let (shaped, tabs) = shape_row(&shown, &runs);
-                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
+                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, gaps: tabs };
                     }
                     // The code the AI is rewriting fades while the new code appears.
                     if editor.ai_writing_lines().is_some_and(|l| l.contains(&row.line)) {
                         let (shaped, tabs) = shape_row(&text, &[run(text.len(), &font, theme.faint)]);
-                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
+                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, gaps: tabs };
                     }
-                    let mut runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
-                    // Who last changed the caret's line, faintly after its end.
-                    if row.last
-                        && show_blame
-                        && !editor.is_folded(row.line)
-                        && let Some((line, blame)) = editor.line_blame()
-                        && line == row.line
-                    {
-                        let note = format!("{BLAME_GAP}{blame}");
-                        runs.push(run(note.len(), &font, theme.faint));
-                        let (shaped, tabs) = shape_row(&format!("{text}{note}"), &runs);
-                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
-                    }
-                    // A folded line ends in "⋯", standing in for the lines it hides.
-                    if row.last && editor.is_folded(row.line) {
-                        runs.push(run(FOLDED.len(), &font, theme.muted));
-                        let (shaped, tabs) = shape_row(&format!("{text}{FOLDED}"), &runs);
-                        return RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs };
-                    }
-                    let (shaped, tabs) = shape_row(&text, &runs);
-                    RowLayout { x: char_width * row.indent as f32, row, text, shaped, tabs }
+                    let runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
+                    // The row's type hints, at their bytes in its text.
+                    let hints: Vec<(usize, String)> = if show_hints {
+                        editor
+                            .hints_on_line(row.line)
+                            .filter(|(col, _)| {
+                                (row.cols.start..row.cols.end).contains(col) || (row.last && *col == row.cols.end)
+                            })
+                            .map(|(col, label)| (byte_of_column(&text, col - row.cols.start), label.to_string()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    // A folded line ends in "⋯", standing in for the lines it hides; the
+                    // caret's line can end in who last changed it, faintly.
+                    let blame = (row.last && show_blame && !editor.is_folded(row.line))
+                        .then(|| editor.line_blame())
+                        .flatten()
+                        .filter(|(line, _)| *line == row.line)
+                        .map(|(_, blame)| format!("{BLAME_GAP}{blame}"));
+                    let (suffix, suffix_text) = if row.last && editor.is_folded(row.line) {
+                        (Some(run(FOLDED.len(), &font, theme.muted)), FOLDED.to_string())
+                    } else if let Some(note) = blame {
+                        (Some(run(note.len(), &font, theme.faint)), note)
+                    } else {
+                        (None, String::new())
+                    };
+                    let (shaped, gaps) = shape_hinted(&text, &runs, &hints, suffix, &suffix_text);
+                    RowLayout { x: char_width * row.indent as f32, row, text, shaped, gaps }
                 })
                 .collect();
             let wrap = &editor.wrap;
@@ -978,7 +1087,7 @@ mod tests {
             text: text.into(),
             shaped: ShapedLine::default(),
             x: px(0.),
-            tabs,
+            gaps: gaps_of(&[], &tabs),
         };
         // "b" is byte 2 of the text and byte 4 as shown, and back.
         assert_eq!(row.shown_byte(2), 4);
@@ -987,5 +1096,42 @@ mod tests {
         // A click inside a tab's spaces lands on its nearer edge.
         assert_eq!(row.text_byte(2), 1);
         assert_eq!(row.text_byte(3), 2);
+    }
+
+    #[test]
+    fn hints_show_before_their_character_without_moving_the_text() {
+        let font = gpui::font("Mono");
+        let text = "let x = f(1);";
+        let runs = [run(text.len(), &font, gpui::white())];
+        // `x: i32` and `f(n: 1)`: hints at bytes 5 and 10.
+        let hints = [(5, ": i32".to_string()), (10, "n: ".to_string())];
+        let (shown, runs, placed) = insert_hints(text, &runs, &hints, |len| run(len, &font, gpui::black()));
+        assert_eq!(shown, "let x: i32 = f(n: 1);");
+        assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), shown.len());
+        let row = RowLayout {
+            row: Row { line: 0, cols: 0..13, indent: 0, last: true, block: None },
+            text: text.into(),
+            shaped: ShapedLine::default(),
+            x: px(0.),
+            gaps: gaps_of(&placed, &[]),
+        };
+        // The caret after `x` sits before its hint; ` =` comes after it.
+        assert_eq!(row.shown_byte(5), 5);
+        assert_eq!(row.shown_byte(6), 11);
+        assert_eq!(row.shown_byte(10), 15);
+        assert_eq!(row.shown_byte(11), 19);
+        // A click on a hint lands before the character it stands for.
+        assert_eq!(row.text_byte(8), 5);
+        assert_eq!(row.text_byte(17), 10);
+        assert_eq!(row.text_byte(row.shown_byte(12)), 12);
+    }
+
+    #[test]
+    fn tabs_after_hints_keep_their_own_bytes() {
+        // "a\tb" with a hint before the tab: the tab is still byte 1.
+        let placed = [(1, 3)];
+        let tabs = [(4, 2)];
+        let gaps = gaps_of(&placed, &tabs);
+        assert_eq!(gaps, vec![Gap { byte: 1, extra: 3, hint: true }, Gap { byte: 1, extra: 2, hint: false }]);
     }
 }
