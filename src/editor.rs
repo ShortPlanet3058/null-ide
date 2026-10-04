@@ -7,6 +7,7 @@ mod fixes;
 mod fold;
 mod ghost;
 mod intel;
+mod marks;
 mod refactor;
 mod review;
 mod signature;
@@ -442,6 +443,8 @@ pub struct Editor {
     completion_task: Option<Task<()>>,
     /// ⌘.'s list of quick fixes.
     fix_menu: Option<fixes::FixMenu>,
+    /// Other uses of the symbol at the caret.
+    symbol_marks: marks::SymbolMarks,
     /// The snippet being filled in, if any.
     snippet: Option<snippet::Session>,
     /// ⌃⇧⌘→'s steps, to shrink back through.
@@ -541,6 +544,7 @@ impl Editor {
             fix_menu: None,
             expansions: Default::default(),
             snippet: None,
+            symbol_marks: Default::default(),
             fixes_task: None,
             signature: Default::default(),
             folds: Default::default(),
@@ -922,6 +926,7 @@ impl Editor {
         }
         self.signature_after_move(cx);
         self.unfold_around_caret(cx);
+        self.refresh_symbol_marks(cx);
         self.last_activity = Instant::now();
         self.autoscroll = true;
         cx.notify();
