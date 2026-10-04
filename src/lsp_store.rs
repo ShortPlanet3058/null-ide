@@ -266,6 +266,7 @@ impl LspStore {
                     publish_diagnostics: Some(PublishDiagnosticsClientCapabilities::default()),
                     rename: Some(lsp_types::RenameClientCapabilities::default()),
                     references: Some(Default::default()),
+                    document_highlight: Some(Default::default()),
                     signature_help: Some(lsp_types::SignatureHelpClientCapabilities {
                         signature_information: Some(lsp_types::SignatureInformationSettings {
                             documentation_format: Some(vec![MarkupKind::PlainText]),
@@ -583,6 +584,25 @@ impl LspStore {
                 work_done_progress_params: Default::default(),
                 partial_result_params: Default::default(),
                 context: lsp_types::ReferenceContext { include_declaration: true },
+            })
+        });
+        async move {
+            let Some(request) = request else { return Vec::new() };
+            request.await.ok().flatten().unwrap_or_default()
+        }
+    }
+
+    /// Where the symbol at `position` is used in this file.
+    pub fn document_highlight(
+        &self,
+        path: &Path,
+        position: Position,
+    ) -> impl Future<Output = Vec<lsp_types::DocumentHighlight>> + use<> {
+        let request = self.server_for(path).zip(Self::position_params(path, position)).map(|(server, params)| {
+            server.request::<lsp_types::request::DocumentHighlightRequest>(lsp_types::DocumentHighlightParams {
+                text_document_position_params: params,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
             })
         });
         async move {

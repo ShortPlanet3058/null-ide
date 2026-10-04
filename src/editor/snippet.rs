@@ -242,6 +242,7 @@ impl Editor {
         self.select_placeholder(cx);
     }
 
+    #[cfg(test)]
     pub fn in_snippet(&self) -> bool {
         self.snippet.is_some()
     }

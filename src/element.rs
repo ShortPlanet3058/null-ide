@@ -136,6 +136,8 @@ pub struct Prepaint {
     lines: Vec<(ShapedLine, Point<Pixels>)>,
     selection: Vec<Bounds<Pixels>>,
     matches: Vec<(Bounds<Pixels>, bool)>,
+    /// Other uses of the symbol at the caret.
+    symbol_marks: Vec<Bounds<Pixels>>,
     link: Vec<Bounds<Pixels>>,
     git_marks: Vec<(Bounds<Pixels>, Hsla)>,
     assist_band: Option<Bounds<Pixels>>,
@@ -654,6 +656,18 @@ impl Element for EditorElement {
                 }
             }
 
+            // Other uses of the symbol at the caret, on screen.
+            let symbol_marks: Vec<Bounds<Pixels>> = {
+                let first_char = editor.buffer.line_to_char(lines_shown.start);
+                let last_char = editor.buffer.line_to_char(lines_shown.end);
+                editor
+                    .symbol_marks()
+                    .iter()
+                    .filter(|r| r.end >= first_char && r.start <= last_char)
+                    .flat_map(|r| range_rects(r.clone()))
+                    .collect()
+            };
+
             // Text being composed (an accent, or an input method) is underlined.
             let marked = editor.marked.clone().map(|r| underline(r, 0.85)).unwrap_or_default();
 
@@ -813,6 +827,7 @@ impl Element for EditorElement {
                 lines,
                 selection,
                 matches,
+                symbol_marks,
                 link,
                 git_marks,
                 assist_band,
@@ -880,6 +895,9 @@ impl Element for EditorElement {
             window.paint_svg(*bounds, "icons/chevron-right.svg".into(), turn, color, cx).ok();
         }
         window.with_content_mask(Some(ContentMask { bounds: prepaint.text_bounds }), |window| {
+            for rect in &prepaint.symbol_marks {
+                window.paint_quad(fill(*rect, theme.find_match.opacity(0.6)).corner_radii(px(3.)));
+            }
             for (rect, current) in &prepaint.matches {
                 let quad = fill(*rect, theme.find_match).corner_radii(px(3.));
                 window.paint_quad(if *current { quad.border_widths(px(1.)).border_color(theme.caret) } else { quad });
