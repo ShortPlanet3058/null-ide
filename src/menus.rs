@@ -72,6 +72,7 @@ pub fn set(cx: &mut App) {
             items: vec![
                 MenuItem::action("New File", NewUntitled),
                 MenuItem::action("Open File or Folder…", Open),
+                MenuItem::action("Open Recent…", crate::workspace::OpenRecent),
                 MenuItem::action("Reopen Closed Tab", ReopenClosedTab),
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),

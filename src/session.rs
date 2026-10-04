@@ -110,6 +110,44 @@ fn remember_last_project(root: &Path) {
     if let Some(file) = last_project_file() {
         std::fs::write(file, root.to_string_lossy().as_bytes()).ok();
     }
+    remember_recent_project(root);
+}
+
+/// How many projects Open Recent remembers.
+const RECENT_PROJECTS: usize = 20;
+
+fn recent_projects_file() -> Option<PathBuf> {
+    Some(sessions_dir()?.join("recent-projects.json"))
+}
+
+fn read_recent(file: &Path) -> Vec<PathBuf> {
+    std::fs::read_to_string(file).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+fn remember_recent_project(root: &Path) {
+    if let Some(file) = recent_projects_file() {
+        remember_in(&file, root);
+    }
+}
+
+/// Puts `root` first in the list kept in `file`.
+fn remember_in(file: &Path, root: &Path) {
+    let mut recent = read_recent(file);
+    if recent.first().is_some_and(|p| p == root) {
+        return;
+    }
+    recent.retain(|p| p != root);
+    recent.insert(0, root.to_path_buf());
+    recent.truncate(RECENT_PROJECTS);
+    if let Ok(text) = serde_json::to_string_pretty(&recent) {
+        std::fs::write(file, text).ok();
+    }
+}
+
+/// Projects opened lately, most recent first, that are still there.
+pub fn recent_projects() -> Vec<PathBuf> {
+    let Some(file) = recent_projects_file() else { return Vec::new() };
+    read_recent(&file).into_iter().filter(|p| p.is_dir()).collect()
 }
 
 /// The project open when Null last closed, if it's still there.
@@ -121,6 +159,19 @@ pub fn last_project() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_projects_go_first_once_each() {
+        let dir = std::env::temp_dir().join(format!("null-recent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("recent.json");
+        let _ = std::fs::remove_file(&file);
+        for p in ["/a", "/b", "/a", "/c"] {
+            remember_in(&file, Path::new(p));
+        }
+        assert_eq!(read_recent(&file), [PathBuf::from("/c"), PathBuf::from("/a"), PathBuf::from("/b")]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn missing_files_are_dropped_and_the_active_tab_follows() {
