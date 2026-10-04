@@ -17,7 +17,9 @@ actions!(
         JoinLines,
         SortLines,
         UpperCase,
-        LowerCase
+        LowerCase,
+        NextChange,
+        PreviousChange
     ]
 );
 
@@ -35,6 +37,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-enter", NewlineBelow, ctx),
         KeyBinding::new("secondary-shift-enter", NewlineAbove, ctx),
         KeyBinding::new("ctrl-j", JoinLines, ctx),
+        KeyBinding::new("alt-f5", NextChange, ctx),
+        KeyBinding::new("alt-shift-f5", PreviousChange, ctx),
     ]);
 }
 
@@ -108,6 +112,36 @@ impl Editor {
         let line = self.buffer.line_to_char(first)..self.buffer.line_to_char(last) + self.buffer.line_len(last);
         let all = 0..self.buffer.len_chars();
         next_larger(range, [word, line, all].into_iter())
+    }
+
+    pub(super) fn next_change(&mut self, _: &NextChange, _: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_change(true, cx);
+    }
+
+    pub(super) fn previous_change(&mut self, _: &PreviousChange, _: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_change(false, cx);
+    }
+
+    /// ⌥F5: to the next block of lines changed since the last commit (round to the first).
+    fn go_to_change(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let line = self.buffer.point(self.selection.head).0;
+        let starts: Vec<usize> = self.git_hunks.iter().map(|h| h.lines.start).collect();
+        let target = if forward {
+            starts.iter().find(|&&s| s > line).or(starts.first())
+        } else {
+            starts.iter().rev().find(|&&s| s < line).or(starts.last())
+        };
+        let Some(&target) = target else {
+            let at = self.selection.head;
+            return self.show_notice(at, "Nothing changed since the last commit.".into(), cx);
+        };
+        cx.emit(super::EditorEvent::Jumped { from: self.caret_point() });
+        let target = target.min(self.buffer.len_lines().saturating_sub(1));
+        let indent = self.buffer.line_text(target).chars().take_while(|c| c.is_whitespace()).count();
+        self.single_cursor();
+        self.selection = Selection::caret(self.buffer.offset(target, indent));
+        self.goal_column = None;
+        self.touch(cx);
     }
 
     /// ⌘⇧\: to the bracket matching the one at the caret, or to the opening one around it.
@@ -307,6 +341,26 @@ mod tests {
             e.selection = Selection::caret(0);
             e.shrink_selection(&ShrinkSelection, window, cx);
             assert_eq!(e.selection, Selection::caret(0));
+        });
+    }
+
+    #[gpui::test]
+    fn changes_are_visited_in_turn(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "a\n  b\nc\nd\ne\n");
+        e.update_in(cx, |e, window, cx| {
+            use crate::git::{Change, Hunk};
+            e.git_hunks =
+                vec![Hunk { change: Change::Modified, lines: 1..2 }, Hunk { change: Change::Added, lines: 3..5 }];
+            e.next_change(&NextChange, window, cx);
+            // On the changed line's code, past its indentation.
+            assert_eq!(e.caret_point(), (1, 2));
+            e.next_change(&NextChange, window, cx);
+            assert_eq!(e.caret_point(), (3, 0));
+            // Round to the first.
+            e.next_change(&NextChange, window, cx);
+            assert_eq!(e.caret_point(), (1, 2));
+            e.previous_change(&PreviousChange, window, cx);
+            assert_eq!(e.caret_point(), (3, 0));
         });
     }
 

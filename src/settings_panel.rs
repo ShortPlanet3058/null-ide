@@ -453,6 +453,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Indent guides",
+                Some("Faint lines down the indentation, to see what's inside what"),
+                Self::toggle("indent-guides", s.indent_guides, &theme, cx, |s| s.indent_guides = !s.indent_guides),
+                &theme,
+            ),
+            Self::row(
                 "Who changed the line",
                 Some("At the end of the caret's line, faintly: who last changed it, when, and why. From git"),
                 Self::toggle("line-blame", s.line_blame, &theme, cx, |s| s.line_blame = !s.line_blame),

@@ -25,8 +25,8 @@ pub use intel::HoverCard;
 pub use refactor::{FindReferences, FormatDocument, RenameSymbol, apply_edits};
 pub use review::{KeepHunk, UndoHunk};
 pub use structure::{
-    ExpandSelection, GoToMatchingBracket, JoinLines, LowerCase, NewlineAbove, NewlineBelow, ShrinkSelection, SortLines,
-    UpperCase,
+    ExpandSelection, GoToMatchingBracket, JoinLines, LowerCase, NewlineAbove, NewlineBelow, NextChange, PreviousChange,
+    ShrinkSelection, SortLines, UpperCase,
 };
 
 use crate::buffer::Buffer;
@@ -2103,6 +2103,11 @@ impl Editor {
         }
     }
 
+    /// Shows what's known about the code at the caret: its problems, then its type and docs.
+    pub fn show_info_now(&mut self, cx: &mut Context<Self>) {
+        self.show_info_at_caret(cx);
+    }
+
     fn show_info(&mut self, _: &ShowInfo, _: &mut Window, cx: &mut Context<Self>) {
         self.show_info_at_caret(cx);
     }
@@ -2593,6 +2598,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::newline_below))
             .on_action(cx.listener(Self::newline_above))
             .on_action(cx.listener(Self::join_lines))
+            .on_action(cx.listener(Self::next_change))
+            .on_action(cx.listener(Self::previous_change))
             .on_action(cx.listener(Self::sort_lines))
             .on_action(cx.listener(Self::upper_case))
             .on_action(cx.listener(Self::lower_case))

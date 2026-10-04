@@ -62,6 +62,9 @@ actions!(
         ToggleInlayHints,
         ToggleFocusMode,
         RunTask,
+        NextProblem,
+        ToggleIndentGuides,
+        PreviousProblem,
         AutoSaveAfterPause,
         AutoSaveWhenLeaving,
         OpenSettings,
@@ -111,6 +114,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("secondary-shift-b", RunTask, ctx),
+        KeyBinding::new("f8", NextProblem, ctx),
+        KeyBinding::new("shift-f8", PreviousProblem, ctx),
         KeyBinding::new("ctrl-tab", NextTab, ctx),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, ctx),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
@@ -1945,6 +1950,15 @@ impl Workspace {
             (App, "Settings…".into(), Box::new(OpenSettings)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
+            (
+                View,
+                toggle(settings.indent_guides, "Hide Indent Guides", "Show Indent Guides"),
+                Box::new(ToggleIndentGuides),
+            ),
+            (Go, "Next Problem".into(), Box::new(NextProblem)),
+            (Go, "Previous Problem".into(), Box::new(PreviousProblem)),
+            (Go, "Next Change".into(), Box::new(crate::editor::NextChange)),
+            (Go, "Previous Change".into(), Box::new(crate::editor::PreviousChange)),
             (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
@@ -2771,6 +2785,72 @@ impl Workspace {
         cx.notify();
     }
 
+    /// F8: to the next error or warning, in this file then the next ones (round to the
+    /// first), with its message shown.
+    fn next_problem(&mut self, _: &NextProblem, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_problem(true, window, cx);
+    }
+
+    fn previous_problem(&mut self, _: &PreviousProblem, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_problem(false, window, cx);
+    }
+
+    fn go_to_problem(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use lsp_types::DiagnosticSeverity as S;
+        let mut places = self.problem_places(cx);
+        places.retain(|(_, d)| matches!(d.severity.unwrap_or(S::ERROR), S::ERROR | S::WARNING));
+        let key = |path: &Path, p: lsp_types::Position| (path.to_path_buf(), p.line, p.character);
+        let mut places: Vec<_> = places.into_iter().map(|(path, d)| (key(&path, d.range.start), d.range)).collect();
+        places.sort_by(|a, b| a.0.cmp(&b.0));
+        places.dedup_by(|a, b| a.0 == b.0);
+        if places.is_empty() {
+            return self.show_notice("No problems found".into(), cx);
+        }
+        let here = self.active_editor().and_then(|e| {
+            let e = e.read(cx);
+            let (line, col) = e.caret_point();
+            let character = e.buffer.column_to_utf16(line, col) as u32;
+            Some((e.path()?.to_path_buf(), line as u32, character))
+        });
+        let next = match &here {
+            Some(here) if forward => places.iter().find(|(k, _)| k > here).or(places.first()),
+            Some(here) => places.iter().rev().find(|(k, _)| k < here).or(places.last()),
+            None => places.first(),
+        };
+        let Some(((path, _, _), range)) = next.cloned() else { return };
+        let start = lsp_types::Range { start: range.start, end: range.start };
+        self.go_to(path, start, window, cx);
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| editor.show_info_now(cx));
+        }
+    }
+
+    /// Every problem the servers report, where it is now: open files say where their
+    /// problems moved to while editing.
+    fn problem_places(&self, cx: &App) -> Vec<(PathBuf, lsp_types::Diagnostic)> {
+        let mut open: Vec<(PathBuf, Vec<lsp_types::Diagnostic>)> = Vec::new();
+        for tab in &self.tabs {
+            let editor = tab.editor.read(cx);
+            // A file open on both sides counts once.
+            if let Some(path) = editor.path().filter(|p| !open.iter().any(|(o, _)| o == p))
+                && let Some(list) = editor.current_diagnostics(cx)
+            {
+                open.push((path.to_path_buf(), list));
+            }
+        }
+        let mut found: Vec<(PathBuf, lsp_types::Diagnostic)> = self
+            .lsp
+            .read(cx)
+            .all_diagnostics()
+            .filter(|(p, _)| !open.iter().any(|(o, _)| o == *p))
+            .map(|(p, d)| (p.clone(), d.clone()))
+            .collect();
+        for (path, list) in open {
+            found.extend(list.into_iter().map(|d| (path.clone(), d)));
+        }
+        found
+    }
+
     /// ⌘⇧B: the project's tasks (the last run first), to run one in the terminal.
     fn run_task(&mut self, _: &RunTask, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
@@ -3172,25 +3252,7 @@ impl Workspace {
     fn show_problems(&mut self, _: &ShowProblems, window: &mut Window, cx: &mut Context<Self>) {
         use crate::palette::{Location, LocationKind};
         use lsp_types::DiagnosticSeverity as S;
-        // Open files say where their problems are now, edits since included.
-        let mut open: Vec<(PathBuf, Vec<lsp_types::Diagnostic>)> = Vec::new();
-        for tab in &self.tabs {
-            let editor = tab.editor.read(cx);
-            // A file open on both sides counts once.
-            if let Some(path) = editor.path().filter(|p| !open.iter().any(|(o, _)| o == p)) {
-                open.push((path.to_path_buf(), editor.current_diagnostics(cx)));
-            }
-        }
-        let mut found: Vec<(PathBuf, lsp_types::Diagnostic)> = self
-            .lsp
-            .read(cx)
-            .all_diagnostics()
-            .filter(|(p, _)| !open.iter().any(|(o, _)| o == *p))
-            .map(|(p, d)| (p.clone(), d.clone()))
-            .collect();
-        for (path, list) in open {
-            found.extend(list.into_iter().map(|d| (path.clone(), d)));
-        }
+        let found = self.problem_places(cx);
         let mut locations: Vec<Location> = found
             .into_iter()
             .filter_map(|(path, d)| {
@@ -4021,6 +4083,11 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
+            .on_action(cx.listener(Self::next_problem))
+            .on_action(cx.listener(|_, _: &ToggleIndentGuides, _, cx| {
+                settings::update(cx, |s| s.indent_guides = !s.indent_guides)
+            }))
+            .on_action(cx.listener(Self::previous_problem))
             .on_action(cx.listener(|_, _: &AutoSaveAfterPause, _, cx| {
                 settings::update(cx, |s| s.auto_save = AutoSave::AfterPause)
             }))
@@ -4336,6 +4403,56 @@ mod tests {
         });
         cx.simulate_keystrokes(keys);
         workspace.update(cx, |w, _| assert!(!w.focus_mode));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn f8_walks_the_problems_then_the_next_file(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-f8-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("a.txt"), &lines).unwrap();
+        std::fs::write(dir.join("b.txt"), &lines).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let problem = |line: u32, severity| lsp_types::Diagnostic {
+            range: lsp_types::Range {
+                start: lsp_types::Position::new(line, 0),
+                end: lsp_types::Position::new(line, 4),
+            },
+            severity: Some(severity),
+            message: format!("problem on {line}"),
+            ..Default::default()
+        };
+        use lsp_types::DiagnosticSeverity as S;
+        let at = |w: &Workspace, cx: &App| {
+            let e = w.active_editor().unwrap().read(cx);
+            (e.file_name(), e.caret_point().0)
+        };
+        workspace.update_in(cx, |w, window, cx| {
+            let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+            w.lsp.update(cx, |lsp, _| {
+                // A hint isn't a stop: only errors and warnings.
+                lsp.set_diagnostics(a.clone(), vec![problem(5, S::WARNING), problem(2, S::ERROR), problem(7, S::HINT)]);
+                lsp.set_diagnostics(b.clone(), vec![problem(1, S::ERROR)]);
+            });
+            w.open_file(a, window, cx);
+        });
+        let mut stops = Vec::new();
+        for _ in 0..4 {
+            cx.simulate_keystrokes("f8");
+            stops.push(workspace.update(cx, |w, cx| at(w, cx)));
+        }
+        assert_eq!(stops, [("a.txt".into(), 2), ("a.txt".into(), 5), ("b.txt".into(), 1), ("a.txt".into(), 2)]);
+        cx.simulate_keystrokes("shift-f8");
+        workspace.update(cx, |w, cx| assert_eq!(at(w, cx), ("b.txt".into(), 1)));
         std::fs::remove_dir_all(&dir).ok();
     }
 
