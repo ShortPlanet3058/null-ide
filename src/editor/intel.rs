@@ -480,6 +480,7 @@ impl Editor {
                 if at_definition {
                     this.find_references_at(offset, cx);
                 } else if here {
+                    cx.emit(EditorEvent::Jumped { from: this.caret_point() });
                     this.select_lsp_range(location.range, cx);
                 } else {
                     cx.emit(EditorEvent::GoTo { path: target, range: location.range });

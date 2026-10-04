@@ -10,6 +10,7 @@ mod intel;
 mod refactor;
 mod review;
 mod signature;
+mod structure;
 
 pub use assist::{Block, BlockKind};
 pub use completion::CompletionMenu;
@@ -20,6 +21,10 @@ pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::HoverCard;
 pub use refactor::{FindReferences, FormatDocument, RenameSymbol, apply_edits};
 pub use review::{KeepHunk, UndoHunk};
+pub use structure::{
+    ExpandSelection, GoToMatchingBracket, JoinLines, LowerCase, NewlineAbove, NewlineBelow, ShrinkSelection, SortLines,
+    UpperCase,
+};
 
 use crate::buffer::Buffer;
 use crate::element::{EditorElement, RowLayout};
@@ -119,6 +124,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     refactor::bind_keys(cx);
     fold::bind_keys(cx);
     fixes::bind_keys(cx);
+    structure::bind_keys(cx);
 }
 
 pub fn bind_ai_keys(cx: &mut App) {
@@ -279,6 +285,10 @@ pub enum EditorEvent {
     },
     /// Every change of a review was kept or undone.
     Reviewed,
+    /// The caret jumped within the file (to a definition): Back comes back to `from`.
+    Jumped {
+        from: (usize, usize),
+    },
     /// A quick fix was picked: the workspace works out its edits and applies them.
     CodeAction(lsp_types::CodeActionOrCommand),
     /// Show where the symbol at `position` is used.
@@ -430,6 +440,8 @@ pub struct Editor {
     completion_task: Option<Task<()>>,
     /// ⌘.'s list of quick fixes.
     fix_menu: Option<fixes::FixMenu>,
+    /// ⌃⇧⌘→'s steps, to shrink back through.
+    expansions: structure::Expansions,
     fixes_task: Option<Task<()>>,
     /// Parameter hints while typing a call.
     signature: signature::Signature,
@@ -523,6 +535,7 @@ impl Editor {
             completion: None,
             completion_task: None,
             fix_menu: None,
+            expansions: Default::default(),
             fixes_task: None,
             signature: Default::default(),
             folds: Default::default(),
@@ -622,6 +635,16 @@ impl Editor {
     /// Zero-based line and column of the caret.
     pub fn caret_point(&self) -> (usize, usize) {
         self.buffer.point(self.selection.head)
+    }
+
+    /// Puts the caret at a line and column (kept within the text), and shows it.
+    pub fn set_caret_point(&mut self, (line, column): (usize, usize), cx: &mut Context<Self>) {
+        let line = line.min(self.buffer.len_lines().saturating_sub(1));
+        let column = column.min(self.buffer.line_len(line));
+        self.single_cursor();
+        self.selection = Selection::caret(self.buffer.offset(line, column));
+        self.goal_column = None;
+        self.touch(cx);
     }
 
     pub fn scrollbar_dragging(&self) -> bool {
@@ -2537,6 +2560,15 @@ impl Render for Editor {
             .on_action(cx.listener(Self::accept_ghost_action))
             .on_action(cx.listener(Self::rename_symbol))
             .on_action(cx.listener(Self::quick_fix))
+            .on_action(cx.listener(Self::expand_selection))
+            .on_action(cx.listener(Self::shrink_selection))
+            .on_action(cx.listener(Self::go_to_matching_bracket))
+            .on_action(cx.listener(Self::newline_below))
+            .on_action(cx.listener(Self::newline_above))
+            .on_action(cx.listener(Self::join_lines))
+            .on_action(cx.listener(Self::sort_lines))
+            .on_action(cx.listener(Self::upper_case))
+            .on_action(cx.listener(Self::lower_case))
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::format_document))
             .on_action(cx.listener(Self::accept_ghost_word))

@@ -41,6 +41,8 @@ actions!(
         PushBranch,
         RevertAllChanges,
         SwitchBranch,
+        GoBack,
+        GoForward,
         ShowWelcome,
         InstallShellCommand,
         ReviewAiTask,
@@ -130,10 +132,29 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-0", ResetFontSize, ctx),
     ];
     if cfg!(target_os = "macos") {
-        keys.extend([KeyBinding::new("cmd-shift-]", NextTab, ctx), KeyBinding::new("cmd-shift-[", PreviousTab, ctx)]);
+        keys.extend([
+            KeyBinding::new("cmd-shift-]", NextTab, ctx),
+            KeyBinding::new("cmd-shift-[", PreviousTab, ctx),
+            KeyBinding::new("ctrl--", GoBack, ctx),
+            KeyBinding::new("ctrl-shift--", GoForward, ctx),
+            KeyBinding::new("ctrl-_", GoForward, ctx),
+        ]);
+    } else {
+        keys.extend([KeyBinding::new("alt-left", GoBack, ctx), KeyBinding::new("alt-right", GoForward, ctx)]);
     }
     cx.bind_keys(keys);
 }
+
+/// A place visited, to come back to with Back and Forward.
+#[derive(Clone, Debug, PartialEq)]
+struct Place {
+    path: PathBuf,
+    /// Line and column of the caret.
+    point: (usize, usize),
+}
+
+/// How many places Back remembers.
+const MAX_PLACES: usize = 100;
 
 /// Where the window is, in the session's terms.
 fn window_state(window: &Window) -> crate::session::WindowState {
@@ -304,6 +325,11 @@ pub struct Workspace {
     git_status_task: Option<Task<()>>,
     /// The list of changes is open: opening a file from it shows its changes.
     git_listing: bool,
+    /// Places to go back and forward to, most recent last.
+    back: Vec<Place>,
+    forward: Vec<Place>,
+    /// Going back or forward: the moves it makes aren't places to remember.
+    navigating: bool,
     /// The branches for the branch list about to open.
     pending_branches: Vec<git::Branch>,
     /// The AI task running or waiting for review, if any.
@@ -367,6 +393,12 @@ impl Workspace {
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
                 ProjectSearchEvent::Open { path, line, columns, query, keep_focus } => {
                     let (line, columns, query) = (*line, columns.clone(), query.clone());
+                    if this.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf)).as_ref()
+                        == Some(path)
+                    {
+                        let here = this.here(cx);
+                        this.remember_place(here);
+                    }
                     this.open_file(path.clone(), window, cx);
                     if let Some(editor) = this.active_editor() {
                         editor.update(cx, |editor, cx| editor.reveal_match(line, columns, query, cx));
@@ -432,6 +464,9 @@ impl Workspace {
             git_status_task: None,
             git_listing: false,
             pending_branches: Vec::new(),
+            back: Vec::new(),
+            forward: Vec::new(),
+            navigating: false,
             pending_commands: Vec::new(),
             ignore_rules,
             key_prompt: None,
@@ -550,6 +585,9 @@ impl Workspace {
         if self.tabs.is_empty() {
             window.focus(&self.focus_handle);
         }
+        // Opening the tabs again isn't somewhere to go back to.
+        self.back.clear();
+        self.forward.clear();
     }
 
     /// Finds what the project defines, for suggestions, without slowing anything down.
@@ -840,6 +878,72 @@ impl Workspace {
             window,
             cx,
         );
+    }
+
+    // ---------- back and forward ----------
+
+    /// The caret in the current file, as a place to come back to.
+    fn here(&self, cx: &App) -> Option<Place> {
+        let editor = self.active_editor()?.read(cx);
+        Some(Place { path: editor.path()?.to_path_buf(), point: editor.caret_point() })
+    }
+
+    /// Remembers a place being left, for Back. A new place ends any way Forward.
+    fn remember_place(&mut self, place: Option<Place>) {
+        let Some(place) = place.filter(|_| !self.navigating) else { return };
+        // Another spot on the same line is the same place.
+        if self.back.last().is_some_and(|p| p.path == place.path && p.point.0 == place.point.0) {
+            self.back.pop();
+        }
+        self.back.push(place);
+        if self.back.len() > MAX_PLACES {
+            self.back.remove(0);
+        }
+        self.forward.clear();
+    }
+
+    /// Opens `path` with `range` selected, remembering where the caret was.
+    fn go_to(&mut self, path: PathBuf, range: lsp_types::Range, window: &mut Window, cx: &mut Context<Self>) {
+        let here = self.here(cx);
+        if here.as_ref().is_some_and(|h| h.path == path) {
+            self.remember_place(here);
+        }
+        self.open_file(path, window, cx);
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| editor.select_lsp_range(range, cx));
+        }
+    }
+
+    fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(true, window, cx);
+    }
+
+    fn go_forward(&mut self, _: &GoForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(false, window, cx);
+    }
+
+    /// Back (or Forward) to the last place, skipping ones that are here already or whose
+    /// file is gone.
+    fn navigate(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let here = self.here(cx);
+        loop {
+            let next = if back { self.back.pop() } else { self.forward.pop() };
+            let Some(place) = next else { return };
+            let same = here.as_ref().is_some_and(|h| h.path == place.path && h.point.0 == place.point.0);
+            if same || !place.path.is_file() {
+                continue;
+            }
+            if let Some(here) = here {
+                if back { self.forward.push(here) } else { self.back.push(here) }
+            }
+            self.navigating = true;
+            self.open_file(place.path, window, cx);
+            if let Some(editor) = self.active_editor() {
+                editor.update(cx, |editor, cx| editor.set_caret_point(place.point, cx));
+            }
+            self.navigating = false;
+            return;
+        }
     }
 
     /// The branches, to switch to one or start one.
@@ -1208,9 +1312,12 @@ impl Workspace {
                 }
                 EditorEvent::GoTo { path, range } => {
                     let range = *range;
-                    this.open_file(path.clone(), window, cx);
-                    if let Some(editor) = this.active_editor() {
-                        editor.update(cx, |editor, cx| editor.select_lsp_range(range, cx));
+                    this.go_to(path.clone(), range, window, cx);
+                }
+                EditorEvent::Jumped { from } => {
+                    if let Some(path) = editor.read(cx).path() {
+                        let place = Place { path: path.to_path_buf(), point: *from };
+                        this.remember_place(Some(place));
                     }
                 }
             }),
@@ -1325,6 +1432,12 @@ impl Workspace {
 
     /// Makes tab `ix` the current one; `focus` also moves the keyboard to it.
     fn show_tab(&mut self, ix: usize, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix) else { return };
+        // Leaving a file: Back comes back here.
+        if self.active_editor().is_some_and(|e| *e != tab.editor) {
+            let here = self.here(cx);
+            self.remember_place(here);
+        }
         let Some(tab) = self.tabs.get(ix) else { return };
         self.active = Some(ix);
         self.shown[tab.side] = Some(tab.editor.clone());
@@ -1740,6 +1853,8 @@ impl Workspace {
             (Go, "Go to File…".into(), Box::new(TogglePalette)),
             (Go, "Go to Symbol in Project…".into(), Box::new(GoToSymbolInProject)),
             (Go, "Search in Project…".into(), Box::new(SearchProject)),
+            (Go, "Back".into(), Box::new(GoBack)),
+            (Go, "Forward".into(), Box::new(GoForward)),
             (File, "Review Changes…".into(), Box::new(ReviewChanges)),
             (File, "Commit All Changes…".into(), Box::new(CommitAll)),
             (File, "Push".into(), Box::new(PushBranch)),
@@ -1792,6 +1907,15 @@ impl Workspace {
                 (Lines, "Duplicate Line".into(), Box::new(crate::editor::DuplicateLineDown)),
                 (Lines, "Delete Line".into(), Box::new(crate::editor::DeleteLine)),
                 (Lines, "Select Line".into(), Box::new(crate::editor::SelectLine)),
+                (Lines, "Insert Line Below".into(), Box::new(crate::editor::NewlineBelow)),
+                (Lines, "Insert Line Above".into(), Box::new(crate::editor::NewlineAbove)),
+                (Lines, "Join Lines".into(), Box::new(crate::editor::JoinLines)),
+                (Lines, "Sort Lines".into(), Box::new(crate::editor::SortLines)),
+                (Edit, "Upper Case".into(), Box::new(crate::editor::UpperCase)),
+                (Edit, "Lower Case".into(), Box::new(crate::editor::LowerCase)),
+                (Edit, "Expand Selection".into(), Box::new(crate::editor::ExpandSelection)),
+                (Edit, "Shrink Selection".into(), Box::new(crate::editor::ShrinkSelection)),
+                (Go, "Go to Matching Bracket".into(), Box::new(crate::editor::GoToMatchingBracket)),
                 (Lines, "Indent with Tabs".into(), Box::new(crate::editor::IndentWithTabs)),
                 (Lines, "Indent with 2 Spaces".into(), Box::new(crate::editor::IndentWith2Spaces)),
                 (Lines, "Indent with 4 Spaces".into(), Box::new(crate::editor::IndentWith4Spaces)),
@@ -1963,11 +2087,7 @@ impl Workspace {
                 if std::mem::take(&mut this.git_listing) && this.review_git_file(&path, window, cx) {
                     return;
                 }
-                this.open_file(path, window, cx);
-                if let Some(editor) = this.active_editor() {
-                    let range = lsp_types::Range { start: position, end: position };
-                    editor.update(cx, |editor, cx| editor.select_lsp_range(range, cx));
-                }
+                this.go_to(path, lsp_types::Range { start: position, end: position }, window, cx);
             }
             PaletteEvent::Preview(path, position) => {
                 if let Some(editor) = this
@@ -1981,6 +2101,8 @@ impl Workspace {
             PaletteEvent::GoToLine(line) => {
                 let line = *line;
                 this.close_palette(window, cx);
+                let here = this.here(cx);
+                this.remember_place(here);
                 if let Some(editor) = this.active_editor() {
                     editor.update(cx, |editor, cx| editor.go_to_line(line, cx));
                 }
@@ -3719,6 +3841,17 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::commit_all))
             .on_action(cx.listener(Self::push_branch))
             .on_action(cx.listener(Self::switch_branch))
+            .on_action(cx.listener(Self::go_back))
+            .on_action(cx.listener(Self::go_forward))
+            // The mouse's back and forward buttons.
+            .on_mouse_down(
+                MouseButton::Navigate(gpui::NavigationDirection::Back),
+                cx.listener(|this, _: &MouseDownEvent, window, cx| this.navigate(true, window, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(gpui::NavigationDirection::Forward),
+                cx.listener(|this, _: &MouseDownEvent, window, cx| this.navigate(false, window, cx)),
+            )
             .on_action(cx.listener(Self::revert_all_changes))
             .on_action(cx.listener(|this, _: &ShowWelcome, window, cx| this.show_welcome(window, cx)))
             .on_action(cx.listener(Self::install_shell_command))
@@ -3918,6 +4051,58 @@ mod tests {
         assert!(given.lines().next().unwrap().ends_with("/new.txt"), "{given}");
         assert!(dir.join("new.txt").exists());
         assert_eq!(given.lines().count(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn back_and_forward_retrace_the_jumps(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("a.txt"), &lines).unwrap();
+        std::fs::write(dir.join("b.txt"), &lines).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let at = |w: &Workspace, cx: &App| {
+            let e = w.active_editor().unwrap().read(cx);
+            (e.file_name(), e.caret_point().0)
+        };
+        let line =
+            |n: u32| lsp_types::Range { start: lsp_types::Position::new(n, 0), end: lsp_types::Position::new(n, 0) };
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.txt"), window, cx);
+            w.go_to(dir.join("a.txt"), line(5), window, cx);
+            // A definition in another file, then a line further down there.
+            w.go_to(dir.join("b.txt"), line(20), window, cx);
+            w.go_to(dir.join("b.txt"), line(30), window, cx);
+            w.go_back(&GoBack, window, cx);
+            assert_eq!(at(w, cx), ("b.txt".into(), 20));
+            w.go_back(&GoBack, window, cx);
+            assert_eq!(at(w, cx), ("a.txt".into(), 5));
+            w.go_back(&GoBack, window, cx);
+            assert_eq!(at(w, cx), ("a.txt".into(), 0));
+            w.go_forward(&GoForward, window, cx);
+            w.go_forward(&GoForward, window, cx);
+            assert_eq!(at(w, cx), ("b.txt".into(), 20));
+            // Going somewhere new ends the way forward.
+            w.go_to(dir.join("a.txt"), line(10), window, cx);
+            w.go_forward(&GoForward, window, cx);
+            assert_eq!(at(w, cx), ("a.txt".into(), 10));
+        });
+        // The keys: ⌃- and ⌃⇧- on macOS, Alt+← and Alt+→ elsewhere.
+        let (back, forward) =
+            if cfg!(target_os = "macos") { ("ctrl--", "ctrl-shift--") } else { ("alt-left", "alt-right") };
+        cx.simulate_keystrokes(back);
+        workspace.update(cx, |w, cx| assert_eq!(at(w, cx), ("b.txt".into(), 20)));
+        cx.simulate_keystrokes(forward);
+        workspace.update(cx, |w, cx| assert_eq!(at(w, cx), ("a.txt".into(), 10)));
         std::fs::remove_dir_all(&dir).ok();
     }
 
