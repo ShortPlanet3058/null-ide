@@ -899,11 +899,15 @@ impl Workspace {
         self.tree.update(cx, |tree, cx| tree.refresh(&visible, cx));
         self.reindex(&visible, cx);
         for tab in &self.tabs {
-            let changed = tab.editor.read(cx).path().is_some_and(|p| visible.iter().any(|v| v == p));
-            if changed {
+            let Some(path) = tab.editor.read(cx).path().map(Path::to_path_buf) else { continue };
+            if visible.iter().any(|v| *v == path) {
                 tab.editor.update(cx, |editor, cx| editor.reload_from_disk(cx));
+            } else if visible.iter().any(|v| path.starts_with(v)) {
+                // Its folder changed (deleted, renamed): only whether the file is still there.
+                tab.editor.update(cx, |editor, cx| editor.check_missing(cx));
             }
         }
+        cx.notify();
         if git_changed {
             self.refresh_git(cx);
         } else if !visible.is_empty() {
@@ -4311,6 +4315,7 @@ impl Workspace {
                 let active = shown && (!split || self.active == Some(ix));
                 let resting = shown && !active;
                 let dirty = editor.buffer.is_dirty();
+                let missing = editor.missing;
                 let group = format!("tab-{ix}");
                 // Unsaved: a small dot, which turns into the close button under the pointer.
                 let close = div()
@@ -4381,7 +4386,14 @@ impl Workspace {
                             .min_w_0()
                             .flex()
                             .gap(px(6.))
-                            .child(div().min_w_0().truncate().child(name))
+                            // Deleted on disk: struck through, until saved back.
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .when(missing, |d| d.line_through().text_color(theme.muted))
+                                    .child(name),
+                            )
                             .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
                     )
                     .child(close)
@@ -4650,7 +4662,10 @@ impl Render for Workspace {
                 let path = editor.path().map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string());
                 let problems = editor.problems(cx);
                 let count = |s| problems.iter().filter(|p| p.severity == s).count();
-                let path = path.map(|p| shorten_path(&p, STATUS_PATH_CHARS)).unwrap_or_else(|| "Untitled".into());
+                let mut path = path.map(|p| shorten_path(&p, STATUS_PATH_CHARS)).unwrap_or_else(|| "Untitled".into());
+                if editor.missing {
+                    path.push_str(" · deleted on disk");
+                }
                 if let Some(preview) = &editor.preview {
                     (vec![path, preview.summary()], (0, 0))
                 } else {
