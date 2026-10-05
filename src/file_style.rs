@@ -59,11 +59,19 @@ pub struct FileStyle {
     pub final_newline: Option<bool>,
     /// Saving removes spaces at the ends of lines.
     pub trim_trailing: bool,
+    /// The line length the project keeps to, when it says (a faint guide shows it).
+    pub ruler: Option<usize>,
 }
 
 impl Default for FileStyle {
     fn default() -> Self {
-        Self { indent: Indent::Spaces(4), line_ending: LineEnding::Lf, final_newline: None, trim_trailing: false }
+        Self {
+            indent: Indent::Spaces(4),
+            line_ending: LineEnding::Lf,
+            final_newline: None,
+            trim_trailing: false,
+            ruler: None,
+        }
     }
 }
 
@@ -81,8 +89,60 @@ impl FileStyle {
             line_ending: config.line_ending.unwrap_or_else(|| detect_line_ending(text)),
             final_newline: config.final_newline,
             trim_trailing: config.trim_trailing.unwrap_or(false),
+            ruler: config.max_line_length.or_else(|| path.and_then(formatter_width)),
         }
     }
+}
+
+/// The line length a file's formatter is set to keep to, from the project's own config:
+/// rustfmt's `max_width`, Prettier's `printWidth`, Black's or Ruff's `line-length`. Only
+/// what's written down: a formatter's default draws no guide.
+pub fn formatter_width(path: &Path) -> Option<usize> {
+    let extension = path.extension()?.to_str()?.to_lowercase();
+    let files: &[(&str, &str)] = match extension.as_str() {
+        "rs" => &[("rustfmt.toml", "max_width"), (".rustfmt.toml", "max_width")],
+        "py" | "pyi" => {
+            &[("pyproject.toml", "line-length"), ("ruff.toml", "line-length"), (".ruff.toml", "line-length")]
+        }
+        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" | "css" | "scss" | "less" | "html" | "vue"
+        | "svelte" | "json" | "md" | "yaml" | "yml" => &[
+            (".prettierrc", "printWidth"),
+            (".prettierrc.json", "printWidth"),
+            (".prettierrc.yaml", "printWidth"),
+            (".prettierrc.yml", "printWidth"),
+            ("package.json", "printWidth"),
+        ],
+        _ => return None,
+    };
+    for dir in path.ancestors().skip(1) {
+        for (name, key) in files {
+            let Ok(text) = std::fs::read_to_string(dir.join(name)) else { continue };
+            if let Some(width) = number_after(&text, key) {
+                return Some(width);
+            }
+        }
+        // The project's top: no further up.
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    None
+}
+
+/// The number set for `key` in a TOML, JSON or YAML text: `key = 100`, `"key": 100`,
+/// `key: 100`, wherever it is (a JSON file can be all on one line).
+fn number_after(text: &str, key: &str) -> Option<usize> {
+    text.match_indices(key).find_map(|(at, _)| {
+        // The whole key, not the end of a longer one (`max-line-length`, `my_max_width`).
+        let before = text[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            return None;
+        }
+        let rest = text[at + key.len()..].trim_start_matches('"').trim_start();
+        let rest = rest.strip_prefix('=').or_else(|| rest.strip_prefix(':'))?.trim_start();
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok().filter(|&n: &usize| (20..=400).contains(&n))
+    })
 }
 
 /// The indentation a text uses, if it shows: tabs or spaces, whichever most lines start
@@ -140,6 +200,7 @@ pub struct EditorConfig {
     pub line_ending: Option<LineEnding>,
     pub final_newline: Option<bool>,
     pub trim_trailing: Option<bool>,
+    pub max_line_length: Option<usize>,
 }
 
 /// The `.editorconfig` settings for `path`: files from its folder up to the one marked
@@ -198,6 +259,8 @@ pub fn editorconfig(path: &Path) -> EditorConfig {
                 }
                 "insert_final_newline" => config.final_newline = flag.or(config.final_newline),
                 "trim_trailing_whitespace" => config.trim_trailing = flag.or(config.trim_trailing),
+                // "off" takes back a length set further up.
+                "max_line_length" => config.max_line_length = value.parse().ok(),
                 _ => {}
             }
         }
@@ -273,6 +336,30 @@ mod tests {
         assert!(glob_matches("Makefile", "sub/Makefile"));
         assert!(glob_matches("lib/**.py", "lib/x/y.py"));
         assert!(!glob_matches("lib/*.py", "lib/x/y.py"));
+    }
+
+    #[test]
+    fn the_line_length_comes_from_the_project_s_config() {
+        let root = std::env::temp_dir().join(format!("null-ruler-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let ruler = |name: &str| FileStyle::for_file(Some(&root.join(name)), "", Indent::Spaces(4)).ruler;
+        // Nothing set: no guide, whatever the formatter's default.
+        assert_eq!(ruler("src/main.rs"), None);
+        std::fs::write(root.join("rustfmt.toml"), "max_width = 120\nuse_small_heuristics = \"Max\"\n").unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[tool.ruff]\nline-length = 88\n").unwrap();
+        std::fs::write(root.join(".prettierrc"), "{ \"semi\": false, \"printWidth\": 100 }\n").unwrap();
+        assert_eq!(ruler("src/main.rs"), Some(120));
+        assert_eq!(ruler("app.py"), Some(88));
+        assert_eq!(ruler("web.ts"), Some(100));
+        assert_eq!(ruler("main.go"), None);
+        // .editorconfig says first; "off" means no guide.
+        std::fs::write(root.join(".editorconfig"), "[*.rs]\nmax_line_length = 80\n[*.py]\nmax_line_length = off\n")
+            .unwrap();
+        assert_eq!(ruler("src/main.rs"), Some(80));
+        assert_eq!(ruler("app.py"), Some(88));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
