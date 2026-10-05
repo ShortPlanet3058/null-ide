@@ -35,6 +35,8 @@ pub struct TabState {
     pub side: usize,
     /// Folded regions, as (first line, last line).
     pub folds: Vec<(usize, usize)>,
+    /// Lines with a breakpoint.
+    pub breakpoints: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]

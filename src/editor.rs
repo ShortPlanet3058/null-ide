@@ -472,6 +472,9 @@ pub struct Editor {
     breakpoints_revision: u64,
     /// The line the debugger stopped on, while it's stopped in this file.
     pub execution_line: Option<usize>,
+    /// While stopped: values of the variables the lines above name, shown faintly at
+    /// their end (line, text).
+    pub inline_values: Vec<(usize, String)>,
     /// The snippet being filled in, if any.
     snippet: Option<snippet::Session>,
     /// Cursors as they were before each one was added, for ⌘U.
@@ -580,6 +583,7 @@ impl Editor {
             breakpoints: Vec::new(),
             breakpoints_revision: 0,
             execution_line: None,
+            inline_values: Vec::new(),
             symbol_marks: Default::default(),
             hints: Default::default(),
             fixes_task: None,

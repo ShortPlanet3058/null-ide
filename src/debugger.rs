@@ -25,13 +25,95 @@ pub enum DebugState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stop {
     pub thread: i64,
-    /// The file and line (from 0) of the top frame, when it's in source code.
+    /// The file and line (from 0) of the frame looked at, when it's in source code.
     pub place: Option<(PathBuf, usize)>,
     /// "breakpoint", "step", "pause", "exception"…
     pub reason: String,
     /// What the debugger said about it (an exception's message).
     pub description: Option<String>,
+    /// The calls that led here, innermost first.
+    pub frames: Vec<Frame>,
+    /// The frame looked at (0: where it stopped).
+    pub frame: usize,
+    /// That frame's local variables: name and value.
+    pub locals: Vec<(String, String)>,
 }
+
+/// One call on the stack.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    pub id: i64,
+    pub name: String,
+    pub place: Option<(PathBuf, usize)>,
+}
+
+/// A value as worth showing: without the address the debugger adds (`… @ 0x7ff…`), and
+/// None when what's left only names a type (`&str`, `Vec<u8>`): that says nothing new.
+pub fn clean_value(value: &str) -> Option<String> {
+    let value = match value.rfind(" @ 0x") {
+        Some(at) if value[at + 5..].chars().all(|c| c.is_ascii_hexdigit()) => &value[..at],
+        _ => value,
+    }
+    .trim();
+    // Text or a structure's fields are data; a reference, a path or generics with neither
+    // is a type (`&str[3]`, `IntoIter<&str>`), even with a number in it.
+    let has_data = value.contains(['"', '\'', '{']) || matches!(value, "true" | "false");
+    let type_like = value.is_empty() || value.starts_with('&') || value.contains("::") || value.contains('<');
+    (has_data || !type_like).then(|| value.to_string())
+}
+
+/// Whether `name` appears in `text` as a whole word.
+fn names(text: &str, name: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    !name.is_empty()
+        && text.match_indices(name).any(|(i, _)| {
+            let before = text[..i].chars().next_back();
+            let after = text[i + name.len()..].chars().next();
+            !before.is_some_and(is_word) && !after.is_some_and(is_word)
+        })
+}
+
+/// The code of a line, without a `//` comment (it names things too, but isn't about them).
+fn code_of(text: &str) -> &str {
+    text.split("//").next().unwrap_or(text)
+}
+
+/// The locals the code shows (named in `lines`), with values worth showing: what the
+/// Debug panel lists. Compiler temporaries (a loop's `iter`) aren't in the code.
+pub fn shown_locals(lines: &[(usize, String)], locals: &[(String, String)]) -> Vec<(String, String)> {
+    locals
+        .iter()
+        .filter(|(name, _)| lines.iter().any(|(_, text)| names(code_of(text), name)))
+        .filter_map(|(name, value)| Some((name.clone(), clean_value(value)?)))
+        .collect()
+}
+
+/// The values to show faintly at the end of lines: each local once, on the last of
+/// `lines` that names it, as `name = value` (at most three a line, long ones cut short).
+pub fn inline_values(lines: &[(usize, String)], locals: &[(String, String)]) -> Vec<(usize, String)> {
+    const PER_LINE: usize = 3;
+    const LONGEST: usize = 32;
+    let mut by_line: Vec<(usize, Vec<String>)> = Vec::new();
+    for (name, value) in shown_locals(lines, locals) {
+        let Some((line, _)) = lines.iter().rev().find(|(_, text)| names(code_of(text), &name)) else { continue };
+        let value: String = if value.chars().count() > LONGEST {
+            value.chars().take(LONGEST - 1).chain(['…']).collect()
+        } else {
+            value
+        };
+        let shown = format!("{name} = {value}");
+        match by_line.iter_mut().find(|(l, _)| l == line) {
+            Some((_, list)) if list.len() < PER_LINE => list.push(shown),
+            Some(_) => {}
+            None => by_line.push((*line, vec![shown])),
+        }
+    }
+    by_line.sort_by_key(|(line, _)| *line);
+    by_line.into_iter().map(|(line, list)| (line, list.join("   "))).collect()
+}
+
+/// How many calls of the stack are asked for.
+const FRAMES: usize = 40;
 
 pub enum DebuggerEvent {
     /// Stopped somewhere: the workspace shows the place.
@@ -225,22 +307,78 @@ impl Debugger {
         }
     }
 
-    /// Asks where thread `thread` stopped, then says so.
+    /// Asks where thread `thread` stopped (the calls, and the locals of the innermost one
+    /// in source code), then says so.
     fn locate_stop(&mut self, thread: i64, reason: String, description: Option<String>, cx: &mut Context<Self>) {
         let Some(adapter) = self.adapter.clone() else { return };
-        let frames = adapter.request("stackTrace", json!({ "threadId": thread, "startFrame": 0, "levels": 1 }));
+        let stack = adapter.request("stackTrace", json!({ "threadId": thread, "startFrame": 0, "levels": FRAMES }));
         self._tasks.push(cx.spawn(async move |this, cx| {
-            let place = frames.await.ok().and_then(|body| {
-                let frame = body["stackFrames"].get(0)?;
-                let path = PathBuf::from(frame["source"]["path"].as_str()?);
-                let line = frame["line"].as_u64()?.saturating_sub(1) as usize;
-                Some((path, line))
-            });
+            let frames: Vec<Frame> = stack
+                .await
+                .ok()
+                .and_then(|body| body["stackFrames"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .map(|f| Frame {
+                    id: f["id"].as_i64().unwrap_or_default(),
+                    name: f["name"].as_str().unwrap_or("?").to_string(),
+                    place: f["source"]["path"]
+                        .as_str()
+                        .map(|path| (PathBuf::from(path), f["line"].as_u64().unwrap_or(1).saturating_sub(1) as usize)),
+                })
+                .collect();
+            // Stopped inside a library with no source: look at the first call that has some.
+            let frame = frames.iter().position(|f| f.place.is_some()).unwrap_or(0);
+            let locals = match frames.get(frame) {
+                Some(f) => Self::locals_of(&adapter, f.id).await,
+                None => Vec::new(),
+            };
             this.update(cx, |this, cx| {
-                let stop = Stop { thread, place, reason, description };
+                let place = frames.get(frame).and_then(|f| f.place.clone());
+                let stop = Stop { thread, place, reason, description, frames, frame, locals };
                 this.state = DebugState::Stopped(stop.clone());
                 cx.emit(DebuggerEvent::Stopped(stop));
                 cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// A frame's local variables, as the debugger shows them (name, value).
+    async fn locals_of(adapter: &DebugAdapter, frame: i64) -> Vec<(String, String)> {
+        let Ok(scopes) = adapter.request("scopes", json!({ "frameId": frame })).await else { return Vec::new() };
+        // The first scope is the locals (then globals, registers: not wanted here).
+        let Some(reference) = scopes["scopes"].get(0).and_then(|s| s["variablesReference"].as_i64()) else {
+            return Vec::new();
+        };
+        let Ok(variables) = adapter.request("variables", json!({ "variablesReference": reference })).await else {
+            return Vec::new();
+        };
+        variables["variables"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| Some((v["name"].as_str()?.to_string(), v["value"].as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Looks at another call on the stack: its place and its locals.
+    pub fn select_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
+        let (Some(adapter), DebugState::Stopped(stop)) = (self.adapter.clone(), &self.state) else { return };
+        let Some(id) = stop.frames.get(frame).map(|f| f.id) else { return };
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let locals = Self::locals_of(&adapter, id).await;
+            this.update(cx, |this, cx| {
+                if let DebugState::Stopped(stop) = &mut this.state {
+                    stop.frame = frame;
+                    stop.place = stop.frames[frame].place.clone();
+                    stop.locals = locals;
+                    let stop = stop.clone();
+                    cx.emit(DebuggerEvent::Stopped(stop));
+                    cx.notify();
+                }
             })
             .ok();
         }));
@@ -298,6 +436,36 @@ mod tests {
     use super::*;
     use gpui::{AppContext as _, TestAppContext};
 
+    #[test]
+    fn values_show_on_the_lines_that_name_them() {
+        let lines = vec![
+            (2, "    int total = 0;".to_string()),
+            (3, "    for (int i = 1; i <= 3; i++) { // total so far".to_string()),
+            (4, "        total += i;".to_string()),
+            (5, "    totals();".to_string()),
+        ];
+        let locals = vec![("total".to_string(), "3".to_string()), ("i".to_string(), "2".to_string())];
+        // Each once, on the last line naming it; `totals` and the comment don't count.
+        assert_eq!(inline_values(&lines, &locals), [(4, "total = 3   i = 2".to_string())]);
+        let long = vec![("s".to_string(), "x".repeat(50))];
+        assert_eq!(inline_values(&[(0, "s".into())], &long)[0].1.chars().count(), 4 + 32);
+    }
+
+    #[test]
+    fn addresses_and_bare_types_are_left_out() {
+        assert_eq!(clean_value("4"), Some("4".into()));
+        assert_eq!(clean_value("\"is\" @ 0x7ff7bfefe558"), Some("\"is\"".into()));
+        assert_eq!(clean_value("&str @ 0x7ff7bfefe558"), None);
+        assert_eq!(clean_value("&str[3] @ 0x7ff7bfefe490"), None);
+        assert_eq!(clean_value("-12.5"), Some("-12.5".into()));
+        assert_eq!(clean_value("core::array::iter::IntoIter<&str> @ 0x7ff7bfefe508"), None);
+        assert_eq!(clean_value("true"), Some("true".into()));
+        // The loop's iterator isn't in the code: not listed.
+        let lines = vec![(0, "for word in words {".to_string())];
+        let locals = vec![("iter".to_string(), "x".to_string()), ("word".to_string(), "\"a\"".to_string())];
+        assert_eq!(shown_locals(&lines, &locals), [("word".to_string(), "\"a\"".to_string())]);
+    }
+
     /// Waits for real work (the adapter, the program) until `done` holds, or gives up.
     fn wait_for(cx: &mut TestAppContext, debugger: &gpui::Entity<Debugger>, done: impl Fn(&Debugger) -> bool) -> bool {
         for _ in 0..600 {
@@ -341,8 +509,11 @@ mod tests {
             _ => unreachable!(),
         });
         assert_eq!(stop.reason, "breakpoint");
-        let (path, line) = stop.place.unwrap();
+        let (path, line) = stop.place.clone().unwrap();
         assert_eq!((path.file_name().unwrap().to_str().unwrap(), line), ("main.c", 4));
+        // Its locals, with their values, and the call it's in.
+        assert!(stop.locals.iter().any(|(name, value)| name == "total" && value == "0"), "{:?}", stop.locals);
+        assert_eq!(stop.frames[0].name, "main");
         // Step over: on to the loop's next line.
         debugger.update(cx, |d, cx| d.resume("next", cx));
         assert!(wait_for(cx, &debugger, |d| matches!(&d.state, DebugState::Stopped(s) if s.reason == "step")));

@@ -583,8 +583,16 @@ impl Element for EditorElement {
                         .flatten()
                         .filter(|(line, _)| *line == row.line)
                         .map(|(_, blame)| format!("{BLAME_GAP}{blame}"));
+                    // While debugging: the values of what the line names, before anything else.
+                    let values = row
+                        .last
+                        .then(|| editor.inline_values.iter().find(|(l, _)| *l == row.line))
+                        .flatten()
+                        .map(|(_, text)| format!("{BLAME_GAP}{text}"));
                     let (suffix, suffix_text) = if row.last && editor.is_folded(row.line) {
                         (Some(run(FOLDED.len(), &font, theme.muted)), FOLDED.to_string())
+                    } else if let Some(note) = values {
+                        (Some(run(note.len(), &font, theme.muted)), note)
                     } else if let Some(note) = blame {
                         (Some(run(note.len(), &font, theme.faint)), note)
                     } else {
