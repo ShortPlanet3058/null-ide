@@ -20,7 +20,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-actions!(palette, [SelectNext, SelectPrevious, Confirm, ConfirmAside, Dismiss, AdjustLeft, AdjustRight]);
+actions!(
+    palette,
+    [SelectNext, SelectPrevious, Confirm, ConfirmAside, Dismiss, AdjustLeft, AdjustRight, ToggleCommitFile]
+);
 
 /// Registered after the text field's keys: on a choice row, ←→ change the choice
 /// instead of moving the caret (the query is empty there anyway).
@@ -35,6 +38,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Confirm, ctx),
         KeyBinding::new("secondary-enter", ConfirmAside, ctx),
         KeyBinding::new("escape", Dismiss, ctx),
+        KeyBinding::new("tab", ToggleCommitFile, Some("Palette && committing")),
         KeyBinding::new("left", AdjustLeft, adjusting),
         KeyBinding::new("right", AdjustRight, adjusting),
     ]);
@@ -326,8 +330,8 @@ pub enum PaletteEvent {
     Preview(PathBuf, lsp_types::Position),
     /// Start an AI task with this description.
     StartTask(String),
-    /// Commit every change with this message.
-    Commit(String),
+    /// Commit with this message: every change but the files left out.
+    Commit(String, Vec<PathBuf>),
     SwitchBranch(crate::git::Branch),
     /// Start a branch with this name, here.
     CreateBranch(String),
@@ -356,6 +360,8 @@ pub struct Palette {
     projects: Vec<PathBuf>,
     /// Symbols of the open file: their line is enough, and moving through them shows each.
     in_file: bool,
+    /// Committing: the changed files (by their row in `locations`) left out of the commit.
+    left_out: std::collections::HashSet<usize>,
     root: PathBuf,
     rows: Vec<Row>,
     selected: usize,
@@ -410,6 +416,7 @@ impl Palette {
             line_count: options.line_count,
             terminal_open: options.terminal_open,
             title: options.title,
+            left_out: Default::default(),
             in_file: matches!(options.locations.first(), Some(l) if matches!(l.kind, LocationKind::Symbol(_)))
                 && options.locations.iter().all(|l| Some(&l.path) == options.locations.first().map(|f| &f.path)),
             locations: options.locations,
@@ -451,7 +458,13 @@ impl Palette {
         match self.kind {
             PaletteKind::Files => self.file_rows(split_place(&query).0),
             PaletteKind::Quick => self.quick_rows(&query),
-            PaletteKind::Line | PaletteKind::Task | PaletteKind::Commit => {}
+            PaletteKind::Line | PaletteKind::Task => {}
+            // What's typed is the message: every changed file stays listed under it.
+            PaletteKind::Commit => {
+                for i in 0..self.locations.len() {
+                    self.push(Item::Location(i), Vec::new(), false);
+                }
+            }
             PaletteKind::Locations => self.location_rows(&query),
             PaletteKind::Branch => self.branch_rows(&query),
             PaletteKind::Run => self.task_rows(&query),
@@ -747,6 +760,19 @@ impl Palette {
         self.confirm_at(self.selected, cx);
     }
 
+    /// Committing, ⇥: the selected file is left out of the commit, or put back in.
+    fn toggle_commit_file(&mut self, _: &ToggleCommitFile, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_left_out(cx);
+    }
+
+    fn toggle_left_out(&mut self, cx: &mut Context<Self>) {
+        let Some(Item::Location(i)) = self.selected_item() else { return };
+        if !self.left_out.remove(&i) {
+            self.left_out.insert(i);
+        }
+        cx.notify();
+    }
+
     fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
         self.confirm_at(self.selected, cx);
     }
@@ -770,8 +796,9 @@ impl Palette {
                 return;
             }
             PaletteKind::Commit => {
-                if !self.query.is_empty() {
-                    cx.emit(PaletteEvent::Commit(self.query.clone()));
+                let left_out: Vec<PathBuf> = self.left_out.iter().map(|&i| self.locations[i].path.clone()).collect();
+                if !self.query.is_empty() && left_out.len() < self.locations.len().max(1) {
+                    cx.emit(PaletteEvent::Commit(self.query.clone(), left_out));
                 }
                 return;
             }
@@ -1007,7 +1034,20 @@ impl Palette {
                 if let LocationKind::FileChange(kind, added, removed) = location.kind {
                     use crate::ai_task::ChangeKind;
                     let text = StyledText::new(location.text.clone()).with_highlights(highlights_in(&location.text, 0));
+                    // Left out of a commit: quiet, with a hollow dot.
+                    if self.kind == PaletteKind::Commit && self.left_out.contains(&i) {
+                        return self.render_row_parts(
+                            ix,
+                            div().size(px(5.)).rounded_full().border_1().border_color(dim).into_any_element(),
+                            div().text_color(dim).child(text).into_any_element(),
+                            Some(div().text_color(dim).child("left out").into_any_element()),
+                            cx,
+                        );
+                    }
                     let (dot, place) = match kind {
+                        ChangeKind::Deleted if self.kind == PaletteKind::Commit => {
+                            (theme.git_deleted, "deleted".to_string())
+                        }
                         ChangeKind::Added => (theme.git_added, format!("new · +{added}")),
                         ChangeKind::Changed => (theme.git_modified, format!("+{added} −{removed}")),
                         ChangeKind::Deleted => (theme.git_deleted, "deleted · ↵ restores it".to_string()),
@@ -1069,6 +1109,21 @@ impl Palette {
                 }
             }
         };
+        self.render_row_parts(ix, marker, label, right, cx)
+    }
+
+    /// A row's frame around its marker, label and what's on the right.
+    fn render_row_parts(
+        &self,
+        ix: usize,
+        marker: AnyElement,
+        label: AnyElement,
+        right: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.global::<Theme>();
+        let row = &self.rows[ix];
+        let selected = ix == self.selected;
         let separated = row.item == Item::Quick(Quick::AllSettings);
         div()
             .id(ix)
@@ -1104,7 +1159,15 @@ impl Palette {
                 }
             }))
             .active(|s| s.opacity(0.7))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.confirm_at(ix, cx)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                // Committing, a file's row leaves it out (or puts it back); elsewhere it's picked.
+                if this.kind == PaletteKind::Commit {
+                    this.selected = ix;
+                    this.toggle_left_out(cx);
+                } else {
+                    this.confirm_at(ix, cx)
+                }
+            }))
             .into_any_element()
     }
 
@@ -1135,7 +1198,8 @@ impl Palette {
             PaletteKind::Files => "↵ open",
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
-            PaletteKind::Commit => "↵ commit",
+            PaletteKind::Commit if self.left_out.is_empty() => "↵ commit",
+            PaletteKind::Commit => "↵ commit these",
             PaletteKind::Run => "↵ run",
             PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window",
             PaletteKind::Projects => "↵ open · Ctrl+↵ new window",
@@ -1243,8 +1307,35 @@ impl Render for Palette {
                 Some(self.render_message(text, self.line_target().is_some(), cx))
             }
             PaletteKind::Commit => {
-                let text = self.title.clone().unwrap_or_default();
-                Some(self.render_message(text, false, cx))
+                // The files under the line saying what's committed; ⇥ leaves the selected one out.
+                let (total, kept) = (self.locations.len(), self.locations.len() - self.left_out.len());
+                let branch = self.title.clone().unwrap_or_default();
+                let files = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+                let text = match (kept, total) {
+                    (0, _) => "Nothing left to commit: ⇥ puts a file back".to_string(),
+                    (k, t) if k == t => format!("Commits every change on {branch}: {} · ⇥ leaves one out", files(t)),
+                    (k, t) => format!("Commits {k} of {} on {branch}", files(t)),
+                };
+                let rows: Vec<AnyElement> = (0..self.rows.len()).map(|i| self.render_row(i, window, cx)).collect();
+                Some(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(self.render_message(text, false, cx))
+                        .child(
+                            div()
+                                .id("palette-results")
+                                .max_h(px(LIST_HEIGHT))
+                                .overflow_y_scroll()
+                                .track_scroll(&self.scroll)
+                                .px(px(6.))
+                                .pb(px(6.))
+                                .flex()
+                                .flex_col()
+                                .children(rows),
+                        )
+                        .into_any_element(),
+                )
             }
             PaletteKind::Task => {
                 let text = match &self.title {
@@ -1290,6 +1381,9 @@ impl Render for Palette {
         if matches!(self.selected_item(), Some(Item::Quick(q)) if q.is_choice()) {
             context.add("adjusting");
         }
+        if self.kind == PaletteKind::Commit {
+            context.add("committing");
+        }
         let theme = cx.global::<Theme>();
         div()
             .key_context(context)
@@ -1298,6 +1392,7 @@ impl Render for Palette {
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::toggle_commit_file))
             .on_action(cx.listener(Self::confirm_aside))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::adjust_left))

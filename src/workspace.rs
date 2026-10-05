@@ -965,10 +965,40 @@ impl Workspace {
             };
             return self.show_notice(message.into(), cx);
         }
+        self.with_changed_files(window, cx, |this, locations, window, cx| {
+            use crate::palette::{Category, Command};
+            let command = |label: &str, action: Box<dyn Action>| Command {
+                category: Category::File,
+                label: label.to_string().into(),
+                action,
+                keys: None,
+            };
+            this.pending_commands = vec![
+                command("Commit…", Box::new(CommitAll)),
+                command("Push", Box::new(PushBranch)),
+                command("Switch Branch…", Box::new(SwitchBranch)),
+                command("Revert All Changes…", Box::new(RevertAllChanges)),
+            ];
+            let title = match &this.branch {
+                Some(branch) => format!("Changes on {branch}"),
+                None => "Changes".to_string(),
+            };
+            this.open_locations(title, locations, window, cx);
+            this.git_listing = true;
+        });
+    }
+
+    /// The files changed since the last commit, as rows with the lines added and removed
+    /// in each (read off the main thread), handed to `then`.
+    fn with_changed_files(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, Vec<crate::palette::Location>, &mut Window, &mut Context<Self>) + 'static,
+    ) {
         let root = self.tree.read(cx).root().to_path_buf();
         let changed = self.git_status.clone();
         cx.spawn_in(window, async move |this, cx| {
-            // Lines added and removed in each, read off the main thread.
             let rows = cx
                 .background_executor()
                 .spawn(async move {
@@ -985,7 +1015,7 @@ impl Workspace {
                 .await;
             this.update_in(cx, |this, window, cx| {
                 use crate::ai_task::ChangeKind;
-                use crate::palette::{Category, Command, Location, LocationKind};
+                use crate::palette::{Location, LocationKind};
                 let locations = rows
                     .into_iter()
                     .map(|(path, status, added, removed)| Location {
@@ -1003,24 +1033,7 @@ impl Workspace {
                         ),
                     })
                     .collect();
-                let command = |label: &str, action: Box<dyn Action>| Command {
-                    category: Category::File,
-                    label: label.to_string().into(),
-                    action,
-                    keys: None,
-                };
-                this.pending_commands = vec![
-                    command("Commit All Changes…", Box::new(CommitAll)),
-                    command("Push", Box::new(PushBranch)),
-                    command("Switch Branch…", Box::new(SwitchBranch)),
-                    command("Revert All Changes…", Box::new(RevertAllChanges)),
-                ];
-                let title = match &this.branch {
-                    Some(branch) => format!("Changes on {branch}"),
-                    None => "Changes".to_string(),
-                };
-                this.open_locations(title, locations, window, cx);
-                this.git_listing = true;
+                then(this, locations, window, cx);
             })
             .ok();
         })
@@ -1050,21 +1063,16 @@ impl Workspace {
         true
     }
 
-    /// Asks for a message, then commits every change (open files saved first).
+    /// Asks for a message, then commits the changes, the files under it with ⇥ left out
+    /// (open files saved first).
     fn commit_all(&mut self, _: &CommitAll, window: &mut Window, cx: &mut Context<Self>) {
         if self.git_status.is_empty() {
             return self.show_notice("Nothing to commit.".into(), cx);
         }
-        let count = self.git_status.len();
-        let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
-        let branch = self.branch.clone().unwrap_or_default();
-        self.open_palette_with(
-            PaletteKind::Commit,
-            Some(format!("Commits every change on {branch}: {files}. Open files are saved first.")),
-            Vec::new(),
-            window,
-            cx,
-        );
+        self.with_changed_files(window, cx, |this, locations, window, cx| {
+            let branch = this.branch.clone().unwrap_or_default();
+            this.open_palette_with(PaletteKind::Commit, Some(branch), locations, window, cx);
+        });
     }
 
     // ---------- back and forward ----------
@@ -1231,11 +1239,11 @@ impl Workspace {
         }
     }
 
-    fn commit_with(&mut self, message: String, cx: &mut Context<Self>) {
+    fn commit_with(&mut self, message: String, left_out: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.save_named_tabs(cx);
         let root = self.tree.read(cx).root().to_path_buf();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { git::commit_all(&root, &message) }).await;
+            let result = cx.background_executor().spawn(async move { git::commit(&root, &message, &left_out) }).await;
             this.update(cx, |this, cx| {
                 let notice = match result {
                     Ok(id) => format!("Committed {id}."),
@@ -2333,7 +2341,7 @@ impl Workspace {
                 Box::new(ToggleLineBlame),
             ),
             (View, toggle(settings.inlay_hints, "Hide Type Hints", "Show Type Hints"), Box::new(ToggleInlayHints)),
-            (File, "Commit All Changes…".into(), Box::new(CommitAll)),
+            (File, "Commit…".into(), Box::new(CommitAll)),
             (File, "Push".into(), Box::new(PushBranch)),
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
@@ -2611,10 +2619,10 @@ impl Workspace {
                 this.close_palette(window, cx);
                 this.change_branch(Err(name), cx);
             }
-            PaletteEvent::Commit(message) => {
-                let message = message.clone();
+            PaletteEvent::Commit(message, left_out) => {
+                let (message, left_out) = (message.clone(), left_out.clone());
                 this.close_palette(window, cx);
-                this.commit_with(message, cx);
+                this.commit_with(message, left_out, cx);
             }
             PaletteEvent::StartTask(text) => {
                 let text = text.clone();

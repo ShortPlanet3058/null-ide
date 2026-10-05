@@ -3,7 +3,7 @@
 //! happens (quietly) where git isn't installed.
 
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
@@ -72,8 +72,20 @@ pub fn status(root: &Path) -> Vec<(std::path::PathBuf, FileStatus)> {
 }
 
 /// Commits every change (new files included) with `message`; returns the short commit id.
+#[cfg(test)]
 pub fn commit_all(root: &Path, message: &str) -> Result<String, String> {
+    commit(root, message, &[])
+}
+
+/// Commits every change but those to `left_out`, which stay as they are, uncommitted.
+pub fn commit(root: &Path, message: &str, left_out: &[PathBuf]) -> Result<String, String> {
     run(root, &["add", "-A"])?;
+    if !left_out.is_empty() {
+        let paths: Vec<String> = left_out.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let mut args = vec!["reset", "-q", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        run(root, &args)?;
+    }
     run(root, &["commit", "-q", "-m", message])?;
     Ok(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default().trim().to_string())
 }
@@ -342,6 +354,36 @@ mod tests {
         assert_eq!(committed_text(&dir.join("link/src/a.rs"), Default::default()).as_deref(), Some("committed\n"));
         assert_eq!(committed_text(&repo.join("src/new.rs"), Default::default()), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn commits_all_but_the_files_left_out() {
+        let repo = std::env::temp_dir().join(format!("null-git-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        if run(&repo, &["init", "-q"]).is_err() {
+            return; // No git here.
+        }
+        run(&repo, &["config", "user.name", "t"]).unwrap();
+        run(&repo, &["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        commit_all(&repo, "first").unwrap();
+        // Two changed, one new, one deleted: the change to b and the new file stay out.
+        std::fs::write(repo.join("a.txt"), "a2\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b2\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "n\n").unwrap();
+        commit(&repo, "second", &[repo.join("b.txt"), repo.join("new.txt")]).unwrap();
+        let committed = git(&repo, &["show", "--name-only", "--format=", "HEAD"]).unwrap();
+        assert_eq!(committed.trim(), "a.txt");
+        let mut left: Vec<String> =
+            status(&repo).into_iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["b.txt", "new.txt"]);
+        // Still changed, as left.
+        assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "b2\n");
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
