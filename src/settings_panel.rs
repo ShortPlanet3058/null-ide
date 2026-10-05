@@ -1180,6 +1180,8 @@ mod tests {
         assert_eq!(count(&["wrap"], cx), 2);
         // Words found across sections: a heading for each.
         assert!(count(&["theme"], cx) >= 2);
+        // A theme by its name finds the picker.
+        assert_eq!(count(&["paper"], cx), 2);
         // Nothing: one line saying so.
         assert_eq!(count(&["zzz"], cx), 1);
         // Every word must match.
