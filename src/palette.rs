@@ -84,6 +84,8 @@ pub enum LocationKind {
     Symbol(&'static str),
     /// A file an AI task changed, with the lines added and removed.
     FileChange(crate::ai_task::ChangeKind, usize, usize),
+    /// A commit in a file's history: its subject, then (after a tab) who and when.
+    Commit,
 }
 
 /// A place in the code, with the text to show for it.
@@ -1029,7 +1031,10 @@ impl Palette {
                 let color = match location.kind {
                     LocationKind::Error => theme.error,
                     LocationKind::Warning => theme.warning,
-                    LocationKind::Reference | LocationKind::Symbol(_) | LocationKind::FileChange(..) => accent,
+                    LocationKind::Reference
+                    | LocationKind::Symbol(_)
+                    | LocationKind::FileChange(..)
+                    | LocationKind::Commit => accent,
                 };
                 if let LocationKind::FileChange(kind, added, removed) = location.kind {
                     use crate::ai_task::ChangeKind;
@@ -1056,6 +1061,16 @@ impl Palette {
                         div().size(px(5.)).rounded_full().bg(dot).into_any_element(),
                         div().child(text).into_any_element(),
                         Some(div().text_color(dim).child(place).into_any_element()),
+                    )
+                } else if location.kind == LocationKind::Commit {
+                    // The subject, then who and when, faint.
+                    let (subject, detail) = location.text.split_once('\t').unwrap_or((&location.text, ""));
+                    let marked: Vec<_> =
+                        highlights_in(&location.text, 0).into_iter().filter(|(r, _)| r.end <= subject.len()).collect();
+                    (
+                        div().size(px(5.)).rounded_full().bg(color).into_any_element(),
+                        div().child(StyledText::new(subject.to_string()).with_highlights(marked)).into_any_element(),
+                        Some(div().text_color(dim).child(detail.to_string()).into_any_element()),
                     )
                 } else if let LocationKind::Symbol(kind) = location.kind {
                     // The name in the code font, the word that defines it beside it, faint.

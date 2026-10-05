@@ -86,6 +86,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Commit…", crate::workspace::CommitAll),
                 MenuItem::action("Push", crate::workspace::PushBranch),
                 MenuItem::action("Pull", crate::workspace::PullBranch),
+                MenuItem::action("Show File History", crate::workspace::FileHistory),
                 MenuItem::action("Switch Branch…", crate::workspace::SwitchBranch),
                 MenuItem::action("Revert All Changes…", crate::workspace::RevertAllChanges),
             ],
