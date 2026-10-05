@@ -7,6 +7,7 @@ mod dap;
 mod debugger;
 mod editor;
 mod element;
+mod encoding;
 mod file_style;
 mod file_tree;
 mod find_bar;

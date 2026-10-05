@@ -24,8 +24,8 @@ impl Preview {
 }
 
 /// How a file opens: `None` for text, the preview otherwise. `text` is what reading it as
-/// UTF-8 gave, so the file is read once.
-pub fn of(path: &Path, text: &std::io::Result<String>) -> Option<Preview> {
+/// text gave (see `encoding::read`), so the file is read once.
+pub fn of(path: &Path, text: &Result<&str, std::io::ErrorKind>) -> Option<Preview> {
     let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if IMAGES.contains(&ext.as_str()) {
@@ -36,7 +36,7 @@ pub fn of(path: &Path, text: &std::io::Result<String>) -> Option<Preview> {
         // A NUL byte: UTF-8, maybe, but not text anyone types.
         Ok(text) if text.as_bytes().iter().take(8192).any(|&b| b == 0) => Some(Preview::NotText { bytes }),
         Ok(_) => None,
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Some(Preview::NotText { bytes }),
+        Err(std::io::ErrorKind::InvalidData) => Some(Preview::NotText { bytes }),
         // Missing or unreadable: an empty editor, as before (a new file is written on save).
         Err(_) => None,
     }
@@ -135,6 +135,11 @@ mod tests {
         assert_eq!(file_size(5 * 1024 * 1024), "5.0 MB");
     }
 
+    fn read(path: &Path) -> Option<Preview> {
+        let read = crate::encoding::read(path);
+        of(path, &read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind()))
+    }
+
     #[test]
     fn tells_text_from_the_rest() {
         let dir = std::env::temp_dir().join(format!("null-preview-{}", std::process::id()));
@@ -142,14 +147,16 @@ mod tests {
         let open = |name: &str, bytes: &[u8]| {
             let path = dir.join(name);
             std::fs::write(&path, bytes).unwrap();
-            of(&path, &std::fs::read_to_string(&path))
+            read(&path)
         };
         assert_eq!(open("a.rs", b"fn main() {}\n"), None);
         assert_eq!(open("a.svg", b"<svg/>"), None);
         assert_eq!(open("a.o", b"\xcf\xfa\xed\xfe\x07"), Some(Preview::NotText { bytes: 5 }));
         assert_eq!(open("nul.txt", b"a\0b"), Some(Preview::NotText { bytes: 3 }));
         assert!(matches!(open("a.png", b"\x89PNG"), Some(Preview::Image { size: None, .. })));
-        assert_eq!(of(&dir.join("missing.rs"), &std::fs::read_to_string(dir.join("missing.rs"))), None);
+        assert_eq!(read(&dir.join("missing.rs")), None);
+        // Text in an older encoding is text, not a binary.
+        assert_eq!(open("latin.txt", b"caf\xe9\n"), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

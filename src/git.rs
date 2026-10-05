@@ -14,9 +14,12 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 /// The file as of the last commit. None if it isn't tracked (or there's no repo).
 /// Asked from the file's own folder, so a project opened through a link (or under
 /// /tmp, which is /private/tmp on macOS) still finds it.
-pub fn committed_text(path: &Path) -> Option<String> {
+pub fn committed_text(path: &Path, encoding: crate::encoding::Encoding) -> Option<String> {
     let name = path.file_name()?.to_str()?;
-    git(path.parent()?, &["show", &format!("HEAD:./{name}")])
+    let output =
+        Command::new("git").arg("-C").arg(path.parent()?).args(["show", &format!("HEAD:./{name}")]).output().ok()?;
+    // In the file's own encoding, so a Windows-1252 file compares with its accents.
+    output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
 }
 
 /// Whether a change inside `.git` can mean a new commit or branch: HEAD itself, the
@@ -336,8 +339,8 @@ mod tests {
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]).unwrap();
         std::fs::write(repo.join("src/a.rs"), "edited\n").unwrap();
         std::os::unix::fs::symlink(&repo, dir.join("link")).unwrap();
-        assert_eq!(committed_text(&dir.join("link/src/a.rs")).as_deref(), Some("committed\n"));
-        assert_eq!(committed_text(&repo.join("src/new.rs")), None);
+        assert_eq!(committed_text(&dir.join("link/src/a.rs"), Default::default()).as_deref(), Some("committed\n"));
+        assert_eq!(committed_text(&repo.join("src/new.rs"), Default::default()), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -468,8 +471,8 @@ mod tests {
         if git(readme.parent().unwrap(), &["rev-parse", "--git-dir"]).is_none() {
             return; // not running inside a git checkout
         }
-        assert!(committed_text(&readme).is_some_and(|t| t.contains("Null")));
+        assert!(committed_text(&readme, Default::default()).is_some_and(|t| t.contains("Null")));
         assert!(current_branch(readme.parent().unwrap()).is_some());
-        assert!(committed_text(&readme.with_file_name("does-not-exist.txt")).is_none());
+        assert!(committed_text(&readme.with_file_name("does-not-exist.txt"), Default::default()).is_none());
     }
 }
