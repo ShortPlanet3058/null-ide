@@ -17,7 +17,7 @@ mod snippet;
 mod structure;
 
 pub use assist::{Block, BlockKind};
-pub use breakpoints::ToggleBreakpoint;
+pub use breakpoints::{Breakpoint, ToggleBreakpoint};
 pub use completion::CompletionMenu;
 pub use cursors::Cursor;
 pub use fixes::QuickFix;
@@ -469,7 +469,11 @@ pub struct Editor {
     symbol_marks: marks::SymbolMarks,
     /// Lines (from 0) where the debugger should stop; they move with edits.
     pub breakpoints: Vec<usize>,
+    /// Breakpoints that only stop when something holds: (line, condition).
+    pub breakpoint_conditions: Vec<(usize, String)>,
     breakpoints_revision: u64,
+    /// The field a breakpoint's condition is being typed in.
+    editing_condition: Option<breakpoints::ConditionEdit>,
     /// The line the debugger stopped on, while it's stopped in this file.
     pub execution_line: Option<usize>,
     /// While stopped: values of the variables the lines above name, shown faintly at
@@ -583,7 +587,9 @@ impl Editor {
             cursor_history: Vec::new(),
             snippet: None,
             breakpoints: Vec::new(),
+            breakpoint_conditions: Vec::new(),
             breakpoints_revision: 0,
+            editing_condition: None,
             execution_line: None,
             inline_values: Vec::new(),
             debug_locals: Vec::new(),
@@ -2784,6 +2790,7 @@ impl Render for Editor {
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -2793,6 +2800,7 @@ impl Render for Editor {
         let rename = self.render_rename(cx);
         let completions = self.render_completions(cx);
         let fixes = self.render_fixes(cx);
+        let condition = self.render_condition(cx);
         let signature = self.render_signature(cx);
         let ai_blocks = self.render_ai_blocks(cx);
         div()
@@ -2806,6 +2814,7 @@ impl Render for Editor {
             .children(rename)
             .children(completions)
             .children(fixes)
+            .children(condition)
             .children(signature)
             .children(ai_blocks)
     }

@@ -676,6 +676,7 @@ impl Workspace {
                     side: tab.side,
                     folds: editor.folded_regions(),
                     breakpoints: editor.breakpoints.clone(),
+                    conditions: editor.breakpoint_conditions.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -726,6 +727,8 @@ impl Workspace {
                     editor.restore_folds(&tab.folds, cx);
                     let lines = editor.buffer.len_lines();
                     editor.breakpoints = tab.breakpoints.iter().copied().filter(|&l| l < lines).collect();
+                    editor.breakpoint_conditions =
+                        tab.conditions.iter().filter(|(l, _)| editor.breakpoints.contains(l)).cloned().collect();
                     editor.restore_view(tab.line, tab.column, tab.top_line, cx)
                 });
             }
@@ -1555,7 +1558,7 @@ impl Workspace {
                 EditorEvent::BreakpointsChanged => {
                     let editor = editor.read(cx);
                     if let Some(path) = editor.path().map(Path::to_path_buf) {
-                        let lines = editor.breakpoints.clone();
+                        let lines = editor.breakpoint_list();
                         this.debugger.update(cx, |debugger, _| debugger.set_breakpoints(&path, &lines));
                     }
                     this.schedule_session_save(cx);
@@ -3244,13 +3247,13 @@ impl Workspace {
 
     fn debug_with(&mut self, program: PathBuf, init_commands: Vec<String>, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
-        let mut breakpoints: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+        let mut breakpoints: Vec<(PathBuf, Vec<crate::editor::Breakpoint>)> = Vec::new();
         for tab in &self.tabs {
             let editor = tab.editor.read(cx);
             if let Some(path) = editor.path().filter(|_| !editor.breakpoints.is_empty())
                 && !breakpoints.iter().any(|(p, _)| p == path)
             {
-                breakpoints.push((path.to_path_buf(), editor.breakpoints.clone()));
+                breakpoints.push((path.to_path_buf(), editor.breakpoint_list()));
             }
         }
         self.debugger.update(cx, |d, cx| d.start(program, root, breakpoints, init_commands, cx));

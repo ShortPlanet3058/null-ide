@@ -178,7 +178,7 @@ impl Debugger {
         &mut self,
         program: PathBuf,
         cwd: PathBuf,
-        breakpoints: Vec<(PathBuf, Vec<usize>)>,
+        breakpoints: Vec<(PathBuf, Vec<crate::editor::Breakpoint>)>,
         init_commands: Vec<String>,
         cx: &mut Context<Self>,
     ) {
@@ -279,13 +279,19 @@ impl Debugger {
         self._tasks = vec![events, handshake];
     }
 
-    fn breakpoint_args(path: &Path, lines: &[usize]) -> Value {
-        let breakpoints: Vec<Value> = lines.iter().map(|l| json!({ "line": l + 1 })).collect();
+    fn breakpoint_args(path: &Path, lines: &[crate::editor::Breakpoint]) -> Value {
+        let breakpoints: Vec<Value> = lines
+            .iter()
+            .map(|b| match &b.condition {
+                Some(condition) => json!({ "line": b.line + 1, "condition": condition }),
+                None => json!({ "line": b.line + 1 }),
+            })
+            .collect();
         json!({ "source": { "path": path.display().to_string() }, "breakpoints": breakpoints })
     }
 
     /// While debugging: the breakpoints of one file changed.
-    pub fn set_breakpoints(&mut self, path: &Path, lines: &[usize]) {
+    pub fn set_breakpoints(&mut self, path: &Path, lines: &[crate::editor::Breakpoint]) {
         if let (Some(adapter), true) = (&self.adapter, self.is_active()) {
             drop(adapter.request("setBreakpoints", Self::breakpoint_args(path, lines)));
         }
@@ -516,8 +522,11 @@ mod tests {
         assert!(built.success());
         let debugger = cx.new(|_| Debugger::default());
         // A breakpoint on `total += i;` (line 5, from 0: 4).
-        debugger
-            .update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![4])], Vec::new(), cx));
+        // A breakpoint on `total += i;` (line 5, from 0: 4), only once i is 3.
+        let at = crate::editor::Breakpoint { line: 4, condition: Some("i == 3".into()) };
+        debugger.update(cx, |d, cx| {
+            d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![at])], Vec::new(), cx)
+        });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let stop = debugger.read_with(cx, |d, _| match &d.state {
             DebugState::Stopped(stop) => stop.clone(),
@@ -527,7 +536,8 @@ mod tests {
         let (path, line) = stop.place.clone().unwrap();
         assert_eq!((path.file_name().unwrap().to_str().unwrap(), line), ("main.c", 4));
         // Its locals, with their values, and the call it's in.
-        assert!(stop.locals.iter().any(|(name, value)| name == "total" && value == "0"), "{:?}", stop.locals);
+        // Stopped only once i is 3: total is 1 + 2 by then.
+        assert!(stop.locals.iter().any(|(name, value)| name == "total" && value == "3"), "{:?}", stop.locals);
         assert_eq!(stop.frames[0].name, "main");
         // Step over: on to the loop's next line.
         debugger.update(cx, |d, cx| d.resume("next", cx));
