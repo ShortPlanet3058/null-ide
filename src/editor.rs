@@ -425,7 +425,9 @@ pub struct Editor {
     /// Markdown shown as it reads (⌘⇧V) instead of its source.
     pub reading: bool,
     /// The parsed document for the preview, and the revision it's of.
-    markdown: Option<(u64, Rc<Vec<crate::markdown_view::Block>>)>,
+    markdown: Option<(u64, Rc<Vec<(usize, crate::markdown_view::Block)>>)>,
+    /// The source line the preview last scrolled to, following the other side.
+    followed_line: Option<usize>,
     reading_scroll: gpui::ScrollHandle,
     /// The merge conflicts in the text, and the revision they were found at.
     conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
@@ -594,6 +596,7 @@ impl Editor {
             viewport_height: None,
             reading: false,
             markdown: None,
+            followed_line: None,
             reading_scroll: gpui::ScrollHandle::new(),
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
@@ -3013,13 +3016,35 @@ impl Editor {
         cx.notify();
     }
 
+    /// The source's first line on screen, for a preview beside it to follow.
+    pub fn top_line(&self) -> usize {
+        let row = (self.scroll.target_y / f32::from(self.line_height())).max(0.) as usize;
+        self.wrap.line_of_row(row)
+    }
+
+    /// In the preview: scrolls to the block the source shows at its top, when that changes.
+    pub fn follow_source_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        if !self.reading || self.followed_line == Some(line) {
+            return;
+        }
+        self.followed_line = Some(line);
+        let Some((_, blocks)) = &self.markdown else { return };
+        let ix = blocks.iter().rposition(|(start, _)| *start <= line).unwrap_or(0);
+        if line == 0 {
+            self.reading_scroll.set_offset(gpui::point(px(0.), px(0.)));
+        } else {
+            self.reading_scroll.scroll_to_top_of_item(ix);
+        }
+        cx.notify();
+    }
+
     /// The preview: the document drawn as it reads, in a column, scrolling.
     fn render_reading(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let revision = self.buffer.revision();
         let blocks = match &self.markdown {
             Some((r, blocks)) if *r == revision => blocks.clone(),
             _ => {
-                let blocks = Rc::new(crate::markdown_view::parse(&self.buffer.to_string()));
+                let blocks = Rc::new(crate::markdown_view::parse_located(&self.buffer.to_string()));
                 self.markdown = Some((revision, blocks.clone()));
                 blocks
             }
@@ -3049,18 +3074,29 @@ impl Editor {
             .on_action(cx.listener(Self::toggle_markdown_preview))
             .on_action(cx.listener(Self::save))
             .child(
-                div().id("markdown-preview").size_full().overflow_y_scroll().track_scroll(&self.reading_scroll).child(
-                    div().w_full().flex().justify_center().px(px(32.)).py(px(28.)).child(
+                // Each block a child of the scroller, so the preview can scroll to one.
+                div()
+                    .id("markdown-preview")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.reading_scroll)
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.))
+                    .py(px(28.))
+                    .font_family(style.ui_font.clone())
+                    .text_size(px(15.))
+                    .line_height(px(24.))
+                    .text_color(theme.foreground)
+                    .children(crate::markdown_view::render_blocks(&blocks, &style).into_iter().map(|block| {
                         div()
                             .w_full()
-                            .max_w(px(760.))
-                            .font_family(style.ui_font.clone())
-                            .text_size(px(15.))
-                            .line_height(px(24.))
-                            .text_color(theme.foreground)
-                            .child(crate::markdown_view::render(&blocks, &style)),
-                    ),
-                ),
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .px(px(32.))
+                            .child(div().w_full().max_w(px(760.)).flex().flex_col().child(block))
+                    })),
             )
             .into_any_element()
     }

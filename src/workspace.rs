@@ -1456,6 +1456,20 @@ impl Workspace {
         }
     }
 
+    /// A Markdown preview beside its source follows it: the block at the source's top
+    /// is at the preview's.
+    fn sync_preview(&mut self, source: &Entity<Editor>, cx: &mut Context<Self>) {
+        if source.read(cx).reading {
+            return;
+        }
+        let line = source.read(cx).top_line();
+        for twin in self.twins_of(source, cx) {
+            if twin.read(cx).reading {
+                twin.update(cx, |preview, cx| preview.follow_source_line(line, cx));
+            }
+        }
+    }
+
     /// The other copies of a file open on both sides.
     fn twins_of(&self, editor: &Entity<Editor>, cx: &App) -> Vec<Entity<Editor>> {
         let Some(path) = editor.read(cx).path() else { return Vec::new() };
@@ -1544,7 +1558,10 @@ impl Workspace {
     fn add_tab_on(&mut self, editor: Entity<Editor>, side: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let side = side.unwrap_or_else(|| self.focused_side());
         let subscriptions = [
-            cx.observe(&editor, |_, _, cx| cx.notify()),
+            cx.observe(&editor, |this, editor, cx| {
+                this.sync_preview(&editor, cx);
+                cx.notify();
+            }),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited => {
                     this.schedule_backup(cx);

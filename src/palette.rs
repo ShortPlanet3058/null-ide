@@ -449,7 +449,7 @@ impl Palette {
         let query = self.query.clone();
         self.rows.clear();
         match self.kind {
-            PaletteKind::Files => self.file_rows(&query),
+            PaletteKind::Files => self.file_rows(split_place(&query).0),
             PaletteKind::Quick => self.quick_rows(&query),
             PaletteKind::Line | PaletteKind::Task | PaletteKind::Commit => {}
             PaletteKind::Locations => self.location_rows(&query),
@@ -785,8 +785,21 @@ impl Palette {
         let Some(item) = self.rows.get(ix).map(|r| r.item) else { return };
         match item {
             Item::Command(i) => cx.emit(PaletteEvent::Run(self.commands[i].action.boxed_clone())),
-            Item::File(i) => cx.emit(PaletteEvent::OpenFile(self.files[i].path.clone())),
-            Item::RecentFile(i) => cx.emit(PaletteEvent::OpenFile(self.recent_files[i].path.clone())),
+            Item::File(_) | Item::RecentFile(_) => {
+                let path = match item {
+                    Item::File(i) => self.files[i].path.clone(),
+                    Item::RecentFile(i) => self.recent_files[i].path.clone(),
+                    _ => unreachable!(),
+                };
+                // "name:42" (or "name:42:7") opens it there.
+                match split_place(&self.query).1 {
+                    Some((line, column)) => cx.emit(PaletteEvent::OpenLocation(
+                        path,
+                        lsp_types::Position { line: line - 1, character: column.saturating_sub(1) },
+                    )),
+                    None => cx.emit(PaletteEvent::OpenFile(path)),
+                }
+            }
             Item::Line(line) => cx.emit(PaletteEvent::GoToLine(line)),
             Item::Location(i) => {
                 let location = &self.locations[i];
@@ -1118,6 +1131,7 @@ impl Palette {
     /// What Enter does right now, shown at the end of the field.
     fn hint(&self) -> &'static str {
         match self.kind {
+            PaletteKind::Files if split_place(&self.query).1.is_some() => "↵ open there",
             PaletteKind::Files => "↵ open",
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
@@ -1316,8 +1330,36 @@ impl Render for Palette {
     }
 }
 
+/// A file query with a place after it: "conflicts.rs:283" or "conflicts.rs:283:13", as
+/// compilers print them. The name, and the 1-based line and column (column 1 if none).
+fn split_place(query: &str) -> (&str, Option<(u32, u32)>) {
+    let number = |s: &str| s.parse::<u32>().ok().filter(|&n| n > 0);
+    let mut parts = query.rsplitn(3, ':');
+    let (last, middle, first) = (parts.next(), parts.next(), parts.next());
+    match (first, middle.and_then(number), last.and_then(number)) {
+        (Some(name), Some(line), Some(column)) if !name.is_empty() => (name, Some((line, column))),
+        _ => match query.rsplit_once(':') {
+            Some((name, line)) if !name.is_empty() => match number(line) {
+                Some(line) => (name, Some((line, 1))),
+                None => (query, None),
+            },
+            _ => (query, None),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_a_place_after_a_file_name() {
+        use super::split_place;
+        assert_eq!(split_place("conflicts.rs:283"), ("conflicts.rs", Some((283, 1))));
+        assert_eq!(split_place("src/a.rs:12:5"), ("src/a.rs", Some((12, 5))));
+        assert_eq!(split_place("main.rs"), ("main.rs", None));
+        assert_eq!(split_place("main.rs:"), ("main.rs:", None));
+        assert_eq!(split_place(":12"), (":12", None));
+    }
+
     use super::*;
     use gpui::TestAppContext;
 
