@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 const GLIDE: Duration = Duration::from_millis(90);
 /// The caret stays solid while you work and only starts blinking after this.
 const BLINK_DELAY: Duration = Duration::from_millis(500);
+/// …and blinks this long; then it stays lit and nothing is drawn until something happens
+/// (each blink's fades are frames drawn, which kept an idle window busy).
+const BLINK_FOR: Duration = Duration::from_secs(15);
 const TOP_PADDING: f32 = 8.;
 const TEXT_PADDING: f32 = 8.;
 pub(crate) const GUTTER_PADDING: f32 = 16.;
@@ -1119,6 +1122,9 @@ impl Element for EditorElement {
                 let idle = now - editor.last_activity;
                 if idle < BLINK_DELAY {
                     editor.wake_after(BLINK_DELAY - idle, cx);
+                    1.
+                } else if idle >= BLINK_DELAY + BLINK_FOR {
+                    // Resting: lit, and no more frames until the next keystroke or click.
                     1.
                 } else {
                     let phase = ((idle - BLINK_DELAY).as_millis() % 1100) as u64;
