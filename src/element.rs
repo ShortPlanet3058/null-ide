@@ -256,6 +256,8 @@ pub struct Prepaint {
     execution: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
     /// Faint lines down the indentation, one per level.
     indent_guides: Vec<Bounds<Pixels>>,
+    /// The line at the project's line length.
+    line_guide: Option<Bounds<Pixels>>,
     /// The first lines of the blocks the view is inside, pinned at the top: the band
     /// behind them, and each one's text and line number.
     sticky: Option<(Bounds<Pixels>, Vec<(ShapedLine, Point<Pixels>, ShapedLine, Point<Pixels>)>)>,
@@ -826,6 +828,12 @@ impl Element for EditorElement {
                 })
             });
 
+            // The project's line length: a faint line down the text at that column.
+            let line_guide = editor.style.ruler.filter(|_| cx.global::<Settings>().line_guide).and_then(|width| {
+                let x = text_bounds.left() + px(TEXT_PADDING) + char_width * width as f32 - px(editor.scroll.x);
+                (x > text_bounds.left() && x < text_bounds.right())
+                    .then(|| Bounds::new(point(x, text_bounds.top()), size(px(1.), text_bounds.size.height)))
+            });
             // Indent guides: a faint line at each level a line is indented past. Blank lines
             // take the smaller indentation of the lines around them, so guides run through.
             let indent_guides: Vec<Bounds<Pixels>> = if cx.global::<Settings>().indent_guides {
@@ -1217,6 +1225,7 @@ impl Element for EditorElement {
                 breakpoint_dots,
                 execution,
                 indent_guides,
+                line_guide,
                 sticky,
                 numbers,
                 chevrons,
@@ -1305,6 +1314,9 @@ impl Element for EditorElement {
         window.with_content_mask(Some(ContentMask { bounds: prepaint.text_bounds }), |window| {
             for rect in &prepaint.indent_guides {
                 window.paint_quad(fill(*rect, theme.hairline));
+            }
+            if let Some(rect) = prepaint.line_guide {
+                window.paint_quad(fill(rect, theme.hairline));
             }
             for rect in &prepaint.symbol_marks {
                 window.paint_quad(fill(*rect, theme.find_match.opacity(0.6)).corner_radii(px(3.)));

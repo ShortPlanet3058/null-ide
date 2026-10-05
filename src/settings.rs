@@ -42,6 +42,8 @@ pub struct Settings {
     pub line_blame: bool,
     /// Faint lines down the indentation, one per level.
     pub indent_guides: bool,
+    /// A faint line at the length the project keeps lines to, when it sets one.
+    pub line_guide: bool,
     /// Keep the first lines of the blocks scrolled into pinned at the top.
     pub sticky_scroll: bool,
     /// Tint the other uses of the name at the caret.
@@ -75,6 +77,7 @@ impl Default for Settings {
             line_blame: true,
             inlay_hints: false,
             indent_guides: true,
+            line_guide: true,
             sticky_scroll: true,
             symbol_marks: true,
             ai: Default::default(),

@@ -588,6 +588,14 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Line-length guide",
+                Some(
+                    "A faint line at the length the project keeps to: .editorconfig, rustfmt, Prettier, Black or Ruff",
+                ),
+                Self::toggle("line-guide", s.line_guide, &theme, cx, |s| s.line_guide = !s.line_guide),
+                &theme,
+            ),
+            Self::row(
                 "Sticky scroll",
                 Some("Inside a long function or block, its first line stays at the top"),
                 Self::toggle("sticky-scroll", s.sticky_scroll, &theme, cx, |s| s.sticky_scroll = !s.sticky_scroll),

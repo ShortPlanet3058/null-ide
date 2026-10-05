@@ -77,6 +77,7 @@ actions!(
         PauseDebugging,
         NextProblem,
         ToggleIndentGuides,
+        ToggleLineGuide,
         ToggleStickyScroll,
         ToggleSymbolMarks,
         PreviousProblem,
@@ -2494,6 +2495,11 @@ impl Workspace {
                 View,
                 toggle(settings.indent_guides, "Hide Indent Guides", "Show Indent Guides"),
                 Box::new(ToggleIndentGuides),
+            ),
+            (
+                View,
+                toggle(settings.line_guide, "Hide Line-Length Guide", "Show Line-Length Guide"),
+                Box::new(ToggleLineGuide),
             ),
             (
                 View,
@@ -5483,6 +5489,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &ToggleIndentGuides, _, cx| {
                 settings::update(cx, |s| s.indent_guides = !s.indent_guides)
             }))
+            .on_action(
+                cx.listener(|_, _: &ToggleLineGuide, _, cx| settings::update(cx, |s| s.line_guide = !s.line_guide)),
+            )
             .on_action(cx.listener(Self::previous_problem))
             .on_action(cx.listener(|_, _: &AutoSaveAfterPause, _, cx| {
                 settings::update(cx, |s| s.auto_save = AutoSave::AfterPause)
