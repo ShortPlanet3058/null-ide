@@ -999,3 +999,74 @@ mod tests {
         assert_eq!(starts, [3, 5, 8, 12, 16, 19, 21, 25, 27]);
     }
 }
+
+/// What Enter carries on to the next line of a Markdown list or quote, from the text
+/// before the caret: the next line's start ("- ", "3. ", "- [ ] ", "> "), and whether
+/// the item was left empty (then Enter ends the list instead).
+pub fn continuation(before_caret: &str) -> Option<(String, bool)> {
+    let indent_len = before_caret.len() - before_caret.trim_start_matches([' ', '\t']).len();
+    let (indent, mut rest) = before_caret.split_at(indent_len);
+    let mut quotes = String::new();
+    while let Some(after) = rest.strip_prefix('>') {
+        quotes.push('>');
+        rest = after;
+        if let Some(after) = rest.strip_prefix(' ') {
+            quotes.push(' ');
+            rest = after;
+        }
+    }
+    let mut next = String::new();
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    let marker = if rest.starts_with(['-', '*', '+']) {
+        Some((rest[..1].to_string(), 1))
+    } else if (1..=9).contains(&digits) && rest[digits..].starts_with(['.', ')']) {
+        let number: u64 = rest[..digits].parse().ok()?;
+        Some((format!("{}{}", number + 1, &rest[digits..digits + 1]), digits + 1))
+    } else {
+        None
+    };
+    if let Some((mark, len)) = marker {
+        let spaces = rest[len..].chars().take_while(|&c| c == ' ').count();
+        // "-text" isn't an item, and "---" is a rule.
+        if spaces == 0 {
+            return None;
+        }
+        next.push_str(&mark);
+        next.push_str(&" ".repeat(spaces));
+        rest = &rest[len + spaces..];
+        for task in ["[ ] ", "[x] ", "[X] "] {
+            if let Some(after) = rest.strip_prefix(task) {
+                next.push_str("[ ] ");
+                rest = after;
+            }
+        }
+    }
+    if quotes.is_empty() && next.is_empty() {
+        return None;
+    }
+    Some((format!("{indent}{quotes}{next}"), rest.trim().is_empty()))
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::continuation;
+
+    #[test]
+    fn lists_and_quotes_carry_on() {
+        assert_eq!(continuation("- milk"), Some(("- ".into(), false)));
+        assert_eq!(continuation("  * nested"), Some(("  * ".into(), false)));
+        assert_eq!(continuation("9. ninth"), Some(("10. ".into(), false)));
+        assert_eq!(continuation("1) first"), Some(("2) ".into(), false)));
+        assert_eq!(continuation("- [x] done"), Some(("- [ ] ".into(), false)));
+        assert_eq!(continuation("> quoted"), Some(("> ".into(), false)));
+        assert_eq!(continuation("> - in a quote"), Some(("> - ".into(), false)));
+        // An empty item: Enter ends the list.
+        assert_eq!(continuation("- "), Some(("- ".into(), true)));
+        assert_eq!(continuation("- [ ] "), Some(("- [ ] ".into(), true)));
+        // Not lists.
+        assert_eq!(continuation("plain text"), None);
+        assert_eq!(continuation("-dash"), None);
+        assert_eq!(continuation("---"), None);
+        assert_eq!(continuation("2026 was a year"), None);
+    }
+}
