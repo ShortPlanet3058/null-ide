@@ -1584,6 +1584,9 @@ impl Editor {
             let mut range = this.selection.range();
             let (line, col) = this.buffer.point(range.start);
             let line_text = this.buffer.line_text(line);
+            if this.continue_markdown(range.clone(), line, col, &line_text, cx) {
+                return;
+            }
             // The indentation up to the caret only: Enter inside it doesn't double it.
             let indent: String = line_text.chars().take(col).take_while(|c| *c == ' ' || *c == '\t').collect();
             // On a line of only spaces, those spaces don't stay behind.
@@ -1611,6 +1614,37 @@ impl Editor {
         });
         // A new line is a good moment for a suggestion (the body after `def f():`...).
         self.schedule_ghost(None, cx);
+    }
+
+    /// Enter in a Markdown list or quote: the next line starts the next item (an empty
+    /// item ends the list instead). False when it isn't one, or the caret is in code.
+    fn continue_markdown(
+        &mut self,
+        range: Range<usize>,
+        line: usize,
+        col: usize,
+        line_text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.is_markdown() || !range.is_empty() {
+            return false;
+        }
+        let before: String = line_text.chars().take(col).collect();
+        let Some((next, empty)) = crate::markdown_view::continuation(&before) else { return false };
+        // Inside a fenced code block, Enter is just Enter.
+        let fences = (0..line).filter(|&l| self.buffer.line_text(l).trim_start().starts_with("```")).count();
+        if fences % 2 == 1 {
+            return false;
+        }
+        let start = self.buffer.line_to_char(line);
+        if empty && line_text.chars().skip(col).all(char::is_whitespace) {
+            // An empty item: the marker goes, and the list ends here.
+            self.edit(start..start + self.buffer.line_len(line), "", EditKind::Other, cx);
+            return true;
+        }
+        let nl = self.style.line_ending.text();
+        self.edit(range, &format!("{nl}{next}"), EditKind::Other, cx);
+        true
     }
 
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
@@ -3170,6 +3204,36 @@ impl Editor {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    /// Enter in a Markdown list starts the next item; on an empty one, it ends the list.
+    #[gpui::test]
+    fn enter_carries_markdown_lists_on(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(""), Some(PathBuf::from("todo.md")), cx));
+        e.update_in(cx, |e, window, _| window.focus(&e.focus_handle));
+        cx.simulate_input("1. milk");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("eggs");
+        cx.simulate_keystrokes("enter enter");
+        cx.simulate_input("done");
+        cx.run_until_parked();
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "1. milk\n2. eggs\ndone");
+        // Not in a code block.
+        let (code, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("```\n- item"), Some(PathBuf::from("x.md")), cx));
+        code.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle);
+            e.set_caret_point((1, 6), cx);
+        });
+        cx.simulate_keystrokes("enter");
+        assert_eq!(code.read_with(cx, |e, _| e.buffer.to_string()), "```\n- item\n");
+    }
 
     #[gpui::test]
     fn a_file_deleted_with_its_folder_is_noticed_and_saved_back(cx: &mut TestAppContext) {
