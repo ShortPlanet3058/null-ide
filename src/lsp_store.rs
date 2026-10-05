@@ -231,6 +231,11 @@ impl LspStore {
         }
     }
 
+    /// Whether a language server answers for this file now.
+    pub fn serves(&self, path: &Path) -> bool {
+        self.server_for(path).is_some()
+    }
+
     fn server_for(&self, path: &Path) -> Option<Arc<LanguageServer>> {
         match self.servers.get(config_for(path)?.name)? {
             ServerState::Running { server } => Some(server.clone()),

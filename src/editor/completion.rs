@@ -11,6 +11,12 @@ use std::time::Duration;
 /// Wait for a pause in typing before asking, so the list doesn't flicker.
 const TYPING_PAUSE: Duration = Duration::from_millis(90);
 const MAX_SHOWN: usize = 100;
+/// Words of the file are looked for this many lines around the caret, and no further
+/// than this many characters (a minified file is one long line).
+const WORDS_AROUND: usize = 2000;
+const WORDS_AROUND_CHARS: usize = 100_000;
+/// Without a language server, the list opens by itself once a word is this long.
+const WORDS_AFTER: usize = 2;
 
 pub struct Suggestion {
     pub label: String,
@@ -81,7 +87,7 @@ fn is_word_char(c: char) -> bool {
 impl Editor {
     /// After typing `text`: open, refresh or close the list.
     pub(super) fn completion_after_typing(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.lsp.is_none() || !self.selection.is_empty() || self.multi_cursor() {
+        if !self.selection.is_empty() || self.multi_cursor() {
             return self.close_completion(cx);
         }
         let Some(last) = text.chars().last() else { return };
@@ -99,7 +105,61 @@ impl Editor {
             return;
         }
         let word_start = if trigger.is_some() { caret } else { self.word_start_before(caret) };
+        // The file's own words: they open by themselves in code, not while writing prose, nor
+        // when AI completions already suggest the file's names inline.
+        let own_words = !self.served(cx);
+        let quiet = self.is_prose() || caret - word_start < WORDS_AFTER || cx.global::<Settings>().ai.completions;
+        if own_words && self.completion.is_none() && quiet {
+            return;
+        }
         self.request_completion(word_start, trigger, TYPING_PAUSE, cx);
+    }
+
+    /// Whether a language server gives this file's suggestions (otherwise its own words do).
+    fn served(&self, cx: &Context<Self>) -> bool {
+        match (&self.lsp, &self.path) {
+            (Some(lsp), Some(path)) => lsp.read(cx).serves(path),
+            _ => false,
+        }
+    }
+
+    /// The words of the file around the caret, nearest first, but the one being typed.
+    fn words_near(&self, word_start: usize) -> Vec<CompletionItem> {
+        let caret = self.selection.head;
+        let line = self.buffer.point(caret).0;
+        let first =
+            self.buffer.line_to_char(line.saturating_sub(WORDS_AROUND)).max(caret.saturating_sub(WORDS_AROUND_CHARS));
+        let last = self.buffer.line_to_char(line + WORDS_AROUND).min(caret + WORDS_AROUND_CHARS);
+        let mut nearest: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut word = String::new();
+        let mut start = first;
+        let text = self.buffer.slice(first..last);
+        for (i, c) in text.chars().chain([' ']).enumerate() {
+            let at = first + i;
+            if is_word_char(c) {
+                if word.is_empty() {
+                    start = at;
+                }
+                word.push(c);
+                continue;
+            }
+            // Not the word being typed itself.
+            if word.chars().count() >= 3 && !word.starts_with(|c: char| c.is_ascii_digit()) && start != word_start {
+                let distance = if at <= word_start { word_start - at } else { start - caret };
+                let best = nearest.entry(std::mem::take(&mut word)).or_insert(distance);
+                *best = (*best).min(distance);
+            }
+            word.clear();
+        }
+        nearest
+            .into_iter()
+            .map(|(label, distance)| CompletionItem {
+                sort_text: Some(format!("{distance:010}")),
+                kind: Some(CompletionItemKind::TEXT),
+                label,
+                ..Default::default()
+            })
+            .collect()
     }
 
     /// After deleting: keep the list in step, or close it once the word is gone.
@@ -140,6 +200,10 @@ impl Editor {
         delay: Duration,
         cx: &mut Context<Self>,
     ) {
+        if !self.served(cx) {
+            let words = self.words_near(word_start);
+            return self.show_suggestions(words, word_start, cx);
+        }
         let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else { return };
         let position = self.lsp_position(self.selection.head);
         self.completion_task = Some(cx.spawn(async move |this, cx| {
@@ -148,33 +212,34 @@ impl Editor {
                 return;
             };
             let items = request.await;
-            this.update(cx, |this, cx| {
-                if items.is_empty() {
-                    return this.close_completion(cx);
-                }
-                let selected_label = this
-                    .completion
-                    .as_ref()
-                    .and_then(|m| m.shown.get(m.selected))
-                    .map(|&(i, _)| this.completion.as_ref().unwrap().suggestions[i].label.clone());
-                let scroll = this.completion.take().map(|m| m.scroll).unwrap_or_default();
-                this.completion = Some(CompletionMenu {
-                    suggestions: items.into_iter().map(Suggestion::from_lsp).collect(),
-                    shown: Vec::new(),
-                    selected: 0,
-                    word_start,
-                    scroll,
-                });
-                this.refilter(cx);
-                // Keep the same suggestion selected when the list refreshes under it.
-                if let (Some(label), Some(menu)) = (selected_label, this.completion.as_mut())
-                    && let Some(ix) = menu.shown.iter().position(|&(i, _)| menu.suggestions[i].label == label)
-                {
-                    menu.selected = ix;
-                }
-            })
-            .ok();
+            this.update(cx, |this, cx| this.show_suggestions(items, word_start, cx)).ok();
         }));
+    }
+
+    /// Shows `items` as the list for the word starting at `word_start`, keeping the selected
+    /// suggestion when the list refreshes under it.
+    fn show_suggestions(&mut self, items: Vec<CompletionItem>, word_start: usize, cx: &mut Context<Self>) {
+        if items.is_empty() {
+            return self.close_completion(cx);
+        }
+        let selected_label = self
+            .completion
+            .as_ref()
+            .and_then(|m| m.shown.get(m.selected).map(|&(i, _)| m.suggestions[i].label.clone()));
+        let scroll = self.completion.take().map(|m| m.scroll).unwrap_or_default();
+        self.completion = Some(CompletionMenu {
+            suggestions: items.into_iter().map(Suggestion::from_lsp).collect(),
+            shown: Vec::new(),
+            selected: 0,
+            word_start,
+            scroll,
+        });
+        self.refilter(cx);
+        if let (Some(label), Some(menu)) = (selected_label, self.completion.as_mut())
+            && let Some(ix) = menu.shown.iter().position(|&(i, _)| menu.suggestions[i].label == label)
+        {
+            menu.selected = ix;
+        }
     }
 
     /// Re-ranks the suggestions against what's typed so far.
@@ -385,6 +450,62 @@ mod tests {
         });
         cx.simulate_keystrokes("cmd-z cmd-z");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "const a = useState(initial)\n"));
+    }
+
+    fn editor<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        name: &str,
+        text: &str,
+    ) -> (gpui::Entity<Editor>, &'a mut gpui::VisualTestContext) {
+        use gpui::Focusable;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let (name, text) = (std::path::PathBuf::from(name), text.to_string());
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(crate::buffer::Buffer::from_text(&text), Some(name), cx));
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            e.selection = Selection::caret(e.buffer.len_chars());
+        });
+        (e, cx)
+    }
+
+    fn shown(cx: &mut gpui::VisualTestContext, e: &gpui::Entity<Editor>) -> Vec<String> {
+        e.update(cx, |e, _| {
+            e.completion
+                .as_ref()
+                .map_or(Vec::new(), |m| (0..m.shown.len()).map(|i| m.suggestion(i).label.clone()).collect())
+        })
+    }
+
+    /// With no language server, the file's own words: nearest first, not the one typed,
+    /// once two letters are in.
+    #[gpui::test]
+    fn without_a_server_the_files_words_are_suggested(cx: &mut gpui::TestAppContext) {
+        let (e, cx) = editor(cx, "deploy.yaml", "release_tag: 1\nname: x\nrelease_name: y\nr");
+        cx.run_until_parked();
+        assert!(shown(cx, &e).is_empty());
+        cx.simulate_input("e");
+        cx.run_until_parked();
+        assert_eq!(shown(cx, &e), ["release_name", "release_tag"]);
+        cx.simulate_input("l");
+        cx.simulate_keystrokes("enter");
+        e.update(cx, |e, _| assert!(e.buffer.to_string().ends_with("release_name: y\nrelease_name")));
+    }
+
+    /// In prose they only come when asked for: writing doesn't pop a list up.
+    #[gpui::test]
+    fn prose_gets_words_only_when_asked(cx: &mut gpui::TestAppContext) {
+        let (e, cx) = editor(cx, "notes.md", "Paragraphs and paragons.\n\npar");
+        cx.simulate_input("a");
+        cx.run_until_parked();
+        assert!(shown(cx, &e).is_empty());
+        cx.simulate_keystrokes("ctrl-space");
+        cx.run_until_parked();
+        assert_eq!(shown(cx, &e), ["paragons", "Paragraphs"]);
     }
 
     #[test]
