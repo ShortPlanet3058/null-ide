@@ -112,6 +112,16 @@ pub fn inline_values(lines: &[(usize, String)], locals: &[(String, String)]) -> 
     by_line.into_iter().map(|(line, list)| (line, list.join("   "))).collect()
 }
 
+/// For a Rust program: the lldb command that teaches it Rust's types (so a `&str` or a
+/// `String` shows its text), from the toolchain's own formatters, when they're there.
+pub fn rust_formatters() -> Option<String> {
+    let rustc = crate::tools::find("rustc")?;
+    let output = std::process::Command::new(rustc).args(["--print", "sysroot"]).output().ok()?;
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let script = sysroot.join("lib/rustlib/etc/lldb_lookup.py");
+    script.is_file().then(|| format!("command script import \"{}\"", script.display()))
+}
+
 /// How many calls of the stack are asked for.
 const FRAMES: usize = 40;
 
@@ -169,6 +179,7 @@ impl Debugger {
         program: PathBuf,
         cwd: PathBuf,
         breakpoints: Vec<(PathBuf, Vec<usize>)>,
+        init_commands: Vec<String>,
         cx: &mut Context<Self>,
     ) {
         if self.state != DebugState::Building {
@@ -238,7 +249,10 @@ impl Debugger {
             let cwd_text = cwd.display().to_string();
             let launch = adapter.request(
                 "launch",
-                json!({ "program": program.display().to_string(), "cwd": cwd_text, "args": [], "stopOnEntry": false }),
+                json!({
+                    "program": program.display().to_string(), "cwd": cwd_text, "args": [], "stopOnEntry": false,
+                    "initCommands": init_commands,
+                }),
             );
             if initialized_rx.await.is_err() {
                 return;
@@ -502,7 +516,8 @@ mod tests {
         assert!(built.success());
         let debugger = cx.new(|_| Debugger::default());
         // A breakpoint on `total += i;` (line 5, from 0: 4).
-        debugger.update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![4])], cx));
+        debugger
+            .update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![4])], Vec::new(), cx));
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let stop = debugger.read_with(cx, |d, _| match &d.state {
             DebugState::Stopped(stop) => stop.clone(),

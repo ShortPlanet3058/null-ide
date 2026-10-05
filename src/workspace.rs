@@ -3208,9 +3208,12 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
-                    std::process::Command::new(cargo).arg("build").current_dir(&cwd).output()
+                    let built = std::process::Command::new(cargo).arg("build").current_dir(&cwd).output();
+                    // Rust's own formatters, so its strings and collections show their contents.
+                    (built, crate::debugger::rust_formatters())
                 })
                 .await;
+            let (built, formatters) = built;
             this.update(cx, |this, cx| {
                 let message = match (&built, &program) {
                     (Ok(output), _) if !output.status.success() => {
@@ -3226,7 +3229,7 @@ impl Workspace {
                         d.append_output(&message, cx);
                         d.stop(cx);
                     }),
-                    None => this.debug(program.expect("checked above"), cx),
+                    None => this.debug_with(program.expect("checked above"), formatters.into_iter().collect(), cx),
                 }
             })
             .ok();
@@ -3236,6 +3239,10 @@ impl Workspace {
 
     /// Runs `program` under the debugger, with every breakpoint set in the open files.
     fn debug(&mut self, program: PathBuf, cx: &mut Context<Self>) {
+        self.debug_with(program, Vec::new(), cx);
+    }
+
+    fn debug_with(&mut self, program: PathBuf, init_commands: Vec<String>, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
         let mut breakpoints: Vec<(PathBuf, Vec<usize>)> = Vec::new();
         for tab in &self.tabs {
@@ -3246,7 +3253,7 @@ impl Workspace {
                 breakpoints.push((path.to_path_buf(), editor.breakpoints.clone()));
             }
         }
-        self.debugger.update(cx, |d, cx| d.start(program, root, breakpoints, cx));
+        self.debugger.update(cx, |d, cx| d.start(program, root, breakpoints, init_commands, cx));
     }
 
     fn debugger_event(&mut self, event: &crate::debugger::DebuggerEvent, window: &mut Window, cx: &mut Context<Self>) {
