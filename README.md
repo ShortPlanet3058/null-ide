@@ -6,9 +6,10 @@ Null is a new IDE built around one idea: the screen belongs to your code. It aim
 first-class, polished experience — instant, fluid, beautiful — and keeps AI within reach
 without ever making it the center of the room.
 
-> Status: **pre-alpha**. Opens a folder with a file tree, tabs, a terminal and project
-> search, with syntax highlighting for Rust, Python, JavaScript, TypeScript, JSON, TOML,
-> Markdown, HTML, CSS, Go, C, C++, YAML and shell scripts.
+> Status: **pre-alpha**, used daily on macOS. An editor with language servers, git, a
+> terminal, tests and a debugger, syntax highlighting for Rust, Python, JavaScript,
+> TypeScript, JSON, TOML, Markdown, HTML, CSS, Go, C, C++, YAML and shell scripts, and AI
+> that stays out of the way until called.
 
 ## Building
 
@@ -46,7 +47,12 @@ Getting around:
 | ⌘, | all settings |
 | ⌃G | go to a line |
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
+| ⌘P `file:42:7` | open a file at a place, as compilers print it |
+| ⌘⇧F / ⌘⇧H | search / replace across the project |
+| ⌃- / ⌃⇧- | back / forward to where you were |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
+| ⌘⇧N / ⌥⌘O | a new window / a recent project |
+| ⌥⌘↵ | focus mode: only the code |
 | ⌥⌘I | an AI task, reviewed change by change (with Claude Code or Codex) |
 
 Coming from another editor? Pick its shortcuts (VS Code, JetBrains, Sublime Text or Zed) on
@@ -54,6 +60,49 @@ the welcome screen or in Settings → Keyboard.
 
 Shaders are compiled when the app starts (GPUI's `runtime_shaders` feature), so the build
 doesn't need Xcode's separate Metal Toolchain download.
+
+## Writing
+
+- **⌘.** offers the language server's quick fixes at the caret (a missing import, match
+  arms…). **F8** goes from problem to problem.
+- Multiple cursors (⌘D, ⌘⇧-click), a box with ⌥⇧-drag, cursors at line ends (⌥⇧I);
+  expand the selection by syntax, move and duplicate lines, join, sort, change case.
+- Faint indent guides, sticky scroll (the enclosing lines stay at the top), the other uses
+  of a name tinted, and a line at the length the project keeps to (from `.editorconfig`,
+  rustfmt, Prettier, Black or Ruff). Each can be turned off.
+- Files keep their own style: indentation, line endings, and encoding (UTF-8 with or
+  without BOM, UTF-16, Windows-1252), shown in the status bar when not the usual.
+- Unsaved work survives a crash. A file renamed or moved outside Null is followed; one
+  deleted shows struck through, and saving puts it back.
+- Images open as images; other files that aren't text are never saved over. Minified
+  files with very long lines stay quick.
+
+## Markdown
+
+**⌘⇧V** shows a Markdown file as it reads (headings, lists, tables, code coloured, local
+images); **Open Markdown Preview to the Side** keeps it next to the source, following as you
+scroll and type. Markdown and text wrap on their own setting (⌥Z switches it in one of
+those files); Enter carries lists and quotes on, Tab nests an item.
+
+## Git
+
+- **⌃⇧G** lists what changed since the last commit; each file opens with its changes to
+  keep or take back one by one.
+- **Commit** lists the files under the message: ⇥ leaves one out. **Push** and **Pull**;
+  ↑ and ↓ beside the branch count what's to push and pull (as last fetched: Null never
+  goes to the network on its own). Switch or start a branch from the status bar.
+- Who last changed the caret's line, faintly at its end. **Show File History**, and any
+  commit's version compared with the file now.
+- Merge conflicts: each side tinted, **⌘.** keeps one or both, **⌥F8** to the next.
+
+## Running, testing, debugging
+
+- **⌘⇧B** runs what the project defines (Cargo, package.json scripts, Make, just, Go).
+- **⌥⌘T** runs the test at the caret (Rust, Go, pytest, vitest, jest), or all of a file's.
+- The terminal (**⌃\`**, more with **⌃⇧\`**): ⌘-click a `file:line:col` or a link in its
+  output to open it, **⌘F** searches it.
+- **F5** debugs (lldb-dap, with Xcode): breakpoints with **F9**, conditions with a
+  right-click, values shown faintly beside the code and in a panel.
 
 ## Principles
 
@@ -65,7 +114,7 @@ doesn't need Xcode's separate Metal Toolchain download.
   are treated as core features, not polish for later.
 - **Bring your own model.** Local models or your own API key — your choice.
 
-## Planned stack
+## Built with
 
 - [Rust](https://www.rust-lang.org/) + [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) for GPU-accelerated UI
 - [tree-sitter](https://tree-sitter.github.io/) for syntax and structure
@@ -172,7 +221,8 @@ more code fonts so every platform has the same choice:
 [Commit Mono](https://github.com/eigilnikolajsen/commit-mono),
 [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono),
 [IBM Plex Mono](https://github.com/IBM/plex) and
-[Source Code Pro](https://github.com/adobe-fonts/source-code-pro). All are under the SIL Open
+[Source Code Pro](https://github.com/adobe-fonts/source-code-pro). Instrument Sans comes with its
+italics, for emphasis in the Markdown preview. All are under the SIL Open
 Font License 1.1 (see `assets/fonts/*/OFL.txt`). Any installed font can be used instead: pick
 one in Settings → Appearance, or set `code_font` and `ui_font` in the JSON.
 
