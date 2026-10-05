@@ -167,7 +167,7 @@ impl Drop for LanguageServer {
 }
 
 /// Reads one `Content-Length`-framed JSON message. None at end of stream.
-fn read_message(reader: &mut impl BufRead) -> Option<Value> {
+pub(crate) fn read_message(reader: &mut impl BufRead) -> Option<Value> {
     loop {
         let mut length = None;
         loop {

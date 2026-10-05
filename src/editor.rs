@@ -1,4 +1,5 @@
 mod assist;
+mod breakpoints;
 mod changes;
 mod commands;
 mod completion;
@@ -16,6 +17,7 @@ mod snippet;
 mod structure;
 
 pub use assist::{Block, BlockKind};
+pub use breakpoints::ToggleBreakpoint;
 pub use completion::CompletionMenu;
 pub use cursors::Cursor;
 pub use fixes::QuickFix;
@@ -131,6 +133,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     refactor::bind_keys(cx);
     fold::bind_keys(cx);
     fixes::bind_keys(cx);
+    breakpoints::bind_keys(cx);
     structure::bind_keys(cx);
     snippet::bind_keys(cx);
 }
@@ -296,6 +299,8 @@ pub enum EditorEvent {
     },
     /// Every change of a review was kept or undone.
     Reviewed,
+    /// The breakpoints changed (set, removed, or moved by an edit).
+    BreakpointsChanged,
     /// Several places to choose from (implementations): the workspace lists them.
     ShowLocations {
         title: String,
@@ -462,6 +467,11 @@ pub struct Editor {
     hints: hints::Hints,
     /// Other uses of the symbol at the caret.
     symbol_marks: marks::SymbolMarks,
+    /// Lines (from 0) where the debugger should stop; they move with edits.
+    pub breakpoints: Vec<usize>,
+    breakpoints_revision: u64,
+    /// The line the debugger stopped on, while it's stopped in this file.
+    pub execution_line: Option<usize>,
     /// The snippet being filled in, if any.
     snippet: Option<snippet::Session>,
     /// Cursors as they were before each one was added, for ⌘U.
@@ -567,6 +577,9 @@ impl Editor {
             expansions: Default::default(),
             cursor_history: Vec::new(),
             snippet: None,
+            breakpoints: Vec::new(),
+            breakpoints_revision: 0,
+            execution_line: None,
             symbol_marks: Default::default(),
             hints: Default::default(),
             fixes_task: None,
@@ -715,6 +728,7 @@ impl Editor {
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
         self.hints_after_edit();
+        self.breakpoints_after_edit(cx);
         // Cursors from before an edit aren't somewhere to go back to.
         self.cursor_history.clear();
         self.close_hover(cx);
@@ -1975,6 +1989,9 @@ impl Editor {
         if self.scrollbar_mouse_down(event.position, cx) {
             return;
         }
+        if let Some(line) = self.breakpoint_click(event.position) {
+            return self.toggle_breakpoint_at(line, cx);
+        }
         if let Some(line) = self.fold_click(event.position) {
             return self.toggle_fold(line, cx);
         }
@@ -2719,6 +2736,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::accept_ghost_action))
             .on_action(cx.listener(Self::rename_symbol))
             .on_action(cx.listener(Self::quick_fix))
+            .on_action(cx.listener(Self::toggle_breakpoint))
             .on_action(cx.listener(Self::expand_selection))
             .on_action(cx.listener(Self::next_placeholder))
             .on_action(cx.listener(Self::previous_placeholder))

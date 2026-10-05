@@ -214,6 +214,20 @@ pub fn set(cx: &mut App) {
             ],
         },
         Menu {
+            name: "Debug".into(),
+            items: vec![
+                MenuItem::action("Start or Continue", crate::workspace::StartDebugging),
+                MenuItem::action("Pause", crate::workspace::PauseDebugging),
+                MenuItem::action("Stop", crate::workspace::StopDebugging),
+                MenuItem::separator(),
+                MenuItem::action("Step Over", crate::workspace::StepOver),
+                MenuItem::action("Step Into", crate::workspace::StepInto),
+                MenuItem::action("Step Out", crate::workspace::StepOut),
+                MenuItem::separator(),
+                MenuItem::action("Toggle Breakpoint", crate::editor::ToggleBreakpoint),
+            ],
+        },
+        Menu {
             name: "Window".into(),
             items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)],
         },

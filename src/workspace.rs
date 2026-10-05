@@ -63,6 +63,12 @@ actions!(
         ToggleFocusMode,
         RunTask,
         OpenRecent,
+        StartDebugging,
+        StopDebugging,
+        StepOver,
+        StepInto,
+        StepOut,
+        PauseDebugging,
         NextProblem,
         ToggleIndentGuides,
         ToggleStickyScroll,
@@ -120,6 +126,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("secondary-shift-b", RunTask, ctx),
         KeyBinding::new("alt-secondary-o", OpenRecent, ctx),
+        KeyBinding::new("f5", StartDebugging, ctx),
+        KeyBinding::new("shift-f5", StopDebugging, ctx),
+        KeyBinding::new("f6", PauseDebugging, ctx),
+        KeyBinding::new("f10", StepOver, ctx),
+        KeyBinding::new("f11", StepInto, ctx),
+        KeyBinding::new("shift-f11", StepOut, ctx),
         KeyBinding::new("f8", NextProblem, ctx),
         KeyBinding::new("shift-f8", PreviousProblem, ctx),
         KeyBinding::new("ctrl-tab", NextTab, ctx),
@@ -204,6 +216,34 @@ impl TabMenuItem {
 struct TabMenu {
     editor: Entity<Editor>,
     position: Point<Pixels>,
+}
+
+/// The program `cargo build` makes for a project: its first `[[bin]]`, or the package
+/// named in Cargo.toml, in target/debug.
+fn cargo_program(root: &Path) -> Option<PathBuf> {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let mut section = String::new();
+    let (mut package, mut bin) = (None, None);
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            section = line.to_string();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if key.trim() != "name" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').to_string();
+        match section.as_str() {
+            "[[bin]]" if bin.is_none() => bin = Some(value),
+            "[package]" => package = Some(value),
+            _ => {}
+        }
+    }
+    let name = bin.or(package)?;
+    let exe = if cfg!(windows) { format!("{name}.exe") } else { name };
+    Some(root.join("target").join("debug").join(exe))
 }
 
 /// A place visited, to come back to with Back and Forward.
@@ -399,6 +439,12 @@ pub struct Workspace {
     navigating: bool,
     /// Commands run from ⌘⇧B, the last first.
     recent_runs: Vec<String>,
+    /// The debugger, and its panel (shown while debugging, and after, until closed).
+    debugger: Entity<crate::debugger::Debugger>,
+    debug_panel_open: bool,
+    debug_output_scroll: gpui::ScrollHandle,
+    /// The program to debug, when the project doesn't say (no Cargo.toml): asked once.
+    debug_program: Option<PathBuf>,
     /// The projects for the list about to open.
     pending_projects: Vec<PathBuf>,
     /// The tasks for the list about to open.
@@ -510,6 +556,14 @@ impl Workspace {
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |this, cx| this.confirm_unsaved(CloseAction::CloseWindow, window, cx)).unwrap_or(true)
         });
+        let debugger = cx.new(|_| crate::debugger::Debugger::default());
+        let debugger_events =
+            cx.subscribe_in(&debugger, window, |this, _, event, window, cx| this.debugger_event(event, window, cx));
+        let debugger_changes = cx.observe(&debugger, |this, _, cx| {
+            // New output: keep the end of it in sight.
+            this.debug_output_scroll.scroll_to_bottom();
+            cx.notify();
+        });
         let mut workspace = Self {
             focus_handle: cx.focus_handle(),
             tree,
@@ -555,6 +609,10 @@ impl Workspace {
             recent_runs: Vec::new(),
             pending_tasks: Vec::new(),
             pending_projects: Vec::new(),
+            debugger: debugger.clone(),
+            debug_panel_open: false,
+            debug_output_scroll: gpui::ScrollHandle::new(),
+            debug_program: None,
             focus_mode: false,
             tab_menu: None,
             back: Vec::new(),
@@ -578,6 +636,8 @@ impl Workspace {
             async {}
         })
         .detach();
+        workspace._subscriptions.push(debugger_events);
+        workspace._subscriptions.push(debugger_changes);
         workspace._subscriptions.push(cx.observe_window_bounds(window, |this, window, cx| {
             this.window_state = Some(window_state(window));
             this.schedule_session_save(cx);
@@ -1483,6 +1543,13 @@ impl Workspace {
                     let rows = this.location_rows(locations.clone(), cx);
                     this.open_locations(title.clone(), rows, window, cx);
                 }
+                EditorEvent::BreakpointsChanged => {
+                    let editor = editor.read(cx);
+                    if let Some(path) = editor.path().map(Path::to_path_buf) {
+                        let lines = editor.breakpoints.clone();
+                        this.debugger.update(cx, |debugger, _| debugger.set_breakpoints(&path, &lines));
+                    }
+                }
                 EditorEvent::GoTo { path, range } => {
                     let range = *range;
                     this.go_to(path.clone(), range, window, cx);
@@ -2149,6 +2216,9 @@ impl Workspace {
             (App, "Settings…".into(), Box::new(OpenSettings)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
+            (Go, "Start Debugging".into(), Box::new(StartDebugging)),
+            (Go, "Stop Debugging".into(), Box::new(StopDebugging)),
+            (Edit, "Toggle Breakpoint".into(), Box::new(crate::editor::ToggleBreakpoint)),
             (
                 View,
                 toggle(settings.indent_guides, "Hide Indent Guides", "Show Indent Guides"),
@@ -3071,6 +3141,246 @@ impl Workspace {
             found.extend(list.into_iter().map(|d| (path.clone(), d)));
         }
         found
+    }
+
+    // ---------- debugging ----------
+
+    /// F5: start debugging, or carry on from a stop.
+    fn start_debugging(&mut self, _: &StartDebugging, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::debugger::DebugState;
+        match self.debugger.read(cx).state {
+            DebugState::Stopped(_) => return self.debugger.update(cx, |d, cx| d.resume("continue", cx)),
+            DebugState::Idle => {}
+            _ => return,
+        }
+        self.save_named_tabs(cx);
+        self.debug_panel_open = true;
+        let root = self.tree.read(cx).root().to_path_buf();
+        if root.join("Cargo.toml").is_file() {
+            return self.build_and_debug(root, cx);
+        }
+        match self.debug_program.clone().filter(|p| p.is_file()) {
+            Some(program) => self.debug(program, cx),
+            None => self.choose_program_to_debug(window, cx),
+        }
+    }
+
+    /// Without a build Null knows: asks which program to run (once per project).
+    fn choose_program_to_debug(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Debug".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(program) = paths.into_iter().next() else { return };
+            this.update(cx, |this, cx| {
+                this.debug_program = Some(program.clone());
+                this.debug(program, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A Rust project: `cargo build`, then its program under the debugger.
+    fn build_and_debug(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let program = cargo_program(&root);
+        self.debugger.update(cx, |d, cx| {
+            d.set_building(program.clone(), cx);
+            d.append_output("cargo build\n", cx);
+        });
+        cx.spawn(async move |this, cx| {
+            let cwd = root.clone();
+            let built = cx
+                .background_executor()
+                .spawn(async move {
+                    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
+                    std::process::Command::new(cargo).arg("build").current_dir(&cwd).output()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let message = match (&built, &program) {
+                    (Ok(output), _) if !output.status.success() => {
+                        Some(String::from_utf8_lossy(&output.stderr).into_owned() + "\nThe build failed.\n")
+                    }
+                    (Err(error), _) => Some(format!("Couldn't run cargo: {error}\n")),
+                    (_, None) => Some("Couldn't tell which program this project builds.\n".into()),
+                    (_, Some(p)) if !p.is_file() => Some(format!("{} wasn't built.\n", p.display())),
+                    _ => None,
+                };
+                match message {
+                    Some(message) => this.debugger.update(cx, |d, cx| {
+                        d.append_output(&message, cx);
+                        d.stop(cx);
+                    }),
+                    None => this.debug(program.expect("checked above"), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Runs `program` under the debugger, with every breakpoint set in the open files.
+    fn debug(&mut self, program: PathBuf, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let mut breakpoints: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+        for tab in &self.tabs {
+            let editor = tab.editor.read(cx);
+            if let Some(path) = editor.path().filter(|_| !editor.breakpoints.is_empty())
+                && !breakpoints.iter().any(|(p, _)| p == path)
+            {
+                breakpoints.push((path.to_path_buf(), editor.breakpoints.clone()));
+            }
+        }
+        self.debugger.update(cx, |d, cx| d.start(program, root, breakpoints, cx));
+    }
+
+    fn debugger_event(&mut self, event: &crate::debugger::DebuggerEvent, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::debugger::DebuggerEvent;
+        for tab in &self.tabs {
+            tab.editor.update(cx, |e, cx| {
+                if e.execution_line.take().is_some() {
+                    cx.notify();
+                }
+            });
+        }
+        if let DebuggerEvent::Stopped(stop) = event
+            && let Some((path, line)) = stop.place.clone()
+        {
+            // Shown, not gone to: stepping isn't somewhere for Back to return to each time.
+            self.navigating = true;
+            self.open_file(path.clone(), window, cx);
+            self.navigating = false;
+            for tab in &self.tabs {
+                if tab.editor.read(cx).path() == Some(path.as_path()) {
+                    tab.editor.update(cx, |e, cx| {
+                        e.execution_line = Some(line);
+                        let indent = e.buffer.line_text(line).chars().take_while(|c| c.is_whitespace()).count();
+                        e.set_caret_point((line, indent), cx);
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// The Debug panel: where things stand, the controls, and what the program printed.
+    fn render_debug_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::debugger::DebugState;
+        let debugger = self.debugger.read(cx);
+        if !debugger.is_active() && !self.debug_panel_open {
+            return None;
+        }
+        let theme = cx.global::<Theme>().clone();
+        let root = self.tree.read(cx).root().to_path_buf();
+        let status = match &debugger.state {
+            DebugState::Idle => "Ended".to_string(),
+            DebugState::Building => "Building…".to_string(),
+            DebugState::Starting => "Starting…".to_string(),
+            DebugState::Running => "Running".to_string(),
+            DebugState::Stopped(stop) => {
+                let place = stop.place.as_ref().map(|(p, l)| {
+                    let file = p.strip_prefix(&root).unwrap_or(p).display().to_string();
+                    format!(" at {file}:{}", l + 1)
+                });
+                let reason = match stop.reason.as_str() {
+                    "breakpoint" => " (breakpoint)".to_string(),
+                    "exception" => format!(" ({})", stop.description.clone().unwrap_or("exception".into())),
+                    _ => String::new(),
+                };
+                format!("Paused{}{reason}", place.unwrap_or_default())
+            }
+        };
+        let button = |id: &'static str, label: &'static str, tip: &'static str, action: Box<dyn Action>| {
+            let run = action.boxed_clone();
+            div()
+                .id(id)
+                .px(px(8.))
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .rounded(px(ui::R_KEY))
+                .cursor_pointer()
+                .text_color(theme.muted)
+                .hover(|s| s.text_color(theme.foreground).bg(theme.hairline))
+                .tooltip(ui::tip(tip, Some(action)))
+                .child(label)
+                .active(|s| s.opacity(0.7))
+                .on_click(move |_, window, cx| window.dispatch_action(run.boxed_clone(), cx))
+        };
+        let controls: Vec<gpui::Stateful<gpui::Div>> = match &debugger.state {
+            DebugState::Stopped(_) => vec![
+                button("dbg-continue", "Continue", "Continue", Box::new(StartDebugging)),
+                button("dbg-over", "Step Over", "Step over", Box::new(StepOver)),
+                button("dbg-into", "Into", "Step into", Box::new(StepInto)),
+                button("dbg-out", "Out", "Step out", Box::new(StepOut)),
+                button("dbg-stop", "Stop", "Stop debugging", Box::new(StopDebugging)),
+            ],
+            DebugState::Running => vec![
+                button("dbg-pause", "Pause", "Pause", Box::new(PauseDebugging)),
+                button("dbg-stop", "Stop", "Stop debugging", Box::new(StopDebugging)),
+            ],
+            DebugState::Idle => vec![button("dbg-again", "Debug Again", "Start debugging", Box::new(StartDebugging))],
+            _ => vec![button("dbg-stop", "Stop", "Stop debugging", Box::new(StopDebugging))],
+        };
+        let close = div()
+            .id("close-debug")
+            .size(px(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(ui::R_KEY))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.hairline))
+            .child(svg().path("icons/x.svg").size(px(12.)).text_color(theme.muted))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.debugger.update(cx, |d, cx| d.stop(cx));
+                this.debug_panel_open = false;
+                cx.notify();
+            }));
+        let header = div()
+            .h(px(32.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(12.))
+            .text_size(px(ui::T_SM))
+            .child(div().text_color(theme.foreground).pr(px(6.)).child("Debug"))
+            .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(status))
+            .children(controls)
+            .child(close);
+        let code_font = cx.global::<crate::fonts::Fonts>().code.clone();
+        let output = debugger.output.lines().map(|line| div().child(line.to_string()));
+        let body = div()
+            .id("debug-output")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.debug_output_scroll)
+            .px(px(14.))
+            .pb(px(8.))
+            .font_family(code_font)
+            .text_size(px(12.5))
+            .text_color(theme.muted)
+            .children(output);
+        Some(
+            div()
+                .flex_none()
+                .h(px(TERMINAL_HEIGHT * 0.8))
+                .flex()
+                .flex_col()
+                .border_t_1()
+                .border_color(theme.hairline)
+                .bg(theme.background)
+                .child(header)
+                .child(body)
+                .into_any_element(),
+        )
     }
 
     /// ⌥⌘O: projects opened lately (not this one), to switch to.
@@ -4149,8 +4459,14 @@ impl Render for Workspace {
         let split = self.is_split();
         let tabs_left = self.render_tabs(0, cx);
         let tabs_right = split.then(|| self.render_tabs(1, cx));
-        let terminal_panel =
-            (!self.focus_mode).then(|| self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx)).flatten();
+        // While debugging (and after, until closed), the Debug panel takes the terminal's place.
+        let debug_panel = (!self.focus_mode).then(|| self.render_debug_panel(cx)).flatten();
+        let terminal_panel = match debug_panel {
+            Some(panel) => Some(panel),
+            None => {
+                (!self.focus_mode).then(|| self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx)).flatten()
+            }
+        };
         // One editor, or two side by side, each side making its tab current when clicked into.
         let pane = |this: &Self, side: usize, cx: &mut Context<Self>| -> AnyElement {
             let content = match this.shown_editor(side) {
@@ -4541,6 +4857,18 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(Self::open_recent))
+            .on_action(cx.listener(Self::start_debugging))
+            .on_action(cx.listener(|this, _: &StopDebugging, _, cx| {
+                this.debugger.update(cx, |d, cx| d.stop(cx));
+            }))
+            .on_action(cx.listener(|this, _: &PauseDebugging, _, cx| this.debugger.update(cx, |d, _| d.pause())))
+            .on_action(cx.listener(|this, _: &StepOver, _, cx| this.debugger.update(cx, |d, cx| d.resume("next", cx))))
+            .on_action(
+                cx.listener(|this, _: &StepInto, _, cx| this.debugger.update(cx, |d, cx| d.resume("stepIn", cx))),
+            )
+            .on_action(
+                cx.listener(|this, _: &StepOut, _, cx| this.debugger.update(cx, |d, cx| d.resume("stepOut", cx))),
+            )
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::next_terminal))
             .on_action(cx.listener(Self::next_problem))

@@ -3,6 +3,8 @@ mod ai_agent;
 mod ai_task;
 mod assets;
 mod buffer;
+mod dap;
+mod debugger;
 mod editor;
 mod element;
 mod file_style;
