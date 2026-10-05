@@ -821,7 +821,7 @@ impl Workspace {
                         let mut definitions: Vec<_> =
                             current.iter().filter(|d| !changed.contains(&d.path)).cloned().collect();
                         for path in &changed {
-                            if let Ok(text) = std::fs::read_to_string(path) {
+                            if let Ok((text, _)) = crate::encoding::read(path) {
                                 definitions.extend(crate::project_index::definitions_in(path, &text));
                             }
                         }
@@ -3018,7 +3018,7 @@ impl Workspace {
                     files += (count > 0) as usize;
                 }
                 None => {
-                    let Ok(text) = std::fs::read_to_string(path) else { continue };
+                    let Ok((text, encoding)) = crate::encoding::read(path) else { continue };
                     let edits = crate::project_search::replacements(&text, query, replacement, *line);
                     if edits.is_empty() {
                         continue;
@@ -3027,7 +3027,11 @@ impl Workspace {
                     for (range, with) in edits.iter().rev() {
                         new.replace_range(range.clone(), with);
                     }
-                    match std::fs::write(path, new) {
+                    // Written back in its own encoding; one that can't hold the new text fails.
+                    let written = crate::encoding::encode(&new, encoding)
+                        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))
+                        .and_then(|bytes| std::fs::write(path, bytes));
+                    match written {
                         Ok(()) => {
                             replaced += edits.len();
                             files += 1;
@@ -3937,7 +3941,7 @@ impl Workspace {
         if let Some(tab) = self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(path)) {
             return tab.editor.read(cx).buffer.line_text(line);
         }
-        std::fs::read_to_string(path).ok().and_then(|t| t.lines().nth(line).map(str::to_string)).unwrap_or_default()
+        crate::encoding::read(path).ok().and_then(|(t, _)| t.lines().nth(line).map(str::to_string)).unwrap_or_default()
     }
 
     /// Applies a rename (or any multi-file change) from a language server: open files as
@@ -4053,12 +4057,14 @@ impl Workspace {
             if let Some(tab) = self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(path.as_path())) {
                 tab.editor.update(cx, |editor, cx| editor.apply_lsp_edits(&edits, cx));
             } else {
-                let written = std::fs::read_to_string(&path).map(|text| {
+                let written = crate::encoding::read(&path).and_then(|(text, encoding)| {
                     let mut buffer = crate::buffer::Buffer::from_text(&text);
                     crate::editor::apply_edits(&mut buffer, &edits);
-                    std::fs::write(&path, buffer.to_string())
+                    let bytes = crate::encoding::encode(&buffer.to_string(), encoding)
+                        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+                    std::fs::write(&path, bytes)
                 });
-                if !matches!(written, Ok(Ok(()))) {
+                if written.is_err() {
                     failed.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                 }
             }
@@ -5364,6 +5370,33 @@ mod tests {
         std::fs::write(dir.join("new/a.rs"), "fn a() {}\n").unwrap();
         let changed = [dir.join("old"), dir.join("new"), dir.join("new/a.rs")];
         assert_eq!(moved_to(&dir.join("old/a.rs"), print, &changed, &[]), Some((dir.join("old"), dir.join("new"))));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn replacing_across_files_keeps_each_file_s_encoding(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-replace-enc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("latin.txt"), b"caf\xe9 noir\n").unwrap();
+        std::fs::write(dir.join("utf8.txt"), "café noir\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update(cx, |w, cx| {
+            let query = crate::search::SearchQuery { text: "noir".into(), ..Default::default() };
+            let targets = [(dir.join("latin.txt"), None), (dir.join("utf8.txt"), None)];
+            w.replace_in_files(&query, "crème", &targets, cx);
+            // Something Windows-1252 can't hold: that file is left as it was.
+            let query = crate::search::SearchQuery { text: "crème".into(), ..Default::default() };
+            w.replace_in_files(&query, "crème 😀", &targets[..1], cx);
+        });
+        assert_eq!(std::fs::read(dir.join("latin.txt")).unwrap(), b"caf\xe9 cr\xe8me\n");
+        assert_eq!(std::fs::read_to_string(dir.join("utf8.txt")).unwrap(), "café crème\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 
