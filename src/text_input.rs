@@ -15,6 +15,7 @@ actions!(
         BackspaceWord,
         BackspaceAll,
         Delete,
+        DeleteToEnd,
         Left,
         Right,
         SelectLeft,
@@ -50,6 +51,14 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-backspace", BackspaceAll, ctx),
             KeyBinding::new("cmd-left", Home, ctx),
             KeyBinding::new("cmd-right", End, ctx),
+            // The ⌃ keys of every macOS text field.
+            KeyBinding::new("ctrl-a", Home, ctx),
+            KeyBinding::new("ctrl-e", End, ctx),
+            KeyBinding::new("ctrl-f", Right, ctx),
+            KeyBinding::new("ctrl-b", Left, ctx),
+            KeyBinding::new("ctrl-d", Delete, ctx),
+            KeyBinding::new("ctrl-h", Backspace, ctx),
+            KeyBinding::new("ctrl-k", DeleteToEnd, ctx),
         ]);
     } else {
         keys.push(KeyBinding::new("ctrl-backspace", BackspaceWord, ctx));
@@ -192,6 +201,10 @@ impl TextInput {
 
     fn backspace_all(&mut self, _: &BackspaceAll, _: &mut Window, cx: &mut Context<Self>) {
         self.replace(0..self.selected.end, "", cx);
+    }
+
+    fn delete_to_end(&mut self, _: &DeleteToEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.replace(self.selected.start..self.content.len(), "", cx);
     }
 
     fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
@@ -412,6 +425,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::backspace_word))
             .on_action(cx.listener(Self::backspace_all))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_to_end))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))

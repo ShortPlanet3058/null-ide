@@ -69,6 +69,9 @@ doesn't need Xcode's separate Metal Toolchain download.
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
 - In HTML and JSX, typing the `>` of a tag adds its closing tag, and renaming a tag
   renames its pair.
+- **Rewrap** (⌘K) refills a comment or a paragraph to the project's line length, keeping
+  its `//`, `>` or list indent. The ⌃ keys of macOS text fields work too: ⌃A ⌃E, ⌃K and
+  ⌃Y, ⌃T, ⌃O…
 - Faint indent guides, sticky scroll (the enclosing lines stay at the top), the other uses
   of a name tinted, and a line at the length the project keeps to (from `.editorconfig`,
   rustfmt, Prettier, Black or Ruff). Each can be turned off.

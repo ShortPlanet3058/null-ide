@@ -2687,6 +2687,7 @@ impl Workspace {
                 (Lines, "Insert Line Above".into(), Box::new(crate::editor::NewlineAbove)),
                 (Lines, "Join Lines".into(), Box::new(crate::editor::JoinLines)),
                 (Lines, "Sort Lines".into(), Box::new(crate::editor::SortLines)),
+                (Lines, "Rewrap Comment or Paragraph".into(), Box::new(crate::editor::Rewrap)),
                 (Edit, "Upper Case".into(), Box::new(crate::editor::UpperCase)),
                 (Edit, "Lower Case".into(), Box::new(crate::editor::LowerCase)),
                 (Edit, "Expand Selection".into(), Box::new(crate::editor::ExpandSelection)),
