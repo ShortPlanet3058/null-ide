@@ -42,6 +42,8 @@ actions!(
         PushBranch,
         PullBranch,
         FileHistory,
+        CompareWithSaved,
+        CompareWithClipboard,
         RevertAllChanges,
         SwitchBranch,
         GoBack,
@@ -1307,6 +1309,43 @@ impl Workspace {
         .detach();
     }
 
+    /// What changed since the last save, each change kept or taken back to the file on disk.
+    fn compare_with_saved(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else {
+            return self.show_notice("This file hasn't been saved yet.".into(), cx);
+        };
+        let Ok((saved, _)) = crate::encoding::read(&path) else {
+            return self.show_notice("Couldn't read the saved file.".into(), cx);
+        };
+        self.compare_editor(&editor, saved, "Since it was saved", "Nothing changed since it was saved.", cx);
+    }
+
+    /// The file against the clipboard: each difference kept, or changed to the clipboard's.
+    fn compare_with_clipboard(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(clipboard) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return self.show_notice("The clipboard has no text.".into(), cx);
+        };
+        self.compare_editor(&editor, clipboard, "Against the clipboard", "Same as the clipboard.", cx);
+    }
+
+    fn compare_editor(
+        &mut self,
+        editor: &Entity<Editor>,
+        base: String,
+        what: &str,
+        same: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = editor.update(cx, |editor, cx| {
+            editor.start_review(base, cx);
+            editor.in_review()
+        });
+        let notice = if changed { format!("{what}: each change can be kept or taken back.") } else { same.to_string() };
+        self.show_notice(notice, cx);
+    }
+
     /// The file against how it was in `commit`: what changed since shows as changes to
     /// keep, or take back to that version, one by one.
     fn compare_with(&mut self, path: &Path, commit: git::FileCommit, window: &mut Window, cx: &mut Context<Self>) {
@@ -1316,16 +1355,8 @@ impl Workspace {
         };
         self.open_file(path.to_path_buf(), window, cx);
         let Some(editor) = self.active_editor().cloned() else { return };
-        let changed = editor.update(cx, |editor, cx| {
-            editor.start_review(before, cx);
-            editor.in_review()
-        });
-        let notice = if changed {
-            format!("Since {} “{}”: each change can be kept or taken back.", commit.short, commit.subject)
-        } else {
-            format!("Unchanged since {}.", commit.short)
-        };
-        self.show_notice(notice, cx);
+        let since = format!("Since {} “{}”", commit.short, commit.subject);
+        self.compare_editor(&editor, before, &since, &format!("Unchanged since {}.", commit.short), cx);
     }
 
     /// Pulls the branch (open files saved first). Conflicts open at the first one, where
@@ -2458,6 +2489,8 @@ impl Workspace {
             (File, "Push".into(), Box::new(PushBranch)),
             (File, "Pull".into(), Box::new(PullBranch)),
             (File, "Show File History".into(), Box::new(FileHistory)),
+            (File, "Compare with Saved".into(), Box::new(CompareWithSaved)),
+            (File, "Compare with Clipboard".into(), Box::new(CompareWithClipboard)),
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
@@ -5428,6 +5461,10 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::push_branch))
             .on_action(cx.listener(Self::pull_branch))
             .on_action(cx.listener(Self::file_history))
+            .on_action(cx.listener(|this, _: &CompareWithSaved, window, cx| this.compare_with_saved(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &CompareWithClipboard, window, cx| this.compare_with_clipboard(window, cx)),
+            )
             .on_action(cx.listener(Self::switch_branch))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
@@ -6027,6 +6064,49 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(workspace.read_with(cx, |w, _| w.settings_panel.is_none()), "Escape closes Settings after a click");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Compare with Saved shows what was typed since saving, to keep or take back;
+    /// Compare with Clipboard, how the file differs from the clipboard.
+    #[gpui::test]
+    fn comparing_with_saved_and_with_the_clipboard(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-compare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        cx.run_until_parked();
+        cx.simulate_input("zero\n");
+        let text = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.active_editor().unwrap().read(cx).buffer.to_string())
+        };
+        assert_eq!(text(cx), "zero\none\ntwo\n");
+        workspace.update_in(cx, |w, window, cx| w.compare_with_saved(window, cx));
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, cx| w.active_editor().unwrap().read(cx).in_review()));
+        // Esc takes the change back: as saved.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(text(cx), "one\ntwo\n");
+        // The clipboard has another version: its difference shows, and is taken.
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("one\nTWO\n".into()));
+        workspace.update_in(cx, |w, window, cx| w.compare_with_clipboard(window, cx));
+        cx.run_until_parked();
+        let base =
+            workspace.read_with(cx, |w, cx| w.active_editor().unwrap().read(cx).review_base().map(str::to_string));
+        assert_eq!(base.as_deref(), Some("one\nTWO\n"));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(text(cx), "one\nTWO\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 
