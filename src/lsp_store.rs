@@ -147,15 +147,18 @@ impl LspStore {
             Some(ServerState::Installing) => Readiness::Installing { server: config },
             Some(ServerState::InstallFailed(_)) => Readiness::InstallFailed { server: config },
             Some(ServerState::Unavailable) => Readiness::Unavailable { program: config.program },
-            Some(ServerState::Running { .. }) => {
-                let work: Vec<&Progress> = self.progress.values().filter(|p| p.server == config.name).collect();
-                let is_check = |p: &&Progress| p.title.to_lowercase().contains("check");
-                match work.iter().find(|p| !is_check(p)) {
-                    Some(indexing) => Readiness::Indexing { percent: indexing.percent },
-                    None => Readiness::Ready { checking: work.iter().any(is_check) },
-                }
-            }
+            Some(ServerState::Running { .. }) => match self.work_shown(config.name) {
+                (Some(percent), _) => Readiness::Indexing { percent },
+                (None, checking) => Readiness::Ready { checking },
+            },
         })
+    }
+
+    /// What a running server's work shows as: indexing (and how far), or checking.
+    fn work_shown(&self, server: &str) -> (Option<Option<u64>>, bool) {
+        let work: Vec<&Progress> = self.progress.values().filter(|p| p.server == server).collect();
+        let is_check = |p: &&Progress| p.title.to_lowercase().contains("check");
+        (work.iter().find(|p| !is_check(p)).map(|p| p.percent), work.iter().any(is_check))
     }
 
     /// Whether a server is being installed, or why its last install failed.
@@ -377,6 +380,9 @@ impl LspStore {
                     cx.notify();
                 }
                 "$/progress" => {
+                    // Servers report often (every file indexed): only a change to what's shown
+                    // draws the window again.
+                    let shown = self.work_shown(config.name);
                     let token = params["token"].to_string();
                     let value = &params["value"];
                     match value["kind"].as_str() {
@@ -394,7 +400,9 @@ impl LspStore {
                             self.progress.remove(&token);
                         }
                     }
-                    cx.notify();
+                    if self.work_shown(config.name) != shown {
+                        cx.notify();
+                    }
                 }
                 _ => {}
             },
