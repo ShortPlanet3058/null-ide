@@ -62,6 +62,8 @@ actions!(
         ToggleInlayHints,
         ToggleFocusMode,
         RunTask,
+        RunTestAtCursor,
+        RunTestsInFile,
         OpenRecent,
         NewWindow,
         StartDebugging,
@@ -126,6 +128,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("secondary-shift-b", RunTask, ctx),
+        KeyBinding::new("alt-secondary-t", RunTestAtCursor, ctx),
         KeyBinding::new("alt-secondary-o", OpenRecent, ctx),
         KeyBinding::new("secondary-shift-n", NewWindow, ctx),
         KeyBinding::new("f5", StartDebugging, ctx),
@@ -2321,6 +2324,8 @@ impl Workspace {
             (App, "Settings…".into(), Box::new(OpenSettings)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
+            (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
+            (View, "Run Tests in File".into(), Box::new(RunTestsInFile)),
             (Go, "Start Debugging".into(), Box::new(StartDebugging)),
             (Go, "Stop Debugging".into(), Box::new(StopDebugging)),
             (Edit, "Toggle Breakpoint".into(), Box::new(crate::editor::ToggleBreakpoint)),
@@ -3656,6 +3661,24 @@ impl Workspace {
         }
         self.pending_tasks = tasks;
         self.open_palette_with(PaletteKind::Run, None, Vec::new(), window, cx);
+    }
+
+    /// ⌥⌘T: the test the caret is in (or every test in the file) runs in the terminal,
+    /// open files saved first so it runs what's on screen.
+    fn run_test(&mut self, at_caret: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let root = self.tree.read(cx).root().to_path_buf();
+        let Some(run) = editor.update(cx, |e, _| e.test_run(&root, at_caret)) else {
+            let message = if at_caret { "No test at the caret." } else { "No tests in this file." };
+            return self.show_notice(message.into(), cx);
+        };
+        for tab in &self.tabs {
+            if tab.editor.read(cx).buffer.is_dirty() && tab.editor.read(cx).path().is_some() {
+                tab.editor.update(cx, |e, cx| e.save_to_disk(cx));
+            }
+        }
+        self.show_notice(format!("Running {}", run.name), cx);
+        self.run_in_terminal(run.command, window, cx);
     }
 
     /// Types `command` into the terminal (opening it first if needed) and runs it.
@@ -5198,6 +5221,8 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
+            .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))
+            .on_action(cx.listener(|this, _: &RunTestsInFile, window, cx| this.run_test(false, window, cx)))
             .on_action(cx.listener(Self::open_recent))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::start_debugging))

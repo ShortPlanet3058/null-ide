@@ -450,6 +450,17 @@ impl Element for EditorElement {
             if editor.continue_drag(cx) {
                 window.request_animation_frame();
             }
+            // The view got shorter (a panel opening below): a caret that was in view stays in it.
+            if let Some(was) = editor.viewport_height.replace(viewport_height)
+                && viewport_height < was - 0.5
+            {
+                let y = caret_row as f32 * lh + TOP_PADDING;
+                let was_seen = y >= editor.scroll.y && y + lh <= editor.scroll.y + was;
+                if was_seen && y + lh > editor.scroll.y + viewport_height {
+                    editor.scroll.y = y + lh - viewport_height;
+                    editor.scroll.target_y = editor.scroll.y;
+                }
+            }
             if editor.autoscroll {
                 // From the keyboard, keep a few lines of room; from the mouse, just reveal.
                 let margin = if editor.reveal_only { 0. } else { (3. * lh).min(viewport_height / 3.) };

@@ -413,6 +413,8 @@ pub struct Editor {
     pub on_disk: Option<Fingerprint>,
     /// How the file's bytes are text, kept when saving.
     pub encoding: crate::encoding::Encoding,
+    /// The view's height when last drawn, to keep the caret in view as it shrinks.
+    pub viewport_height: Option<f32>,
     /// The merge conflicts in the text, and the revision they were found at.
     conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
     /// The buffer revision and byte range `spans` cover.
@@ -577,6 +579,7 @@ impl Editor {
             missing: false,
             on_disk: None,
             encoding: Default::default(),
+            viewport_height: None,
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
             pinned: Default::default(),
@@ -1833,6 +1836,17 @@ impl Editor {
     }
 
     /// Switches the file's line endings, converting every line break.
+    /// The test the caret is in (or with `at_caret` false, the file's tests), as a command.
+    pub fn test_run(&mut self, root: &std::path::Path, at_caret: bool) -> Option<crate::test_at::TestRun> {
+        let path = self.path.clone()?;
+        let language = self.language()?.name;
+        let highlighter = self.highlighter.as_mut()?;
+        highlighter.sync(&self.buffer);
+        let tree = highlighter.tree()?.clone();
+        let byte = at_caret.then(|| self.buffer.rope().char_to_byte(self.selection.head));
+        crate::test_at::find(language, root, &path, &self.buffer.to_string(), &tree, byte)
+    }
+
     /// Saves the file as UTF-8 from now on: the text stays, its bytes change on the next save.
     pub fn use_utf8(&mut self, cx: &mut Context<Self>) {
         if self.encoding != crate::encoding::Encoding::Utf8 && self.preview.is_none() {
