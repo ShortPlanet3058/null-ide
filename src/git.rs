@@ -98,6 +98,59 @@ pub fn ahead_behind(root: &Path) -> Option<(usize, usize)> {
     Some((numbers.next()??, numbers.next()??))
 }
 
+/// A commit that changed a file, as its history lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileCommit {
+    pub hash: String,
+    pub short: String,
+    pub author: String,
+    /// Unix seconds.
+    pub time: i64,
+    pub subject: String,
+    /// Where the file was then, from the repository's top (it may have been renamed since).
+    pub path: String,
+}
+
+/// The commits that changed `path`, newest first, following it through renames.
+pub fn file_history(path: &Path, max: usize) -> Vec<FileCommit> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return Vec::new();
+    };
+    let format = "--format=%x1e%H%x1f%h%x1f%an%x1f%at%x1f%s";
+    let count = format!("-n{max}");
+    let Some(log) = git(dir, &["log", "--follow", &count, format, "--name-only", "--", name]) else {
+        return Vec::new();
+    };
+    log.split('\x1e')
+        .filter_map(|record| {
+            let mut lines = record.lines();
+            let fields: Vec<&str> = lines.next()?.split('\x1f').collect();
+            let path = lines.map(str::trim).find(|l| !l.is_empty())?.to_string();
+            let [hash, short, author, time, subject] = fields.as_slice() else { return None };
+            Some(FileCommit {
+                hash: hash.to_string(),
+                short: short.to_string(),
+                author: author.to_string(),
+                time: time.parse().unwrap_or(0),
+                subject: subject.to_string(),
+                path,
+            })
+        })
+        .collect()
+}
+
+/// The file as it was in `commit`, in its own encoding.
+pub fn file_at(path: &Path, commit: &FileCommit, encoding: crate::encoding::Encoding) -> Option<String> {
+    let top = git(path.parent()?, &["rev-parse", "--show-toplevel"])?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(top.trim())
+        .args(["show", &format!("{}:{}", commit.hash, commit.path)])
+        .output()
+        .ok()?;
+    output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
+}
+
 /// What a pull did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Pulled {
@@ -386,6 +439,33 @@ mod tests {
         assert_eq!(committed_text(&dir.join("link/src/a.rs"), Default::default()).as_deref(), Some("committed\n"));
         assert_eq!(committed_text(&repo.join("src/new.rs"), Default::default()), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_s_history_follows_renames() {
+        let repo = std::env::temp_dir().join(format!("null-git-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        if run(&repo, &["init", "-q"]).is_err() {
+            return; // No git here.
+        }
+        run(&repo, &["config", "user.name", "Ada"]).unwrap();
+        run(&repo, &["config", "user.email", "a@a"]).unwrap();
+        std::fs::write(repo.join("src/old.rs"), "fn one() {}\n").unwrap();
+        commit_all(&repo, "Start").unwrap();
+        run(&repo, &["mv", "src/old.rs", "src/new.rs"]).unwrap();
+        commit_all(&repo, "Rename").unwrap();
+        std::fs::write(repo.join("src/new.rs"), "fn one() {}\nfn two() {}\n").unwrap();
+        commit_all(&repo, "Add two").unwrap();
+        let history = file_history(&repo.join("src/new.rs"), 50);
+        let subjects: Vec<&str> = history.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, ["Add two", "Rename", "Start"]);
+        assert_eq!((history[2].author.as_str(), history[2].path.as_str()), ("Ada", "src/old.rs"));
+        // The first version, from before the rename.
+        let first = file_at(&repo.join("src/new.rs"), &history[2], Default::default());
+        assert_eq!(first.as_deref(), Some("fn one() {}\n"));
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]

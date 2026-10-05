@@ -41,6 +41,7 @@ actions!(
         CommitAll,
         PushBranch,
         PullBranch,
+        FileHistory,
         RevertAllChanges,
         SwitchBranch,
         GoBack,
@@ -198,6 +199,7 @@ enum TabMenuItem {
     CopyRelativePath,
     Reveal,
     OtherSide,
+    History,
 }
 
 impl TabMenuItem {
@@ -210,6 +212,7 @@ impl TabMenuItem {
             TabMenuItem::CopyRelativePath => "Copy Relative Path",
             TabMenuItem::Reveal => crate::file_tree::REVEAL_LABEL,
             TabMenuItem::OtherSide => "Open on the Other Side Too",
+            TabMenuItem::History => "Show History",
         }
     }
 
@@ -435,6 +438,8 @@ pub struct Workspace {
     git_status_task: Option<Task<()>>,
     /// The list of changes is open: opening a file from it shows its changes.
     git_listing: bool,
+    /// The history a list shows (⌥ picking one compares the file with it), and its file.
+    history: Option<(PathBuf, Vec<git::FileCommit>)>,
     /// A tab's right-click menu, while open.
     tab_menu: Option<TabMenu>,
     /// Only the code: no sidebar, tabs, status bar or terminal, the text centered.
@@ -622,6 +627,7 @@ impl Workspace {
             git_status: Vec::new(),
             git_status_task: None,
             git_listing: false,
+            history: None,
             pending_branches: Vec::new(),
             recent_runs: Vec::new(),
             pending_tasks: Vec::new(),
@@ -1262,6 +1268,63 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// The commits that changed the current file, newest first. Picking one shows the file
+    /// against that version, each change since kept or taken back one by one.
+    fn file_history(&mut self, _: &FileHistory, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf)) else {
+            return self.show_notice("Save the file first: it has no history yet.".into(), cx);
+        };
+        let file = path.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let commits = cx.background_executor().spawn(async move { git::file_history(&file, 300) }).await;
+            this.update_in(cx, |this, window, cx| {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if commits.is_empty() {
+                    return this.show_notice(format!("{name} has no history in git."), cx);
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
+                let locations = commits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| crate::palette::Location {
+                        path: path.clone(),
+                        // The row's place is its commit's index in the history.
+                        position: lsp_types::Position { line: i as u32, character: 0 },
+                        text: format!("{}\t{} · {} · {}", c.subject, c.author, git::ago(c.time, now), c.short),
+                        kind: crate::palette::LocationKind::Commit,
+                    })
+                    .collect();
+                this.open_locations(format!("History of {name}"), locations, window, cx);
+                this.history = Some((path, commits));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The file against how it was in `commit`: what changed since shows as changes to
+    /// keep, or take back to that version, one by one.
+    fn compare_with(&mut self, path: &Path, commit: git::FileCommit, window: &mut Window, cx: &mut Context<Self>) {
+        let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
+        let Some(before) = git::file_at(path, &commit, encoding) else {
+            return self.show_notice(format!("Couldn't read the file as of {}.", commit.short), cx);
+        };
+        self.open_file(path.to_path_buf(), window, cx);
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let changed = editor.update(cx, |editor, cx| {
+            editor.start_review(before, cx);
+            editor.in_review()
+        });
+        let notice = if changed {
+            format!("Since {} “{}”: each change can be kept or taken back.", commit.short, commit.subject)
+        } else {
+            format!("Unchanged since {}.", commit.short)
+        };
+        self.show_notice(notice, cx);
     }
 
     /// Pulls the branch (open files saved first). Conflicts open at the first one, where
@@ -2393,6 +2456,7 @@ impl Workspace {
             (File, "Commit…".into(), Box::new(CommitAll)),
             (File, "Push".into(), Box::new(PushBranch)),
             (File, "Pull".into(), Box::new(PullBranch)),
+            (File, "Show File History".into(), Box::new(FileHistory)),
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
@@ -2688,11 +2752,18 @@ impl Workspace {
                 let (path, position) = (path.clone(), *position);
                 // Going there: no going back to the view before the preview.
                 this.view_before_preview = None;
+                // What the list was, before closing it forgets.
+                let (git_listing, history) = (this.git_listing, this.history.take());
                 this.close_palette(window, cx);
+                if let Some((file, commits)) = history
+                    && let Some(commit) = commits.get(position.line as usize)
+                {
+                    return this.compare_with(&file, commit.clone(), window, cx);
+                }
                 if this.review_file(&path, window, cx) {
                     return;
                 }
-                if std::mem::take(&mut this.git_listing) && this.review_git_file(&path, window, cx) {
+                if git_listing && this.review_git_file(&path, window, cx) {
                     return;
                 }
                 this.go_to(path, lsp_types::Range { start: position, end: position }, window, cx);
@@ -2792,6 +2863,7 @@ impl Workspace {
     /// and puts focus back where it was.
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.git_listing = false;
+        self.history = None;
         // Leaving a symbol list without choosing: the view goes back to where it was.
         if let Some((editor, (line, column, top))) = self.view_before_preview.take() {
             editor.update(cx, |editor, cx| editor.restore_view(line, column, top, cx));
@@ -4597,6 +4669,9 @@ impl Workspace {
         }
         if editor.read(cx).path().is_some() {
             items.extend([CopyPath, CopyRelativePath, Reveal, OtherSide]);
+            if self.branch.is_some() {
+                items.push(History);
+            }
         }
         items
     }
@@ -4634,6 +4709,10 @@ impl Workspace {
                 if let Some(path) = path {
                     cx.reveal_path(&path);
                 }
+            }
+            TabMenuItem::History => {
+                self.activate(ix, window, cx);
+                self.file_history(&FileHistory, window, cx);
             }
             TabMenuItem::OtherSide => {
                 self.activate(ix, window, cx);
@@ -5333,6 +5412,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::commit_all))
             .on_action(cx.listener(Self::push_branch))
             .on_action(cx.listener(Self::pull_branch))
+            .on_action(cx.listener(Self::file_history))
             .on_action(cx.listener(Self::switch_branch))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
