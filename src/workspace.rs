@@ -40,6 +40,7 @@ actions!(
         ReviewChanges,
         CommitAll,
         PushBranch,
+        PullBranch,
         RevertAllChanges,
         SwitchBranch,
         GoBack,
@@ -489,6 +490,8 @@ pub struct Workspace {
     terminal_open: Transition,
     /// The current git branch of the project, if it's a repository.
     branch: Option<String>,
+    /// Commits to push and to pull, against the branch's upstream as last fetched.
+    sync: Option<(usize, usize)>,
     branch_task: Option<Task<()>>,
     /// When language support first became ready this session, to show a short tip once.
     ready_since: Option<Instant>,
@@ -594,6 +597,7 @@ impl Workspace {
             welcome: None,
             ready_since: None,
             branch: None,
+            sync: None,
             branch_task: None,
             terminals: Vec::new(),
             active_terminal: 0,
@@ -942,10 +946,12 @@ impl Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         self.git_status_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(120)).await;
-            let changed = cx.background_executor().spawn(async move { git::status(&root) }).await;
+            let (changed, sync) =
+                cx.background_executor().spawn(async move { (git::status(&root), git::ahead_behind(&root)) }).await;
             this.update(cx, |this, cx| {
                 this.tree.update(cx, |tree, cx| tree.set_git_status(changed.clone(), cx));
                 this.git_status = changed;
+                this.sync = sync;
                 cx.notify();
             })
             .ok();
@@ -976,6 +982,7 @@ impl Workspace {
             this.pending_commands = vec![
                 command("Commit…", Box::new(CommitAll)),
                 command("Push", Box::new(PushBranch)),
+                command("Pull", Box::new(PullBranch)),
                 command("Switch Branch…", Box::new(SwitchBranch)),
                 command("Revert All Changes…", Box::new(RevertAllChanges)),
             ];
@@ -1251,6 +1258,48 @@ impl Workspace {
                 };
                 this.show_notice(notice, cx);
                 this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pulls the branch (open files saved first). Conflicts open at the first one, where
+    /// ⌘. resolves each.
+    fn pull_branch(&mut self, _: &PullBranch, window: &mut Window, cx: &mut Context<Self>) {
+        if self.branch.is_none() {
+            return self.show_notice("This folder isn't a git repository.".into(), cx);
+        }
+        self.save_named_tabs(cx);
+        let root = self.tree.read(cx).root().to_path_buf();
+        self.show_notice("Pulling…".into(), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::pull(&root) }).await;
+            this.update_in(cx, |this, window, cx| {
+                let files = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+                let notice = match &result {
+                    Ok(git::Pulled::UpToDate) => "Already up to date.".to_string(),
+                    Ok(git::Pulled::Commits(1)) => "Pulled 1 commit.".to_string(),
+                    Ok(git::Pulled::Commits(n)) => format!("Pulled {n} commits."),
+                    Ok(git::Pulled::Conflicts(paths)) => {
+                        format!("Pulled, with conflicts in {}: ⌘. resolves each.", files(paths.len()))
+                    }
+                    Err(error) => format!("Couldn't pull: {error}"),
+                };
+                this.show_notice(notice, cx);
+                this.refresh_git(cx);
+                if let Ok(git::Pulled::Conflicts(paths)) = result
+                    && let Some(first) = paths.into_iter().next()
+                {
+                    this.open_file(first, window, cx);
+                    if let Some(editor) = this.active_editor().cloned() {
+                        // An open copy may not have seen the pull yet.
+                        editor.update(cx, |e, cx| {
+                            e.reload_from_disk(cx);
+                            e.go_to_conflict(true, cx);
+                        });
+                    }
+                }
             })
             .ok();
         })
@@ -2343,6 +2392,7 @@ impl Workspace {
             (View, toggle(settings.inlay_hints, "Hide Type Hints", "Show Type Hints"), Box::new(ToggleInlayHints)),
             (File, "Commit…".into(), Box::new(CommitAll)),
             (File, "Push".into(), Box::new(PushBranch)),
+            (File, "Pull".into(), Box::new(PullBranch)),
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
@@ -5046,6 +5096,49 @@ impl Render for Workspace {
                                 this.switch_branch(&SwitchBranch, window, cx)
                             })),
                     )
+                    // Commits to push and to pull, when there are: a click does it.
+                    .children(self.sync.filter(|&(ahead, _)| ahead > 0).map(|(ahead, _)| {
+                        div()
+                            .id("to-push")
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .tooltip(ui::tip(
+                                if ahead == 1 {
+                                    "1 commit to push".to_string()
+                                } else {
+                                    format!("{ahead} commits to push")
+                                },
+                                Some(Box::new(PushBranch)),
+                            ))
+                            .child(format!("↑{ahead}"))
+                            .active(|s| s.opacity(0.7))
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.push_branch(&PushBranch, window, cx)
+                                }),
+                            )
+                    }))
+                    .children(self.sync.filter(|&(_, behind)| behind > 0).map(|(_, behind)| {
+                        div()
+                            .id("to-pull")
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .tooltip(ui::tip(
+                                if behind == 1 {
+                                    "1 commit to pull".to_string()
+                                } else {
+                                    format!("{behind} commits to pull")
+                                },
+                                Some(Box::new(PullBranch)),
+                            ))
+                            .child(format!("↓{behind}"))
+                            .active(|s| s.opacity(0.7))
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.pull_branch(&PullBranch, window, cx)
+                                }),
+                            )
+                    }))
                     .when(changed > 0, |d| {
                         d.child(
                             div()
@@ -5239,6 +5332,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::review_changes))
             .on_action(cx.listener(Self::commit_all))
             .on_action(cx.listener(Self::push_branch))
+            .on_action(cx.listener(Self::pull_branch))
             .on_action(cx.listener(Self::switch_branch))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
