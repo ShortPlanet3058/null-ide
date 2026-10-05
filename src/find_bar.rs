@@ -183,6 +183,7 @@ impl FindBar {
     ) -> impl IntoElement {
         div()
             .id(id)
+            .debug_selector(|| format!("find {id}"))
             .size(px(CONTROL))
             .flex_none()
             .flex()
@@ -233,6 +234,7 @@ impl FindBar {
     ) -> impl IntoElement {
         div()
             .id(id)
+            .debug_selector(|| format!("find {id}"))
             .h(px(CONTROL))
             .min_w(px(CONTROL))
             .px(px(4.))

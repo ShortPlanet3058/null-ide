@@ -5948,6 +5948,83 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Clicks inside the palette and Settings leave the keyboard there: after clicking a
+    /// quick setting, typing goes on in the palette; after clicking a switch in Settings,
+    /// Escape still closes it.
+    #[gpui::test]
+    fn clicks_in_the_palette_and_settings_keep_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-overlay-clicks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
+        cx.run_until_parked();
+        // ⌘K, a click on its first quick setting (it stays open), then typing: the query.
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        let row = cx.debug_bounds("palette-row 0").expect("a row is drawn").center();
+        cx.simulate_click(row, Default::default());
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.palette.is_some()), "a quick setting keeps the palette open");
+        cx.simulate_input("wrap");
+        cx.run_until_parked();
+        let query = workspace.read_with(cx, |w, cx| w.palette.as_ref().map(|(p, _)| p.read(cx).query().to_string()));
+        assert_eq!(query.as_deref(), Some("wrap"), "typing after the click goes to the palette");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        // ⌘F in a file, a click on "Match case", then more typing: still the find field's.
+        std::fs::write(dir.join("a.txt"), "Alpha alpha\n").unwrap();
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        cx.simulate_input("al");
+        cx.run_until_parked();
+        let case = cx.debug_bounds("find case").expect("the button is drawn").center();
+        cx.simulate_click(case, Default::default());
+        cx.run_until_parked();
+        cx.simulate_input("pha");
+        cx.run_until_parked();
+        let (find, text) = workspace.read_with(cx, |w, cx| {
+            let e = w.active_editor().unwrap().read(cx);
+            (e.find_query(cx), e.buffer.to_string())
+        });
+        assert_eq!(text, "Alpha alpha\n", "nothing typed into the file");
+        let find = find.expect("the find bar is open");
+        assert!(find.case_sensitive && find.text == "alpha", "{find:?}");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        // Settings, a click on a switch, then Escape: closed.
+        cx.simulate_keystrokes("cmd-,");
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.settings_panel.is_some()), "⌘, opens Settings");
+        workspace.update_in(cx, |w, _, cx| {
+            if let Some((panel, _)) = &w.settings_panel {
+                panel.update(cx, |p, cx| {
+                    p.show_section(crate::settings_panel::Section::Editor);
+                    cx.notify();
+                });
+            }
+        });
+        cx.run_until_parked();
+        let wrap = cx.debug_bounds("toggle wrap").expect("the switch is drawn").center();
+        let before = cx.update(|_, cx| cx.global::<Settings>().word_wrap);
+        cx.simulate_click(wrap, Default::default());
+        cx.run_until_parked();
+        assert_ne!(cx.update(|_, cx| cx.global::<Settings>().word_wrap), before, "the switch switched");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.settings_panel.is_none()), "Escape closes Settings after a click");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Tests run side by side: two with the same scratch folder overwrite each other's
     /// files (it happened). Every folder name in the tests is its own.
     #[test]
