@@ -375,6 +375,63 @@ fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
     Err(message.join(" ").trim().to_string())
 }
 
+/// A remote's address as the web page of its repository: `git@github.com:me/app.git`
+/// and `https://github.com/me/app.git` both give `https://github.com/me/app`. An SSH
+/// host alias (`github-work`) is taken for the service it names.
+pub fn web_url(remote: &str) -> Option<String> {
+    let remote = remote.trim().trim_end_matches('/').trim_end_matches(".git");
+    let (host, path) = if let Some(rest) = remote.strip_prefix("https://").or_else(|| remote.strip_prefix("http://")) {
+        let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+        rest.split_once('/')?
+    } else {
+        let rest = remote.strip_prefix("ssh://").unwrap_or(remote);
+        let rest = rest.split_once('@').map_or(rest, |(_, r)| r);
+        // `host:owner/repo`, or `host/owner/repo` (and `host:22/owner/repo`) in the ssh:// form.
+        match rest.split_once(':') {
+            Some((host, path)) if !path.starts_with(|c: char| c.is_ascii_digit()) => (host, path),
+            _ => {
+                let (host, path) = rest.split_once('/')?;
+                (
+                    host.split(':').next()?,
+                    path.split_once('/')
+                        .filter(|(p, _)| p.chars().all(|c| c.is_ascii_digit()))
+                        .map_or(path, |(_, p)| p),
+                )
+            }
+        }
+    };
+    let host = ["github", "gitlab", "bitbucket"]
+        .iter()
+        .find(|service| host.contains(*service) && !host.contains('.'))
+        .map(|service| if *service == "bitbucket" { "bitbucket.org".to_string() } else { format!("{service}.com") })
+        .unwrap_or_else(|| host.to_string());
+    Some(format!("https://{host}/{path}"))
+}
+
+/// A permanent link to lines of a file at the commit checked out: GitHub's, GitLab's or
+/// Bitbucket's form. Lines are 1-based, inclusive.
+pub fn line_link(path: &Path, first: usize, last: usize) -> Result<String, String> {
+    let dir = path.parent().ok_or("No folder.")?;
+    let remote = git(dir, &["remote", "get-url", "origin"]).ok_or("This repository has no remote called origin.")?;
+    let web = web_url(&remote).ok_or_else(|| format!("Don't know the web address of {}", remote.trim()))?;
+    let top = git(dir, &["rev-parse", "--show-toplevel"]).ok_or("Not in a git repository.")?;
+    let commit = git(dir, &["rev-parse", "HEAD"]).ok_or("Nothing committed yet.")?;
+    // Through any links: a project opened from /tmp is /private/tmp to git on macOS.
+    let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let (file_path, top) = (resolve(path), resolve(Path::new(top.trim())));
+    let relative = file_path.strip_prefix(&top).map_err(|_| "The file isn't in the repository.")?;
+    let file = relative.to_string_lossy().replace('\\', "/");
+    let commit = commit.trim();
+    let lines = |single: String, range: String| if first == last { single } else { range };
+    Ok(if web.contains("gitlab") {
+        format!("{web}/-/blob/{commit}/{file}#{}", lines(format!("L{first}"), format!("L{first}-{last}")))
+    } else if web.contains("bitbucket") {
+        format!("{web}/src/{commit}/{file}#lines-{}", lines(format!("{first}"), format!("{first}:{last}")))
+    } else {
+        format!("{web}/blob/{commit}/{file}#{}", lines(format!("L{first}"), format!("L{first}-L{last}")))
+    })
+}
+
 pub fn current_branch(dir: &Path) -> Option<String> {
     let name = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
     // A detached HEAD reports "HEAD": show the short commit instead.
@@ -439,6 +496,43 @@ mod tests {
         assert_eq!(committed_text(&dir.join("link/src/a.rs"), Default::default()).as_deref(), Some("committed\n"));
         assert_eq!(committed_text(&repo.join("src/new.rs"), Default::default()), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remotes_become_web_addresses() {
+        let web = |r: &str| web_url(r).unwrap();
+        assert_eq!(web("git@github.com:me/app.git"), "https://github.com/me/app");
+        assert_eq!(web("https://github.com/me/app.git"), "https://github.com/me/app");
+        assert_eq!(web("https://token@github.com/me/app"), "https://github.com/me/app");
+        assert_eq!(web("ssh://git@gitlab.com:22/group/sub/app.git"), "https://gitlab.com/group/sub/app");
+        assert_eq!(web("git@bitbucket.org:team/app.git"), "https://bitbucket.org/team/app");
+        // An SSH alias for a second account on GitHub.
+        assert_eq!(
+            web("git@github-shortplanet:ShortPlanet3058/null-ide.git"),
+            "https://github.com/ShortPlanet3058/null-ide"
+        );
+        assert_eq!(web("git@git.example.org:me/app.git"), "https://git.example.org/me/app");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_link_to_lines_names_the_commit() {
+        let repo = std::env::temp_dir().join(format!("null-git-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        if run(&repo, &["init", "-q"]).is_err() {
+            return; // No git here.
+        }
+        run(&repo, &["config", "user.name", "t"]).unwrap();
+        run(&repo, &["config", "user.email", "t@t"]).unwrap();
+        run(&repo, &["remote", "add", "origin", "git@github.com:me/app.git"]).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn a() {}\n").unwrap();
+        commit_all(&repo, "first").unwrap();
+        let head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let link = line_link(&repo.join("src/a.rs"), 3, 5).unwrap();
+        assert_eq!(link, format!("https://github.com/me/app/blob/{}/src/a.rs#L3-L5", head.trim()));
+        assert!(line_link(&repo.join("src/a.rs"), 3, 3).unwrap().ends_with("#L3"));
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]

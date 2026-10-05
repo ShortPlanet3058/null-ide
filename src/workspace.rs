@@ -43,6 +43,7 @@ actions!(
         PullBranch,
         FileHistory,
         CompareWithSaved,
+        CopyLineLink,
         CompareWithClipboard,
         RevertAllChanges,
         SwitchBranch,
@@ -203,6 +204,7 @@ enum TabMenuItem {
     Reveal,
     OtherSide,
     History,
+    CopyLink,
 }
 
 impl TabMenuItem {
@@ -216,6 +218,7 @@ impl TabMenuItem {
             TabMenuItem::Reveal => crate::file_tree::REVEAL_LABEL,
             TabMenuItem::OtherSide => "Open on the Other Side Too",
             TabMenuItem::History => "Show History",
+            TabMenuItem::CopyLink => "Copy Link to Line",
         }
     }
 
@@ -1303,6 +1306,45 @@ impl Workspace {
                     .collect();
                 this.open_locations(format!("History of {name}"), locations, window, cx);
                 this.history = Some((path, commits));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A link to the selected lines (or the caret's) on the repository's site, at the commit
+    /// checked out, copied: GitHub, GitLab or Bitbucket.
+    fn copy_line_link(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let (path, first, last) = {
+            let e = editor.read(cx);
+            let Some(path) = e.path().map(Path::to_path_buf) else {
+                return self.show_notice("Save the file first.".into(), cx);
+            };
+            let range = e.selection.range();
+            let (first, _) = e.buffer.point(range.start);
+            let (mut last, col) = e.buffer.point(range.end);
+            // A selection ending at the start of a line doesn't take that line.
+            if col == 0 && last > first {
+                last -= 1;
+            }
+            (path, first + 1, last + 1)
+        };
+        cx.spawn(async move |this, cx| {
+            let link = cx.background_executor().spawn(async move { git::line_link(&path, first, last) }).await;
+            this.update(cx, |this, cx| {
+                let notice = match link {
+                    Ok(link) => {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(link));
+                        if first == last {
+                            format!("Copied a link to line {first}.")
+                        } else {
+                            format!("Copied a link to lines {first}–{last}.")
+                        }
+                    }
+                    Err(error) => format!("Couldn't make a link: {error}"),
+                };
+                this.show_notice(notice, cx);
             })
             .ok();
         })
@@ -2490,6 +2532,7 @@ impl Workspace {
             (File, "Pull".into(), Box::new(PullBranch)),
             (File, "Show File History".into(), Box::new(FileHistory)),
             (File, "Compare with Saved".into(), Box::new(CompareWithSaved)),
+            (File, "Copy Link to Line".into(), Box::new(CopyLineLink)),
             (File, "Compare with Clipboard".into(), Box::new(CompareWithClipboard)),
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
@@ -4717,7 +4760,7 @@ impl Workspace {
         if editor.read(cx).path().is_some() {
             items.extend([CopyPath, CopyRelativePath, Reveal, OtherSide]);
             if self.branch.is_some() {
-                items.push(History);
+                items.extend([History, CopyLink]);
             }
         }
         items
@@ -4760,6 +4803,10 @@ impl Workspace {
             TabMenuItem::History => {
                 self.activate(ix, window, cx);
                 self.file_history(&FileHistory, window, cx);
+            }
+            TabMenuItem::CopyLink => {
+                self.activate(ix, window, cx);
+                self.copy_line_link(cx);
             }
             TabMenuItem::OtherSide => {
                 self.activate(ix, window, cx);
@@ -5462,6 +5509,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::pull_branch))
             .on_action(cx.listener(Self::file_history))
             .on_action(cx.listener(|this, _: &CompareWithSaved, window, cx| this.compare_with_saved(window, cx)))
+            .on_action(cx.listener(|this, _: &CopyLineLink, _, cx| this.copy_line_link(cx)))
             .on_action(
                 cx.listener(|this, _: &CompareWithClipboard, window, cx| this.compare_with_clipboard(window, cx)),
             )
