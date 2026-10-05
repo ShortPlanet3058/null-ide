@@ -73,6 +73,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("New File", NewUntitled),
                 MenuItem::action("Open File or Folder…", Open),
                 MenuItem::action("Open Recent…", crate::workspace::OpenRecent),
+                MenuItem::action("New Window…", crate::workspace::NewWindow),
                 MenuItem::action("Reopen Closed Tab", ReopenClosedTab),
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),

@@ -63,6 +63,7 @@ actions!(
         ToggleFocusMode,
         RunTask,
         OpenRecent,
+        NewWindow,
         StartDebugging,
         StopDebugging,
         StepOver,
@@ -126,6 +127,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("secondary-shift-b", RunTask, ctx),
         KeyBinding::new("alt-secondary-o", OpenRecent, ctx),
+        KeyBinding::new("secondary-shift-n", NewWindow, ctx),
         KeyBinding::new("f5", StartDebugging, ctx),
         KeyBinding::new("shift-f5", StopDebugging, ctx),
         KeyBinding::new("f6", PauseDebugging, ctx),
@@ -461,6 +463,8 @@ pub struct Workspace {
     pending_commands: Vec<crate::palette::Command>,
     /// For a file open on both sides: each copy's buffer revision last passed to the other.
     twin_seen: std::collections::HashMap<gpui::EntityId, u64>,
+    /// Quit was asked and this window's unsaved changes were answered for.
+    pub quitting: bool,
     /// Writing unsaved work to its backup, once typing pauses.
     backup_task: Option<Task<()>>,
     /// Saves waiting for a pause in typing, by editor.
@@ -604,6 +608,7 @@ impl Workspace {
             twin_seen: Default::default(),
             auto_saves: Default::default(),
             backup_task: None,
+            quitting: false,
             view_before_preview: None,
             ai_task: None,
             git_status: Vec::new(),
@@ -638,6 +643,7 @@ impl Workspace {
         // Save the session when quitting, when the window moves or resizes, and when Null
         // goes to the background (so a crash loses little).
         cx.on_app_quit(|this, cx| {
+            this.write_backups_now(cx);
             this.save_session(cx);
             async {}
         })
@@ -1960,7 +1966,11 @@ impl Workspace {
             crate::session::save_backups(self.tree.read(cx).root(), &[]);
         }
         match action {
-            CloseAction::Quit => cx.quit(),
+            // The other windows ask about theirs too, then Null quits.
+            CloseAction::Quit => {
+                self.quitting = true;
+                cx.defer(crate::quit_next);
+            }
             CloseAction::SwitchProject(path) => {
                 while !self.tabs.is_empty() {
                     self.remove_tab(self.tabs.len() - 1, window, cx);
@@ -1991,29 +2001,67 @@ impl Workspace {
         }));
     }
 
-    fn write_backups(&mut self, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+    /// Whether any open file has changes not saved.
+    pub fn has_unsaved(&self, cx: &App) -> bool {
+        self.tabs.iter().any(|t| t.editor.read(cx).buffer.is_dirty())
+    }
+
+    /// The unsaved files: path (None for a new one) and text, a file open twice once.
+    fn unsaved_files(&self, cx: &App) -> Vec<(Option<PathBuf>, String)> {
         let mut unsaved: Vec<(Option<PathBuf>, String)> = Vec::new();
         for tab in &self.tabs {
             let editor = tab.editor.read(cx);
             let path = editor.path().map(Path::to_path_buf);
-            // A file open on both sides is kept once.
             if editor.buffer.is_dirty() && (path.is_none() || !unsaved.iter().any(|(p, _)| *p == path)) {
                 unsaved.push((path, editor.buffer.to_string()));
             }
         }
-        cx.background_executor()
-            .spawn(async move {
-                let backups: Vec<crate::session::Backup> = unsaved
-                    .into_iter()
-                    .map(|(path, text)| {
-                        let disk = path.as_deref().and_then(crate::session::disk_fingerprint);
-                        crate::session::Backup { path, text, disk }
-                    })
-                    .collect();
-                crate::session::save_backups(&root, &backups);
+        unsaved
+    }
+
+    fn backups_of(unsaved: Vec<(Option<PathBuf>, String)>) -> Vec<crate::session::Backup> {
+        unsaved
+            .into_iter()
+            .map(|(path, text)| {
+                let disk = path.as_deref().and_then(crate::session::disk_fingerprint);
+                crate::session::Backup { path, text, disk }
             })
+            .collect()
+    }
+
+    fn write_backups(&mut self, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let unsaved = self.unsaved_files(cx);
+        cx.background_executor()
+            .spawn(async move { crate::session::save_backups(&root, &Self::backups_of(unsaved)) })
             .detach();
+    }
+
+    /// Null quitting without asking (logging out, the Mac restarting): unsaved work is
+    /// kept now, not a moment later, so it comes back next time.
+    fn write_backups_now(&mut self, cx: &mut Context<Self>) {
+        if self.quitting {
+            return;
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
+    }
+
+    /// ⌘⇧N: another window, on a folder chosen for it.
+    fn new_window(&mut self, _: &NewWindow, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open in New Window".into()),
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            if let Some(folder) = paths.into_iter().next() {
+                cx.update(|_, cx| crate::open_project_window(folder, None, cx)).ok();
+            }
+        })
+        .detach();
     }
 
     /// After opening a project: unsaved work left from last time comes back, unsaved.
@@ -2188,6 +2236,7 @@ impl Workspace {
             (File, "New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
             (File, "Open File or Folder…".into(), Box::new(Open)),
             (File, "Open Recent…".into(), Box::new(OpenRecent)),
+            (File, "New Window…".into(), Box::new(NewWindow)),
             (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
             (Go, "Go to File…".into(), Box::new(TogglePalette)),
             (Go, "Go to Symbol in Project…".into(), Box::new(GoToSymbolInProject)),
@@ -2451,6 +2500,11 @@ impl Workspace {
                 let branch = branch.clone();
                 this.close_palette(window, cx);
                 this.change_branch(Ok(branch), cx);
+            }
+            PaletteEvent::OpenProjectInNewWindow(path) => {
+                let path = path.clone();
+                this.close_palette(window, cx);
+                crate::open_project_window(path, None, cx);
             }
             PaletteEvent::OpenProject(path) => {
                 let path = path.clone();
@@ -4999,6 +5053,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(Self::open_recent))
+            .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::start_debugging))
             .on_action(cx.listener(|this, _: &StopDebugging, _, cx| {
                 this.debugger.update(cx, |d, cx| d.stop(cx));
@@ -5547,6 +5602,51 @@ mod tests {
         assert!(!from.exists() && to.is_file());
         workspace.update(cx, |w, cx| assert_eq!(w.active_editor().unwrap().read(cx).path(), Some(to.as_path())));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn quitting_asks_every_window_with_unsaved_changes(cx: &mut gpui::TestAppContext) {
+        let make = |name: &str| {
+            let dir = std::env::temp_dir().join(format!("null-quit-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+            dir
+        };
+        let (first, second) = (make("one"), make("two"));
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let open = |cx: &mut gpui::TestAppContext, dir: &Path| {
+            let root = dir.to_path_buf();
+            let window = cx.add_window(|window, cx| Workspace::new(root, window, cx));
+            let file = dir.join("a.txt");
+            window
+                .update(cx, |w, window, cx| {
+                    w.open_file(file, window, cx);
+                    w.active_editor().unwrap().update(cx, |e, cx| e.type_text_for_test(0, "edit ", cx));
+                })
+                .unwrap();
+            window
+        };
+        let (one, two) = (open(cx, &first), open(cx, &second));
+        // ⌘Q in the first window: it asks about its file…
+        one.update(cx, |w, window, cx| w.quit(&Quit, window, cx)).unwrap();
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Don't Save");
+        cx.run_until_parked();
+        // …then the second window asks about its own, rather than Null quitting over it.
+        assert!(one.update(cx, |w, _, _| w.quitting).unwrap());
+        assert!(cx.has_pending_prompt());
+        assert!(!two.update(cx, |w, _, _| w.quitting).unwrap());
+        cx.simulate_prompt_answer("Don't Save");
+        cx.run_until_parked();
+        std::fs::remove_dir_all(&first).ok();
+        std::fs::remove_dir_all(&second).ok();
     }
 
     #[gpui::test]
