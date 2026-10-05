@@ -853,6 +853,23 @@ impl LspStore {
         }
     }
 
+    /// The rest of a completion the server left out of the list (the import it adds, for
+    /// typescript-language-server), asked for once it's picked.
+    pub fn resolve_completion(
+        &self,
+        path: &Path,
+        item: lsp_types::CompletionItem,
+    ) -> impl Future<Output = Result<lsp_types::CompletionItem, String>> + use<> {
+        let request =
+            self.server_for(path).map(|server| server.request::<lsp_types::request::ResolveCompletionItem>(item));
+        async move {
+            match request {
+                Some(request) => request.await,
+                None => Err("No language server for this file.".into()),
+            }
+        }
+    }
+
     /// Runs a server command (a fix that works through the server, which then sends edits).
     pub fn execute_command(
         &self,

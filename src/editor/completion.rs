@@ -24,6 +24,8 @@ pub struct Suggestion {
     /// Where the server wants `insert` to go, if it said.
     range: Option<lsp_types::Range>,
     extra_edits: Vec<lsp_types::TextEdit>,
+    /// The item as the server sent it, when it can say more once picked (the import it adds).
+    unresolved: Option<CompletionItem>,
 }
 
 pub struct CompletionMenu {
@@ -49,6 +51,7 @@ impl CompletionMenu {
 
 impl Suggestion {
     fn from_lsp(item: CompletionItem) -> Self {
+        let unresolved = (item.additional_text_edits.is_none() && item.data.is_some()).then(|| item.clone());
         let (insert, range) = match item.text_edit {
             Some(CompletionTextEdit::Edit(edit)) => (edit.new_text, Some(edit.range)),
             Some(CompletionTextEdit::InsertAndReplace(edit)) => (edit.new_text, Some(edit.replace)),
@@ -66,6 +69,7 @@ impl Suggestion {
             snippet,
             range,
             extra_edits: item.additional_text_edits.unwrap_or_default(),
+            unresolved,
         }
     }
 }
@@ -256,6 +260,68 @@ impl Editor {
         if let Some(parsed) = parsed {
             self.start_snippet(inserted_at, parsed, cx);
         }
+        if let Some(item) = suggestion.unresolved.clone() {
+            self.resolve_picked(item, inserted_at, cx);
+        }
+        self.text_changed(cx);
+        cx.emit(EditorEvent::Edited);
+        self.touch(cx);
+    }
+
+    /// Asks the server what else a picked completion brings (the import it adds), then adds
+    /// that above it, as long as nothing above was changed in the meantime.
+    fn resolve_picked(&mut self, item: CompletionItem, inserted_at: usize, cx: &mut Context<Self>) {
+        let (Some(lsp), Some(path)) = (self.lsp.clone().filter(|_| !self.lsp_follower), self.path.clone()) else {
+            return;
+        };
+        let request = lsp.read(cx).resolve_completion(&path, item);
+        let before = self.lsp_position(inserted_at);
+        let before_byte = self.buffer.rope().char_to_byte(inserted_at);
+        let revision = self.buffer.revision();
+        cx.spawn(async move |this, cx| {
+            let Ok(resolved) = request.await else { return };
+            let edits: Vec<lsp_types::TextEdit> = resolved
+                .additional_text_edits
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.range.end <= before)
+                .collect();
+            if edits.is_empty() {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                let untouched =
+                    this.buffer.edits_since(revision).is_some_and(|mut e| e.all(|e| e.start_byte >= before_byte));
+                if untouched {
+                    this.add_edits_above(&edits, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A server's edits, as one undo step, the cursors (and what they select) staying with
+    /// their text. Nothing changes when an edit would rewrite text a cursor is in.
+    fn add_edits_above(&mut self, edits: &[lsp_types::TextEdit], cx: &mut Context<Self>) {
+        let ranges = super::refactor::edit_ranges(&self.buffer, edits);
+        let moved = |s: Selection| {
+            let anchor = super::refactor::caret_after(s.anchor, &ranges)?;
+            Some(Selection { anchor, head: super::refactor::caret_after(s.head, &ranges)? })
+        };
+        let Some(selection) = moved(self.selection) else { return };
+        let Some(extra) = self
+            .extra
+            .iter()
+            .map(|c| moved(c.selection).map(|selection| super::Cursor { selection, goal: None }))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
+        self.record_undo(EditKind::Other);
+        super::refactor::apply_edits(&mut self.buffer, edits);
+        self.selection = selection;
+        self.extra = extra;
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
@@ -266,6 +332,60 @@ impl Editor {
 mod tests {
     use super::*;
     use lsp_types::{Position, TextEdit};
+
+    #[test]
+    fn items_the_server_completes_later_are_kept_to_ask_about() {
+        let item = |data: Option<serde_json::Value>, edits: Option<Vec<TextEdit>>| CompletionItem {
+            label: "useState".into(),
+            data,
+            additional_text_edits: edits,
+            ..Default::default()
+        };
+        assert!(Suggestion::from_lsp(item(Some(serde_json::json!({"id": 1})), None)).unresolved.is_some());
+        // Already complete, or nothing to ask about with.
+        assert!(Suggestion::from_lsp(item(Some(serde_json::json!(1)), Some(Vec::new()))).unresolved.is_none());
+        assert!(Suggestion::from_lsp(item(None, None)).unresolved.is_none());
+    }
+
+    /// The import a picked completion brings arrives once the placeholder is selected:
+    /// it goes in above, the placeholder stays selected, and ⌘Z takes back just the import.
+    #[gpui::test]
+    fn an_import_arriving_later_leaves_the_placeholder_selected(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        use gpui::Focusable;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(Buffer::from_text("const a = \n"), Some(std::path::PathBuf::from("x.ts")), cx)
+        });
+        let selected = |e: &Editor| e.buffer.slice(e.selection.range());
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            let parsed = super::super::snippet::parse("useState(${1:initial})$0");
+            e.buffer.replace(10..10, &parsed.text);
+            e.start_snippet(10, parsed, cx);
+            assert_eq!(selected(e), "initial");
+            let import = TextEdit {
+                range: lsp_types::Range { start: Position::new(0, 0), end: Position::new(0, 0) },
+                new_text: "import { useState } from \"react\";\n".into(),
+            };
+            e.add_edits_above(&[import], cx);
+            assert_eq!(e.buffer.to_string(), "import { useState } from \"react\";\nconst a = useState(initial)\n");
+            assert_eq!(selected(e), "initial");
+        });
+        cx.simulate_input("0");
+        cx.simulate_keystrokes("tab");
+        e.update(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "import { useState } from \"react\";\nconst a = useState(0)\n");
+            assert!(!e.in_snippet());
+        });
+        cx.simulate_keystrokes("cmd-z cmd-z");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "const a = useState(initial)\n"));
+    }
 
     #[test]
     fn snippets_are_kept_to_fill_in() {
