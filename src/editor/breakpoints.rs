@@ -134,6 +134,9 @@ impl Editor {
         });
         let subscription = cx.subscribe(&input, |_, _, TextInputEvent::Changed, cx| cx.notify());
         window.focus(&input.focus_handle(cx));
+        // Otherwise the click goes on to focus the editor it landed in, taking the keyboard
+        // back from the field: what was typed went into the code.
+        window.prevent_default();
         self.editing_condition = Some(ConditionEdit { line, input, _subscription: subscription });
         cx.notify();
     }
@@ -199,6 +202,44 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With the mouse: a right-click in the strip left of the line numbers opens the
+    /// condition field; typed into and ↵, that line's breakpoint stops only then.
+    #[gpui::test]
+    fn right_clicking_the_gutter_sets_a_condition(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(Buffer::from_text("for i in 0..9 {\n    work(i);\n}\n"), Some("x.rs".into()), cx)
+        });
+        e.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
+        cx.run_until_parked();
+        let in_strip = e.read_with(cx, |e, _| {
+            let l = e.layout.as_ref().expect("drawn");
+            gpui::point(l.bounds.left() + gpui::px(8.), l.text_origin.y + l.line_height * 1.5)
+        });
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: in_strip,
+            button: gpui::MouseButton::Right,
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        assert!(e.read_with(cx, |e, _| e.editing_condition.is_some()), "no field opened");
+        cx.simulate_input("i == 3");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            e.read_with(cx, |e, _| e.breakpoint_list()),
+            [Breakpoint { line: 1, condition: Some("i == 3".into()) }]
+        );
+    }
 
     #[gpui::test]
     fn conditions_go_with_their_breakpoints(cx: &mut gpui::TestAppContext) {

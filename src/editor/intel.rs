@@ -656,6 +656,39 @@ mod tests {
         });
     }
 
+    /// With the mouse while debugging: ⌥ held over a name shows its value.
+    #[gpui::test]
+    fn holding_alt_over_a_name_shows_its_value(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(Buffer::from_text("total += word.len();\n"), Some(std::path::PathBuf::from("x.txt")), cx)
+        });
+        e.update_in(cx, |e, window, _| {
+            e.debug_locals = vec![("word".into(), "\"null\"".into())];
+            window.focus(&e.focus_handle);
+        });
+        cx.run_until_parked();
+        // Over "word" (columns 9 to 13).
+        let over = e.read_with(cx, |e, _| {
+            let l = e.layout.as_ref().expect("drawn");
+            gpui::point(l.text_origin.x + l.char_width * 10.5, l.text_origin.y + l.line_height * 0.5)
+        });
+        let alt = gpui::Modifiers { alt: true, ..Default::default() };
+        cx.simulate_mouse_move(over, None, alt);
+        cx.simulate_modifiers_change(alt);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        e.read_with(cx, |e, _| {
+            let card = e.hover.as_ref().expect("a card while ⌥ is held");
+            assert_eq!(card.blocks[0].text, "word = \"null\"");
+        });
+    }
+
     #[gpui::test]
     fn problems_stay_on_their_text_until_the_server_says_otherwise(cx: &mut gpui::TestAppContext) {
         use crate::buffer::Buffer;
