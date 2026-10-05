@@ -364,6 +364,7 @@ impl SettingsPanel {
     ) -> AnyElement {
         div()
             .id(id)
+            .debug_selector(|| format!("toggle {id}"))
             .cursor_pointer()
             .child(ui::switch(on, theme))
             .active(|s| s.opacity(0.7))

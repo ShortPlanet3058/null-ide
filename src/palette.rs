@@ -780,6 +780,12 @@ impl Palette {
         cx.notify();
     }
 
+    /// What's typed in the field.
+    #[cfg(test)]
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
     fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
         self.confirm_at(self.selected, cx);
     }
@@ -1147,6 +1153,7 @@ impl Palette {
         let separated = row.item == Item::Quick(Quick::AllSettings);
         div()
             .id(ix)
+            .debug_selector(|| format!("palette-row {ix}"))
             .flex_none()
             .when(separated, |d| d.mt(px(5.)).pt(px(5.)).border_t_1().border_color(theme.hairline))
             .child(

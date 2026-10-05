@@ -2999,6 +2999,12 @@ impl Render for Editor {
 }
 
 impl Editor {
+    /// The find bar's search, while it's open.
+    #[cfg(test)]
+    pub fn find_query(&self, cx: &App) -> Option<crate::search::SearchQuery> {
+        self.find_bar.as_ref().map(|bar| bar.read(cx).query(cx))
+    }
+
     pub fn is_markdown(&self) -> bool {
         self.language().is_some_and(|l| l.name == "Markdown")
     }
