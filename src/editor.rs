@@ -475,6 +475,8 @@ pub struct Editor {
     /// While stopped: values of the variables the lines above name, shown faintly at
     /// their end (line, text).
     pub inline_values: Vec<(usize, String)>,
+    /// While stopped in this file: the call's variables, for the info card (⌥ over a name).
+    pub debug_locals: Vec<(String, String)>,
     /// The snippet being filled in, if any.
     snippet: Option<snippet::Session>,
     /// Cursors as they were before each one was added, for ⌘U.
@@ -584,6 +586,7 @@ impl Editor {
             breakpoints_revision: 0,
             execution_line: None,
             inline_values: Vec::new(),
+            debug_locals: Vec::new(),
             symbol_marks: Default::default(),
             hints: Default::default(),
             fixes_task: None,
