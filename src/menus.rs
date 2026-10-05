@@ -83,7 +83,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Close All Tabs", CloseAllTabs),
                 MenuItem::separator(),
                 MenuItem::action("Review Changes…", crate::workspace::ReviewChanges),
-                MenuItem::action("Commit All Changes…", crate::workspace::CommitAll),
+                MenuItem::action("Commit…", crate::workspace::CommitAll),
                 MenuItem::action("Push", crate::workspace::PushBranch),
                 MenuItem::action("Switch Branch…", crate::workspace::SwitchBranch),
                 MenuItem::action("Revert All Changes…", crate::workspace::RevertAllChanges),
