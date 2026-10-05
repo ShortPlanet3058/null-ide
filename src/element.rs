@@ -19,11 +19,11 @@ const GLIDE: Duration = Duration::from_millis(90);
 const BLINK_DELAY: Duration = Duration::from_millis(500);
 const TOP_PADDING: f32 = 8.;
 const TEXT_PADDING: f32 = 8.;
-const GUTTER_PADDING: f32 = 16.;
+pub(crate) const GUTTER_PADDING: f32 = 16.;
 /// Width of the scrollbar along the right edge.
 const BAR: f32 = 10.;
 /// Room in the gutter, after the line numbers, for the fold chevrons.
-const FOLD_SPACE: f32 = 12.;
+pub(crate) const FOLD_SPACE: f32 = 12.;
 
 /// One row of text as drawn last frame.
 pub struct RowLayout {
@@ -240,6 +240,10 @@ pub struct Prepaint {
     text_bounds: Bounds<Pixels>,
     line_height: Pixels,
     current_line: Option<Bounds<Pixels>>,
+    /// The debugger's breakpoints: a dot each, in the gutter.
+    breakpoint_dots: Vec<Bounds<Pixels>>,
+    /// The line the debugger stopped on: a band across it, and a mark in the gutter.
+    execution: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
     /// Faint lines down the indentation, one per level.
     indent_guides: Vec<Bounds<Pixels>>,
     /// The first lines of the blocks the view is inside, pinned at the top: the band
@@ -674,6 +678,29 @@ impl Element for EditorElement {
                     size(bounds.size.width, line_height * caret_rows.len() as f32),
                 )
             });
+            // Breakpoints: a dot left of the line number, on the line's first row.
+            let dot = px(8.);
+            let breakpoint_dots: Vec<Bounds<Pixels>> = editor
+                .breakpoints
+                .iter()
+                .filter(|&&line| lines_shown.contains(&line))
+                .filter_map(|&line| {
+                    let rows = rows_of(line..line + 1);
+                    (!rows.is_empty()).then(|| {
+                        let y = row_top(rows.start) + (line_height - dot) / 2.;
+                        Bounds::new(point(bounds.left() + px(5.), y), size(dot, dot))
+                    })
+                })
+                .collect();
+            let execution = editor.execution_line.and_then(|line| {
+                let rows = rows_of(line..line + 1);
+                (!rows.is_empty()).then(|| {
+                    let height = line_height * rows.len() as f32;
+                    let band = Bounds::new(point(bounds.left(), row_top(rows.start)), size(bounds.size.width, height));
+                    let mark = Bounds::new(point(bounds.left(), row_top(rows.start)), size(px(3.), height));
+                    (band, mark)
+                })
+            });
 
             // Indent guides: a faint line at each level a line is indented past. Blank lines
             // take the smaller indentation of the lines around them, so guides run through.
@@ -1063,6 +1090,8 @@ impl Element for EditorElement {
                 text_bounds,
                 line_height,
                 current_line,
+                breakpoint_dots,
+                execution,
                 indent_guides,
                 sticky,
                 numbers,
@@ -1112,6 +1141,13 @@ impl Element for EditorElement {
         window.paint_quad(fill(bounds, theme.background));
         if let Some(row) = prepaint.current_line {
             window.paint_quad(fill(row, theme.current_line));
+        }
+        if let Some((band, mark)) = prepaint.execution {
+            window.paint_quad(fill(band, theme.warning.opacity(0.14)));
+            window.paint_quad(fill(mark, theme.warning));
+        }
+        for dot in &prepaint.breakpoint_dots {
+            window.paint_quad(fill(*dot, theme.error).corner_radii(px(4.)));
         }
         if let Some(band) = prepaint.assist_band {
             window.paint_quad(fill(band, theme.accent_soft));

@@ -155,7 +155,7 @@ pub fn language_id(path: &Path) -> &'static str {
 /// Programs that come with Xcode, found once through `xcrun`.
 static XCODE: Mutex<Vec<(&'static str, Option<PathBuf>)>> = Mutex::new(Vec::new());
 
-fn xcrun_find(program: &'static str) -> Option<PathBuf> {
+pub fn xcrun_find(program: &'static str) -> Option<PathBuf> {
     if !cfg!(target_os = "macos") {
         return None;
     }
