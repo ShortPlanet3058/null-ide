@@ -15,6 +15,39 @@ use gpui::{
 
 actions!(settings_panel, [CloseSettings]);
 
+/// The fonts installed on this computer, listed once a session: listing them takes most
+/// of a tenth of a second, too long to wait each time Settings opens.
+struct InstalledFonts(Vec<String>);
+
+impl gpui::Global for InstalledFonts {}
+
+thread_local! {
+    /// While a search runs: its words, and the setting rows that match, gathered as the
+    /// sections are built (rows are made in many places; this keeps them unchanged).
+    static SEARCH: std::cell::RefCell<Option<(Vec<String>, Vec<AnyElement>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether a setting answers to every word searched for (in its name or explanation).
+fn answers(words: &[String], title: &str, detail: Option<&str>) -> bool {
+    let text = format!("{} {}", title, detail.unwrap_or("")).to_lowercase();
+    words.iter().all(|w| text.contains(w.as_str()))
+}
+
+/// A row as built: shown as is, or during a search kept aside if it matches (and nothing
+/// shown in its place).
+fn shown_row(title: &str, detail: Option<&str>, build: impl FnOnce() -> AnyElement) -> AnyElement {
+    let searching = SEARCH.with(|s| s.borrow().as_ref().map(|(words, _)| answers(words, title, detail)));
+    match searching {
+        None => build(),
+        Some(false) => div().into_any_element(),
+        Some(true) => {
+            let row = build();
+            SEARCH.with(|s| s.borrow_mut().as_mut().map(|(_, rows)| rows.push(row)));
+            div().into_any_element()
+        }
+    }
+}
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", CloseSettings, Some("SettingsPanel"))]);
 }
@@ -76,6 +109,8 @@ pub struct SettingsPanel {
     section: Section,
     shortcuts: Vec<Shortcut>,
     installed_fonts: Vec<String>,
+    /// Typed at the top: the settings that answer to it, from every section.
+    search: Entity<TextInput>,
     model: Entity<TextInput>,
     address: Entity<TextInput>,
     completion_model: Entity<TextInput>,
@@ -98,7 +133,7 @@ impl SettingsPanel {
         let model = cx.new(|cx| TextInput::new("Model", cx));
         let address = cx.new(|cx| TextInput::new("Address", cx));
         let completion_model = cx.new(|cx| TextInput::new("Same as above", cx));
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             // Install progress shows as it happens.
             cx.observe(&lsp, |_, _, cx| cx.notify()),
             cx.subscribe(&model, |this, input, TextInputEvent::Changed, cx| {
@@ -133,7 +168,13 @@ impl SettingsPanel {
                 });
             }),
         ];
-        let installed_fonts = cx.text_system().all_font_names();
+        if !cx.has_global::<InstalledFonts>() {
+            let names = cx.text_system().all_font_names();
+            cx.set_global(InstalledFonts(names));
+        }
+        let installed_fonts = cx.global::<InstalledFonts>().0.clone();
+        let search = cx.new(|cx| TextInput::new("Search settings", cx));
+        subscriptions.push(cx.subscribe(&search, |_, _, TextInputEvent::Changed, cx| cx.notify()));
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
             lsp,
@@ -144,6 +185,7 @@ impl SettingsPanel {
             address,
             completion_model,
             fields_for: ProviderId::Off,
+            search,
             has_key: None,
             _subscriptions: subscriptions,
         };
@@ -183,8 +225,50 @@ impl SettingsPanel {
         self.has_key = provider.uses_api_key().then(|| ai::known_key(provider)).flatten();
     }
 
+    /// Escape: a search is cleared first; then Settings closes.
     fn close(&mut self, _: &CloseSettings, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.search.read(cx).text().is_empty() {
+            self.search.update(cx, |search, cx| search.set_text("", cx));
+            return cx.notify();
+        }
         cx.emit(SettingsPanelEvent::Closed);
+    }
+
+    fn section_rows(&self, section: Section, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        match section {
+            Section::Appearance => self.appearance(cx),
+            Section::Editor => self.editor(cx),
+            Section::Languages => self.languages(cx),
+            Section::Ai => self.ai(cx),
+            Section::Keyboard => self.keyboard(window, cx),
+        }
+    }
+
+    /// Searching: the matching rows of every section, each under its section's name.
+    fn search_results(&self, words: Vec<String>, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.global::<Theme>().clone();
+        let mut results = Vec::new();
+        for section in Section::ALL {
+            SEARCH.with(|s| *s.borrow_mut() = Some((words.clone(), Vec::new())));
+            drop(self.section_rows(section, window, cx));
+            let rows = SEARCH.with(|s| s.borrow_mut().take()).map(|(_, rows)| rows).unwrap_or_default();
+            if !rows.is_empty() {
+                results.push(Self::heading(section.label(), &theme));
+                results.extend(rows);
+            }
+        }
+        if results.is_empty() {
+            let query = self.search.read(cx).text().trim().to_string();
+            results.push(
+                div()
+                    .pt(px(28.))
+                    .text_size(px(ui::T_LG))
+                    .text_color(theme.muted)
+                    .child(format!("No setting for “{query}”"))
+                    .into_any_element(),
+            );
+        }
+        results
     }
 
     fn set_provider(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
@@ -197,6 +281,10 @@ impl SettingsPanel {
 
     /// A setting: its name and a line of explanation on the left, the control on the right.
     fn row(title: &str, detail: Option<&str>, control: impl IntoElement, theme: &Theme) -> AnyElement {
+        shown_row(title, detail, || Self::row_now(title, detail, control, theme))
+    }
+
+    fn row_now(title: &str, detail: Option<&str>, control: impl IntoElement, theme: &Theme) -> AnyElement {
         div()
             .flex()
             .items_center()
@@ -225,6 +313,10 @@ impl SettingsPanel {
     /// A row whose control needs the width (a model field and its suggestions): the
     /// words above, the control under them, full width.
     fn stacked_row(title: &str, detail: Option<&str>, control: impl IntoElement, theme: &Theme) -> AnyElement {
+        shown_row(title, detail, || Self::stacked_row_now(title, detail, control, theme))
+    }
+
+    fn stacked_row_now(title: &str, detail: Option<&str>, control: impl IntoElement, theme: &Theme) -> AnyElement {
         div()
             .flex()
             .flex_col()
@@ -390,7 +482,9 @@ impl SettingsPanel {
         let ui_options = ui_fonts.iter().enumerate().map(|(i, (_, l))| (i, l.clone())).collect();
         vec![
             Self::heading("Theme", &theme),
-            div().grid().grid_cols(3).gap(px(16.)).py(px(12.)).children(cards).into_any_element(),
+            shown_row("Theme", Some(&ThemeName::ALL.map(|t| t.label()).join(" ")), || {
+                div().grid().grid_cols(3).gap(px(16.)).py(px(12.)).children(cards).into_any_element()
+            }),
             Self::heading("Text", &theme),
             Self::row(
                 "Text size",
@@ -702,7 +796,9 @@ impl SettingsPanel {
         }
         for (title, ids) in groups {
             rows.push(Self::heading(title, &theme));
-            rows.push(
+            let names =
+                format!("AI provider {title} {}", ids.iter().map(|id| id.label()).collect::<Vec<_>>().join(" "));
+            rows.push(shown_row(title, Some(&names), || {
                 // Two columns, so the chosen provider's options stay close.
                 div()
                     .flex()
@@ -754,8 +850,8 @@ impl SettingsPanel {
                             .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_provider(id, cx)))
                     }))
-                    .into_any_element(),
-            );
+                    .into_any_element()
+            }));
         }
         if current == ProviderId::Off {
             return rows;
@@ -911,7 +1007,8 @@ impl SettingsPanel {
             }
             rows.push(Self::heading(category.label(), &theme));
             for (shortcut, keys) in members {
-                rows.push(
+                // Searchable by its name and its keys ("save" finds ⌘S).
+                rows.push(shown_row(&shortcut.label, Some(&format!("shortcut key {keys}")), || {
                     div()
                         .flex()
                         .justify_between()
@@ -921,8 +1018,8 @@ impl SettingsPanel {
                         .text_size(px(13.))
                         .child(div().text_color(theme.foreground).child(shortcut.label.clone()))
                         .child(ui::key_cap(keys, &theme))
-                        .into_any_element(),
-                );
+                        .into_any_element()
+                }));
             }
         }
         rows
@@ -930,8 +1027,9 @@ impl SettingsPanel {
 }
 
 impl Focusable for SettingsPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    /// The search field: typing right away searches.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.search.focus_handle(cx)
     }
 }
 
@@ -942,14 +1040,15 @@ impl Render for SettingsPanel {
             self.fill_provider_fields(cx);
         }
         let theme = cx.global::<Theme>().clone();
-        let content = match self.section {
-            Section::Appearance => self.appearance(cx),
-            Section::Editor => self.editor(cx),
-            Section::Languages => self.languages(cx),
-            Section::Ai => self.ai(cx),
-            Section::Keyboard => self.keyboard(window, cx),
+        let query = self.search.read(cx).text().trim().to_lowercase();
+        let words: Vec<String> = query.split_whitespace().map(str::to_string).collect();
+        let searching = !words.is_empty();
+        let content = if searching {
+            self.search_results(words, window, cx)
+        } else {
+            self.section_rows(self.section, window, cx)
         };
-        let current = self.section;
+        let current = (!searching).then_some(self.section);
         let sidebar = div()
             .w(px(190.))
             .flex_none()
@@ -969,8 +1068,24 @@ impl Render for SettingsPanel {
                     .text_color(theme.foreground)
                     .child("Settings"),
             )
+            // Typing as soon as Settings opens searches it.
+            .child(
+                div()
+                    .mx(px(2.))
+                    .mb(px(10.))
+                    .px(px(8.))
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(ui::R_CONTROL))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .text_size(px(ui::T_MD))
+                    .child(self.search.clone()),
+            )
             .children(Section::ALL.into_iter().map(|section| {
-                let active = section == current;
+                let active = Some(section) == current;
                 div()
                     .id(section.label())
                     .px(px(10.))
@@ -984,6 +1099,7 @@ impl Render for SettingsPanel {
                     .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.section = section;
+                        this.search.update(cx, |search, cx| search.set_text("", cx));
                         cx.notify();
                     }))
             }))
@@ -1044,6 +1160,40 @@ mod tests {
     use gpui::TestAppContext;
 
     /// Every section draws, with and without an AI provider. (Only reads settings: nothing is saved.)
+    #[gpui::test]
+    fn searching_gathers_matching_rows_from_every_section(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let lsp = cx.new(|_| crate::lsp_store::LspStore::new(std::path::PathBuf::from("/tmp")));
+            SettingsPanel::new(Vec::new(), lsp, cx)
+        });
+        let count = |words: &[&str], cx: &mut gpui::VisualTestContext| {
+            panel.update_in(cx, |panel, window, cx| {
+                panel.search_results(words.iter().map(|w| w.to_string()).collect(), window, cx).len()
+            })
+        };
+        // "wrap": one row, under the Editor heading.
+        assert_eq!(count(&["wrap"], cx), 2);
+        // Words found across sections: a heading for each.
+        assert!(count(&["theme"], cx) >= 2);
+        // A theme by its name finds the picker.
+        assert_eq!(count(&["paper"], cx), 2);
+        // Nothing: one line saying so.
+        assert_eq!(count(&["zzz"], cx), 1);
+        // Every word must match.
+        assert_eq!(count(&["wrap", "zzz"], cx), 1);
+        // Escape clears the search first, and Settings stays open.
+        panel.update_in(cx, |panel, window, cx| {
+            panel.search.update(cx, |s, cx| s.set_text("wrap", cx));
+            panel.close(&CloseSettings, window, cx);
+            assert!(panel.search.read(cx).text().is_empty());
+        });
+    }
+
     #[gpui::test]
     fn every_section_renders(cx: &mut TestAppContext) {
         for provider in [ProviderId::Off, ProviderId::Ollama, ProviderId::ClaudeCode] {
