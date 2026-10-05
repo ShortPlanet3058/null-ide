@@ -19,7 +19,7 @@ impl Editor {
         start..end.min(self.buffer.len_lines()).max(start + 1)
     }
 
-    fn lines_char_range(&self, lines: &Range<usize>) -> Range<usize> {
+    pub(super) fn lines_char_range(&self, lines: &Range<usize>) -> Range<usize> {
         let start = self.buffer.line_to_char(lines.start);
         let end = if lines.end >= self.buffer.len_lines() {
             self.buffer.len_chars()

@@ -3,6 +3,7 @@ mod breakpoints;
 mod changes;
 mod commands;
 mod completion;
+mod conflicts;
 mod cursors;
 mod fixes;
 mod fold;
@@ -19,6 +20,7 @@ mod structure;
 pub use assist::{Block, BlockKind};
 pub use breakpoints::{Breakpoint, ToggleBreakpoint};
 pub use completion::CompletionMenu;
+pub use conflicts::{Conflict, NextConflict, PreviousConflict};
 pub use cursors::Cursor;
 pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
@@ -133,6 +135,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     refactor::bind_keys(cx);
     fold::bind_keys(cx);
     fixes::bind_keys(cx);
+    conflicts::bind_keys(cx);
     breakpoints::bind_keys(cx);
     structure::bind_keys(cx);
     snippet::bind_keys(cx);
@@ -397,6 +400,8 @@ pub struct Editor {
     pub spans: Vec<Span>,
     /// The longest line's width in columns, for the buffer revision it was measured at.
     longest_line: std::cell::Cell<(u64, usize)>,
+    /// The merge conflicts in the text, and the revision they were found at.
+    conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
     /// The buffer revision and byte range `spans` cover.
     spans_for: Option<(u64, Range<usize>)>,
     /// `problems()` for a (diagnostics version, buffer revision).
@@ -531,6 +536,7 @@ impl Editor {
             spans: Vec::new(),
             spans_for: None,
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
+            conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
             pinned: Default::default(),
             selection: Selection::caret(0),
@@ -2760,6 +2766,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::newline_above))
             .on_action(cx.listener(Self::join_lines))
             .on_action(cx.listener(Self::next_change))
+            .on_action(cx.listener(Self::next_conflict))
+            .on_action(cx.listener(Self::previous_conflict))
             .on_action(cx.listener(Self::previous_change))
             .on_action(cx.listener(Self::sort_lines))
             .on_action(cx.listener(Self::upper_case))

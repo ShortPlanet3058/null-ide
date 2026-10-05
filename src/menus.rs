@@ -172,6 +172,8 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Previous Problem", crate::workspace::PreviousProblem),
                 MenuItem::action("Next Change", crate::editor::NextChange),
                 MenuItem::action("Previous Change", crate::editor::PreviousChange),
+                MenuItem::action("Next Conflict", crate::editor::NextConflict),
+                MenuItem::action("Previous Conflict", crate::editor::PreviousConflict),
                 MenuItem::action("Show Info at Cursor", ShowInfo),
             ],
         },
