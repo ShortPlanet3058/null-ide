@@ -411,6 +411,8 @@ pub struct Workspace {
     pending_commands: Vec<crate::palette::Command>,
     /// For a file open on both sides: each copy's buffer revision last passed to the other.
     twin_seen: std::collections::HashMap<gpui::EntityId, u64>,
+    /// Writing unsaved work to its backup, once typing pauses.
+    backup_task: Option<Task<()>>,
     /// Saves waiting for a pause in typing, by editor.
     auto_saves: std::collections::HashMap<gpui::EntityId, Task<()>>,
     /// Changed source files waiting to be read again.
@@ -543,6 +545,7 @@ impl Workspace {
             reindex_pending: HashSet::new(),
             twin_seen: Default::default(),
             auto_saves: Default::default(),
+            backup_task: None,
             view_before_preview: None,
             ai_task: None,
             git_status: Vec::new(),
@@ -679,6 +682,8 @@ impl Workspace {
         if self.tabs.is_empty() {
             window.focus(&self.focus_handle);
         }
+        // Unsaved work from last time, if Null didn't get to close properly.
+        self.restore_backups(window, cx);
         // Opening the tabs again isn't somewhere to go back to.
         self.back.clear();
         self.forward.clear();
@@ -1401,6 +1406,7 @@ impl Workspace {
             cx.observe(&editor, |_, _, cx| cx.notify()),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited => {
+                    this.schedule_backup(cx);
                     if cx.global::<Settings>().auto_save == AutoSave::AfterPause {
                         this.save_after_pause(editor, cx);
                     }
@@ -1414,6 +1420,7 @@ impl Workspace {
                 }
                 // Hand edits to the settings file take effect when saved.
                 EditorEvent::Saved => {
+                    this.schedule_backup(cx);
                     this.refresh_git_status(cx);
                     // Saving (and tidying) one copy saves the other: same text, same file.
                     this.sync_twins(editor, cx);
@@ -1867,6 +1874,11 @@ impl Workspace {
     }
 
     fn finish_close(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) {
+        // Every unsaved change was saved or let go: no backup to bring back.
+        if !matches!(action, CloseAction::CloseTabs(_)) {
+            self.backup_task = None;
+            crate::session::save_backups(self.tree.read(cx).root(), &[]);
+        }
         match action {
             CloseAction::Quit => cx.quit(),
             CloseAction::SwitchProject(path) => {
@@ -1882,8 +1894,85 @@ impl Workspace {
                         self.remove_tab(ix, window, cx);
                     }
                 }
+                self.schedule_backup(cx);
             }
         }
+    }
+
+    // ---------- backups of unsaved work ----------
+
+    /// Keeps the unsaved work in Null's own folder a moment after typing stops, so a
+    /// crash or a forced quit doesn't lose it.
+    fn schedule_backup(&mut self, cx: &mut Context<Self>) {
+        const PAUSE: Duration = Duration::from_secs(2);
+        self.backup_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PAUSE).await;
+            this.update(cx, |this, cx| this.write_backups(cx)).ok();
+        }));
+    }
+
+    fn write_backups(&mut self, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let mut unsaved: Vec<(Option<PathBuf>, String)> = Vec::new();
+        for tab in &self.tabs {
+            let editor = tab.editor.read(cx);
+            let path = editor.path().map(Path::to_path_buf);
+            // A file open on both sides is kept once.
+            if editor.buffer.is_dirty() && (path.is_none() || !unsaved.iter().any(|(p, _)| *p == path)) {
+                unsaved.push((path, editor.buffer.to_string()));
+            }
+        }
+        cx.background_executor()
+            .spawn(async move {
+                let backups: Vec<crate::session::Backup> = unsaved
+                    .into_iter()
+                    .map(|(path, text)| {
+                        let disk = path.as_deref().and_then(crate::session::disk_fingerprint);
+                        crate::session::Backup { path, text, disk }
+                    })
+                    .collect();
+                crate::session::save_backups(&root, &backups);
+            })
+            .detach();
+    }
+
+    /// After opening a project: unsaved work left from last time comes back, unsaved.
+    fn restore_backups(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let backups = crate::session::load_backups(&root);
+        if backups.is_empty() {
+            return;
+        }
+        let mut changed_on_disk = 0;
+        for backup in &backups {
+            let editor = match &backup.path {
+                Some(path) if path.is_file() => {
+                    if backup.disk != crate::session::disk_fingerprint(path) {
+                        changed_on_disk += 1;
+                    }
+                    self.open_file(path.clone(), window, cx);
+                    self.tabs
+                        .iter()
+                        .find(|t| t.editor.read(cx).path() == Some(path.as_path()))
+                        .map(|t| t.editor.clone())
+                }
+                // No file (a new one, or since deleted): a new file holding the text.
+                _ => {
+                    let editor = cx.new(|cx| Editor::new(Default::default(), None, cx));
+                    self.add_tab(editor.clone(), window, cx);
+                    Some(editor)
+                }
+            };
+            if let Some(editor) = editor {
+                editor.update(cx, |editor, cx| editor.restore_unsaved(&backup.text, cx));
+            }
+        }
+        let files = if backups.len() == 1 { "1 file".to_string() } else { format!("{} files", backups.len()) };
+        let mut notice = format!("Brought back unsaved changes to {files} from last time");
+        if changed_on_disk > 0 {
+            notice.push_str(", though a file changed on disk since: check before saving");
+        }
+        self.show_notice(notice, cx);
     }
 
     fn close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
@@ -4906,6 +4995,61 @@ mod tests {
         workspace.update(cx, |w, cx| {
             assert_eq!(w.active_editor().unwrap().read(cx).path(), Some(to.as_path()));
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn unsaved_work_comes_back_after_a_crash(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        // Typing in a file and in a new one, then the backup is written…
+        let root = dir.clone();
+        let (first, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        first.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.txt"), window, cx);
+            w.active_editor().unwrap().update(cx, |e, cx| e.type_text_for_test(0, "zero ", cx));
+            w.new_untitled(&NewUntitled, window, cx);
+            w.active_editor().unwrap().update(cx, |e, cx| e.type_text_for_test(0, "a draft", cx));
+            w.write_backups(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(crate::session::load_backups(&dir).len(), 2);
+        // …and Null goes away without asking (a crash). Opening the project again:
+        let root = dir.clone();
+        let second = cx.update(|window, cx| cx.new(|cx| Workspace::new(root, window, cx)));
+        second.update_in(cx, |w, window, cx| {
+            w.restore_session(crate::session::Session::default(), window, cx);
+            let texts: Vec<(Option<String>, String, bool)> = w
+                .tabs
+                .iter()
+                .map(|t| {
+                    let e = t.editor.read(cx);
+                    (
+                        e.path().map(|p| e.file_name()).filter(|_| e.path().is_some()),
+                        e.buffer.to_string(),
+                        e.buffer.is_dirty(),
+                    )
+                })
+                .collect();
+            assert!(texts.contains(&(Some("a.txt".into()), "zero one\n".into(), true)), "{texts:?}");
+            assert!(texts.contains(&(None, "a draft".into(), true)), "{texts:?}");
+            // The file itself wasn't touched.
+            assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
+            // Leaving the project properly (after the save question) lets the backup go.
+            let elsewhere = dir.join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            w.finish_close(CloseAction::SwitchProject(elsewhere), window, cx);
+        });
+        cx.run_until_parked();
+        assert!(crate::session::load_backups(&dir).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
