@@ -277,9 +277,32 @@ pub fn branch_name(typed: &str) -> String {
     typed.split_whitespace().collect::<Vec<_>>().join("-")
 }
 
+/// What `switch_branch` says when changes here would be overwritten there.
+pub const WOULD_LOSE_CHANGES: &str = "Changes here would be lost on that branch: commit or revert them first.";
+
+/// Switches to `branch` taking the changes not committed along: set aside, switched,
+/// put back. The files they conflict in, if putting them back does (they're left marked).
+pub fn switch_carrying_changes(root: &Path, branch: &Branch) -> Result<Vec<PathBuf>, String> {
+    run(root, &["stash", "push", "-q", "--include-untracked", "-m", &format!("Null: carried to {}", branch.name)])
+        .map_err(|e| format!("Couldn't set the changes aside: {e}"))?;
+    if let Err(error) = switch_branch(root, branch) {
+        // Back as they were, on the branch they were on.
+        run(root, &["stash", "pop", "-q"]).ok();
+        return Err(error);
+    }
+    match run(root, &["stash", "pop", "-q"]) {
+        Ok(_) => Ok(Vec::new()),
+        Err(error) => {
+            let conflicted: Vec<PathBuf> =
+                status(root).into_iter().filter(|(_, s)| *s == FileStatus::Conflicted).map(|(p, _)| p).collect();
+            if conflicted.is_empty() { Err(error) } else { Ok(conflicted) }
+        }
+    }
+}
+
 fn explain_switch_error(error: &str) -> String {
     if error.contains("would be overwritten") {
-        "Changes here would be lost on that branch: commit or revert them first.".into()
+        WOULD_LOSE_CHANGES.into()
     } else if error.contains("already exists") {
         "A branch with that name already exists.".into()
     } else if error.contains("not a valid branch name") {
@@ -496,6 +519,39 @@ mod tests {
         assert_eq!(committed_text(&dir.join("link/src/a.rs"), Default::default()).as_deref(), Some("committed\n"));
         assert_eq!(committed_text(&repo.join("src/new.rs"), Default::default()), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn changes_come_along_to_another_branch() {
+        let repo = std::env::temp_dir().join(format!("null-git-carry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        if run(&repo, &["init", "-q", "-b", "main"]).is_err() {
+            return; // No git here.
+        }
+        run(&repo, &["config", "user.name", "t"]).unwrap();
+        run(&repo, &["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(repo.join("f.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        commit_all(&repo, "first").unwrap();
+        run(&repo, &["switch", "-q", "-c", "other"]).unwrap();
+        std::fs::write(repo.join("f.txt"), "ONE\ntwo\nthree\nfour\n").unwrap();
+        commit_all(&repo, "other's").unwrap();
+        run(&repo, &["switch", "-q", "main"]).unwrap();
+        let other = Branch { name: "other".into(), current: false, remote: false, when: String::new() };
+        // A change to another line of the file: git won't switch, carried it merges.
+        std::fs::write(repo.join("f.txt"), "one\ntwo\nthree\nFOUR\n").unwrap();
+        assert_eq!(switch_branch(&repo, &other), Err(WOULD_LOSE_CHANGES.to_string()));
+        assert_eq!(switch_carrying_changes(&repo, &other), Ok(Vec::new()));
+        assert_eq!(current_branch(&repo).as_deref(), Some("other"));
+        assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), "ONE\ntwo\nthree\nFOUR\n");
+        // Back on main with a change to the same line: carried, it conflicts.
+        run(&repo, &["checkout", "-q", "--", "f.txt"]).unwrap();
+        run(&repo, &["switch", "-q", "main"]).unwrap();
+        std::fs::write(repo.join("f.txt"), "uno\ntwo\nthree\nfour\n").unwrap();
+        let conflicts = switch_carrying_changes(&repo, &other).unwrap();
+        assert_eq!(conflicts.iter().map(|p| p.file_name().unwrap().to_owned()).collect::<Vec<_>>(), ["f.txt"]);
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]

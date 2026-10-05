@@ -1200,10 +1200,11 @@ impl Workspace {
 
     /// Switches to a branch (Ok) or starts one with that name (Err). Open files are saved
     /// first, so git sees every change; it refuses if any would be lost.
-    fn change_branch(&mut self, target: Result<git::Branch, String>, cx: &mut Context<Self>) {
+    fn change_branch(&mut self, target: Result<git::Branch, String>, window: &mut Window, cx: &mut Context<Self>) {
         self.save_named_tabs(cx);
         let root = self.tree.read(cx).root().to_path_buf();
-        cx.spawn(async move |this, cx| {
+        let (switch_to, root_now) = (target.clone().ok(), root.clone());
+        cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -1214,6 +1215,13 @@ impl Workspace {
                     .map(|()| git::current_branch(&root).unwrap_or_default())
                 })
                 .await;
+            // Changes here that branch would overwrite: they can come along instead.
+            if let (Err(error), Some(branch)) = (&result, switch_to)
+                && error == git::WOULD_LOSE_CHANGES
+            {
+                this.update_in(cx, |this, window, cx| this.offer_to_carry_changes(branch, root_now, window, cx)).ok();
+                return;
+            }
             this.update(cx, |this, cx| {
                 let notice = match result {
                     Ok(branch) => format!("On {branch}"),
@@ -1221,6 +1229,61 @@ impl Workspace {
                 };
                 this.show_notice(notice, cx);
                 this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks to bring the changes not committed along to `branch`; if so, they're set
+    /// aside, the branch switched, and they're put back (conflicts open to resolve).
+    fn offer_to_carry_changes(
+        &mut self,
+        branch: git::Branch,
+        root: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &format!("Bring your changes along to {}?", branch.name),
+            Some("They'd be overwritten there as they are. Null sets them aside, switches, and puts them back."),
+            &["Bring Them Along", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let name = branch.name.clone();
+            let result =
+                cx.background_executor().spawn(async move { git::switch_carrying_changes(&root, &branch) }).await;
+            this.update_in(cx, |this, window, cx| {
+                let notice = match &result {
+                    Ok(conflicts) if conflicts.is_empty() => format!("On {name}, with your changes."),
+                    Ok(conflicts) => {
+                        let files = if conflicts.len() == 1 {
+                            "1 file".to_string()
+                        } else {
+                            format!("{} files", conflicts.len())
+                        };
+                        format!("On {name}; your changes conflict in {files}: ⌘. resolves each.")
+                    }
+                    Err(error) => error.clone(),
+                };
+                this.show_notice(notice, cx);
+                this.refresh_git(cx);
+                if let Ok(conflicts) = result
+                    && let Some(first) = conflicts.into_iter().next()
+                {
+                    this.open_file(first, window, cx);
+                    if let Some(editor) = this.active_editor().cloned() {
+                        editor.update(cx, |e, cx| {
+                            e.reload_from_disk(cx);
+                            e.go_to_conflict(true, cx);
+                        });
+                    }
+                }
             })
             .ok();
         })
@@ -2794,7 +2857,7 @@ impl Workspace {
             PaletteEvent::SwitchBranch(branch) => {
                 let branch = branch.clone();
                 this.close_palette(window, cx);
-                this.change_branch(Ok(branch), cx);
+                this.change_branch(Ok(branch), window, cx);
             }
             PaletteEvent::OpenProjectInNewWindow(path) => {
                 let path = path.clone();
@@ -2814,7 +2877,7 @@ impl Workspace {
             PaletteEvent::CreateBranch(name) => {
                 let name = name.clone();
                 this.close_palette(window, cx);
-                this.change_branch(Err(name), cx);
+                this.change_branch(Err(name), window, cx);
             }
             PaletteEvent::Commit(message, left_out) => {
                 let (message, left_out) = (message.clone(), left_out.clone());
@@ -6255,6 +6318,56 @@ mod tests {
         workspace.read_with(cx, |w, cx| {
             assert_eq!(w.active_editor().unwrap().read(cx).buffer.to_string(), "xa\n");
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Switching where changes here would be overwritten: asked, they come along.
+    #[gpui::test]
+    #[cfg(unix)]
+    fn switching_offers_to_bring_changes_along(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-carry-changes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+            out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        if git(&["init", "-q", "-b", "main"]).is_err() {
+            return; // No git here.
+        }
+        git(&["config", "user.name", "t"]).unwrap();
+        git(&["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(dir.join("f.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "first"]).unwrap();
+        git(&["switch", "-q", "-c", "other"]).unwrap();
+        std::fs::write(dir.join("f.txt"), "ONE\ntwo\nthree\nfour\n").unwrap();
+        git(&["commit", "-qam", "other's"]).unwrap();
+        git(&["switch", "-q", "main"]).unwrap();
+        std::fs::write(dir.join("f.txt"), "one\ntwo\nthree\nFOUR\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+        };
+        settle(cx);
+        workspace.update_in(cx, |w, window, cx| w.switch_branch(&SwitchBranch, window, cx));
+        settle(cx);
+        cx.simulate_input("other");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert!(cx.has_pending_prompt(), "asked whether to bring the changes along");
+        cx.simulate_prompt_answer("Bring Them Along");
+        settle(cx);
+        assert_eq!(git(&["branch", "--show-current"]).unwrap(), "other");
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "ONE\ntwo\nthree\nFOUR\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 
