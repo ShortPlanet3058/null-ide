@@ -23,6 +23,7 @@ mod lsp_store;
 mod markdown;
 mod menus;
 mod palette;
+mod preview;
 mod project_index;
 mod project_search;
 mod search;

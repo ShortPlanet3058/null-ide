@@ -400,6 +400,8 @@ pub struct Editor {
     pub spans: Vec<Span>,
     /// The longest line's width in columns, for the buffer revision it was measured at.
     longest_line: std::cell::Cell<(u64, usize)>,
+    /// Set for an image or a file that isn't text, shown instead of the text.
+    pub preview: Option<crate::preview::Preview>,
     /// The merge conflicts in the text, and the revision they were found at.
     conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
     /// The buffer revision and byte range `spans` cover.
@@ -536,6 +538,7 @@ impl Editor {
             spans: Vec::new(),
             spans_for: None,
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
+            preview: None,
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
             pinned: Default::default(),
@@ -627,7 +630,14 @@ impl Editor {
 
     /// Opens `path`, or an empty buffer that will be saved there if it doesn't exist yet.
     pub fn open(path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) -> Self {
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let read = std::fs::read_to_string(&path);
+        // An image, or a file that isn't text: shown, never edited or saved over.
+        if let Some(preview) = crate::preview::of(&path, &read) {
+            let mut editor = Self::new(Buffer::new(), Some(path), cx);
+            editor.preview = Some(preview);
+            return editor;
+        }
+        let text = read.unwrap_or_default();
         let mut editor = Self::new(Buffer::from_text(&text), Some(path), cx);
         editor.reload_git_base(cx);
         if let Some(lsp) = lsp {
@@ -640,6 +650,10 @@ impl Editor {
     /// overwritten; the reload itself can be undone.
     pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.path else { return };
+        if self.preview.is_some() {
+            self.preview = crate::preview::of(path, &std::fs::read_to_string(path)).or(self.preview.take());
+            return cx.notify();
+        }
         let Ok(text) = std::fs::read_to_string(path) else { return };
         if text == self.buffer.to_string() {
             return;
@@ -1761,6 +1775,10 @@ impl Editor {
     }
 
     pub fn save_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
+        // Nothing to write: what's shown is the file itself.
+        if self.preview.is_some() {
+            return true;
+        }
         if self.path.is_none() {
             cx.emit(EditorEvent::NeedsPath);
             return false;
@@ -2666,6 +2684,9 @@ impl EntityInputHandler for Editor {
 
 impl Render for Editor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(preview) = &self.preview {
+            return self.render_preview(preview, cx);
+        }
         // The find bar sits beside the text, not inside the "Editor" key context,
         // so typing in it never triggers editor shortcuts.
         let find_bar = self.find_bar.clone();
@@ -2825,5 +2846,51 @@ impl Render for Editor {
             .children(condition)
             .children(signature)
             .children(ai_blocks)
+            .into_any_element()
+    }
+}
+
+impl Editor {
+    /// An image at its own size (smaller if it doesn't fit), or a line saying the file
+    /// isn't text.
+    fn render_preview(&self, preview: &crate::preview::Preview, cx: &Context<Self>) -> AnyElement {
+        use gpui::{ObjectFit, StyledImage, img};
+        let theme = cx.global::<Theme>();
+        let (muted, faint) = (theme.muted, theme.faint);
+        let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+        let note = move |text: String| {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(crate::ui::T_MD))
+                .text_color(muted)
+                .child(text)
+        };
+        let content = match (preview, &self.path) {
+            (crate::preview::Preview::Image { .. }, Some(path)) => {
+                let name = name.clone().unwrap_or_default();
+                img(path.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::ScaleDown)
+                    .with_fallback(move || note(format!("Couldn't show {name}")).into_any_element())
+                    .into_any_element()
+            }
+            _ => note(format!("{} isn't text", name.unwrap_or_else(|| "This file".into())))
+                .child(div().text_size(px(crate::ui::T_SM)).text_color(faint).child(preview.summary()))
+                .into_any_element(),
+        };
+        div()
+            .key_context("Preview")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(32.))
+            .font_family(cx.global::<Fonts>().ui.clone())
+            .child(content)
+            .into_any_element()
     }
 }
