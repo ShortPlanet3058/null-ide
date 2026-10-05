@@ -3103,6 +3103,19 @@ impl Editor {
         cx.notify();
     }
 
+    /// In the preview: to the heading whose anchor is `anchor` (a `#section` link).
+    fn scroll_preview_to(&mut self, anchor: &str, cx: &mut Context<Self>) {
+        let Some((_, blocks)) = &self.markdown else { return };
+        let found = blocks.iter().position(|(_, block)| {
+            matches!(block, crate::markdown_view::Block::Heading(_, text)
+                if crate::markdown_view::slug(&crate::markdown_view::plain_text(text)) == anchor)
+        });
+        if let Some(ix) = found {
+            self.reading_scroll.scroll_to_top_of_item(ix);
+            cx.notify();
+        }
+    }
+
     /// The preview: the document drawn as it reads, in a column, scrolling.
     fn render_reading(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let revision = self.buffer.revision();
@@ -3126,6 +3139,9 @@ impl Editor {
                 crate::markdown_view::Follow::Web(url) => cx.open_url(&url),
                 crate::markdown_view::Follow::File(path) => {
                     this.update(cx, |_, cx| cx.emit(EditorEvent::GoTo { path, range: Default::default() })).ok();
+                }
+                crate::markdown_view::Follow::Heading(anchor) => {
+                    this.update(cx, |editor, cx| editor.scroll_preview_to(&anchor, cx)).ok();
                 }
             }),
         };
