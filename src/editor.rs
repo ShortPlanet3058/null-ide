@@ -1664,6 +1664,16 @@ impl Editor {
         if !self.selection.is_empty() {
             return self.indent_lines(cx);
         }
+        // In a Markdown list item, Tab nests the item, wherever the caret is in it.
+        if self.is_markdown() {
+            let line = self.buffer.point(self.selection.head).0;
+            let text = self.buffer.line_text(line);
+            let is_item =
+                crate::markdown_view::continuation(&text).is_some_and(|(next, _)| !next.trim().starts_with('>'));
+            if is_item {
+                return self.indent_lines(cx);
+            }
+        }
         let range = self.selection.range();
         let text = match self.style.indent {
             IndentStyle::Tabs => "\t".to_string(),
@@ -3224,6 +3234,12 @@ mod tests {
         cx.simulate_input("done");
         cx.run_until_parked();
         assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "1. milk\n2. eggs\ndone");
+        // Tab in an item nests it, the caret where it was in the text; ⇧Tab brings it back.
+        e.update(cx, |e, cx| e.set_caret_point((1, 5), cx));
+        cx.simulate_keystrokes("tab");
+        assert_eq!(e.read_with(cx, |e, _| (e.buffer.line_text(1), e.caret_point())), ("    2. eggs".into(), (1, 9)));
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(1)), "2. eggs");
         // Not in a code block.
         let (code, cx) =
             cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("```\n- item"), Some(PathBuf::from("x.md")), cx));
