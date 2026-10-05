@@ -4600,6 +4600,7 @@ impl Workspace {
                 let dragged = DraggedTab { editor: tab.editor.clone(), label: name.clone().into() };
                 div()
                     .id(("tab", ix))
+                    .debug_selector(|| format!("tab {name}"))
                     .group(group)
                     .on_drag(dragged, |tab, _, _, cx| cx.new(|_| TabGhost { label: tab.label.clone() }))
                     .drag_over::<DraggedTab>({
@@ -4645,9 +4646,11 @@ impl Workspace {
                     // Right-click: what can be done with the tab.
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             if let Some(tab) = this.tabs.get(ix) {
                                 this.tab_menu = Some(TabMenu { editor: tab.editor.clone(), position: event.position });
+                                // The keyboard stays with the editor, not the window behind it.
+                                window.prevent_default();
                                 cx.notify();
                             }
                         }),
@@ -4739,6 +4742,7 @@ impl Workspace {
                 .child(
                     div()
                         .id(("tab-menu", i))
+                        .debug_selector(|| format!("tab-menu {}", item.label()))
                         .h(px(26.))
                         .px(px(10.))
                         .flex()
@@ -5944,12 +5948,71 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Tests run side by side: two with the same scratch folder overwrite each other's
+    /// files (it happened). Every folder name in the tests is its own.
+    #[test]
+    fn tests_use_folders_of_their_own() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let pattern = regex::Regex::new(r#"temp_dir\(\)\.join\(format!\("(null-[A-Za-z0-9-]+)"#).unwrap();
+        let mut names: Vec<String> = Vec::new();
+        for entry in
+            ignore::Walk::new(&src).filter_map(Result::ok).filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+        {
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            names.extend(pattern.captures_iter(&text).map(|c| c[1].to_string()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let shared: Vec<&String> = names.iter().filter(|n| !seen.insert(*n)).collect();
+        assert!(names.len() > 20, "found {} folder names: the pattern no longer matches", names.len());
+        assert!(shared.is_empty(), "tests share scratch folders: {shared:?}");
+    }
+
+    /// A right-click on a tab, then a pick from its menu: the keyboard is still the
+    /// editor's, so typing goes on where it was.
+    #[gpui::test]
+    fn after_a_tab_s_menu_typing_goes_on_in_the_editor(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-tab-menu-typing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        cx.run_until_parked();
+        let tab = cx.debug_bounds("tab a.txt").expect("the tab is drawn").center();
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: tab,
+            button: gpui::MouseButton::Right,
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.tab_menu.is_some()), "the menu opened");
+        let copy = cx.debug_bounds("tab-menu Copy Path").expect("the menu is drawn").center();
+        cx.simulate_click(copy, Default::default());
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.tab_menu.is_none()), "picking an item closes the menu");
+        cx.simulate_input("x");
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.active_editor().unwrap().read(cx).buffer.to_string(), "xa\n");
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Switch Branch: typing part of a name and ↵ switches to it; a new name and ↵ starts
     /// that branch.
     #[gpui::test]
     #[cfg(unix)]
     fn branches_switch_and_start_from_the_list(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-git-branches-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("null-branch-list-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
