@@ -396,7 +396,7 @@ pub struct Editor {
     highlighter: Option<Highlighter>,
     /// How this file is written: its indentation and line endings, kept when editing.
     pub style: crate::file_style::FileStyle,
-    /// Colours for the lines around the view (see [`Self::highlight_lines`]).
+    /// Colours for the lines around the view (see [`Self::highlight_bytes`]).
     pub spans: Vec<Span>,
     /// The longest line's width in columns, for the buffer revision it was measured at.
     longest_line: std::cell::Cell<(u64, usize)>,
@@ -521,9 +521,23 @@ pub struct Editor {
     pub blocks: Vec<Block>,
 }
 
+/// Colours for a file, unless it's too big to colour as you type: a minified bundle's one
+/// long line, or a file of many megabytes, is parsed again after every keystroke, which
+/// took longer than the keystroke. Those show as plain text, as in other editors.
+fn highlighter_for(path: &std::path::Path, buffer: &Buffer) -> Option<Highlighter> {
+    const MAX_COLOURED_LINE: usize = 20_000;
+    const MAX_COLOURED_FILE: usize = 8 * 1024 * 1024;
+    let language = languages::for_path(path)?;
+    let rope = buffer.rope();
+    if rope.len_bytes() > MAX_COLOURED_FILE || rope.lines().any(|l| l.len_bytes() > MAX_COLOURED_LINE) {
+        return None;
+    }
+    Highlighter::new(language)
+}
+
 impl Editor {
     pub fn new(buffer: Buffer, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
-        let highlighter = path.as_deref().and_then(languages::for_path).and_then(Highlighter::new);
+        let highlighter = path.as_deref().and_then(|p| highlighter_for(p, &buffer));
         let style = crate::file_style::FileStyle::for_file(
             path.as_deref(),
             &buffer.slice(0..buffer.len_chars().min(200_000)),
@@ -675,7 +689,7 @@ impl Editor {
     /// Gives the buffer a new file (after a rename, or the first save of an untitled file).
     pub fn set_path(&mut self, path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) {
         self.release_lsp(cx);
-        self.highlighter = languages::for_path(&path).and_then(Highlighter::new);
+        self.highlighter = highlighter_for(&path, &self.buffer);
         self.spans.clear();
         self.spans_for = None;
         // A new name can bring other rules (.editorconfig sections, Go's tabs).
@@ -778,7 +792,12 @@ impl Editor {
     /// after typing, only the edited lines, so it can stay a little wide after a long line
     /// shrinks (some extra room to scroll) but never costs a pass over the file.
     pub(crate) fn longest_line(&self) -> usize {
+        const BIG_FILE: usize = 4 * 1024 * 1024;
         let width = |line: ropey::RopeSlice| {
+            // A very long line counts a column a character, as it's drawn (see `wrap::LONG_LINE`).
+            if line.len_chars() > crate::wrap::LONG_LINE {
+                return line.len_chars();
+            }
             line.chars().filter(|c| *c != '\n' && *c != '\r').fold(0, |col, c| col + crate::wrap::char_columns(c, col))
         };
         let (revision, cols) = self.longest_line.get();
@@ -792,6 +811,10 @@ impl Editor {
                 .flat_map(|e| e.start.0..=e.new_end.0)
                 .map(|line| width(rope.line(line.min(last))))
                 .fold(cols, usize::max),
+            // A big file is measured a column a character: counting columns through every
+            // character of a 70 MB log took half a second, on opening and after each undo.
+            // The rows on screen are measured as drawn, so a wide one still scrolls fully.
+            None if rope.len_bytes() > BIG_FILE => rope.lines().map(|l| l.len_chars()).max().unwrap_or(0),
             None => rope.lines().map(width).max().unwrap_or(0),
         };
         self.longest_line.set((self.buffer.revision(), cols));
@@ -801,15 +824,20 @@ impl Editor {
     /// Makes sure `spans` colours `lines`: the syntax tree catches up with the edits
     /// (only what changed is parsed again), then the lines around the view are
     /// coloured, with some room so scrolling a little needs nothing new.
-    pub(crate) fn highlight_lines(&mut self, lines: Range<usize>) {
+    /// Makes sure `spans` colours the bytes `wanted` (what's on screen): the syntax tree
+    /// catches up with the edits (only what changed is parsed again), then the lines
+    /// around are coloured, with some room so scrolling a little needs nothing new.
+    pub(crate) fn highlight_bytes(&mut self, wanted: Range<usize>) {
         /// Lines coloured beyond the view on each side, so scrolling doesn't colour again…
         const ROOM: usize = 120;
         /// …but after an edit, only a few: what's on screen is what's needed now (colouring
         /// all the room took 3 ms a keystroke on a big file).
         const ROOM_AFTER_EDIT: usize = 10;
+        /// The room never goes past this many bytes either side: on a minified file's one
+        /// long line, a few lines of room were the whole file.
+        const MAX_ROOM_BYTES: usize = 32 * 1024;
         let Some(highlighter) = &mut self.highlighter else { return };
         let revision = self.buffer.revision();
-        let wanted = self.buffer.line_to_byte(lines.start)..self.buffer.line_to_byte(lines.end);
         let edited = match &self.spans_for {
             Some((r, range)) if *r == revision => {
                 if range.start <= wanted.start && range.end >= wanted.end {
@@ -822,8 +850,14 @@ impl Editor {
         };
         highlighter.sync(&self.buffer);
         let room = if edited { ROOM_AFTER_EDIT } else { ROOM };
-        let range =
-            self.buffer.line_to_byte(lines.start.saturating_sub(room))..self.buffer.line_to_byte(lines.end + room);
+        let rope = self.buffer.rope();
+        let len = rope.len_bytes();
+        let first = rope.byte_to_line(wanted.start.min(len));
+        let last = rope.byte_to_line(wanted.end.min(len));
+        let start =
+            self.buffer.line_to_byte(first.saturating_sub(room)).max(wanted.start.saturating_sub(MAX_ROOM_BYTES));
+        let end = self.buffer.line_to_byte(last + 1 + room).min(wanted.end + MAX_ROOM_BYTES).min(len);
+        let range = start..end.max(wanted.end.min(len));
         self.spans = highlighter.spans(self.buffer.rope(), range.clone());
         self.spans_for = Some((revision, range));
     }
@@ -2126,7 +2160,7 @@ impl Editor {
             let text_end = r.shaped.x_for_index(r.shown_byte(r.text.len()));
             (
                 r.row.line,
-                r.row.cols.start == 0,
+                self.wrap.first_row(r.row.line) == row as usize,
                 r.row.last,
                 position.x < layout.text_bounds.left(),
                 position.x - layout.text_origin.x - r.x > text_end,

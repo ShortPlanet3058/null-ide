@@ -152,8 +152,18 @@ impl Editor {
     /// The file's conflicts, found again only after the text changes.
     pub fn conflicts(&self) -> Rc<[Conflict]> {
         let mut known = self.conflicts.borrow_mut();
-        if known.0 != self.buffer.revision() {
-            *known = (self.buffer.revision(), find(self.buffer.rope()).into());
+        let revision = self.buffer.revision();
+        if known.0 != revision {
+            // No conflicts before, and no marker on the lines edited since: still none.
+            // Looking through the whole file again took most of a keystroke on a big log.
+            let rope = self.buffer.rope();
+            let last = rope.len_lines().saturating_sub(1);
+            let still_none = known.1.is_empty()
+                && known.0 != u64::MAX
+                && self.buffer.edits_since(known.0).is_some_and(|mut edits| {
+                    edits.all(|e| (e.start.0..=e.new_end.0).all(|l| marker(rope.line(l.min(last))).is_none()))
+                });
+            *known = (revision, if still_none { known.1.clone() } else { find(rope).into() });
         }
         known.1.clone()
     }

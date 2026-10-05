@@ -279,9 +279,14 @@ impl WrapMap {
     /// the indent (and tabs at their full width).
     pub fn to_display(&self, line: usize, col: usize, buffer: &Buffer) -> (usize, usize) {
         let chars = |from: usize, to: usize| {
-            buffer.rope().line(line.min(buffer.len_lines() - 1)).chars().skip(from).take(to.saturating_sub(from))
+            buffer.rope().line(line.min(buffer.len_lines() - 1)).chars_at(from).take(to.saturating_sub(from))
         };
         if !self.general {
+            // Far along a very long line, a column a character: counting them all, several
+            // times a frame, was most of the frame.
+            if col > LONG_LINE {
+                return (line, col);
+            }
             return (line, columns(chars(0, col)));
         }
         let line = line.min(self.lines - 1);
@@ -300,7 +305,7 @@ impl WrapMap {
             let below = self.blocks[block].before_line;
             return if below >= self.lines { buffer.len_chars() } else { buffer.line_to_char(below) };
         }
-        let shown = buffer.rope().line(row.line).chars().skip(row.cols.start).take(row.cols.len());
+        let shown = buffer.rope().line(row.line).chars_at(row.cols.start).take(row.cols.len());
         let col = row.cols.start.saturating_add(char_at_column(shown, col.saturating_sub(row.indent)));
         let max = if row.last { row.cols.end } else { row.cols.end.saturating_sub(1).max(row.cols.start) };
         buffer.offset(row.line, col.min(max))
@@ -319,6 +324,10 @@ pub fn char_columns(c: char, col: usize) -> usize {
 }
 
 /// The columns `chars` take on screen.
+/// Lines longer than this (in columns) are drawn only around the view, a column a
+/// character past it, so a minified file's one long line stays quick to show and edit.
+pub const LONG_LINE: usize = 2_000;
+
 fn columns(chars: impl Iterator<Item = char>) -> usize {
     chars.fold(0, |col, c| col + char_columns(c, col))
 }

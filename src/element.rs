@@ -184,8 +184,14 @@ pub fn position(
 ) -> (usize, Pixels) {
     let (row, display_col) = wrap.to_display(line, col, buffer);
     match row.checked_sub(first_row).and_then(|i| rows.get(i)) {
-        Some(r) if r.row.line == line && r.row.block.is_none() => {
-            let col = col.saturating_sub(r.row.cols.start);
+        // On the row, in the part of it built (a long line is built only around the view).
+        Some(r)
+            if r.row.line == line
+                && r.row.block.is_none()
+                && r.row.cols.start <= col
+                && (col < r.row.cols.end || (col == r.row.cols.end && r.row.last)) =>
+        {
+            let col = col - r.row.cols.start;
             (row, r.x + r.shaped.x_for_index(r.shown_byte(byte_of_column(&r.text, col))))
         }
         _ => (row, char_width * display_col as f32),
@@ -194,6 +200,10 @@ pub fn position(
 
 /// How many lines of enclosing blocks can be pinned at the top.
 const MAX_STICKY: usize = 3;
+
+/// Columns of room either side of the view on a long line (see `wrap::LONG_LINE`), so
+/// scrolling a little shows text at once.
+const LONG_LINE_ROOM: usize = 256;
 
 /// The first lines of the blocks the view is inside (started above the top line, go
 /// on below it), outermost first, at most `max`, innermost kept. `line_at(n)` is the line
@@ -300,10 +310,17 @@ fn runs_for(
     cuts.retain(|&c| c <= text.len() && text.is_char_boundary(c));
     cuts.sort_unstable();
     cuts.dedup();
+    // Spans come in order, so one walk along them finds each piece's colour (a search per
+    // piece took minutes on a minified file's one long line).
+    let mut next = 0;
     cuts.windows(2)
         .map(|w| {
             let (a, b) = (w[0], w[1]);
-            let syntax = colored.iter().find(|(r, _)| r.start <= a && b <= r.end).map_or(Syntax::Plain, |(_, s)| *s);
+            while colored.get(next).is_some_and(|(r, _)| r.end <= a) {
+                next += 1;
+            }
+            let syntax =
+                colored.get(next).filter(|(r, _)| r.start <= a && b <= r.end).map_or(Syntax::Plain, |(_, s)| *s);
             let mut run = run(b - a, font, theme.syntax(syntax));
             if let Some((_, color)) = underlines.iter().find(|(r, _)| r.start <= a && b <= r.end) {
                 run.underline = Some(UnderlineStyle { color: Some(*color), thickness: px(1.), wavy: true });
@@ -311,6 +328,14 @@ fn runs_for(
             run
         })
         .collect()
+}
+
+/// A column's byte in `text`, line `line` of `buffer`, found through the rope: walking
+/// the text to it, for every row, was most of a frame far along a long wrapped line.
+fn byte_in_line(buffer: &crate::buffer::Buffer, text: &str, line: usize, col: usize) -> usize {
+    let rope = buffer.rope();
+    let col = col.min(buffer.line_len(line));
+    (rope.char_to_byte(rope.line_to_char(line) + col) - rope.line_to_byte(line)).min(text.len())
 }
 
 fn byte_of_column(text: &str, column: usize) -> usize {
@@ -452,13 +477,52 @@ impl Element for EditorElement {
             let first = ((editor.scroll.y - TOP_PADDING) / lh).floor().max(0.) as usize;
             let count = (viewport_height / lh).ceil() as usize + 2;
             let visible = first.min(total_rows)..(first + count).min(total_rows);
-            let rows: Vec<Row> = visible.clone().map(|r| editor.wrap.row(r, &editor.buffer)).collect();
+            // A very long line (a minified file) is built only around what's on screen:
+            // shaping all of it took longer than anyone would wait.
+            let shown_cols = {
+                let from = (editor.scroll.x / cw).floor().max(0.) as usize;
+                let width = (text_width / cw).ceil() as usize;
+                from.saturating_sub(LONG_LINE_ROOM)..from + width + LONG_LINE_ROOM
+            };
+            let rows: Vec<Row> = visible
+                .clone()
+                .map(|r| {
+                    let mut row = editor.wrap.row(r, &editor.buffer);
+                    if row.block.is_none() && row.cols.len() > crate::wrap::LONG_LINE {
+                        let start = (row.cols.start + shown_cols.start).min(row.cols.end);
+                        let end = (row.cols.start + shown_cols.end).min(row.cols.end);
+                        row.last = row.last && end == row.cols.end;
+                        row.indent += start - row.cols.start;
+                        row.cols = start..end;
+                    }
+                    row
+                })
+                .collect();
             let lines_shown = match (rows.first(), rows.last()) {
                 (Some(a), Some(b)) => a.line..b.line + 1,
                 _ => 0..0,
             };
+            let windowed = !editor.wrap.is_on()
+                && rows.iter().any(|r| r.block.is_none() && r.cols.len() < editor.buffer.line_len(r.line));
             let texts: Vec<String> = lines_shown.clone().map(|l| editor.buffer.line_text(l)).collect();
-            editor.highlight_lines(lines_shown.clone());
+            // Colour what the rows show: all of each line, but only the shown part of a long one.
+            let shown_bytes = rows
+                .iter()
+                .filter(|r| r.block.is_none())
+                .map(|r| {
+                    let text = &texts[r.line - lines_shown.start];
+                    let line = editor.buffer.line_to_byte(r.line);
+                    let end = if r.last {
+                        editor.buffer.line_to_byte(r.line + 1)
+                    } else {
+                        line + byte_in_line(&editor.buffer, text, r.line, r.cols.end)
+                    };
+                    line + byte_in_line(&editor.buffer, text, r.line, r.cols.start)..end
+                })
+                .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end));
+            if let Some(bytes) = shown_bytes {
+                editor.highlight_bytes(bytes);
+            }
             // The lines that can fold, needed only while the mouse is over the gutter.
             let over_gutter = editor.mouse_position.is_some_and(|p| {
                 p.x >= bounds.left() && p.x < text_bounds.left() && p.y >= bounds.top() && p.y < bounds.bottom()
@@ -532,7 +596,10 @@ impl Element for EditorElement {
                     }
                     let i = row.line - lines_shown.start;
                     let line_text = &texts[i];
-                    let (b0, b1) = (byte_of_column(line_text, row.cols.start), byte_of_column(line_text, row.cols.end));
+                    let (b0, b1) = (
+                        byte_in_line(&editor.buffer, line_text, row.line, row.cols.start),
+                        byte_in_line(&editor.buffer, line_text, row.line, row.cols.end),
+                    );
                     let text = line_text[b0..b1].to_string();
                     let row_underlines: Vec<(Range<usize>, Hsla)> = underlines[i]
                         .iter()
@@ -624,6 +691,7 @@ impl Element for EditorElement {
             // row. Nothing to scroll when lines wrap.
             let (_, caret_x) = pos(caret_line, caret_col);
             let caret_x = f32::from(caret_x);
+            let scrolled_from = editor.scroll.x;
             if wrap.is_on() {
                 editor.scroll.x = 0.;
             } else if editor.autoscroll {
@@ -640,6 +708,10 @@ impl Element for EditorElement {
                 .map(|r| f32::from(r.x + r.shaped.width))
                 .fold(caret_x.max(editor.longest_line() as f32 * cw), f32::max);
             editor.scroll.x = editor.scroll.x.clamp(0., (widest + cw * 4. - text_width).max(0.));
+            // A long line was built around where the view was: build it again where it is now.
+            if editor.scroll.x != scrolled_from && windowed {
+                window.request_animation_frame();
+            }
             editor.autoscroll = false;
             editor.reveal_only = false;
 
@@ -789,7 +861,7 @@ impl Element for EditorElement {
             let chevrons = row_layouts
                 .iter()
                 .zip(visible.clone())
-                .filter(|(r, _)| r.row.cols.start == 0 && r.row.block.is_none())
+                .filter(|(r, row)| editor.wrap.first_row(r.row.line) == *row && r.row.block.is_none())
                 .filter_map(|(r, row)| {
                     let folded = editor.is_folded(r.row.line);
                     (folded || foldable.contains(&r.row.line)).then(|| {
@@ -806,7 +878,7 @@ impl Element for EditorElement {
             let numbers = row_layouts
                 .iter()
                 .zip(visible.clone())
-                .filter(|(r, _)| r.row.cols.start == 0 && r.row.block.is_none())
+                .filter(|(r, row)| editor.wrap.first_row(r.row.line) == *row && r.row.block.is_none())
                 .map(|(r, row)| {
                     let line = r.row.line;
                     let label = (line + 1).to_string();
@@ -1369,6 +1441,46 @@ mod tests {
         let tabs = [(4, 2)];
         let gaps = gaps_of(&placed, &tabs);
         assert_eq!(gaps, vec![Gap { byte: 1, extra: 3, hint: true }, Gap { byte: 1, extra: 2, hint: false }]);
+    }
+}
+
+#[cfg(test)]
+mod long_lines {
+    use super::*;
+    use crate::buffer::Buffer;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn a_long_line_is_built_only_around_the_view(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            cx.set_global(Settings::default());
+        });
+        let line = "{\"id\":1},".repeat(10_000);
+        let source = format!("{line}\nshort\n");
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(Buffer::from_text(&source), Some(std::path::PathBuf::from("big.json")), cx)
+        });
+        let size = gpui::size(px(1000.), px(600.));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            let editor = editor.clone();
+            cx.draw(Point::default(), size, move |_, _| gpui::AnyView::from(editor));
+        };
+        // At the end of the line: the view scrolls there, and only that part is built.
+        editor.update(cx, |e, cx| e.set_caret_point((0, usize::MAX), cx));
+        draw(cx);
+        draw(cx);
+        editor.update(cx, |e, _| {
+            // Too long to colour as you type: plain text.
+            assert!(e.spans.is_empty());
+            let layout = e.layout.as_ref().unwrap();
+            let row = &layout.rows[0];
+            assert!(row.text.len() < 2 * LONG_LINE_ROOM + 400, "built {} bytes", row.text.len());
+            assert!(row.row.last && row.row.cols.end == line.len());
+            // The short line below is whole.
+            assert_eq!(layout.rows[1].text, "short");
+        });
     }
 }
 
