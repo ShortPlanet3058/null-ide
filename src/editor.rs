@@ -405,6 +405,8 @@ pub struct Editor {
     /// The file was deleted on disk while open (a checkout, the terminal): the text is
     /// still here, and saving puts the file back.
     pub missing: bool,
+    /// What the file last held on disk, as far as Null knows, to recognise it moved.
+    pub on_disk: Option<Fingerprint>,
     /// The merge conflicts in the text, and the revision they were found at.
     conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
     /// The buffer revision and byte range `spans` cover.
@@ -524,6 +526,16 @@ pub struct Editor {
     pub blocks: Vec<Block>,
 }
 
+/// A file's text in brief: its length and a hash, enough to tell it again somewhere else.
+pub type Fingerprint = (usize, u64);
+
+pub fn fingerprint(text: &str) -> Fingerprint {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    text.hash(&mut hasher);
+    (text.len(), hasher.finish())
+}
+
 /// Colours for a file, unless it's too big to colour as you type: a minified bundle's one
 /// long line, or a file of many megabytes, is parsed again after every keystroke, which
 /// took longer than the keystroke. Those show as plain text, as in other editors.
@@ -557,6 +569,7 @@ impl Editor {
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
             preview: None,
             missing: false,
+            on_disk: None,
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
             pinned: Default::default(),
@@ -657,6 +670,7 @@ impl Editor {
         }
         let text = read.unwrap_or_default();
         let mut editor = Self::new(Buffer::from_text(&text), Some(path), cx);
+        editor.on_disk = Some(fingerprint(&text));
         editor.reload_git_base(cx);
         if let Some(lsp) = lsp {
             editor.attach_lsp(lsp, cx);
@@ -676,6 +690,7 @@ impl Editor {
             return cx.notify();
         }
         let Ok(text) = std::fs::read_to_string(path) else { return };
+        self.on_disk = Some(fingerprint(&text));
         if text == self.buffer.to_string() {
             return;
         }
@@ -1843,8 +1858,10 @@ impl Editor {
         {
             std::fs::create_dir_all(parent).ok();
         }
-        match std::fs::write(path, self.buffer.to_string()) {
+        let text = self.buffer.to_string();
+        match std::fs::write(path, &text) {
             Ok(()) => {
+                self.on_disk = Some(fingerprint(&text));
                 self.missing = false;
                 self.buffer.mark_saved();
                 self.lsp_saved(cx);
