@@ -907,6 +907,7 @@ impl Workspace {
                 tab.editor.update(cx, |editor, cx| editor.check_missing(cx));
             }
         }
+        self.follow_moves(&visible, cx);
         cx.notify();
         if git_changed {
             self.refresh_git(cx);
@@ -1350,6 +1351,33 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Files moved outside Null (`mv`, `git mv`, another tool): an open file that's gone,
+    /// and one with the same text that appeared with it, is the same file moved. Its tab
+    /// follows, with the others from its folder when the folder moved.
+    fn follow_moves(&mut self, changed: &[PathBuf], cx: &mut Context<Self>) {
+        let open: Vec<PathBuf> =
+            self.tabs.iter().filter_map(|t| t.editor.read(cx).path().map(Path::to_path_buf)).collect();
+        let moves: Vec<(PathBuf, PathBuf)> = self
+            .tabs
+            .iter()
+            .filter_map(|t| {
+                let editor = t.editor.read(cx);
+                let (true, Some(path), Some(print)) = (editor.missing, editor.path(), editor.on_disk) else {
+                    return None;
+                };
+                moved_to(path, print, changed, &open)
+            })
+            .collect();
+        for (from, to) in moves {
+            // An earlier move (its folder's) may have taken this one along already.
+            if self.tabs.iter().any(|t| t.editor.read(cx).path().is_some_and(|p| p.starts_with(&from))) {
+                self.paths_renamed(&from, &to, cx);
+            }
+        }
+        let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        self.tree.update(cx, |tree, cx| tree.set_active(active, cx));
     }
 
     fn paths_renamed(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
@@ -4612,6 +4640,35 @@ fn shell_script(launch: &str) -> String {
 }
 
 /// Where `path` ends up when `from` (it, or a folder above it) is renamed to `to`.
+/// Where `path`, gone from disk, went among the `changed` paths: a file holding the same
+/// text, alone of its kind. As (what moved, where to): the file itself, or its folder when
+/// the folder moved. Files already open elsewhere don't count.
+fn moved_to(
+    path: &Path,
+    print: crate::editor::Fingerprint,
+    changed: &[PathBuf],
+    open: &[PathBuf],
+) -> Option<(PathBuf, PathBuf)> {
+    // (what moved, where to, the file it is now), folders first so they win.
+    let mut found: Vec<(PathBuf, PathBuf, PathBuf)> = Vec::new();
+    for gone in changed.iter().filter(|g| path.starts_with(g) && g.as_path() != path && !g.exists()) {
+        let Ok(rest) = path.strip_prefix(gone) else { continue };
+        found.extend(changed.iter().filter(|v| v.is_dir()).map(|v| (gone.clone(), v.clone(), v.join(rest))));
+    }
+    found.extend(changed.iter().filter(|v| v.is_file()).map(|v| (path.to_path_buf(), v.clone(), v.clone())));
+    let same_text = |file: &Path| {
+        file != path
+            && !open.iter().any(|o| o == file)
+            && std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.len() as usize == print.0)
+            && std::fs::read_to_string(file).is_ok_and(|text| crate::editor::fingerprint(&text) == print)
+    };
+    found.retain(|(_, _, file)| same_text(file));
+    let mut files: Vec<&PathBuf> = found.iter().map(|(_, _, f)| f).collect();
+    files.sort();
+    files.dedup();
+    (files.len() == 1).then(|| found.swap_remove(0)).map(|(from, to, _)| (from, to))
+}
+
 fn moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
     let rest = path.strip_prefix(from).ok()?;
     // Joining an empty rest would add a trailing slash and turn the file into a "folder".
@@ -5265,6 +5322,29 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moved_file_is_found_by_its_text() {
+        let dir = std::env::temp_dir().join(format!("null-moves-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("new")).unwrap();
+        let print = crate::editor::fingerprint("fn a() {}\n");
+        std::fs::write(dir.join("b.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("other.rs"), "fn other() {}\n").unwrap();
+        // a.rs renamed to b.rs, in the same burst as another file.
+        let changed = [dir.join("a.rs"), dir.join("b.rs"), dir.join("other.rs")];
+        assert_eq!(moved_to(&dir.join("a.rs"), print, &changed, &[]), Some((dir.join("a.rs"), dir.join("b.rs"))));
+        // Already open elsewhere: not a move.
+        assert_eq!(moved_to(&dir.join("a.rs"), print, &changed, &[dir.join("b.rs")]), None);
+        // Two files with the same text: can't tell which, so neither.
+        std::fs::write(dir.join("c.rs"), "fn a() {}\n").unwrap();
+        assert_eq!(moved_to(&dir.join("a.rs"), print, &[changed.to_vec(), vec![dir.join("c.rs")]].concat(), &[]), None);
+        // Its folder moved: the folder is what moved, so the others in it follow too.
+        std::fs::write(dir.join("new/a.rs"), "fn a() {}\n").unwrap();
+        let changed = [dir.join("old"), dir.join("new"), dir.join("new/a.rs")];
+        assert_eq!(moved_to(&dir.join("old/a.rs"), print, &changed, &[]), Some((dir.join("old"), dir.join("new"))));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[gpui::test]
     fn two_sides_open_move_and_close_back_to_one(cx: &mut gpui::TestAppContext) {
