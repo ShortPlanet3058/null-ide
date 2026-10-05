@@ -64,6 +64,7 @@ actions!(
         RunTask,
         RunTestAtCursor,
         RunTestsInFile,
+        OpenPreviewToTheSide,
         OpenRecent,
         NewWindow,
         StartDebugging,
@@ -1436,6 +1437,25 @@ impl Workspace {
         self.add_tab_on(editor, side, window, cx);
     }
 
+    /// A Markdown file's preview on the other side, kept up to date as you write in this one.
+    fn open_preview_to_the_side(&mut self, _: &OpenPreviewToTheSide, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source) = self.active_editor().cloned() else { return };
+        if !source.read(cx).is_markdown() {
+            return self.show_notice("The preview is for Markdown files.".into(), cx);
+        }
+        self.open_on_other_side(window, cx);
+        if let Some(twin) = self.twins_of(&source, cx).first() {
+            twin.update(cx, |twin, cx| {
+                twin.reading = true;
+                cx.notify();
+            });
+        }
+        // Writing goes on in the source.
+        if let Some(at) = self.tabs.iter().position(|t| t.editor == source) {
+            self.activate(at, window, cx);
+        }
+    }
+
     /// The other copies of a file open on both sides.
     fn twins_of(&self, editor: &Entity<Editor>, cx: &App) -> Vec<Entity<Editor>> {
         let Some(path) = editor.read(cx).path() else { return Vec::new() };
@@ -2325,6 +2345,8 @@ impl Workspace {
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
+            (View, "Toggle Markdown Preview".into(), Box::new(crate::editor::ToggleMarkdownPreview)),
+            (View, "Open Markdown Preview to the Side".into(), Box::new(OpenPreviewToTheSide)),
             (View, "Run Tests in File".into(), Box::new(RunTestsInFile)),
             (Go, "Start Debugging".into(), Box::new(StartDebugging)),
             (Go, "Stop Debugging".into(), Box::new(StopDebugging)),
@@ -4774,6 +4796,7 @@ impl Render for Workspace {
                         vec![
                             path,
                             match editor.extra.len() {
+                                _ if editor.reading => "Preview".into(),
                                 0 => format!("Ln {}, Col {}", line + 1, col + 1),
                                 n => format!("{} cursors · Esc for one", n + 1),
                             },
@@ -5231,6 +5254,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))
+            .on_action(cx.listener(Self::open_preview_to_the_side))
             .on_action(cx.listener(|this, _: &RunTestsInFile, window, cx| this.run_test(false, window, cx)))
             .on_action(cx.listener(Self::open_recent))
             .on_action(cx.listener(Self::new_window))
