@@ -494,6 +494,12 @@ impl Element for EditorElement {
             }
 
             let show_blame = cx.global::<crate::settings::Settings>().line_blame;
+            // A merge conflict's first line says how to resolve it, faintly.
+            let conflicts = editor.conflicts();
+            let resolve_tip = (!conflicts.is_empty())
+                .then(|| crate::palette::shortcut(&crate::editor::QuickFix, cx))
+                .flatten()
+                .map(|keys| format!("{BLAME_GAP}{keys} to resolve"));
             let row_layouts: Vec<RowLayout> = rows
                 .into_iter()
                 .map(|row| {
@@ -589,10 +595,16 @@ impl Element for EditorElement {
                         .then(|| editor.inline_values.iter().find(|(l, _)| *l == row.line))
                         .flatten()
                         .map(|(_, text)| format!("{BLAME_GAP}{text}"));
+                    let tip = resolve_tip
+                        .as_ref()
+                        .filter(|_| row.last && conflicts.iter().any(|c| c.start == row.line))
+                        .cloned();
                     let (suffix, suffix_text) = if row.last && editor.is_folded(row.line) {
                         (Some(run(FOLDED.len(), &font, theme.muted)), FOLDED.to_string())
                     } else if let Some(note) = values {
                         (Some(run(note.len(), &font, theme.muted)), note)
+                    } else if let Some(note) = tip {
+                        (Some(run(note.len(), &font, theme.faint)), note)
                     } else if let Some(note) = blame {
                         (Some(run(note.len(), &font, theme.faint)), note)
                     } else {
@@ -679,6 +691,26 @@ impl Element for EditorElement {
                     );
                     ai_tints.push((rect, tint));
                 }
+            }
+            // Merge conflicts: the current side tinted green, the incoming one blue, each
+            // marker a little more; the common ancestor (diff3) and `=======` stay neutral.
+            for c in conflicts.iter() {
+                let band = |lines: Range<usize>, color: Hsla| {
+                    let r = rows_of(lines);
+                    (!r.is_empty()).then(|| {
+                        let rect = Bounds::from_corners(
+                            point(bounds.left() + gutter_width - px(9.), row_top(r.start)),
+                            point(bounds.right(), row_top(r.end)),
+                        );
+                        (rect, color)
+                    })
+                };
+                let (current, incoming, neutral) = (theme.git_added, theme.git_modified, theme.faint);
+                ai_tints.extend(band(c.start..c.start + 1, current.opacity(0.2)));
+                ai_tints.extend(band(c.current(), current.opacity(0.1)));
+                ai_tints.extend(band(c.base.unwrap_or(c.middle)..c.middle + 1, neutral.opacity(0.1)));
+                ai_tints.extend(band(c.incoming(), incoming.opacity(0.1)));
+                ai_tints.extend(band(c.end..c.end + 1, incoming.opacity(0.2)));
             }
             let current_line = editor.selection.is_empty().then(|| {
                 Bounds::new(

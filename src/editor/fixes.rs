@@ -22,8 +22,10 @@ pub struct FixMenu {
     pub fixes: Vec<CodeActionOrCommand>,
     pub selected: usize,
     /// Where the list hangs from.
-    at: usize,
+    pub(super) at: usize,
     pub scroll: ScrollHandle,
+    /// Set when the list holds a merge conflict's choices, resolved here, not by a server.
+    pub conflict: Option<super::Conflict>,
 }
 
 /// The order fixes are listed in: the server's favourite, then fixes for the problem,
@@ -57,6 +59,9 @@ fn arrange(mut fixes: Vec<CodeActionOrCommand>) -> Vec<CodeActionOrCommand> {
 impl Editor {
     pub(super) fn quick_fix(&mut self, _: &QuickFix, _: &mut Window, cx: &mut Context<Self>) {
         let head = self.selection.head;
+        if let Some(conflict) = self.conflict_at_caret() {
+            return self.conflict_choices(conflict, cx);
+        }
         if let Some(message) = self.not_ready_message(cx) {
             return self.show_notice(head, message, cx);
         }
@@ -102,7 +107,8 @@ impl Editor {
                     return this.show_notice(head, "No fixes here.".into(), cx);
                 }
                 this.close_hover(cx);
-                this.fix_menu = Some(FixMenu { fixes, selected: 0, at: head, scroll: ScrollHandle::new() });
+                this.fix_menu =
+                    Some(FixMenu { fixes, selected: 0, at: head, scroll: ScrollHandle::new(), conflict: None });
                 cx.notify();
             })
             .ok();
@@ -136,6 +142,9 @@ impl Editor {
     /// Hands the fix to the workspace, which works out its edits and applies them.
     pub(super) fn accept_fix(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(mut menu) = self.fix_menu.take() else { return };
+        if let Some(conflict) = menu.conflict {
+            return self.resolve_conflict(conflict, ix, cx);
+        }
         if ix < menu.fixes.len() {
             cx.emit(EditorEvent::CodeAction(menu.fixes.swap_remove(ix)));
         }

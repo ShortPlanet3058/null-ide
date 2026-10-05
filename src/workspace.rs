@@ -2300,6 +2300,8 @@ impl Workspace {
             (Go, "Previous Problem".into(), Box::new(PreviousProblem)),
             (Go, "Next Change".into(), Box::new(crate::editor::NextChange)),
             (Go, "Previous Change".into(), Box::new(crate::editor::PreviousChange)),
+            (Go, "Next Conflict".into(), Box::new(crate::editor::NextConflict)),
+            (Go, "Previous Conflict".into(), Box::new(crate::editor::PreviousConflict)),
             (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
             (View, "New Terminal".into(), Box::new(NewTerminal)),
@@ -4631,6 +4633,7 @@ impl Render for Workspace {
 
         let root = self.tree.read(cx).root().to_path_buf();
         let lsp_status = self.language_status(cx);
+        let conflicts = self.active_editor().map_or(0, |e| e.read(cx).conflicts().len());
         let (status_items, problems): (Vec<String>, (usize, usize)) = match self.active_editor().map(|e| e.read(cx)) {
             Some(editor) => {
                 let (line, col) = editor.caret_point();
@@ -4975,6 +4978,25 @@ impl Render for Workspace {
                         .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.open_settings_at(Some(Section::Ai), window, cx)
+                        })),
+                )
+            })
+            // Merge conflicts left in the file: a click goes to the next.
+            .when(conflicts > 0, |bar| {
+                bar.child(
+                    div()
+                        .id("conflicts")
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .text_color(theme.error)
+                        .child(if conflicts == 1 { "1 conflict".to_string() } else { format!("{conflicts} conflicts") })
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            if let Some(editor) = this.active_editor().cloned() {
+                                editor.update(cx, |e, cx| e.go_to_conflict(true, cx));
+                                window.focus(&editor.focus_handle(cx));
+                            }
                         })),
                 )
             })
