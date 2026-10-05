@@ -90,6 +90,38 @@ pub fn commit(root: &Path, message: &str, left_out: &[PathBuf]) -> Result<String
     Ok(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default().trim().to_string())
 }
 
+/// Commits the branch has that its upstream doesn't, and the other way round, as far as
+/// the last fetch knows: (to push, to pull). None without an upstream.
+pub fn ahead_behind(root: &Path) -> Option<(usize, usize)> {
+    let counts = git(root, &["rev-list", "--left-right", "--count", "HEAD...@{u}"])?;
+    let mut numbers = counts.split_whitespace().map(|n| n.parse::<usize>().ok());
+    Some((numbers.next()??, numbers.next()??))
+}
+
+/// What a pull did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pulled {
+    UpToDate,
+    Commits(usize),
+    /// It merged, but these files conflict.
+    Conflicts(Vec<PathBuf>),
+}
+
+/// Pulls the branch from its upstream, as the person's git is set up to (merge or
+/// rebase). Never asks for a password in a terminal that isn't there.
+pub fn pull(root: &Path) -> Result<Pulled, String> {
+    let before = git(root, &["rev-parse", "HEAD"]).unwrap_or_default();
+    if let Err(error) = run(root, &["pull", "-q", "--no-edit"]) {
+        let conflicted: Vec<PathBuf> =
+            status(root).into_iter().filter(|(_, s)| *s == FileStatus::Conflicted).map(|(p, _)| p).collect();
+        return if conflicted.is_empty() { Err(error) } else { Ok(Pulled::Conflicts(conflicted)) };
+    }
+    // The commits that came, not counting a merge commit made to join them.
+    let came = |to: &str| git(root, &["rev-list", "--count", &format!("{}..{to}", before.trim())]);
+    let count = came("@{u}").or_else(|| came("HEAD")).and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+    Ok(if count == 0 { Pulled::UpToDate } else { Pulled::Commits(count) })
+}
+
 /// Pushes the branch to where it's tracked (or sets that up on `origin`). Never asks
 /// for a password in a terminal that isn't there: it fails with git's message instead.
 pub fn push(root: &Path) -> Result<String, String> {
@@ -353,6 +385,48 @@ mod tests {
         std::os::unix::fs::symlink(&repo, dir.join("link")).unwrap();
         assert_eq!(committed_text(&dir.join("link/src/a.rs"), Default::default()).as_deref(), Some("committed\n"));
         assert_eq!(committed_text(&repo.join("src/new.rs"), Default::default()), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pulls_and_counts_what_to_push_and_pull() {
+        let dir = std::env::temp_dir().join(format!("null-git-pull-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if run(&dir, &["init", "-q", "--bare", "-b", "main", "origin.git"]).is_err() {
+            return; // No git here.
+        }
+        let clone = |name: &str| {
+            run(&dir, &["clone", "-q", "origin.git", name]).unwrap();
+            let repo = dir.join(name);
+            for (key, value) in [("user.name", "t"), ("user.email", "t@t"), ("pull.rebase", "false")] {
+                run(&repo, &["config", key, value]).unwrap();
+            }
+            repo
+        };
+        let a = clone("a");
+        std::fs::write(a.join("f.txt"), "one\n").unwrap();
+        commit_all(&a, "first").unwrap();
+        run(&a, &["push", "-q", "-u", "origin", "HEAD:main"]).unwrap();
+        let b = clone("b");
+        // A commits again: B, once it has fetched, has one to pull.
+        std::fs::write(a.join("f.txt"), "two\n").unwrap();
+        commit_all(&a, "second").unwrap();
+        assert_eq!(ahead_behind(&a), Some((1, 0)));
+        run(&a, &["push", "-q"]).unwrap();
+        run(&b, &["fetch", "-q"]).unwrap();
+        assert_eq!(ahead_behind(&b), Some((0, 1)));
+        assert_eq!(pull(&b), Ok(Pulled::Commits(1)));
+        assert_eq!(pull(&b), Ok(Pulled::UpToDate));
+        // Both change the same line: the pull stops at a conflict.
+        std::fs::write(a.join("f.txt"), "from a\n").unwrap();
+        commit_all(&a, "a's").unwrap();
+        run(&a, &["push", "-q"]).unwrap();
+        std::fs::write(b.join("f.txt"), "from b\n").unwrap();
+        commit_all(&b, "b's").unwrap();
+        let Ok(Pulled::Conflicts(files)) = pull(&b) else { panic!("expected a conflict") };
+        assert_eq!(files.iter().map(|f| f.file_name().unwrap().to_owned()).collect::<Vec<_>>(), ["f.txt"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
