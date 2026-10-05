@@ -3715,9 +3715,15 @@ impl Workspace {
 
     /// A terminal's tab: its shell's folder, from the title it sets ("user@host:~/a/b" → "b").
     fn terminal_label(title: &str, ix: usize) -> String {
-        let path = title.rsplit(':').next().unwrap_or(title).trim();
-        let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("").trim();
+        let name = Self::terminal_name(title);
         if name.is_empty() { format!("Terminal {}", ix + 1) } else { name.to_string() }
+    }
+
+    /// What a shell's title comes down to: the folder it's in ("IDE" from
+    /// "me@mac:~/code/IDE"), or the command it runs.
+    fn terminal_name(title: &str) -> &str {
+        let path = title.rsplit(':').next().unwrap_or(title).trim();
+        path.trim_end_matches('/').rsplit('/').next().unwrap_or("").trim()
     }
 
     fn render_terminal_panel(&self, height: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3726,7 +3732,7 @@ impl Workspace {
             return None;
         }
         let theme = cx.global::<Theme>();
-        let title = terminal.read(cx).title.clone();
+        let title = Self::terminal_name(&terminal.read(cx).title).to_string();
         let icon_button = |id: &'static str, icon: &'static str| {
             div()
                 .id(id)
@@ -4819,179 +4825,183 @@ impl Render for Workspace {
             .child(div().w(px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
 
         let mut items = status_items.into_iter();
-        let status =
-            div()
-                .h(px(28.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(16.))
-                .px(px(16.))
-                .border_t_1()
-                .border_color(theme.hairline)
-                .bg(theme.surface)
-                .text_size(px(12.))
-                .text_color(theme.muted)
-                .opacity(opacity)
-                .children(self.branch.clone().map(|branch| {
-                    // The branch (a click switches it), and how many files changed (a click lists them).
-                    let changed = self.git_status.len();
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(5.))
-                        .child(
+        let status = div()
+            .h(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .px(px(16.))
+            .border_t_1()
+            .border_color(theme.hairline)
+            .bg(theme.surface)
+            .text_size(px(12.))
+            .text_color(theme.muted)
+            .opacity(opacity)
+            .children(self.branch.clone().map(|branch| {
+                // The branch (a click switches it), and how many files changed (a click lists them).
+                let changed = self.git_status.len();
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .id("branch")
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .tooltip(ui::tip("Switch branch", Some(Box::new(SwitchBranch))))
+                            .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
+                            .child(branch)
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.switch_branch(&SwitchBranch, window, cx)
+                            })),
+                    )
+                    .when(changed > 0, |d| {
+                        d.child(
                             div()
-                                .id("branch")
-                                .flex()
-                                .items_center()
-                                .gap(px(5.))
+                                .id("changes")
                                 .cursor_pointer()
+                                .text_color(theme.git_modified)
                                 .hover(|s| s.text_color(theme.foreground))
-                                .tooltip(ui::tip("Switch branch", Some(Box::new(SwitchBranch))))
-                                .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
-                                .child(branch)
+                                .tooltip(ui::tip("Review changes", Some(Box::new(ReviewChanges))))
+                                .child(format!("· {changed}"))
                                 .active(|s| s.opacity(0.7))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.switch_branch(&SwitchBranch, window, cx)
+                                    this.review_changes(&ReviewChanges, window, cx)
                                 })),
                         )
-                        .when(changed > 0, |d| {
-                            d.child(
-                                div()
-                                    .id("changes")
-                                    .cursor_pointer()
-                                    .text_color(theme.git_modified)
-                                    .hover(|s| s.text_color(theme.foreground))
-                                    .tooltip(ui::tip("Review changes", Some(Box::new(ReviewChanges))))
-                                    .child(format!("· {changed}"))
-                                    .active(|s| s.opacity(0.7))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.review_changes(&ReviewChanges, window, cx)
-                                    })),
-                            )
-                        })
-                }))
-                .child(div().flex_1().min_w_0().truncate().children(items.next()))
-                .children(lsp_status)
-                .children(indent_label.map(|label| {
+                    })
+            }))
+            .child(div().flex_1().min_w_0().truncate().children(items.next()))
+            .children(lsp_status)
+            .children(indent_label.map(|label| {
+                div()
+                    .id("status-indent")
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(label)
+                    .active(|s| s.opacity(0.7))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_commands_for("indent with", window, cx)
+                        }),
+                    )
+            }))
+            .when(crlf, |bar| {
+                bar.child(
                     div()
-                        .id("status-indent")
+                        .id("status-crlf")
                         .flex_none()
-                        .whitespace_nowrap()
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.foreground))
-                        .child(label)
+                        .child("CRLF")
                         .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.show_commands_for("indent with", window, cx)
-                        }))
-                }))
-                .when(crlf, |bar| {
-                    bar.child(
-                        div()
-                            .id("status-crlf")
-                            .flex_none()
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child("CRLF")
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.show_commands_for("line endings", window, cx)
-                            })),
-                    )
-                })
-                .children(self.ai_task.as_ref().map(|run| {
-                    // One line for a task: what it's at, then how many files to review.
-                    let text: String = match &run.state {
-                        TaskState::Starting => "Starting the task…".into(),
-                        TaskState::Running(Some(file)) => {
-                            let name =
-                                Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
-                            format!("Working on {name}…")
-                        }
-                        TaskState::Running(None) => format!("{}…", run.title.trim()),
-                        TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
-                        TaskState::Review(changes) => format!("Review {} files", changes.len()),
-                    };
-                    let reviewing = matches!(run.state, TaskState::Review(_));
+                            this.show_commands_for("line endings", window, cx)
+                        })),
+                )
+            })
+            .children(self.ai_task.as_ref().map(|run| {
+                // One line for a task: what it's at, then how many files to review.
+                let text: String = match &run.state {
+                    TaskState::Starting => "Starting the task…".into(),
+                    TaskState::Running(Some(file)) => {
+                        let name =
+                            Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                        format!("Working on {name}…")
+                    }
+                    TaskState::Running(None) => format!("{}…", run.title.trim()),
+                    TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
+                    TaskState::Review(changes) => format!("Review {} files", changes.len()),
+                };
+                let reviewing = matches!(run.state, TaskState::Review(_));
+                div()
+                    .id("ai-task")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .whitespace_nowrap()
+                    .max_w(px(320.))
+                    .text_color(theme.foreground)
+                    .child(div().flex_none().text_color(theme.caret).child("✦"))
+                    .child(div().min_w_0().truncate().child(text))
+                    // While it works, only "Stop" stops it; once done, the line opens the review.
+                    .when(!reviewing, |d| {
+                        d.child(
+                            div()
+                                .id("stop-ai-task")
+                                .flex_none()
+                                .cursor_pointer()
+                                .text_color(theme.muted)
+                                .hover(|s| s.text_color(theme.foreground))
+                                .child("Stop")
+                                .active(|s| s.opacity(0.7))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.stop_ai_task(&StopAiTask, window, cx)
+                                })),
+                        )
+                    })
+                    .when(reviewing, |d| {
+                        d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
+                        ))
+                    })
+            }))
+            // AI's only lasting mark: a dot. Its name shows on hover; a click opens its settings.
+            .when(ai_provider != ProviderId::Off, |bar| {
+                let dot = theme.caret.opacity(0.6);
+                let lit = theme.caret;
+                bar.child(
                     div()
-                        .id("ai-task")
+                        .id("ai-status")
+                        .flex_none()
+                        .size(px(14.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .group("ai-status")
+                        .child(div().size(px(6.)).rounded_full().bg(dot).group_hover("ai-status", move |s| s.bg(lit)))
+                        .tooltip(ui::tip(format!("AI · {}", ai_provider.label()), None))
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_settings_at(Some(Section::Ai), window, cx)
+                        })),
+                )
+            })
+            .when(problems != (0, 0), |bar| {
+                let (errors, warnings) = problems;
+                let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+                bar.child(
+                    div()
+                        .id("problems")
                         .flex()
                         .flex_none()
-                        .items_center()
-                        .gap(px(6.))
                         .whitespace_nowrap()
-                        .max_w(px(320.))
-                        .text_color(theme.foreground)
-                        .child(div().flex_none().text_color(theme.caret).child("✦"))
-                        .child(div().min_w_0().truncate().child(text))
-                        // While it works, only "Stop" stops it; once done, the line opens the review.
-                        .when(!reviewing, |d| {
-                            d.child(
-                                div()
-                                    .id("stop-ai-task")
-                                    .flex_none()
-                                    .cursor_pointer()
-                                    .text_color(theme.muted)
-                                    .hover(|s| s.text_color(theme.foreground))
-                                    .child("Stop")
-                                    .active(|s| s.opacity(0.7))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.stop_ai_task(&StopAiTask, window, cx)
-                                    })),
-                            )
-                        })
-                        .when(reviewing, |d| {
-                            d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
-                                |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
-                            ))
-                        })
-                }))
-                .when(ai_provider != ProviderId::Off, |bar| {
-                    bar.child(
-                        div()
-                            .id("ai-status")
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(6.))
-                            .whitespace_nowrap()
-                            .cursor_pointer()
-                            .text_color(theme.muted)
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child(div().size(px(6.)).rounded_full().bg(theme.caret.opacity(0.6)))
-                            .child(format!("AI · {}", ai_provider.label()))
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_settings_at(Some(Section::Ai), window, cx)
-                            })),
-                    )
-                })
-                .when(problems != (0, 0), |bar| {
-                    let (errors, warnings) = problems;
-                    let plural =
-                        |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
-                    bar.child(
-                        div()
-                            .id("problems")
-                            .flex()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .gap(px(10.))
-                            .cursor_pointer()
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        .gap(px(10.))
+                        .cursor_pointer()
+                        .active(|s| s.opacity(0.7))
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.show_problems(&ShowProblems, window, cx)
-                            }))
-                            .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
-                            .when(warnings > 0, |d| {
-                                d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
                             }),
-                    )
-                })
-                .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
+                        )
+                        .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
+                        .when(warnings > 0, |d| {
+                            d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
+                        }),
+                )
+            })
+            .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
 
         div()
             .key_context("Workspace")
@@ -5455,6 +5465,8 @@ mod tests {
         assert_eq!(Workspace::terminal_label("ada@mac:~/code/null", 0), "null");
         assert_eq!(Workspace::terminal_label("ada@mac:/tmp/", 1), "tmp");
         assert_eq!(Workspace::terminal_label("", 2), "Terminal 3");
+        assert_eq!(Workspace::terminal_name("ada@mac:~/code/null"), "null");
+        assert_eq!(Workspace::terminal_name("cargo run"), "cargo run");
     }
 
     #[gpui::test]
