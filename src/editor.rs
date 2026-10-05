@@ -402,6 +402,9 @@ pub struct Editor {
     longest_line: std::cell::Cell<(u64, usize)>,
     /// Set for an image or a file that isn't text, shown instead of the text.
     pub preview: Option<crate::preview::Preview>,
+    /// The file was deleted on disk while open (a checkout, the terminal): the text is
+    /// still here, and saving puts the file back.
+    pub missing: bool,
     /// The merge conflicts in the text, and the revision they were found at.
     conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
     /// The buffer revision and byte range `spans` cover.
@@ -553,6 +556,7 @@ impl Editor {
             spans_for: None,
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
             preview: None,
+            missing: false,
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
             pinned: Default::default(),
@@ -663,6 +667,9 @@ impl Editor {
     /// Picks up a change made to the file outside Null. Unsaved edits are never
     /// overwritten; the reload itself can be undone.
     pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
+        if self.check_missing(cx) {
+            return;
+        }
         let Some(path) = &self.path else { return };
         if self.preview.is_some() {
             self.preview = crate::preview::of(path, &std::fs::read_to_string(path)).or(self.preview.take());
@@ -686,8 +693,19 @@ impl Editor {
         cx.notify();
     }
 
+    /// Notes whether the file is gone from disk; true when it is.
+    pub fn check_missing(&mut self, cx: &mut Context<Self>) -> bool {
+        let missing = self.path.as_ref().is_some_and(|p| !p.exists());
+        if missing != self.missing {
+            self.missing = missing;
+            cx.notify();
+        }
+        missing
+    }
+
     /// Gives the buffer a new file (after a rename, or the first save of an untitled file).
     pub fn set_path(&mut self, path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) {
+        self.missing = false;
         self.release_lsp(cx);
         self.highlighter = highlighter_for(&path, &self.buffer);
         self.spans.clear();
@@ -1819,8 +1837,15 @@ impl Editor {
         }
         self.tidy_for_save(cx);
         let Some(path) = &self.path else { return false };
+        // Deleted on disk with its folder: saving puts both back.
+        if self.missing
+            && let Some(parent) = path.parent()
+        {
+            std::fs::create_dir_all(parent).ok();
+        }
         match std::fs::write(path, self.buffer.to_string()) {
             Ok(()) => {
+                self.missing = false;
                 self.buffer.mark_saved();
                 self.lsp_saved(cx);
                 cx.emit(EditorEvent::Saved);
@@ -2926,5 +2951,38 @@ impl Editor {
             .font_family(cx.global::<Fonts>().ui.clone())
             .child(content)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn a_file_deleted_with_its_folder_is_noticed_and_saved_back(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = std::env::temp_dir().join(format!("null-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sub/a.rs");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "fn a() {}\n").unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(path.clone(), None, cx));
+        editor.update(cx, |e, cx| {
+            assert!(!e.check_missing(cx));
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+            // Reloading keeps the text, and notes the file is gone.
+            e.reload_from_disk(cx);
+            assert!(e.missing);
+            assert_eq!(e.buffer.to_string(), "fn a() {}\n");
+            assert!(e.save_to_disk(cx));
+            assert!(!e.missing);
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn a() {}\n");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
