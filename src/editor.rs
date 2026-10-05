@@ -57,7 +57,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-actions!(file_style, [IndentWithTabs, IndentWith2Spaces, IndentWith4Spaces, UseLfLineEndings, UseCrlfLineEndings]);
+actions!(
+    file_style,
+    [IndentWithTabs, IndentWith2Spaces, IndentWith4Spaces, UseLfLineEndings, UseCrlfLineEndings, UseUtf8Encoding]
+);
 
 actions!(
     editor,
@@ -355,6 +358,7 @@ pub struct TwinSource {
     dirty: bool,
     path: PathBuf,
     style: crate::file_style::FileStyle,
+    encoding: crate::encoding::Encoding,
     view: (usize, usize, usize),
 }
 
@@ -407,6 +411,8 @@ pub struct Editor {
     pub missing: bool,
     /// What the file last held on disk, as far as Null knows, to recognise it moved.
     pub on_disk: Option<Fingerprint>,
+    /// How the file's bytes are text, kept when saving.
+    pub encoding: crate::encoding::Encoding,
     /// The merge conflicts in the text, and the revision they were found at.
     conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
     /// The buffer revision and byte range `spans` cover.
@@ -570,6 +576,7 @@ impl Editor {
             preview: None,
             missing: false,
             on_disk: None,
+            encoding: Default::default(),
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
             pinned: Default::default(),
@@ -661,16 +668,18 @@ impl Editor {
 
     /// Opens `path`, or an empty buffer that will be saved there if it doesn't exist yet.
     pub fn open(path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) -> Self {
-        let read = std::fs::read_to_string(&path);
+        let read = crate::encoding::read(&path);
         // An image, or a file that isn't text: shown, never edited or saved over.
-        if let Some(preview) = crate::preview::of(&path, &read) {
+        if let Some(preview) = crate::preview::of(&path, &read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind()))
+        {
             let mut editor = Self::new(Buffer::new(), Some(path), cx);
             editor.preview = Some(preview);
             return editor;
         }
-        let text = read.unwrap_or_default();
+        let (text, encoding) = read.unwrap_or_default();
         let mut editor = Self::new(Buffer::from_text(&text), Some(path), cx);
         editor.on_disk = Some(fingerprint(&text));
+        editor.encoding = encoding;
         editor.reload_git_base(cx);
         if let Some(lsp) = lsp {
             editor.attach_lsp(lsp, cx);
@@ -685,12 +694,15 @@ impl Editor {
             return;
         }
         let Some(path) = &self.path else { return };
+        let read = crate::encoding::read(path);
         if self.preview.is_some() {
-            self.preview = crate::preview::of(path, &std::fs::read_to_string(path)).or(self.preview.take());
+            let text = read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind());
+            self.preview = crate::preview::of(path, &text).or(self.preview.take());
             return cx.notify();
         }
-        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let Ok((text, encoding)) = read else { return };
         self.on_disk = Some(fingerprint(&text));
+        self.encoding = encoding;
         if text == self.buffer.to_string() {
             return;
         }
@@ -1742,6 +1754,7 @@ impl Editor {
         }
         let mut editor = Self::new(buffer, Some(source.path), cx);
         editor.style = source.style;
+        editor.encoding = source.encoding;
         editor.lsp_follower = true;
         if let Some(lsp) = lsp {
             editor.attach_lsp(lsp, cx);
@@ -1759,6 +1772,7 @@ impl Editor {
             dirty: self.buffer.is_dirty(),
             path: self.path.clone()?,
             style: self.style.clone(),
+            encoding: self.encoding,
             view: self.view_state(),
         })
     }
@@ -1819,6 +1833,16 @@ impl Editor {
     }
 
     /// Switches the file's line endings, converting every line break.
+    /// Saves the file as UTF-8 from now on: the text stays, its bytes change on the next save.
+    pub fn use_utf8(&mut self, cx: &mut Context<Self>) {
+        if self.encoding != crate::encoding::Encoding::Utf8 && self.preview.is_none() {
+            self.encoding = crate::encoding::Encoding::Utf8;
+            self.buffer.mark_unsaved();
+            cx.emit(EditorEvent::Edited);
+            cx.notify();
+        }
+    }
+
     pub fn set_line_ending(&mut self, ending: crate::file_style::LineEnding, cx: &mut Context<Self>) {
         self.style.line_ending = ending;
         let mut edits = Vec::new();
@@ -1859,7 +1883,18 @@ impl Editor {
             std::fs::create_dir_all(parent).ok();
         }
         let text = self.buffer.to_string();
-        match std::fs::write(path, &text) {
+        let bytes = match crate::encoding::encode(&text, self.encoding) {
+            Ok(bytes) => bytes,
+            Err(c) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let encoding = self.encoding.label();
+                cx.emit(EditorEvent::SaveFailed(format!(
+                    "Couldn't save {name}: {encoding} has no “{c}”. Click {encoding} below to save it as UTF-8."
+                )));
+                return false;
+            }
+        };
+        match std::fs::write(path, bytes) {
             Ok(()) => {
                 self.on_disk = Some(fingerprint(&text));
                 self.missing = false;
@@ -2830,6 +2865,7 @@ impl Render for Editor {
             .on_action(cx.listener(|this, _: &UseCrlfLineEndings, _, cx| {
                 this.set_line_ending(crate::file_style::LineEnding::Crlf, cx)
             }))
+            .on_action(cx.listener(|this, _: &UseUtf8Encoding, _, cx| this.use_utf8(cx)))
             .on_action(cx.listener(Self::keep_hunk))
             .on_action(cx.listener(Self::undo_hunk))
             .on_action(cx.listener(Self::fold))

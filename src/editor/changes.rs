@@ -23,8 +23,9 @@ impl Editor {
     /// Reads the committed version of the file again (it may have been committed since).
     pub fn reload_git_base(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.path.clone() else { return };
+        let encoding = self.encoding;
         self.git_base_task = Some(cx.spawn(async move |this, cx| {
-            let base = cx.background_executor().spawn(async move { git::committed_text(&path) }).await;
+            let base = cx.background_executor().spawn(async move { git::committed_text(&path, encoding) }).await;
             this.update(cx, |this, cx| {
                 this.git_base = base.map(Arc::from);
                 this.refresh_git_hunks(Duration::ZERO, cx);

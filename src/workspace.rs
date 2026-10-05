@@ -971,8 +971,8 @@ impl Workspace {
                     changed
                         .into_iter()
                         .map(|(path, status)| {
-                            let before = git::committed_text(&path).unwrap_or_default();
-                            let after = std::fs::read_to_string(&path).unwrap_or_default();
+                            let (after, encoding) = crate::encoding::read(&path).unwrap_or_default();
+                            let before = git::committed_text(&path, encoding).unwrap_or_default();
                             let (added, removed) = crate::ai_task::line_counts(&before, &after);
                             (path, status, added, removed)
                         })
@@ -1037,7 +1037,8 @@ impl Workspace {
             self.refresh_git_status(cx);
             return true;
         }
-        let before = git::committed_text(path).unwrap_or_default();
+        let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
+        let before = git::committed_text(path, encoding).unwrap_or_default();
         self.open_file(path.to_path_buf(), window, cx);
         if let Some(editor) = self.active_editor().cloned() {
             editor.update(cx, |editor, cx| editor.start_review(before, cx));
@@ -2385,6 +2386,7 @@ impl Workspace {
                 (Lines, "Indent with 4 Spaces".into(), Box::new(crate::editor::IndentWith4Spaces)),
                 (Lines, "Use LF Line Endings (macOS, Linux)".into(), Box::new(crate::editor::UseLfLineEndings)),
                 (Lines, "Use CRLF Line Endings (Windows)".into(), Box::new(crate::editor::UseCrlfLineEndings)),
+                (Lines, "Use UTF-8 Encoding".into(), Box::new(crate::editor::UseUtf8Encoding)),
                 (Lines, "Fold".into(), Box::new(crate::editor::Fold)),
                 (Lines, "Unfold".into(), Box::new(crate::editor::Unfold)),
                 (Lines, "Fold All".into(), Box::new(crate::editor::FoldAll)),
@@ -4659,8 +4661,12 @@ fn moved_to(
     let same_text = |file: &Path| {
         file != path
             && !open.iter().any(|o| o == file)
-            && std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.len() as usize == print.0)
-            && std::fs::read_to_string(file).is_ok_and(|text| crate::editor::fingerprint(&text) == print)
+            // Its size, near enough (another encoding writes the same text in other sizes).
+            && std::fs::metadata(file).is_ok_and(|m| {
+                let len = m.len() as usize;
+                m.is_file() && len >= print.0 / 3 && len <= print.0 * 2 + 3
+            })
+            && crate::encoding::read(file).is_ok_and(|(text, _)| crate::editor::fingerprint(&text) == print)
     };
     found.retain(|(_, _, file)| same_text(file));
     let mut files: Vec<&PathBuf> = found.iter().map(|(_, _, f)| f).collect();
@@ -4872,6 +4878,8 @@ impl Render for Workspace {
         let ai_provider = cx.global::<Settings>().ai.active();
         // How the file is written, when it's not the usual: its indentation, Windows line endings.
         let default_indent = cx.global::<Settings>().default_indent();
+        let encoding =
+            self.active_editor().map(|e| e.read(cx).encoding).filter(|e| *e != crate::encoding::Encoding::Utf8);
         let (indent_label, crlf) = match self.active_editor().map(|e| e.read(cx).style.clone()) {
             Some(style) => (
                 (style.indent != default_indent).then(|| style.indent.label()),
@@ -4983,6 +4991,19 @@ impl Render for Workspace {
                         cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.show_commands_for("indent with", window, cx)
                         }),
+                    )
+            }))
+            // Not UTF-8: which encoding it's kept in; a click offers UTF-8.
+            .children(encoding.map(|encoding| {
+                div()
+                    .id("status-encoding")
+                    .flex_none()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(encoding.label())
+                    .active(|s| s.opacity(0.7))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_commands_for("encoding", window, cx)),
                     )
             }))
             .when(crlf, |bar| {
