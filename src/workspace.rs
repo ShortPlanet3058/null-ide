@@ -3715,6 +3715,15 @@ impl Workspace {
             TerminalEvent::TitleChanged => cx.notify(),
             // The shell exited (e.g. `exit`): its tab goes; with none left, so does the panel.
             TerminalEvent::Exited => this.remove_terminal(terminal.entity_id(), window, cx),
+            TerminalEvent::OpenFile(path, line, column) => {
+                this.open_file(path.clone(), window, cx);
+                if let Some(editor) = this.active_editor().cloned() {
+                    let place =
+                        (line.unwrap_or(1).saturating_sub(1) as usize, column.unwrap_or(1).saturating_sub(1) as usize);
+                    editor.update(cx, |e, cx| e.set_caret_point(place, cx));
+                    window.focus(&editor.focus_handle(cx));
+                }
+            }
         });
         self.terminals.push((terminal, subscription));
         self.active_terminal = self.terminals.len() - 1;
