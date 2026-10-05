@@ -476,6 +476,67 @@ mod tests {
         assert_eq!(text(cx, &e), "o-(ne\nt-(wo\nt-(hree\n");
     }
 
+    /// ⌥⇧ and a drag, with the real mouse events: a box from where it went down to where
+    /// it's let go.
+    #[gpui::test]
+    fn alt_shift_dragging_selects_a_box(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "abcd\nabcdef\nabcd\n");
+        let draw = |cx: &mut VisualTestContext| {
+            let e = e.clone();
+            cx.draw(gpui::Point::default(), gpui::size(gpui::px(800.), gpui::px(400.)), move |_, _| {
+                gpui::AnyView::from(e)
+            });
+        };
+        draw(cx);
+        // Where column `col` of line `line` is on screen, from the last frame's layout.
+        let at = |cx: &mut VisualTestContext, line: usize, col: usize| {
+            e.read_with(cx, |e, _| {
+                let l = e.layout.as_ref().unwrap();
+                gpui::point(
+                    l.text_origin.x + l.char_width * (col as f32 + 0.1),
+                    l.text_origin.y + l.line_height * (line as f32 + 0.5),
+                )
+            })
+        };
+        let box_keys = gpui::Modifiers { alt: true, shift: true, ..Default::default() };
+        let (from, to) = (at(cx, 0, 1), at(cx, 2, 3));
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, box_keys);
+        for step in 1..=4 {
+            let t = step as f32 / 4.;
+            let p = gpui::point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            cx.simulate_mouse_move(p, gpui::MouseButton::Left, box_keys);
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, box_keys);
+        assert_eq!(cursor_count(cx, &e), 3);
+        type_text(cx, &e, "X");
+        assert_eq!(text(cx, &e), "aXd\naXdef\naXd\n");
+    }
+
+    /// A click on a letter's left half puts the caret before it, its right half after it,
+    /// the line's last letter too.
+    #[gpui::test]
+    fn a_click_lands_on_the_nearer_side_of_a_letter(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "abcd\n");
+        let e2 = e.clone();
+        cx.draw(gpui::Point::default(), gpui::size(gpui::px(800.), gpui::px(400.)), move |_, _| {
+            gpui::AnyView::from(e2)
+        });
+        let caret_after_click = |cx: &mut VisualTestContext, col: f32| {
+            let at = e.read_with(cx, |e, _| {
+                let l = e.layout.as_ref().unwrap();
+                gpui::point(l.text_origin.x + l.char_width * col, l.text_origin.y + l.line_height * 0.5)
+            });
+            cx.simulate_click(at, gpui::Modifiers::default());
+            e.read_with(cx, |e, _| e.caret_point())
+        };
+        assert_eq!(caret_after_click(cx, 1.3), (0, 1));
+        assert_eq!(caret_after_click(cx, 1.7), (0, 2));
+        // The last letter, "d": its left half is before it.
+        assert_eq!(caret_after_click(cx, 3.3), (0, 3));
+        assert_eq!(caret_after_click(cx, 3.7), (0, 4));
+    }
+
     #[gpui::test]
     fn a_box_selects_the_same_columns_on_each_line(cx: &mut TestAppContext) {
         let (e, cx) = editor(cx, "abcd\nabcdef\na\nabcd\n");

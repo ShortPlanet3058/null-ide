@@ -965,6 +965,8 @@ impl FileTree {
                 let dragged = DraggedEntry { path: entry.path.clone(), name: entry.name.clone() };
                 let tint = theme.accent_soft;
                 let row_el = base
+                    // Tests find a row by its path (no cost outside them).
+                    .debug_selector(|| format!("tree-row {}", entry.path.display()))
                     .text_color(color)
                     .when(active, |r| r.bg(theme.accent_soft))
                     .when(selected && !active, |r| r.bg(theme.hairline))

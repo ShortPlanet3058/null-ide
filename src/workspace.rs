@@ -5897,6 +5897,53 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Dragging a file onto a folder in the tree, with the real mouse events: it moves
+    /// there, and its tab follows.
+    #[gpui::test]
+    fn dragging_a_file_onto_a_folder_moves_it(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-tree-drag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("notes.txt"), "hello\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..4 {
+                cx.executor().advance_clock(Duration::from_millis(600));
+                cx.run_until_parked();
+            }
+        };
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("notes.txt"), window, cx));
+        settle(cx);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let file = format!("tree-row {}", dir.join("notes.txt").display());
+        let folder = format!("tree-row {}", dir.join("src").display());
+        let (file, folder): (&'static str, &'static str) = (file.leak(), folder.leak());
+        let from = cx.debug_bounds(file).expect("the file's row is drawn").center();
+        let to = cx.debug_bounds(folder).expect("the folder's row is drawn").center();
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, none);
+        for step in 1..=6 {
+            let t = step as f32 / 6.;
+            let p = gpui::point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            cx.simulate_mouse_move(p, gpui::MouseButton::Left, none);
+        }
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, none);
+        settle(cx);
+        assert!(dir.join("src/notes.txt").is_file() && !dir.join("notes.txt").exists());
+        workspace.update(cx, |w, cx| {
+            assert_eq!(w.active_editor().unwrap().read(cx).path(), Some(dir.join("src/notes.txt").as_path()));
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Switch Branch: typing part of a name and ↵ switches to it; a new name and ↵ starts
     /// that branch.
     #[gpui::test]
