@@ -1428,6 +1428,13 @@ impl Workspace {
 
     fn add_twin(&mut self, source: &Entity<Editor>, side: usize, window: &mut Window, cx: &mut Context<Self>) {
         let lsp = self.lsp.clone();
+        // An image has no text to share: the other side shows the file too.
+        if source.read(cx).preview.is_some()
+            && let Some(path) = source.read(cx).path().map(Path::to_path_buf)
+        {
+            let copy = cx.new(|cx| Editor::open(path, None, cx));
+            return self.add_tab_on(copy, Some(side), window, cx);
+        }
         let Some(from) = source.read(cx).twin_source() else { return };
         let twin = cx.new(|cx| Editor::twin(from, Some(lsp), cx));
         self.twin_seen.insert(source.entity_id(), source.read(cx).buffer.revision());
@@ -2147,6 +2154,9 @@ impl Workspace {
     }
 
     fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_editor().is_some_and(|e| e.read(cx).preview.is_some()) {
+            return self.show_notice("Only text files are saved from Null.".into(), cx);
+        }
         if let Some(editor) = self.active_editor().cloned() {
             self.ask_where_to_save(editor, window, cx);
         }
@@ -4640,17 +4650,22 @@ impl Render for Workspace {
                 let path = editor.path().map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string());
                 let problems = editor.problems(cx);
                 let count = |s| problems.iter().filter(|p| p.severity == s).count();
-                (
-                    vec![
-                        path.map(|p| shorten_path(&p, STATUS_PATH_CHARS)).unwrap_or_else(|| "Untitled".into()),
-                        match editor.extra.len() {
-                            0 => format!("Ln {}, Col {}", line + 1, col + 1),
-                            n => format!("{} cursors · Esc for one", n + 1),
-                        },
-                        editor.language_name().into(),
-                    ],
-                    (count(lsp_types::DiagnosticSeverity::ERROR), count(lsp_types::DiagnosticSeverity::WARNING)),
-                )
+                let path = path.map(|p| shorten_path(&p, STATUS_PATH_CHARS)).unwrap_or_else(|| "Untitled".into());
+                if let Some(preview) = &editor.preview {
+                    (vec![path, preview.summary()], (0, 0))
+                } else {
+                    (
+                        vec![
+                            path,
+                            match editor.extra.len() {
+                                0 => format!("Ln {}, Col {}", line + 1, col + 1),
+                                n => format!("{} cursors · Esc for one", n + 1),
+                            },
+                            editor.language_name().into(),
+                        ],
+                        (count(lsp_types::DiagnosticSeverity::ERROR), count(lsp_types::DiagnosticSeverity::WARNING)),
+                    )
+                }
             }
             None => {
                 let home = std::env::var_os("HOME").map(PathBuf::from);
