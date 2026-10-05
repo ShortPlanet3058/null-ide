@@ -16,6 +16,7 @@ mod review;
 mod signature;
 mod snippet;
 mod structure;
+mod tags;
 
 pub use assist::{Block, BlockKind};
 pub use breakpoints::{Breakpoint, ToggleBreakpoint};
@@ -484,6 +485,8 @@ pub struct Editor {
     hover_from_keyboard: bool,
     /// Typing with Alt held (e.g. Alt+arrows) hides the card until Alt is released.
     hover_suppressed: bool,
+    /// A tag's name and its pair's, edited together.
+    linked: Option<tags::LinkedTag>,
     alt_held: bool,
     /// Cmd on macOS, Ctrl elsewhere: held to make words clickable for go to definition.
     secondary_held: bool,
@@ -642,6 +645,7 @@ impl Editor {
             mouse_in_card: false,
             hover_from_keyboard: false,
             hover_suppressed: false,
+            linked: None,
             alt_held: false,
             secondary_held: false,
             link_word: None,
@@ -1485,8 +1489,13 @@ impl Editor {
         if self.starts_undo_step(&range, text, kind) {
             self.last_edit = None;
         }
+        // Typing in a tag's name types in its pair's too.
+        let linked = matches!(kind, EditKind::Typing | EditKind::Deleting).then(|| self.linked_tag(&range)).flatten();
         self.record_undo(kind);
-        let end = self.buffer.replace(range, text);
+        let mut end = self.buffer.replace(range.clone(), text);
+        if let Some(linked) = linked {
+            end = self.mirror_tag(linked, range.clone(), end - range.start, end);
+        }
         if let Some((_, _, caret)) = &mut self.last_edit
             && self.batch.is_none()
         {
@@ -2801,6 +2810,9 @@ impl EntityInputHandler for Editor {
             return;
         }
         self.edit(range, text, EditKind::Typing, cx);
+        if text == ">" {
+            self.close_tag(cx);
+        }
         self.completion_after_typing(text, cx);
         self.signature_after_typing(text, cx);
         self.schedule_ghost(kept, cx);
