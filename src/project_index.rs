@@ -153,7 +153,7 @@ pub fn index(root: &Path) -> Vec<Definition> {
         .filter(|e| e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| SOURCE_EXTENSIONS.contains(&x)))
         .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_FILE_BYTES))
         .take(MAX_FILES)
-        .filter_map(|e| Some((e.path().to_path_buf(), std::fs::read_to_string(e.path()).ok()?)))
+        .filter_map(|e| Some((e.path().to_path_buf(), crate::encoding::read(e.path()).ok()?.0)))
         .flat_map(|(path, text)| definitions_in(&path, &text))
         .collect()
 }

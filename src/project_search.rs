@@ -515,8 +515,9 @@ fn search_files(
         }
         let text = match unsaved.get(&path) {
             Some(rope) => rope.to_string(),
-            None => match std::fs::read_to_string(&path) {
-                Ok(text) => text,
+            // In its own encoding, so an old Latin-1 file is searched too.
+            None => match crate::encoding::read(&path) {
+                Ok((text, _)) => text,
                 Err(_) => continue,
             },
         };
@@ -850,6 +851,24 @@ mod tests {
             s.step(false, cx);
             assert_eq!(s.selected, Some(2));
         });
+    }
+
+    #[test]
+    fn searches_files_in_other_encodings() {
+        let dir = std::env::temp_dir().join(format!("null-search-latin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old.txt"), b"caf\xe9 cr\xe8me\n").unwrap();
+        let query = SearchQuery { text: "crème".into(), ..Default::default() };
+        let mut results = Vec::new();
+        search_files(&dir, &query, &Default::default(), &AtomicBool::new(false), |found| {
+            if let Found::Files(files) = found {
+                results.extend(files)
+            }
+        });
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].matches[0].preview.as_ref(), "café crème");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
