@@ -67,6 +67,8 @@ doesn't need Xcode's separate Metal Toolchain download.
   arms…). **F8** goes from problem to problem.
 - Multiple cursors (⌘D, ⌘⇧-click), a box with ⌥⇧-drag, cursors at line ends (⌥⇧I);
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
+- In HTML and JSX, typing the `>` of a tag adds its closing tag, and renaming a tag
+  renames its pair.
 - Faint indent guides, sticky scroll (the enclosing lines stay at the top), the other uses
   of a name tinted, and a line at the length the project keeps to (from `.editorconfig`,
   rustfmt, Prettier, Black or Ruff). Each can be turned off.
