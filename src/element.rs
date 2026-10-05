@@ -240,8 +240,8 @@ pub struct Prepaint {
     text_bounds: Bounds<Pixels>,
     line_height: Pixels,
     current_line: Option<Bounds<Pixels>>,
-    /// The debugger's breakpoints: a dot each, in the gutter.
-    breakpoint_dots: Vec<Bounds<Pixels>>,
+    /// The debugger's breakpoints: a dot each, in the gutter (a ring for one with a condition).
+    breakpoint_dots: Vec<(Bounds<Pixels>, bool)>,
     /// The line the debugger stopped on: a band across it, and a mark in the gutter.
     execution: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
     /// Faint lines down the indentation, one per level.
@@ -688,7 +688,7 @@ impl Element for EditorElement {
             });
             // Breakpoints: a dot left of the line number, on the line's first row.
             let dot = px(8.);
-            let breakpoint_dots: Vec<Bounds<Pixels>> = editor
+            let breakpoint_dots: Vec<(Bounds<Pixels>, bool)> = editor
                 .breakpoints
                 .iter()
                 .filter(|&&line| lines_shown.contains(&line))
@@ -696,7 +696,8 @@ impl Element for EditorElement {
                     let rows = rows_of(line..line + 1);
                     (!rows.is_empty()).then(|| {
                         let y = row_top(rows.start) + (line_height - dot) / 2.;
-                        Bounds::new(point(bounds.left() + px(5.), y), size(dot, dot))
+                        let conditional = editor.breakpoint_conditions.iter().any(|(l, _)| *l == line);
+                        (Bounds::new(point(bounds.left() + px(5.), y), size(dot, dot)), conditional)
                     })
                 })
                 .collect();
@@ -1154,8 +1155,13 @@ impl Element for EditorElement {
             window.paint_quad(fill(band, theme.warning.opacity(0.14)));
             window.paint_quad(fill(mark, theme.warning));
         }
-        for dot in &prepaint.breakpoint_dots {
-            window.paint_quad(fill(*dot, theme.error).corner_radii(px(4.)));
+        for (dot, conditional) in &prepaint.breakpoint_dots {
+            let quad = if *conditional {
+                fill(*dot, gpui::transparent_black()).border_widths(px(1.5)).border_color(theme.error)
+            } else {
+                fill(*dot, theme.error)
+            };
+            window.paint_quad(quad.corner_radii(px(4.)));
         }
         if let Some(band) = prepaint.assist_band {
             window.paint_quad(fill(band, theme.accent_soft));

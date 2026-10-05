@@ -37,6 +37,8 @@ pub struct TabState {
     pub folds: Vec<(usize, usize)>,
     /// Lines with a breakpoint.
     pub breakpoints: Vec<usize>,
+    /// Breakpoints that only stop when something holds: (line, condition).
+    pub conditions: Vec<(usize, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
