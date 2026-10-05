@@ -443,7 +443,7 @@ impl Editor {
                 "{chat_outline}{chat_context}File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {before:?}",
                 self.language_name(),
                 &text[from..caret_byte],
-                &suffix,
+                suffix,
             ),
             // A fill-only code model can't chat; the usual model does it then.
             model: ai_settings.completion_model(provider).filter(|_| !ai::fim_available(&ai_settings)),

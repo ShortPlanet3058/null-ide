@@ -644,7 +644,7 @@ impl Element for EditorElement {
             let mut ai_tints: Vec<(Bounds<Pixels>, Hsla)> = editor
                 .ai_added_lines()
                 .into_iter()
-                .map(|lines| rows_of(lines))
+                .map(&rows_of)
                 .filter(|r| !r.is_empty())
                 .map(|r| {
                     let rect = Bounds::from_corners(

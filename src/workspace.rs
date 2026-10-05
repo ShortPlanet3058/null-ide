@@ -1402,10 +1402,10 @@ impl Workspace {
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited => {
                     if cx.global::<Settings>().auto_save == AutoSave::AfterPause {
-                        this.save_after_pause(&editor, cx);
+                        this.save_after_pause(editor, cx);
                     }
-                    this.sync_twins(&editor, cx);
-                    this.share_unsaved(&editor, cx);
+                    this.sync_twins(editor, cx);
+                    this.share_unsaved(editor, cx);
                     if cx.global::<Settings>().fade_bars_while_typing {
                         this.chrome.set(false, FADE_IN, FADE_OUT);
                     }
@@ -1416,14 +1416,14 @@ impl Workspace {
                 EditorEvent::Saved => {
                     this.refresh_git_status(cx);
                     // Saving (and tidying) one copy saves the other: same text, same file.
-                    this.sync_twins(&editor, cx);
-                    for twin in this.twins_of(&editor, cx) {
+                    this.sync_twins(editor, cx);
+                    for twin in this.twins_of(editor, cx) {
                         twin.update(cx, |twin, cx| {
                             twin.buffer.mark_saved();
                             cx.notify();
                         });
                     }
-                    this.share_unsaved(&editor, cx);
+                    this.share_unsaved(editor, cx);
                     this.refresh_title(window, cx);
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
@@ -1431,7 +1431,7 @@ impl Workspace {
                     cx.notify();
                 }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
-                EditorEvent::Reviewed => this.file_reviewed(&editor, cx),
+                EditorEvent::Reviewed => this.file_reviewed(editor, cx),
                 EditorEvent::SaveFailed(message) => this.show_notice(message.clone(), cx),
                 EditorEvent::ChangedOnDisk => {
                     let name = editor.read(cx).file_name();

@@ -226,10 +226,12 @@ impl Welcome {
         // A key typed for the provider goes to the keychain, never to the settings file.
         let key = self.key.read(cx).text().trim().to_string();
         let provider = cx.global::<Settings>().ai.provider;
-        if !key.is_empty() && provider.uses_api_key() && cx.global::<Settings>().ai.enabled {
-            if let Err(error) = ai::store_api_key(provider, &key) {
-                eprintln!("null: couldn't save the key: {error}");
-            }
+        if !key.is_empty()
+            && provider.uses_api_key()
+            && cx.global::<Settings>().ai.enabled
+            && let Err(error) = ai::store_api_key(provider, &key)
+        {
+            eprintln!("null: couldn't save the key: {error}");
         }
         settings::update(cx, |s| {
             s.welcomed = true;
@@ -345,7 +347,7 @@ impl Welcome {
         let eased = 1. - (1. - t).powi(3);
         let (language, pieces) = HELLOS[self.hello];
         // The caret blinks only once the line has settled in.
-        let blink_on = (self.hello_since.elapsed().as_millis() / 550) % 2 == 0;
+        let blink_on = (self.hello_since.elapsed().as_millis() / 550).is_multiple_of(2);
         let text: String = pieces.iter().map(|(t, _)| *t).collect();
         let mut highlights = Vec::new();
         let mut at = 0;
