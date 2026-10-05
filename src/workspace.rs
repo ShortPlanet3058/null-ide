@@ -5739,6 +5739,84 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The palettes, by keystroke: ⌘P with a place, ⌘P ":line", ⌃G, ⌘⇧O and a name, ⌘K and
+    /// a command. Each row does what it says.
+    #[gpui::test]
+    fn palette_rows_go_where_they_say(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-palette-flows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "fn alpha() {}\n\nfn beta() {\n    alpha();\n}\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+        };
+        // As when Null starts: the window's keys go to the workspace.
+        workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
+        settle(cx);
+        let place = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |w, cx| {
+                let e = w.active_editor().map(|e| e.read(cx));
+                e.map(|e| (e.file_name(), e.caret_point()))
+            })
+        };
+        // ⌘P "notes.txt:3:2": that file, line 3, column 2.
+        cx.simulate_keystrokes("cmd-p");
+        settle(cx);
+        cx.simulate_input("notes.txt:3:2");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(place(cx), Some(("notes.txt".into(), (2, 1))));
+        // ⌘P ":2", and ⌃G "4": lines in the open file.
+        cx.simulate_keystrokes("cmd-p");
+        settle(cx);
+        cx.simulate_input(":2");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(place(cx), Some(("notes.txt".into(), (1, 0))));
+        cx.simulate_keystrokes("ctrl-g");
+        settle(cx);
+        cx.simulate_input("4");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(place(cx).map(|(_, (line, _))| line), Some(3));
+        // ⌘⇧O in lib.rs, "beta": its definition.
+        cx.simulate_keystrokes("cmd-p");
+        settle(cx);
+        cx.simulate_input("lib.rs");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        cx.simulate_keystrokes("cmd-shift-o");
+        settle(cx);
+        cx.simulate_input("beta");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(place(cx), Some(("lib.rs".into(), (2, 3))));
+        // ⌘K "toggle sidebar": the sidebar goes.
+        let visible = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| cx.global::<Settings>().sidebar_visible);
+        let before = visible(cx);
+        cx.simulate_keystrokes("cmd-k");
+        settle(cx);
+        cx.simulate_input("toggle sidebar");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_ne!(visible(cx), before);
+        // A quick setting stays open to see its effect; Escape closes it.
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(workspace.read_with(cx, |w, _| w.palette.is_none()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Switch Branch: typing part of a name and ↵ switches to it; a new name and ↵ starts
     /// that branch.
     #[gpui::test]

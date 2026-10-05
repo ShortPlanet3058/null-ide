@@ -238,25 +238,22 @@ fn theme_action(theme: ThemeName) -> Box<dyn Action> {
 }
 
 /// Commands that a quick setting already covers, left out of ⌘K's search.
-fn covered_by_quick(name: &str) -> bool {
-    matches!(
-        name.rsplit("::").next().unwrap_or(name),
-        "ToggleWordWrap"
-            | "ToggleSidebar"
-            | "ToggleTerminal"
-            | "ToggleAutocomplete"
-            | "ToggleFadeWhileTyping"
-            | "ToggleAi"
-            | "UseNullTheme"
-            | "UseAshTheme"
-            | "UseMidnightTheme"
-            | "UseMossTheme"
-            | "UsePaperTheme"
-            | "UseDuneTheme"
-            | "IncreaseFontSize"
-            | "DecreaseFontSize"
-            | "OpenSettings"
-    )
+/// The quick setting that stands in for a command in ⌘K, if one does.
+fn quick_for(name: &str) -> Option<Quick> {
+    Some(match name.rsplit("::").next().unwrap_or(name) {
+        "ToggleWordWrap" => Quick::Wrap,
+        "ToggleSidebar" => Quick::Sidebar,
+        "ToggleTerminal" => Quick::Terminal,
+        "ToggleAutocomplete" => Quick::Suggestions,
+        "ToggleFadeWhileTyping" => Quick::Fade,
+        "ToggleAi" => Quick::Ai,
+        "UseNullTheme" | "UseAshTheme" | "UseMidnightTheme" | "UseMossTheme" | "UsePaperTheme" | "UseDuneTheme" => {
+            Quick::Theme
+        }
+        "IncreaseFontSize" | "DecreaseFontSize" => Quick::TextSize,
+        "OpenSettings" => Quick::AllSettings,
+        _ => return None,
+    })
 }
 
 /// What the palette starts with.
@@ -687,7 +684,15 @@ impl Palette {
             .filter_map(|q| fuzzy::score(q.label(), query).map(|(s, h)| (s + 8, Item::Quick(q), h)))
             .collect();
         for (i, c) in self.commands.iter().enumerate() {
-            if covered_by_quick(c.action.name()) {
+            // A command a quick setting stands in for: its own name finds that setting
+            // ("toggle sidebar" finds Sidebar), shown once.
+            if let Some(quick) = quick_for(c.action.name()) {
+                if let Some((score, _)) = fuzzy::score(&c.label, query) {
+                    match found.iter_mut().find(|(_, item, _)| *item == Item::Quick(quick)) {
+                        Some(entry) => entry.0 = entry.0.max(score + 8),
+                        None => found.push((score + 8, Item::Quick(quick), Vec::new())),
+                    }
+                }
                 continue;
             }
             let recent = self.recent_commands.iter().position(|&n| n == c.action.name());
