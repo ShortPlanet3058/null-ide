@@ -5817,6 +5817,77 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Finding by keystroke: ⌘F and ↵ step through a file's matches, ⌘⇧F and ↵ opens a
+    /// project search's result, ⌘W and ⌘⇧T close and bring back a tab.
+    #[gpui::test]
+    fn find_search_and_tabs_by_keystroke(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-find-flows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "let alpha = 1;\nlet beta = alpha + alpha;\n").unwrap();
+        std::fs::write(dir.join("src/b.rs"), "fn other() {}\n\n// gamma lives here\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..4 {
+                cx.executor().advance_clock(Duration::from_millis(300));
+                cx.run_until_parked();
+            }
+        };
+        workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
+        settle(cx);
+        let place = |cx: &mut gpui::VisualTestContext| {
+            workspace
+                .read_with(cx, |w, cx| w.active_editor().map(|e| (e.read(cx).file_name(), e.read(cx).caret_point())))
+        };
+        cx.simulate_keystrokes("cmd-p");
+        settle(cx);
+        cx.simulate_input("a.rs");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        // ⌘F "alpha": the first one; ↵ the next, and the next.
+        cx.simulate_keystrokes("cmd-f");
+        settle(cx);
+        cx.simulate_input("alpha");
+        settle(cx);
+        let lines: Vec<(usize, usize)> = (0..2)
+            .map(|_| {
+                cx.simulate_keystrokes("enter");
+                settle(cx);
+                place(cx).unwrap().1
+            })
+            .collect();
+        assert_eq!(lines, [(1, 16), (1, 24)], "↵ goes from match to match");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        // ⌘⇧F "gamma", ↵: b.rs opens on that line.
+        cx.simulate_keystrokes("cmd-shift-f");
+        settle(cx);
+        cx.simulate_input("gamma");
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(place(cx).map(|(name, (line, _))| (name, line)), Some(("b.rs".into(), 2)));
+        // ⌘W closes it; ⌘⇧T brings it back.
+        workspace.update_in(cx, |w, window, cx| {
+            let editor = w.active_editor().unwrap().focus_handle(cx);
+            window.focus(&editor);
+        });
+        cx.simulate_keystrokes("cmd-w");
+        settle(cx);
+        assert_eq!(place(cx).map(|(name, _)| name), Some("a.rs".into()));
+        cx.simulate_keystrokes("cmd-shift-t");
+        settle(cx);
+        assert_eq!(place(cx).map(|(name, _)| name), Some("b.rs".into()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Switch Branch: typing part of a name and ↵ switches to it; a new name and ↵ starts
     /// that branch.
     #[gpui::test]

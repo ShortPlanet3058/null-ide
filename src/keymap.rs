@@ -157,6 +157,44 @@ mod tests {
         assert_eq!(serde_json::from_str::<Keymap>("\"jetbrains\"").unwrap(), Keymap::JetBrains);
     }
 
+    /// Whatever the preset, typing a letter, digit or symbol types it: no key without ⌘,
+    /// ⌃ or ⌥ is taken for a command where text is typed (the editor, the terminal, a field).
+    #[gpui::test]
+    fn typing_is_never_taken_for_a_command(cx: &mut gpui::TestAppContext) {
+        let typed: Vec<String> = ('a'..='z')
+            .chain('0'..='9')
+            .chain("`-=[]\\;',./".chars())
+            .map(|c| c.to_string())
+            .chain(["space".to_string()])
+            .collect();
+        let places = [
+            vec!["Workspace", "Editor"],
+            vec!["Workspace", "Terminal"],
+            vec!["Workspace", "Palette", "TextInput"],
+            vec!["Workspace", "FindBar", "TextInput"],
+            vec!["Workspace", "TerminalFind", "TextInput"],
+        ];
+        for preset in [Keymap::Null, Keymap::VsCode, Keymap::JetBrains, Keymap::Sublime, Keymap::Zed] {
+            cx.update(|cx| {
+                register(preset, cx);
+                let keymap = cx.key_bindings();
+                let keymap = keymap.borrow();
+                for place in &places {
+                    let context: Vec<gpui::KeyContext> =
+                        place.iter().map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+                    for key in &typed {
+                        for stroke in [key.clone(), format!("shift-{key}")] {
+                            let keystroke = gpui::Keystroke::parse(&stroke).unwrap();
+                            let (bindings, _) = keymap.bindings_for_input(&[keystroke], &context);
+                            let taken: Vec<&str> = bindings.iter().map(|b| b.action().name()).collect();
+                            assert!(taken.is_empty(), "{preset:?}: “{stroke}” in {place:?} runs {taken:?}");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     /// The preset's keys win over Null's own: on JetBrains, ⌘D duplicates the line.
     #[gpui::test]
     fn a_preset_overrides_the_default_keys(cx: &mut gpui::TestAppContext) {
