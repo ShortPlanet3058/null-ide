@@ -24,6 +24,8 @@ pub struct Settings {
     pub fade_bars_while_typing: bool,
     /// Wrap long lines to the width of the editor instead of scrolling sideways.
     pub word_wrap: bool,
+    /// Markdown and plain text wrap on their own: they're paragraphs, not code.
+    pub wrap_prose: bool,
     /// Indentation for files that don't show their own (and have no .editorconfig):
     /// this many spaces, or tabs when `indent_with_tabs`.
     pub indent_size: usize,
@@ -66,6 +68,7 @@ impl Default for Settings {
             sidebar_visible: true,
             fade_bars_while_typing: false,
             word_wrap: false,
+            wrap_prose: true,
             indent_size: 4,
             indent_with_tabs: false,
             ligatures: true,

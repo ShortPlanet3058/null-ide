@@ -3005,6 +3005,21 @@ impl Editor {
         self.find_bar.as_ref().map(|bar| bar.read(cx).query(cx))
     }
 
+    /// Prose: Markdown, or a text file (no language of its own). It wraps by its own setting.
+    pub fn is_prose(&self) -> bool {
+        if self.is_markdown() {
+            return true;
+        }
+        let extension = self.path.as_ref().and_then(|p| p.extension()).and_then(|e| e.to_str());
+        self.language().is_none() && matches!(extension, Some("txt" | "text" | "rst" | "adoc" | "org"))
+    }
+
+    /// Whether long lines wrap here: prose by its setting, code by the other.
+    pub fn wraps(&self, cx: &App) -> bool {
+        let settings = cx.global::<Settings>();
+        if self.is_prose() { settings.wrap_prose } else { settings.word_wrap }
+    }
+
     pub fn is_markdown(&self) -> bool {
         self.language().is_some_and(|l| l.name == "Markdown")
     }

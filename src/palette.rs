@@ -268,6 +268,8 @@ pub struct PaletteOptions {
     /// Lines in the current file, for going to a line.
     pub line_count: Option<usize>,
     pub terminal_open: bool,
+    /// The current file is prose (Markdown, text): Wrap shows its own setting.
+    pub prose_here: bool,
     /// For a list of places: what it is ("Problems", "References to x") and the places.
     pub title: Option<String>,
     pub locations: Vec<Location>,
@@ -352,6 +354,7 @@ pub struct Palette {
     recent_commands: Vec<&'static str>,
     line_count: Option<usize>,
     terminal_open: bool,
+    prose_here: bool,
     title: Option<String>,
     locations: Vec<Location>,
     branches: Vec<crate::git::Branch>,
@@ -414,6 +417,7 @@ impl Palette {
             recent_commands: options.recent_commands,
             line_count: options.line_count,
             terminal_open: options.terminal_open,
+            prose_here: options.prose_here,
             title: options.title,
             left_out: Default::default(),
             in_file: matches!(options.locations.first(), Some(l) if matches!(l.kind, LocationKind::Symbol(_)))
@@ -894,6 +898,7 @@ impl Palette {
             Quick::AllSettings => row.children(keys(&crate::workspace::OpenSettings)).into_any_element(),
             _ => {
                 let on = match quick {
+                    Quick::Wrap if self.prose_here => settings.wrap_prose,
                     Quick::Wrap => settings.word_wrap,
                     Quick::Sidebar => settings.sidebar_visible,
                     Quick::Terminal => self.terminal_open,
@@ -1507,6 +1512,7 @@ mod tests {
             recent_commands: Vec::new(),
             line_count: Some(10),
             terminal_open: false,
+            prose_here: false,
             title: None,
             locations: Vec::new(),
             branches: Vec::new(),
@@ -1574,6 +1580,7 @@ mod tests {
             recent_commands: Vec::new(),
             line_count: None,
             terminal_open: false,
+            prose_here: false,
             title: Some("2 uses of total".into()),
             locations: vec![place("a.rs", "let total = 1;"), place("b.rs", "print(total)")],
             branches: Vec::new(),
@@ -1603,6 +1610,7 @@ mod tests {
             recent_commands: Vec::new(),
             line_count: None,
             terminal_open: false,
+            prose_here: false,
             title: None,
             locations: Vec::new(),
             branches: vec![
@@ -1642,6 +1650,7 @@ mod tests {
             recent_commands: Vec::new(),
             line_count: None,
             terminal_open: false,
+            prose_here: false,
             title: None,
             locations: Vec::new(),
             branches: Vec::new(),

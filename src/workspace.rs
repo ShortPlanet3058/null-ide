@@ -2705,6 +2705,7 @@ impl Workspace {
             recent_commands: self.recent_commands.clone(),
             line_count: self.active_editor().map(|e| e.read(cx).buffer.len_lines()),
             terminal_open: self.terminal_open.on,
+            prose_here: self.active_editor().is_some_and(|e| e.read(cx).is_prose()),
             title,
             locations,
             branches: std::mem::take(&mut self.pending_branches),
@@ -3295,7 +3296,11 @@ impl Workspace {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
     }
 
+    /// ⌥Z: wrapping on or off for the kind of file at hand, prose or code.
     fn toggle_word_wrap(&mut self, _: &ToggleWordWrap, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_editor().is_some_and(|e| e.read(cx).is_prose()) {
+            return settings::update(cx, |s| s.wrap_prose = !s.wrap_prose);
+        }
         settings::update(cx, |s| s.word_wrap = !s.word_wrap);
     }
 
@@ -6025,6 +6030,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Markdown wraps while code doesn't; ⌥Z in each switches its own kind.
+    #[gpui::test]
+    fn prose_wraps_on_its_own_setting(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-prose-wrap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let long = "word ".repeat(200);
+        std::fs::write(dir.join("notes.md"), format!("{long}\n")).unwrap();
+        std::fs::write(dir.join("main.rs"), format!("// {long}\n")).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let wraps = |cx: &mut gpui::VisualTestContext, name: &str| {
+            let path = dir.join(name);
+            workspace.update_in(cx, |w, window, cx| w.open_file(path, window, cx));
+            cx.run_until_parked();
+            workspace.read_with(cx, |w, cx| w.active_editor().unwrap().read(cx).wrap.is_on())
+        };
+        assert!(wraps(cx, "notes.md"), "Markdown wraps by default");
+        assert!(!wraps(cx, "main.rs"), "code doesn't");
+        // ⌥Z in the Markdown file: prose stops wrapping, code is left as it was.
+        wraps(cx, "notes.md");
+        cx.simulate_keystrokes("alt-z");
+        cx.run_until_parked();
+        let (prose, code) = cx.update(|_, cx| (cx.global::<Settings>().wrap_prose, cx.global::<Settings>().word_wrap));
+        assert_eq!((prose, code), (false, false));
+        assert!(!wraps(cx, "notes.md"));
+        // ⌥Z in the code: code wraps, prose stays off.
+        wraps(cx, "main.rs");
+        cx.simulate_keystrokes("alt-z");
+        cx.run_until_parked();
+        let (prose, code) = cx.update(|_, cx| (cx.global::<Settings>().wrap_prose, cx.global::<Settings>().word_wrap));
+        assert_eq!((prose, code), (false, true));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Tests run side by side: two with the same scratch folder overwrite each other's
     /// files (it happened). Every folder name in the tests is its own.
     #[test]
@@ -6489,7 +6535,7 @@ mod tests {
                 .map(|t| {
                     let e = t.editor.read(cx);
                     (
-                        e.path().map(|p| e.file_name()).filter(|_| e.path().is_some()),
+                        e.path().map(|_| e.file_name()).filter(|_| e.path().is_some()),
                         e.buffer.to_string(),
                         e.buffer.is_dirty(),
                     )
