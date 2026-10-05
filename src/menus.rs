@@ -100,6 +100,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Cut", Cut),
                 MenuItem::action("Copy", Copy),
                 MenuItem::action("Paste", Paste),
+                MenuItem::action("Paste as Is", crate::editor::PasteAsIs),
                 MenuItem::action("Select All", SelectAll),
                 MenuItem::action("Expand Selection", crate::editor::ExpandSelection),
                 MenuItem::action("Shrink Selection", crate::editor::ShrinkSelection),

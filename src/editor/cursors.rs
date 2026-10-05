@@ -18,7 +18,9 @@ impl Cursor {
     }
 }
 
-/// What's on the clipboard, as Null wrote it: whole lines, or one piece per cursor.
+/// What's on the clipboard, as Null wrote it: whole lines, or one piece per cursor. After
+/// a `|`, how indented the line it was copied from was, so pasting can move it to its new
+/// depth.
 const LINES: &str = "null-lines";
 const PIECES: &str = "null-pieces";
 
@@ -362,23 +364,76 @@ impl Editor {
             lines.sort();
             lines.dedup();
             let text: String = lines.iter().map(|&l| format!("{}\n", self.buffer.line_text(l))).collect();
-            cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, LINES.to_string()));
+            let indent = self.line_indent(lines[0]);
+            cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, format!("{LINES}|{indent}")));
             return true;
         }
-        let kind = if texts.len() > 1 { PIECES } else { "" };
-        cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(texts.join("\n"), kind.to_string()));
+        let kind = if texts.len() > 1 {
+            PIECES.to_string()
+        } else {
+            format!("|{}", self.line_indent(self.buffer.point(self.selection.range().start).0))
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(texts.join("\n"), kind));
         true
+    }
+
+    /// How wide line `line`'s indentation shows.
+    fn line_indent(&self, line: usize) -> usize {
+        super::reindent::indent_columns(&self.buffer.line_text(line), super::TAB_SIZE)
+    }
+
+    /// How indented lines put in at the start of `line` should be: as deep as it is, or as
+    /// the line above leads into (inside a block it opens).
+    fn indent_for_lines_at(&self, line: usize) -> usize {
+        let above = (line.saturating_sub(1000)..line).rev().find(|&l| !self.buffer.line_text(l).trim().is_empty());
+        let after_above = above.map_or(0, |l| super::reindent::indent_columns(&self.indent_after(l), super::TAB_SIZE));
+        self.line_indent(line).max(after_above)
+    }
+
+    /// `text` moved to the indentation of where it goes in at `range`, and where it goes in
+    /// (from the start of the line, when it's put in within the indentation).
+    fn reindented(&self, text: &str, base: Option<usize>, range: Range<usize>) -> (String, Range<usize>) {
+        let tab = super::TAB_SIZE;
+        let base = base.unwrap_or_else(|| super::reindent::indent_columns(text, tab));
+        let unit = self.style.indent;
+        let (line, column) = self.buffer.point(range.start);
+        let line_text = self.buffer.line_text(line);
+        let before: String = line_text.chars().take(column).collect();
+        if !before.trim().is_empty() {
+            let target = self.line_indent(line);
+            return (super::reindent::reindent(text, base, target, false, unit, tab), range);
+        }
+        let blank = line_text.trim().is_empty();
+        let whole_lines = column == 0 && text.ends_with('\n');
+        let target = if blank || whole_lines {
+            self.indent_for_lines_at(line).max(super::reindent::indent_columns(&before, tab))
+        } else {
+            super::reindent::indent_columns(&before, tab)
+        };
+        let start = self.buffer.line_to_char(line);
+        (super::reindent::reindent(text, base, target, true, unit, tab), start..range.end)
     }
 
     /// Pastes at every cursor. Whole lines (copied with nothing selected) go in above
     /// the cursor's line; text copied from several cursors goes one piece per cursor.
-    pub(super) fn paste_text(&mut self, text: String, kind: &str, cx: &mut Context<Self>) {
+    /// With `adjust`, code of several lines moves to the indentation where it goes.
+    pub(super) fn paste_text(&mut self, text: String, meta: &str, adjust: bool, cx: &mut Context<Self>) {
+        let (kind, base) = meta.split_once('|').map_or((meta, None), |(kind, indent)| (kind, indent.parse().ok()));
+        let adjust =
+            adjust && text.contains('\n') && kind != PIECES && self.language().is_some() && !self.is_markdown();
         if kind == LINES && self.all_selections().iter().all(|s| s.is_empty()) {
             return self.for_each_cursor(cx, |this, cx| {
                 let caret = this.selection.head;
                 let start = this.buffer.line_to_char(this.buffer.point(caret).0);
+                let text = if adjust { this.reindented(&text, base, start..start).0 } else { text.clone() };
                 this.edit(start..start, &text, super::EditKind::Other, cx);
                 this.selection = Selection::caret(caret + text.chars().count());
+            });
+        }
+        if adjust {
+            return self.for_each_cursor(cx, |this, cx| {
+                let (text, range) = this.reindented(&text, base, this.selection.range());
+                this.edit(range, &text, super::EditKind::Other, cx);
             });
         }
         let count = self.extra.len() + 1;
@@ -683,7 +738,7 @@ mod tests {
         e.update(cx, |e, cx| {
             e.selection = Selection::caret(0);
             e.add_cursor_vertically(true, cx);
-            e.paste_text("1\n2".into(), super::PIECES, cx);
+            e.paste_text("1\n2".into(), super::PIECES, true, cx);
         });
         assert_eq!(text(cx, &e), "1x\n2y\n");
     }

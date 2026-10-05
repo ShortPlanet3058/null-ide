@@ -13,6 +13,7 @@ mod intel;
 mod mac_keys;
 mod marks;
 mod refactor;
+mod reindent;
 mod review;
 mod rewrap;
 mod signature;
@@ -105,6 +106,7 @@ actions!(
         Copy,
         Cut,
         Paste,
+        PasteAsIs,
         Undo,
         Redo,
         Save,
@@ -189,6 +191,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-c", Copy, ctx),
         KeyBinding::new("secondary-x", Cut, ctx),
         KeyBinding::new("secondary-v", Paste, ctx),
+        KeyBinding::new("alt-shift-secondary-v", PasteAsIs, ctx),
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-shift-z", Redo, ctx),
         KeyBinding::new("secondary-s", Save, ctx),
@@ -1721,6 +1724,15 @@ impl Editor {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste_clipboard(true, cx);
+    }
+
+    /// Pastes code as it was copied, without moving it to the indentation where it goes.
+    fn paste_as_is(&mut self, _: &PasteAsIs, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste_clipboard(false, cx);
+    }
+
+    fn paste_clipboard(&mut self, adjust: bool, cx: &mut Context<Self>) {
         let Some(item) = cx.read_from_clipboard() else { return };
         let Some(text) = item.text() else { return };
         let kind = item.metadata().cloned().unwrap_or_default();
@@ -1730,7 +1742,7 @@ impl Editor {
             crate::file_style::LineEnding::Crlf => text.replace('\n', "\r\n"),
             crate::file_style::LineEnding::Lf => text,
         };
-        self.paste_text(text, &kind, cx);
+        self.paste_text(text, &kind, adjust, cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -2946,6 +2958,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::paste_as_is))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::save))
