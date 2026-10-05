@@ -554,6 +554,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Wrap Markdown and text",
+                Some("Paragraphs fit the window, whatever code does. ⌥Z in one of these files switches this"),
+                Self::toggle("wrap-prose", s.wrap_prose, &theme, cx, |s| s.wrap_prose = !s.wrap_prose),
+                &theme,
+            ),
+            Self::row(
                 "Indentation",
                 Some("For new files, and files that don't show their own. Files keep theirs, and .editorconfig wins"),
                 {
@@ -1185,8 +1191,8 @@ mod tests {
                 panel.search_results(words.iter().map(|w| w.to_string()).collect(), window, cx).len()
             })
         };
-        // "wrap": one row, under the Editor heading.
-        assert_eq!(count(&["wrap"], cx), 2);
+        // "wrap": two rows (code, and Markdown and text), under the Editor heading.
+        assert_eq!(count(&["wrap"], cx), 3);
         // Words found across sections: a heading for each.
         assert!(count(&["theme"], cx) >= 2);
         // A theme by its name finds the picker.

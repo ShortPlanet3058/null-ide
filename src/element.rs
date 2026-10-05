@@ -440,8 +440,7 @@ impl Element for EditorElement {
             let cw = f32::from(char_width);
 
             // Word wrap: rows as wide as the text area (clear of the scrollbar), in characters.
-            let wrap_width =
-                cx.global::<Settings>().word_wrap.then(|| ((text_width - BAR - cw) / cw).floor().max(1.) as usize);
+            let wrap_width = editor.wraps(cx).then(|| ((text_width - BAR - cw) / cw).floor().max(1.) as usize);
             editor.wrap.update(&editor.buffer, wrap_width, &editor.block_specs());
             let total_rows = editor.wrap.rows();
             let (caret_row, _) = editor.wrap.to_display(caret_line, caret_col, &editor.buffer);
