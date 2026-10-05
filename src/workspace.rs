@@ -3262,6 +3262,7 @@ impl Workspace {
             tab.editor.update(cx, |e, cx| {
                 let had_values = !e.inline_values.is_empty();
                 e.inline_values.clear();
+                e.debug_locals.clear();
                 if e.execution_line.take().is_some() || had_values {
                     cx.notify();
                 }
@@ -3295,6 +3296,11 @@ impl Workspace {
                         let start = e.blocks_around(line).last().map_or(0, |b| b.start).max(line.saturating_sub(BACK));
                         let lines: Vec<(usize, String)> = (start..=line).map(|l| (l, e.buffer.line_text(l))).collect();
                         e.inline_values = crate::debugger::inline_values(&lines, &stop.locals);
+                        e.debug_locals = stop
+                            .locals
+                            .iter()
+                            .filter_map(|(n, v)| Some((n.clone(), crate::debugger::clean_value(v)?)))
+                            .collect();
                         shown = Some(crate::debugger::shown_locals(&lines, &stop.locals));
                     });
                 }

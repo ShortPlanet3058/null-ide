@@ -422,6 +422,13 @@ impl Editor {
         if let Some(message) = not_ready {
             diagnostics.push((DiagnosticSeverity::HINT, message));
         }
+        // While the debugger is stopped here: the name's value, first.
+        let name = self.buffer.slice(word.clone());
+        let value = self
+            .debug_locals
+            .iter()
+            .find(|(local, _)| *local == name)
+            .map(|(local, value)| HoverBlock { code: true, text: format!("{local} = {value}") });
         self.hover_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             let hover = match request {
@@ -433,7 +440,10 @@ impl Editor {
                 if this.hover_word.as_ref() != Some(&word) {
                     return;
                 }
-                let blocks = hover.map(|h| hover_blocks(h.contents)).unwrap_or_default();
+                let mut blocks = hover.map(|h| hover_blocks(h.contents)).unwrap_or_default();
+                if let Some(value) = value {
+                    blocks.insert(0, value);
+                }
                 if blocks.is_empty() && diagnostics.is_empty() {
                     if this.hover.is_none() {
                         this.hover_word = None;
@@ -622,6 +632,28 @@ mod tests {
             texts,
             vec![(true, "null_ide::buffer"), (true, "pub struct Buffer"), (false, "Text storage, see ropey.")]
         );
+    }
+
+    #[gpui::test]
+    fn while_paused_the_info_card_starts_with_the_value(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(Buffer::from_text("total += word.len();\n"), Some(std::path::PathBuf::from("x.txt")), cx)
+        });
+        e.update(cx, |e, cx| {
+            e.debug_locals = vec![("word".into(), "\"null\"".into()), ("total".into(), "4".into())];
+            e.request_hover(10, Duration::ZERO, cx);
+        });
+        cx.run_until_parked();
+        e.update(cx, |e, _| {
+            let card = e.hover.as_ref().expect("a card");
+            assert_eq!(card.blocks[0].text, "word = \"null\"");
+        });
     }
 
     #[gpui::test]
