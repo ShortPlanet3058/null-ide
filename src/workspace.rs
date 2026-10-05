@@ -443,6 +443,10 @@ pub struct Workspace {
     debugger: Entity<crate::debugger::Debugger>,
     debug_panel_open: bool,
     debug_output_scroll: gpui::ScrollHandle,
+    /// While paused, the panel shows the variables and the calls; this shows the output instead.
+    debug_show_output: bool,
+    /// The paused call's variables the code shows, with values worth showing.
+    debug_locals: Vec<(String, String)>,
     /// The program to debug, when the project doesn't say (no Cargo.toml): asked once.
     debug_program: Option<PathBuf>,
     /// The projects for the list about to open.
@@ -612,6 +616,8 @@ impl Workspace {
             debugger: debugger.clone(),
             debug_panel_open: false,
             debug_output_scroll: gpui::ScrollHandle::new(),
+            debug_show_output: false,
+            debug_locals: Vec::new(),
             debug_program: None,
             focus_mode: false,
             tab_menu: None,
@@ -669,6 +675,7 @@ impl Workspace {
                     top_line,
                     side: tab.side,
                     folds: editor.folded_regions(),
+                    breakpoints: editor.breakpoints.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -717,6 +724,8 @@ impl Workspace {
             if let Some(editor) = self.active_editor() {
                 editor.update(cx, |editor, cx| {
                     editor.restore_folds(&tab.folds, cx);
+                    let lines = editor.buffer.len_lines();
+                    editor.breakpoints = tab.breakpoints.iter().copied().filter(|&l| l < lines).collect();
                     editor.restore_view(tab.line, tab.column, tab.top_line, cx)
                 });
             }
@@ -1549,6 +1558,7 @@ impl Workspace {
                         let lines = editor.breakpoints.clone();
                         this.debugger.update(cx, |debugger, _| debugger.set_breakpoints(&path, &lines));
                     }
+                    this.schedule_session_save(cx);
                 }
                 EditorEvent::GoTo { path, range } => {
                     let range = *range;
@@ -3243,14 +3253,26 @@ impl Workspace {
         use crate::debugger::DebuggerEvent;
         for tab in &self.tabs {
             tab.editor.update(cx, |e, cx| {
-                if e.execution_line.take().is_some() {
+                let had_values = !e.inline_values.is_empty();
+                e.inline_values.clear();
+                if e.execution_line.take().is_some() || had_values {
                     cx.notify();
                 }
             });
         }
+        // Unless the paused call's code is open, every variable with a value worth showing.
+        self.debug_locals = match event {
+            DebuggerEvent::Stopped(stop) => stop
+                .locals
+                .iter()
+                .filter_map(|(name, value)| Some((name.clone(), crate::debugger::clean_value(value)?)))
+                .collect(),
+            _ => Vec::new(),
+        };
         if let DebuggerEvent::Stopped(stop) = event
             && let Some((path, line)) = stop.place.clone()
         {
+            let mut shown = None;
             // Shown, not gone to: stepping isn't somewhere for Back to return to each time.
             self.navigating = true;
             self.open_file(path.clone(), window, cx);
@@ -3261,8 +3283,17 @@ impl Workspace {
                         e.execution_line = Some(line);
                         let indent = e.buffer.line_text(line).chars().take_while(|c| c.is_whitespace()).count();
                         e.set_caret_point((line, indent), cx);
+                        // The lines of this call so far (from its start, at most 40 back).
+                        const BACK: usize = 40;
+                        let start = e.blocks_around(line).last().map_or(0, |b| b.start).max(line.saturating_sub(BACK));
+                        let lines: Vec<(usize, String)> = (start..=line).map(|l| (l, e.buffer.line_text(l))).collect();
+                        e.inline_values = crate::debugger::inline_values(&lines, &stop.locals);
+                        shown = Some(crate::debugger::shown_locals(&lines, &stop.locals));
                     });
                 }
+            }
+            if let Some(shown) = shown {
+                self.debug_locals = shown;
             }
         }
         cx.notify();
@@ -3342,6 +3373,29 @@ impl Workspace {
                 this.debug_panel_open = false;
                 cx.notify();
             }));
+        let stopped = match &debugger.state {
+            DebugState::Stopped(stop) => Some(stop.clone()),
+            _ => None,
+        };
+        let showing_output = stopped.is_none() || self.debug_show_output;
+        // While paused: variables and calls, or the output, a click apart.
+        let view_switch = stopped.as_ref().map(|_| {
+            div()
+                .id("dbg-view")
+                .px(px(8.))
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .rounded(px(ui::R_KEY))
+                .cursor_pointer()
+                .text_color(theme.faint)
+                .hover(|s| s.text_color(theme.foreground))
+                .child(if showing_output { "Variables" } else { "Output" })
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.debug_show_output = !this.debug_show_output;
+                    cx.notify();
+                }))
+        });
         let header = div()
             .h(px(32.))
             .flex_none()
@@ -3352,22 +3406,94 @@ impl Workspace {
             .text_size(px(ui::T_SM))
             .child(div().text_color(theme.foreground).pr(px(6.)).child("Debug"))
             .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(status))
+            .children(view_switch)
             .children(controls)
             .child(close);
         let code_font = cx.global::<crate::fonts::Fonts>().code.clone();
-        let output = debugger.output.lines().map(|line| div().child(line.to_string()));
-        let body = div()
-            .id("debug-output")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.debug_output_scroll)
-            .px(px(14.))
-            .pb(px(8.))
-            .font_family(code_font)
-            .text_size(px(12.5))
-            .text_color(theme.muted)
-            .children(output);
+        let body = match stopped.filter(|_| !showing_output) {
+            // Paused: the call's variables, and the calls that led to it (a click looks at one).
+            Some(stop) => {
+                let variables = self.debug_locals.iter().map(|(name, value)| {
+                    div()
+                        .flex()
+                        .gap(px(10.))
+                        .whitespace_nowrap()
+                        .child(div().text_color(theme.foreground).child(name.clone()))
+                        .child(div().min_w_0().truncate().text_color(theme.muted).child(value.clone()))
+                });
+                // The project's own calls; the libraries' ones (the runtime, std) are only counted.
+                let in_project =
+                    |f: &crate::debugger::Frame| f.place.as_ref().is_some_and(|(p, _)| p.starts_with(&root));
+                let hidden = stop.frames.iter().filter(|f| !in_project(f)).count();
+                let calls = stop.frames.iter().enumerate().filter(|(_, f)| in_project(f)).map(|(i, frame)| {
+                    let place = frame.place.as_ref().map(|(p, l)| {
+                        let file = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        format!("{file}:{}", l + 1)
+                    });
+                    let looked_at = i == stop.frame;
+                    let has_source = frame.place.is_some();
+                    div()
+                        .id(("dbg-frame", i))
+                        .flex()
+                        .gap(px(10.))
+                        .whitespace_nowrap()
+                        .when(has_source, |d| d.cursor_pointer().hover(|s| s.text_color(theme.foreground)))
+                        .text_color(if looked_at {
+                            theme.caret
+                        } else if has_source {
+                            theme.muted
+                        } else {
+                            theme.faint
+                        })
+                        .child(div().min_w_0().truncate().child(frame.name.clone()))
+                        .children(place.map(|p| div().flex_none().text_color(theme.faint).child(p)))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if has_source {
+                                this.debugger.update(cx, |d, cx| d.select_frame(i, cx));
+                            }
+                        }))
+                });
+                let column = |id: &'static str| {
+                    div().id(id).flex_1().min_w_0().h_full().overflow_y_scroll().flex().flex_col().gap(px(3.))
+                };
+                div()
+                    .id("debug-paused")
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .gap(px(24.))
+                    .px(px(14.))
+                    .pb(px(8.))
+                    .font_family(code_font)
+                    .text_size(px(12.5))
+                    .child(column("dbg-variables").children(variables).when(self.debug_locals.is_empty(), |d| {
+                        d.child(div().text_color(theme.faint).child("No local variables here"))
+                    }))
+                    .child(column("dbg-calls").children(calls).when(hidden > 0, |d| {
+                        let more = if hidden == 1 {
+                            "1 more in libraries".to_string()
+                        } else {
+                            format!("{hidden} more in libraries")
+                        };
+                        d.child(div().text_color(theme.faint).child(more))
+                    }))
+            }
+            None => {
+                let output = debugger.output.lines().map(|line| div().child(line.to_string()));
+                div()
+                    .id("debug-output")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.debug_output_scroll)
+                    .px(px(14.))
+                    .pb(px(8.))
+                    .font_family(code_font)
+                    .text_size(px(12.5))
+                    .text_color(theme.muted)
+                    .children(output)
+            }
+        };
         Some(
             div()
                 .flex_none()
