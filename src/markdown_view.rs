@@ -483,6 +483,21 @@ pub fn inlines(text: &str) -> Vec<Inline> {
                 out.push(Inline::Link { text: vec![Inline::Text(url.clone())], url });
                 continue;
             }
+            // ***both***: strong and emphasised at once.
+            '*' | '_'
+                if chars.get(i + 1) == Some(&c)
+                    && chars.get(i + 2) == Some(&c)
+                    && chars.get(i + 3).is_some_and(|n| !n.is_whitespace()) =>
+            {
+                let marker: String = std::iter::repeat_n(c, 3).collect();
+                if let Some(end) = find_from(&chars, i + 3, &marker).filter(|&e| !chars[e - 1].is_whitespace()) {
+                    flush(&mut plain, &mut out);
+                    let inner: String = chars[i + 3..end].iter().collect();
+                    out.push(Inline::Strong(vec![Inline::Emphasis(inlines(&inner))]));
+                    i = end + 3;
+                    continue;
+                }
+            }
             '*' | '_' | '~' => {
                 let double = chars.get(i + 1) == Some(&c);
                 let opens = chars.get(i + if double { 2 } else { 1 }).is_some_and(|n| !n.is_whitespace())
@@ -938,6 +953,7 @@ mod tests {
             vec![Inline::Image { alt: "logo".into(), url: "assets/logo.png".into() }]
         );
         assert_eq!(inlines(r"not \*emphasis\*"), vec![text("not *emphasis*")]);
+        assert_eq!(inlines("***both***"), vec![Inline::Strong(vec![Inline::Emphasis(vec![text("both")])])]);
     }
 
     #[test]

@@ -45,6 +45,10 @@ const EMBEDDED: &[&[u8]] = &[
     include_bytes!("../assets/fonts/instrument-sans/InstrumentSans-Medium.ttf"),
     include_bytes!("../assets/fonts/instrument-sans/InstrumentSans-SemiBold.ttf"),
     include_bytes!("../assets/fonts/instrument-sans/InstrumentSans-Bold.ttf"),
+    include_bytes!("../assets/fonts/instrument-sans/InstrumentSans-Italic.ttf"),
+    include_bytes!("../assets/fonts/instrument-sans/InstrumentSans-MediumItalic.ttf"),
+    include_bytes!("../assets/fonts/instrument-sans/InstrumentSans-SemiBoldItalic.ttf"),
+    include_bytes!("../assets/fonts/instrument-sans/InstrumentSans-BoldItalic.ttf"),
 ];
 
 /// The font families actually in use, after checking the ones in settings exist.
