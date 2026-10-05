@@ -174,11 +174,12 @@ impl gpui::Render for Tip {
 /// Builds a tooltip for `.tooltip(...)`: `label`, and the keys bound to `action` (read when
 /// it shows, so another keymap shows its own).
 pub fn tip(
-    label: &'static str,
+    label: impl Into<SharedString>,
     action: Option<Box<dyn gpui::Action>>,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let label = label.into();
     move |_, cx| {
         let keys = action.as_ref().and_then(|a| crate::palette::shortcut(a.as_ref(), cx));
-        cx.new(|_| Tip { label: label.into(), keys }).into()
+        cx.new(|_| Tip { label: label.clone(), keys }).into()
     }
 }
