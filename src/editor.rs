@@ -55,7 +55,10 @@ use regex::Regex;
 use ropey::Rope;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+actions!(markdown_preview, [ToggleMarkdownPreview]);
 
 actions!(
     file_style,
@@ -152,6 +155,10 @@ pub fn bind_ai_keys(cx: &mut App) {
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Editor");
+    cx.bind_keys([
+        KeyBinding::new("secondary-shift-v", ToggleMarkdownPreview, ctx),
+        KeyBinding::new("escape", ToggleMarkdownPreview, Some("MarkdownPreview")),
+    ]);
     let mut keys = vec![
         KeyBinding::new("left", MoveLeft, ctx),
         KeyBinding::new("right", MoveRight, ctx),
@@ -415,6 +422,11 @@ pub struct Editor {
     pub encoding: crate::encoding::Encoding,
     /// The view's height when last drawn, to keep the caret in view as it shrinks.
     pub viewport_height: Option<f32>,
+    /// Markdown shown as it reads (⌘⇧V) instead of its source.
+    pub reading: bool,
+    /// The parsed document for the preview, and the revision it's of.
+    markdown: Option<(u64, Rc<Vec<crate::markdown_view::Block>>)>,
+    reading_scroll: gpui::ScrollHandle,
     /// The merge conflicts in the text, and the revision they were found at.
     conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
     /// The buffer revision and byte range `spans` cover.
@@ -580,6 +592,9 @@ impl Editor {
             on_disk: None,
             encoding: Default::default(),
             viewport_height: None,
+            reading: false,
+            markdown: None,
+            reading_scroll: gpui::ScrollHandle::new(),
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
             pinned: Default::default(),
@@ -2812,6 +2827,9 @@ impl Render for Editor {
         if let Some(preview) = &self.preview {
             return self.render_preview(preview, cx);
         }
+        if self.reading {
+            return self.render_reading(cx);
+        }
         // The find bar sits beside the text, not inside the "Editor" key context,
         // so typing in it never triggers editor shortcuts.
         let find_bar = self.find_bar.clone();
@@ -2880,6 +2898,7 @@ impl Render for Editor {
                 this.set_line_ending(crate::file_style::LineEnding::Crlf, cx)
             }))
             .on_action(cx.listener(|this, _: &UseUtf8Encoding, _, cx| this.use_utf8(cx)))
+            .on_action(cx.listener(Self::toggle_markdown_preview))
             .on_action(cx.listener(Self::keep_hunk))
             .on_action(cx.listener(Self::undo_hunk))
             .on_action(cx.listener(Self::fold))
@@ -2977,6 +2996,75 @@ impl Render for Editor {
 }
 
 impl Editor {
+    pub fn is_markdown(&self) -> bool {
+        self.language().is_some_and(|l| l.name == "Markdown")
+    }
+
+    /// ⌘⇧V: Markdown as it reads, or back to its source.
+    pub fn toggle_markdown_preview(&mut self, _: &ToggleMarkdownPreview, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_markdown() && !self.reading {
+            let at = self.selection.head;
+            return self.show_notice(at, "The preview is for Markdown files.".into(), cx);
+        }
+        self.reading = !self.reading;
+        self.close_completion(cx);
+        self.close_hover(cx);
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    /// The preview: the document drawn as it reads, in a column, scrolling.
+    fn render_reading(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let revision = self.buffer.revision();
+        let blocks = match &self.markdown {
+            Some((r, blocks)) if *r == revision => blocks.clone(),
+            _ => {
+                let blocks = Rc::new(crate::markdown_view::parse(&self.buffer.to_string()));
+                self.markdown = Some((revision, blocks.clone()));
+                blocks
+            }
+        };
+        let theme = cx.global::<Theme>().clone();
+        let fonts = cx.global::<Fonts>();
+        let this = cx.entity().downgrade();
+        let style = crate::markdown_view::Style {
+            theme: theme.clone(),
+            ui_font: fonts.ui.clone(),
+            code_font: fonts.code.clone(),
+            base: self.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default(),
+            open: Rc::new(move |target, _, cx| match target {
+                crate::markdown_view::Follow::Web(url) => cx.open_url(&url),
+                crate::markdown_view::Follow::File(path) => {
+                    this.update(cx, |_, cx| cx.emit(EditorEvent::GoTo { path, range: Default::default() })).ok();
+                }
+            }),
+        };
+        let mut context = KeyContext::new_with_defaults();
+        context.add("Editor");
+        context.add("MarkdownPreview");
+        div()
+            .key_context(context)
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .on_action(cx.listener(Self::toggle_markdown_preview))
+            .on_action(cx.listener(Self::save))
+            .child(
+                div().id("markdown-preview").size_full().overflow_y_scroll().track_scroll(&self.reading_scroll).child(
+                    div().w_full().flex().justify_center().px(px(32.)).py(px(28.)).child(
+                        div()
+                            .w_full()
+                            .max_w(px(760.))
+                            .font_family(style.ui_font.clone())
+                            .text_size(px(15.))
+                            .line_height(px(24.))
+                            .text_color(theme.foreground)
+                            .child(crate::markdown_view::render(&blocks, &style)),
+                    ),
+                ),
+            )
+            .into_any_element()
+    }
+
     /// An image at its own size (smaller if it doesn't fit), or a line saying the file
     /// isn't text.
     fn render_preview(&self, preview: &crate::preview::Preview, cx: &Context<Self>) -> AnyElement {
