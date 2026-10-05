@@ -169,34 +169,62 @@ fn main() {
         })
         .detach();
 
-        let session = session::Session::load(&root);
-        let options = WindowOptions {
-            window_bounds: Some(window_bounds(session.window, cx)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Null".into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(16.), px(13.))),
-            }),
-            window_min_size: Some(size(px(480.), px(320.))),
-            ..Default::default()
-        };
-        cx.open_window(options, |window, cx| {
-            cx.new(|cx| {
-                let mut workspace = Workspace::new(root, window, cx);
-                window.focus(&workspace.focus_handle(cx));
-                workspace.restore_session(session, window, cx);
-                if let Some(file) = file {
-                    workspace.open_file(file, window, cx);
-                }
-                if !cx.global::<settings::Settings>().welcomed {
-                    workspace.show_welcome(window, cx);
-                }
-                workspace
-            })
-        })
-        .expect("failed to open the main window");
+        open_project_window(root, file, cx);
         cx.activate(true);
     });
+}
+
+/// Opens a window on project `root`, as it was left (and `file` in it, if given).
+pub(crate) fn open_project_window(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::App) {
+    let session = session::Session::load(&root);
+    let options = WindowOptions {
+        window_bounds: Some(window_bounds(session.window, cx)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Null".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(16.), px(13.))),
+        }),
+        window_min_size: Some(size(px(480.), px(320.))),
+        ..Default::default()
+    };
+    let opened = cx.open_window(options, |window, cx| {
+        cx.new(|cx| {
+            let mut workspace = Workspace::new(root, window, cx);
+            window.focus(&workspace.focus_handle(cx));
+            workspace.restore_session(session, window, cx);
+            if let Some(file) = file {
+                workspace.open_file(file, window, cx);
+            }
+            if !cx.global::<settings::Settings>().welcomed {
+                workspace.show_welcome(window, cx);
+            }
+            workspace
+        })
+    });
+    if let Err(error) = opened {
+        eprintln!("null: couldn't open a window: {error}");
+    }
+}
+
+/// Quitting: the next window with unsaved changes asks about them; once none is left,
+/// Null quits.
+pub(crate) fn quit_next(cx: &mut gpui::App) {
+    let waiting = cx
+        .windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<Workspace>())
+        .find(|handle| handle.read(cx).is_ok_and(|workspace| !workspace.quitting && workspace.has_unsaved(cx)));
+    match waiting {
+        Some(handle) => {
+            handle
+                .update(cx, |workspace, window, cx| {
+                    window.activate_window();
+                    workspace.quit(&Quit, window, cx)
+                })
+                .ok();
+        }
+        None => cx.quit(),
+    }
 }
 
 #[cfg(test)]

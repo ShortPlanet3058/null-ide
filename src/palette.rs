@@ -20,7 +20,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-actions!(palette, [SelectNext, SelectPrevious, Confirm, Dismiss, AdjustLeft, AdjustRight]);
+actions!(palette, [SelectNext, SelectPrevious, Confirm, ConfirmAside, Dismiss, AdjustLeft, AdjustRight]);
 
 /// Registered after the text field's keys: on a choice row, ←→ change the choice
 /// instead of moving the caret (the query is empty there anyway).
@@ -33,6 +33,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", SelectPrevious, ctx),
         KeyBinding::new("ctrl-p", SelectPrevious, ctx),
         KeyBinding::new("enter", Confirm, ctx),
+        KeyBinding::new("secondary-enter", ConfirmAside, ctx),
         KeyBinding::new("escape", Dismiss, ctx),
         KeyBinding::new("left", AdjustLeft, adjusting),
         KeyBinding::new("right", AdjustRight, adjusting),
@@ -334,6 +335,8 @@ pub enum PaletteEvent {
     RunCommand(String),
     /// Open this folder as the project.
     OpenProject(PathBuf),
+    /// Open this folder in a window of its own.
+    OpenProjectInNewWindow(PathBuf),
 }
 
 pub struct Palette {
@@ -736,6 +739,14 @@ impl Palette {
         self.adjust(1, cx);
     }
 
+    /// ⌘↵: a recent project in a window of its own; anything else as ↵ does.
+    fn confirm_aside(&mut self, _: &ConfirmAside, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Item::Project(i)) = self.selected_item() {
+            return cx.emit(PaletteEvent::OpenProjectInNewWindow(self.projects[i].clone()));
+        }
+        self.confirm_at(self.selected, cx);
+    }
+
     fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
         self.confirm_at(self.selected, cx);
     }
@@ -1112,7 +1123,8 @@ impl Palette {
             PaletteKind::Task => "↵ start",
             PaletteKind::Commit => "↵ commit",
             PaletteKind::Run => "↵ run",
-            PaletteKind::Projects => "↵ open",
+            PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window",
+            PaletteKind::Projects => "↵ open · Ctrl+↵ new window",
             PaletteKind::Branch => match self.selected_item() {
                 Some(Item::NewBranch) => "↵ create",
                 _ => "↵ switch",
@@ -1272,6 +1284,7 @@ impl Render for Palette {
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::confirm_aside))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::adjust_left))
             .on_action(cx.listener(Self::adjust_right))
