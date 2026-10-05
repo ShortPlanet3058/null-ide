@@ -64,7 +64,13 @@ pub enum Inline {
 
 // ---------- blocks ----------
 
+#[cfg(test)]
 pub fn parse(source: &str) -> Vec<Block> {
+    parse_located(source).into_iter().map(|(_, b)| b).collect()
+}
+
+/// The document's blocks, each with the source line it starts on.
+pub fn parse_located(source: &str) -> Vec<(usize, Block)> {
     let lines: Vec<&str> = source.lines().collect();
     // Front matter (--- … --- at the very top) is the file's settings, not its text.
     let mut start = 0;
@@ -73,13 +79,25 @@ pub fn parse(source: &str) -> Vec<Block> {
     {
         start = end + 2;
     }
-    parse_lines(&lines[start.min(lines.len())..])
+    let start = start.min(lines.len());
+    let (blocks, starts) = parse_lines_at(&lines[start..]);
+    starts.into_iter().map(|line| line + start).zip(blocks).collect()
 }
 
 fn parse_lines(lines: &[&str]) -> Vec<Block> {
+    parse_lines_at(lines).0
+}
+
+/// The blocks of `lines`, and the line each starts on.
+fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
     let mut blocks = Vec::new();
+    let mut starts = Vec::new();
+    let mut begin = 0;
     let mut i = 0;
     while i < lines.len() {
+        // The block just made started where the last turn did.
+        starts.resize(blocks.len(), begin);
+        begin = i;
         let line = lines[i];
         let trimmed = line.trim_start();
         let indent = line.len() - trimmed.len();
@@ -199,7 +217,8 @@ fn parse_lines(lines: &[&str]) -> Vec<Block> {
             blocks.push(Block::Paragraph(inlines(&joined)));
         }
     }
-    blocks
+    starts.resize(blocks.len(), begin);
+    (blocks, starts)
 }
 
 fn lines_break(lines: &[&str], trimmed: &str) -> bool {
@@ -620,14 +639,10 @@ pub struct Style {
     pub open: Opener,
 }
 
-pub fn render(blocks: &[Block], style: &Style) -> AnyElement {
+/// Each block drawn, in order (the preview scrolls to them one by one).
+pub fn render_blocks(blocks: &[(usize, Block)], style: &Style) -> Vec<AnyElement> {
     let mut counter = 0;
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(14.))
-        .children(blocks.iter().map(|b| render_block(b, style, &mut counter, style.theme.foreground)))
-        .into_any_element()
+    blocks.iter().map(|(_, b)| render_block(b, style, &mut counter, style.theme.foreground)).collect()
 }
 
 /// `color` is the text's: muted in a quote or a done task.
@@ -979,5 +994,8 @@ mod tests {
         assert_eq!(blocks[7], Block::Rule);
         assert_eq!(blocks[8], Block::Heading(1, vec![text("End")]));
         assert_eq!(blocks.len(), 9);
+        // Where each starts in the source, front matter counted.
+        let starts: Vec<usize> = parse_located(doc).iter().map(|(line, _)| *line).collect();
+        assert_eq!(starts, [3, 5, 8, 12, 16, 19, 21, 25, 27]);
     }
 }
