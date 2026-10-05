@@ -612,6 +612,37 @@ fn bracketed(chars: &[char], start: usize) -> Option<(String, String, usize)> {
 pub enum Follow {
     Web(String),
     File(PathBuf),
+    /// A heading of this page, by its slug (`#getting-started`).
+    Heading(String),
+}
+
+/// A heading's anchor as GitHub makes it: lowercase, spaces to dashes, other punctuation
+/// dropped ("Getting started!" is `getting-started`).
+pub fn slug(heading: &str) -> String {
+    heading
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('-'),
+            c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The plain text of inlines (a heading's words, for its slug).
+pub fn plain_text(content: &[Inline]) -> String {
+    content
+        .iter()
+        .map(|inline| match inline {
+            Inline::Text(t) | Inline::Code(t) => t.clone(),
+            Inline::Strong(i) | Inline::Emphasis(i) | Inline::Strike(i) => plain_text(i),
+            Inline::Link { text, .. } => plain_text(text),
+            Inline::Image { alt, .. } => alt.clone(),
+            Inline::Break => " ".into(),
+        })
+        .collect()
 }
 
 pub fn follow(url: &str, base: &Path) -> Option<Follow> {
@@ -619,10 +650,10 @@ pub fn follow(url: &str, base: &Path) -> Option<Follow> {
         return Some(Follow::Web(url.to_string()));
     }
     // A link within the page (#section) or to a file next to it.
-    let path = url.split('#').next().unwrap_or("");
-    if path.is_empty() {
-        return None;
+    if let Some(anchor) = url.strip_prefix('#') {
+        return (!anchor.is_empty()).then(|| Follow::Heading(anchor.to_lowercase()));
     }
+    let path = url.split('#').next().unwrap_or("");
     let file = base.join(path);
     file.exists().then_some(Follow::File(file))
 }
@@ -994,6 +1025,8 @@ mod tests {
         assert_eq!(blocks[7], Block::Rule);
         assert_eq!(blocks[8], Block::Heading(1, vec![text("End")]));
         assert_eq!(blocks.len(), 9);
+        assert_eq!(slug("Getting started!"), "getting-started");
+        assert_eq!(slug(&plain_text(&inlines("The `null` *command*"))), "the-null-command");
         // Where each starts in the source, front matter counted.
         let starts: Vec<usize> = parse_located(doc).iter().map(|(line, _)| *line).collect();
         assert_eq!(starts, [3, 5, 8, 12, 16, 19, 21, 25, 27]);

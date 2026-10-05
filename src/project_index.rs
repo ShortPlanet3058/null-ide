@@ -110,6 +110,10 @@ fn name_and_kind(line: &str) -> Option<(String, &'static str)> {
 
 /// The definitions in one file's text.
 pub fn definitions_in(path: &Path, text: &str) -> Vec<Definition> {
+    let extension = path.extension().and_then(|e| e.to_str()).map(str::to_lowercase);
+    if matches!(extension.as_deref(), Some("md" | "markdown" | "mdx")) {
+        return headings_in(path, text);
+    }
     text.lines()
         .enumerate()
         .filter(|(_, l)| l.len() < 220 && DEFINITION.is_match(l))
@@ -121,6 +125,33 @@ pub fn definitions_in(path: &Path, text: &str) -> Vec<Definition> {
             let line = l.trim().trim_end_matches('{').trim_end().to_string();
             let (name, kind) = name_and_kind(&line)?;
             Some(Definition { path: path.to_path_buf(), line, row, name, kind })
+        })
+        .collect()
+}
+
+/// A Markdown file's outline, for ⌘⇧O: its headings (not lines starting with # in code).
+fn headings_in(path: &Path, text: &str) -> Vec<Definition> {
+    const LEVELS: [&str; 6] = ["#", "##", "###", "####", "#####", "######"];
+    let mut in_code = false;
+    text.lines()
+        .enumerate()
+        .filter_map(|(row, line)| {
+            if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+                in_code = !in_code;
+                return None;
+            }
+            if in_code {
+                return None;
+            }
+            let level = line.chars().take_while(|&c| c == '#').count();
+            let name = line.get(level..)?.strip_prefix(' ')?.trim().trim_end_matches('#').trim();
+            ((1..=6).contains(&level) && !name.is_empty()).then(|| Definition {
+                path: path.to_path_buf(),
+                line: line.to_string(),
+                row,
+                name: name.to_string(),
+                kind: LEVELS[level - 1],
+            })
         })
         .collect()
 }
@@ -190,6 +221,14 @@ pub fn outline_for(definitions: &[Definition], current: &Path, root: &Path, comm
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_markdown_file_s_symbols_are_its_headings() {
+        let text = "# Null\n\nIntro.\n\n## Building\n\n```sh\n# not a heading\n```\n\n### The Mac app ##\n#tag\n";
+        let found: Vec<(usize, String, &str)> =
+            definitions_in(Path::new("README.md"), text).into_iter().map(|d| (d.row, d.name, d.kind)).collect();
+        assert_eq!(found, [(0, "Null".into(), "#"), (4, "Building".into(), "##"), (10, "The Mac app".into(), "###")]);
+    }
 
     #[test]
     fn finds_definitions_in_common_languages() {
