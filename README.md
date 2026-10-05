@@ -69,6 +69,8 @@ doesn't need Xcode's separate Metal Toolchain download.
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
 - In HTML and JSX, typing the `>` of a tag adds its closing tag, and renaming a tag
   renames its pair.
+- Pasted code takes the indentation of where it goes, its lines keeping theirs relative
+  to each other; ⌥⇧⌘V pastes it as it was.
 - **Rewrap** (⌘K) refills a comment or a paragraph to the project's line length, keeping
   its `//`, `>` or list indent. The ⌃ keys of macOS text fields work too: ⌃A ⌃E, ⌃K and
   ⌃Y, ⌃T, ⌃O…

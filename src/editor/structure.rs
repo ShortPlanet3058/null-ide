@@ -182,7 +182,7 @@ impl Editor {
     }
 
     /// The indentation of `line`, plus one level if it opens a block.
-    fn indent_after(&self, line: usize) -> String {
+    pub(super) fn indent_after(&self, line: usize) -> String {
         let text = self.buffer.line_text(line);
         let indent: String = text.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
         let trimmed = text.trim_end();
