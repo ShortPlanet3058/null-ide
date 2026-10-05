@@ -34,6 +34,7 @@ mod settings;
 mod settings_panel;
 mod tasks;
 mod terminal;
+mod terminal_links;
 mod test_at;
 mod text_input;
 mod theme;

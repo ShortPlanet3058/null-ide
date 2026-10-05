@@ -96,6 +96,22 @@ const SETTLE_AT_MOST: std::time::Duration = std::time::Duration::from_secs(4);
 pub enum TerminalEvent {
     TitleChanged,
     Exited,
+    /// ⌘-click on a place in a file the output names: the file, and its 1-based line and column.
+    OpenFile(PathBuf, Option<u32>, Option<u32>),
+}
+
+/// A link the mouse is over while ⌘ is held: its row (as the grid counts, history
+/// negative) and columns, and what it opens.
+struct HoveredLink {
+    line: i32,
+    columns: std::ops::Range<usize>,
+    target: LinkTarget,
+}
+
+#[derive(Clone)]
+enum LinkTarget {
+    Url(String),
+    File(PathBuf, Option<u32>, Option<u32>),
 }
 
 pub struct TerminalView {
@@ -121,6 +137,9 @@ pub struct TerminalView {
     /// Whether the shell has written anything yet.
     spoke: bool,
     settle_task: Option<Task<()>>,
+    /// Where the shell started: relative paths in its output are found from here.
+    root: PathBuf,
+    link: Option<HoveredLink>,
     _events: Task<()>,
 }
 
@@ -132,6 +151,7 @@ pub struct Shell {
     sender: EventLoopSender,
     events: mpsc::UnboundedReceiver<TermEvent>,
     size: GridSize,
+    cwd: PathBuf,
 }
 
 impl Shell {
@@ -151,7 +171,7 @@ impl Shell {
         let options = tty::Options {
             // A login shell, like a terminal app opens, so PATH and the prompt are set up.
             shell: shell.map(|program| tty::Shell::new(program, vec!["-l".into()])),
-            working_directory: Some(cwd),
+            working_directory: Some(cwd.clone()),
             drain_on_exit: false,
             env,
             #[cfg(target_os = "windows")]
@@ -167,13 +187,13 @@ impl Shell {
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
         let sender = event_loop.channel();
         event_loop.spawn();
-        Ok(Self { term, sender, events, size })
+        Ok(Self { term, sender, events, size, cwd })
     }
 }
 
 impl TerminalView {
     pub fn new(shell: Shell, cx: &mut Context<Self>) -> Self {
-        let Shell { term, sender, mut events, size } = shell;
+        let Shell { term, sender, mut events, size, cwd } = shell;
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this.update(cx, |this, cx| this.handle_event(event, cx)).is_err() {
@@ -197,6 +217,8 @@ impl TerminalView {
             settled: false,
             spoke: false,
             settle_task: None,
+            root: cwd,
+            link: None,
             _events: events,
         }
     }
@@ -348,7 +370,64 @@ impl TerminalView {
     /// Whether the program running asked for the mouse (vim, htop, tmux...). Holding Shift
     /// keeps it for selecting text, as in other terminals.
     fn program_wants_mouse(&self, modifiers: &Modifiers) -> bool {
-        self.term.lock().mode().intersects(TermMode::MOUSE_MODE) && !modifiers.shift
+        // ⌘ is for links, even in a program that took the mouse.
+        self.term.lock().mode().intersects(TermMode::MOUSE_MODE) && !modifiers.shift && !modifiers.secondary()
+    }
+
+    /// The link under `position`, if the output there names a web address or a file
+    /// that exists (from where the shell started, or the folder its title shows).
+    fn link_at(&self, position: Point<Pixels>) -> Option<HoveredLink> {
+        let (point, _) = self.grid_point(position);
+        let row: Vec<char> = {
+            let term = self.term.lock();
+            let grid = term.grid();
+            if point.line.0 < -(grid.history_size() as i32) || point.line.0 >= grid.screen_lines() as i32 {
+                return None;
+            }
+            let row = &grid[point.line];
+            (0..grid.columns())
+                .map(|c| {
+                    let cell = &row[Column(c)];
+                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) { ' ' } else { cell.c }
+                })
+                .collect()
+        };
+        let (columns, link) = crate::terminal_links::link_at(&row, point.column.0)?;
+        let target = match link {
+            crate::terminal_links::Link::Url(url) => LinkTarget::Url(url),
+            crate::terminal_links::Link::File { path, line, column } => {
+                LinkTarget::File(self.find_file(&path)?, line, column)
+            }
+        };
+        Some(HoveredLink { line: point.line.0, columns, target })
+    }
+
+    fn find_file(&self, path: &str) -> Option<PathBuf> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let expand = |p: &str| match (p.strip_prefix("~/"), &home) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ => PathBuf::from(p),
+        };
+        let path = expand(path);
+        if path.is_absolute() {
+            return path.is_file().then_some(path);
+        }
+        // The shell's folder, as its title shows it ("me@mac:~/code/app"), then where it started.
+        let shown = self.title.rsplit(':').next().map(|t| expand(t.trim())).filter(|d| d.is_absolute());
+        shown.into_iter().chain([self.root.clone()]).map(|dir| dir.join(&path)).find(|p| p.is_file())
+    }
+
+    fn update_link(&mut self, position: Point<Pixels>, modifiers: &Modifiers, cx: &mut Context<Self>) {
+        let link = if modifiers.secondary() { self.link_at(position) } else { None };
+        let same = match (&self.link, &link) {
+            (Some(a), Some(b)) => a.line == b.line && a.columns == b.columns,
+            (None, None) => true,
+            _ => false,
+        };
+        self.link = link;
+        if !same {
+            cx.notify();
+        }
     }
 
     /// Tells the program about a mouse event, in the encoding it asked for.
@@ -388,6 +467,18 @@ impl TerminalView {
         if self.mouse_held.is_some() {
             return;
         }
+        // ⌘-click on a link opens it rather than selecting.
+        if event.modifiers.secondary()
+            && let Some(link) = self.link_at(event.position)
+        {
+            self.link = None;
+            match link.target {
+                LinkTarget::Url(url) => cx.open_url(&url),
+                LinkTarget::File(path, line, column) => cx.emit(TerminalEvent::OpenFile(path, line, column)),
+            }
+            cx.notify();
+            return;
+        }
         let (point, side) = self.grid_point(event.position);
         let kind = match event.click_count {
             2 => SelectionType::Semantic,
@@ -400,6 +491,9 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.pressed_button.is_none() {
+            self.update_link(event.position, &event.modifiers, cx);
+        }
         let mode = *self.term.lock().mode();
         // Dragging (or just moving, if the program asked) is reported cell by cell.
         let report_motion = match self.mouse_held {
@@ -530,7 +624,13 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .track_focus(&self.focus_handle)
             .size_full()
-            .cursor(gpui::CursorStyle::IBeam)
+            .cursor(if self.link.is_some() { gpui::CursorStyle::PointingHand } else { gpui::CursorStyle::IBeam })
+            // Letting go of ⌘ takes the underline away at once.
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                if !event.modifiers.secondary() && this.link.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::clear))
@@ -694,6 +794,8 @@ struct Prepaint {
     cursor: Option<Bounds<Pixels>>,
     cursor_hollow: bool,
     line_height: Pixels,
+    /// Under the link the mouse is over while ⌘ is held.
+    link_underline: Option<Bounds<Pixels>>,
 }
 
 impl IntoElement for TerminalElement {
@@ -879,7 +981,15 @@ impl Element for TerminalElement {
                     _ => Bounds::new(at, size(cell_width, line_height)),
                 }
             });
-        Prepaint { backgrounds, runs, cursor, cursor_hollow: !focused, line_height }
+        let link_underline = view.link.as_ref().and_then(|link| {
+            let row = link.line + display_offset;
+            (row >= 0 && (row as usize) < lines).then(|| {
+                let left = origin.x + cell_width * link.columns.start as f32;
+                let top = origin.y + line_height * row as f32 + line_height - px(3.);
+                Bounds::new(point(left, top), size(cell_width * link.columns.len() as f32, px(1.)))
+            })
+        });
+        Prepaint { backgrounds, runs, cursor, cursor_hollow: !focused, line_height, link_underline }
     }
 
     fn paint(
@@ -907,6 +1017,9 @@ impl Element for TerminalElement {
         }
         for (line, origin) in &prepaint.runs {
             line.paint(*origin, prepaint.line_height, window, cx).ok();
+        }
+        if let Some(underline) = prepaint.link_underline {
+            window.paint_quad(fill(underline, theme.foreground.opacity(0.8)));
         }
     }
 }
