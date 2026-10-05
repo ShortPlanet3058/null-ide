@@ -5657,6 +5657,137 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The git lists, as a person goes through them: Review Changes and ↵ opens a file's
+    /// changes, a file's history and ↵ on a commit compares with it, Commit with a file
+    /// left out (⇥) commits the rest.
+    #[gpui::test]
+    #[cfg(unix)]
+    fn git_lists_do_what_their_rows_say(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-git-lists-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().map(|o| o.status.success())
+        };
+        if !git(&["init", "-q"]).unwrap_or(false) {
+            return; // No git here.
+        }
+        git(&["config", "user.name", "t"]).unwrap();
+        git(&["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "first"]).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&["commit", "-qam", "second"]).unwrap();
+        // Now changed: a.txt (a line added), b.txt.
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "b2\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+        };
+        settle(cx);
+        assert_eq!(workspace.read_with(cx, |w, _| w.git_status.len()), 2);
+
+        // Review Changes, ↵ on its first row: that file opens with its changes to review.
+        workspace.update_in(cx, |w, window, cx| w.review_changes(&ReviewChanges, window, cx));
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        workspace.update(cx, |w, cx| {
+            let editor = w.active_editor().unwrap().read(cx);
+            assert_eq!(editor.file_name(), "a.txt");
+            assert!(editor.in_review(), "the file opened without its changes");
+        });
+
+        // a.txt's history, ↵ on the older commit: compared with "one".
+        workspace.update_in(cx, |w, window, cx| w.file_history(&FileHistory, window, cx));
+        settle(cx);
+        cx.simulate_keystrokes("down enter");
+        settle(cx);
+        workspace.update(cx, |w, cx| {
+            let editor = w.active_editor().unwrap().read(cx);
+            assert!(editor.in_review());
+            assert_eq!(editor.review_base(), Some("one\n"));
+        });
+
+        // Commit, with the first file (a.txt) left out: only b.txt is committed.
+        workspace.update_in(cx, |w, window, cx| w.commit_all(&CommitAll, window, cx));
+        settle(cx);
+        cx.simulate_input("only b");
+        cx.simulate_keystrokes("tab enter");
+        settle(cx);
+        let committed = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["show", "--name-only", "--format=%s", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&committed.stdout).split_whitespace().collect::<Vec<_>>(),
+            ["only", "b", "b.txt"]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Switch Branch: typing part of a name and ↵ switches to it; a new name and ↵ starts
+    /// that branch.
+    #[gpui::test]
+    #[cfg(unix)]
+    fn branches_switch_and_start_from_the_list(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-git-branches-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+            out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        if git(&["init", "-q", "-b", "main"]).is_err() {
+            return; // No git here.
+        }
+        git(&["config", "user.name", "t"]).unwrap();
+        git(&["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "first"]).unwrap();
+        git(&["branch", "feature/login"]).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+        };
+        settle(cx);
+        workspace.update_in(cx, |w, window, cx| w.switch_branch(&SwitchBranch, window, cx));
+        settle(cx);
+        cx.simulate_input("login");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(git(&["branch", "--show-current"]).unwrap(), "feature/login");
+        workspace.update_in(cx, |w, window, cx| w.switch_branch(&SwitchBranch, window, cx));
+        settle(cx);
+        cx.simulate_input("fix-typo");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(git(&["branch", "--show-current"]).unwrap(), "fix-typo");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[gpui::test]
     fn two_sides_open_move_and_close_back_to_one(cx: &mut gpui::TestAppContext) {
         let dir = std::env::temp_dir().join(format!("null-split-{}", std::process::id()));
