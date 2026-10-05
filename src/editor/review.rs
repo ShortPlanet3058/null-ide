@@ -87,6 +87,12 @@ impl Editor {
         cx.notify();
     }
 
+    /// What a review compares against (the text before the changes).
+    #[cfg(test)]
+    pub fn review_base(&self) -> Option<&str> {
+        self.review.as_ref().map(|r| r.base.as_str())
+    }
+
     pub fn in_review(&self) -> bool {
         self.review.is_some()
     }
