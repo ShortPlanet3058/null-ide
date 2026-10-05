@@ -183,3 +183,18 @@ pub fn tip(
         cx.new(|_| Tip { label: label.clone(), keys }).into()
     }
 }
+
+/// The character boundary nearest `x` on a shaped line. GPUI's own puts anything past the
+/// start of the last character at the line's end, so a click on the left half of a line's
+/// last letter landed after it; here it lands before, as anywhere else on the line.
+pub fn index_at_x(line: &gpui::LineLayout, x: gpui::Pixels) -> usize {
+    let index = line.closest_index_for_x(x);
+    if index != line.len {
+        return index;
+    }
+    let last = line.runs.iter().flat_map(|r| r.glyphs.iter()).next_back();
+    match last {
+        Some(glyph) if x < (glyph.position.x + line.width) / 2. => glyph.index,
+        _ => index,
+    }
+}

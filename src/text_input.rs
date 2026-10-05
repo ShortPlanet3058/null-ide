@@ -255,7 +255,7 @@ impl TextInput {
     fn index_for_position(&self, position: Point<Pixels>) -> usize {
         match (&self.last_bounds, &self.last_layout) {
             (Some(bounds), Some(line)) if !self.content.is_empty() => {
-                line.closest_index_for_x(position.x - bounds.left()).min(self.content.len())
+                crate::ui::index_at_x(line, position.x - bounds.left()).min(self.content.len())
             }
             _ => 0,
         }

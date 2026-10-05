@@ -2121,7 +2121,7 @@ impl Editor {
         let x = position.x - layout.text_origin.x;
         match row.checked_sub(layout.first_row).and_then(|i| layout.rows.get(i)) {
             Some(r) => {
-                let byte = r.text_byte(r.shaped.closest_index_for_x(x - r.x));
+                let byte = r.text_byte(crate::ui::index_at_x(&r.shaped, x - r.x));
                 // The row can show more than its text (a ghost completion): clicks past it land at its end.
                 let chars = r.text.get(..byte).map_or(r.text.chars().count(), |t| t.chars().count());
                 let col = r.row.cols.start + chars;
