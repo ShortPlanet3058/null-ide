@@ -48,7 +48,7 @@ pub fn apply_edits(buffer: &mut Buffer, edits: &[TextEdit]) {
 }
 
 /// The character ranges a server's edits replace, with their new text.
-fn edit_ranges<'a>(buffer: &Buffer, edits: &'a [TextEdit]) -> Vec<(Range<usize>, &'a str)> {
+pub(super) fn edit_ranges<'a>(buffer: &Buffer, edits: &'a [TextEdit]) -> Vec<(Range<usize>, &'a str)> {
     let offset = |p: Position| {
         let line = p.line as usize;
         if line >= buffer.len_lines() {
@@ -61,7 +61,7 @@ fn edit_ranges<'a>(buffer: &Buffer, edits: &'a [TextEdit]) -> Vec<(Range<usize>,
 
 /// Where `caret` ends up once `edits` are applied: shifted by the edits before it, or
 /// None when one of them rewrites the text around it.
-fn caret_after(caret: usize, edits: &[(Range<usize>, &str)]) -> Option<usize> {
+pub(super) fn caret_after(caret: usize, edits: &[(Range<usize>, &str)]) -> Option<usize> {
     let mut shift = 0isize;
     for (range, text) in edits {
         if range.start < caret && caret < range.end {
