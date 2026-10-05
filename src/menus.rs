@@ -122,6 +122,7 @@ pub fn set(cx: &mut App) {
                         MenuItem::action("Insert Line Above", crate::editor::NewlineAbove),
                         MenuItem::action("Join Lines", crate::editor::JoinLines),
                         MenuItem::action("Sort Lines", crate::editor::SortLines),
+                        MenuItem::action("Rewrap", crate::editor::Rewrap),
                         MenuItem::separator(),
                         MenuItem::action("Upper Case", crate::editor::UpperCase),
                         MenuItem::action("Lower Case", crate::editor::LowerCase),

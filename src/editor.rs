@@ -10,9 +10,11 @@ mod fold;
 mod ghost;
 mod hints;
 mod intel;
+mod mac_keys;
 mod marks;
 mod refactor;
 mod review;
+mod rewrap;
 mod signature;
 mod snippet;
 mod structure;
@@ -29,6 +31,7 @@ pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::HoverCard;
 pub use refactor::{FindReferences, FormatDocument, FormatSelection, RenameSymbol, apply_edits};
 pub use review::{KeepHunk, UndoHunk};
+pub use rewrap::Rewrap;
 pub use structure::{
     ExpandSelection, GoToMatchingBracket, JoinLines, LowerCase, NewlineAbove, NewlineBelow, NextChange, PreviousChange,
     ShrinkSelection, SortLines, UpperCase,
@@ -146,6 +149,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     breakpoints::bind_keys(cx);
     structure::bind_keys(cx);
     snippet::bind_keys(cx);
+    mac_keys::bind_keys(cx);
 }
 
 pub fn bind_ai_keys(cx: &mut App) {
@@ -485,6 +489,8 @@ pub struct Editor {
     hover_from_keyboard: bool,
     /// Typing with Alt held (e.g. Alt+arrows) hides the card until Alt is released.
     hover_suppressed: bool,
+    /// Where the caret was after the last ⌃K, so another adds to what was cut.
+    killed_at: Option<(u64, usize)>,
     /// A tag's name and its pair's, edited together.
     linked: Option<tags::LinkedTag>,
     alt_held: bool,
@@ -646,6 +652,7 @@ impl Editor {
             hover_from_keyboard: false,
             hover_suppressed: false,
             linked: None,
+            killed_at: None,
             alt_held: false,
             secondary_held: false,
             link_word: None,
@@ -2990,6 +2997,11 @@ impl Render for Editor {
             .on_action(cx.listener(Self::newline_below))
             .on_action(cx.listener(Self::newline_above))
             .on_action(cx.listener(Self::join_lines))
+            .on_action(cx.listener(Self::rewrap))
+            .on_action(cx.listener(Self::delete_to_line_end))
+            .on_action(cx.listener(Self::yank))
+            .on_action(cx.listener(Self::transpose))
+            .on_action(cx.listener(Self::open_line))
             .on_action(cx.listener(Self::next_change))
             .on_action(cx.listener(Self::next_conflict))
             .on_action(cx.listener(Self::previous_conflict))

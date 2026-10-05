@@ -195,6 +195,28 @@ mod tests {
         }
     }
 
+    /// The ⌃ keys of macOS text fields move the caret, except in the suggestion list,
+    /// where ⌃N and ⌃P still go through the suggestions.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn control_keys_move_the_caret_but_not_in_suggestions(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            register(Keymap::Null, cx);
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let run = |stroke: &str, context: &str| {
+                let context: Vec<gpui::KeyContext> =
+                    ["Workspace", context].iter().map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+                let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse(stroke).unwrap()], &context);
+                bindings.first().map(|b| b.action().name())
+            };
+            assert_eq!(run("ctrl-n", "Editor"), Some(crate::editor::MoveDown.name()));
+            assert_eq!(run("ctrl-n", "Editor showing_completions"), Some(crate::editor::CompletionNext.name()));
+            assert_eq!(run("ctrl-p", "Editor showing_completions"), Some(crate::editor::CompletionPrevious.name()));
+            assert_eq!(run("ctrl-a", "TextInput"), Some(crate::text_input::Home.name()));
+        });
+    }
+
     /// The preset's keys win over Null's own: on JetBrains, ⌘D duplicates the line.
     #[gpui::test]
     fn a_preset_overrides_the_default_keys(cx: &mut gpui::TestAppContext) {
