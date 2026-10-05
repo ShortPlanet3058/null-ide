@@ -54,6 +54,39 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// Where moving `path` into folder `dir` would put it, if that's allowed: not into
+/// itself, and not over something already there.
+pub fn move_target(path: &Path, dir: &Path) -> Result<PathBuf, String> {
+    let name = path.file_name().ok_or("Nothing to move")?;
+    let target = dir.join(name);
+    if dir.starts_with(path) {
+        return Err("A folder can't go inside itself".into());
+    }
+    if target != path && target.exists() {
+        return Err(format!("{} already has a {}", folder_name(dir), name.to_string_lossy()));
+    }
+    Ok(target)
+}
+
+fn folder_name(dir: &Path) -> String {
+    dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string())
+}
+
+/// Moves `path` to `target` (as [`move_target`] or [`rename_target`] worked out).
+pub fn move_path(path: &Path, target: &Path) -> Result<PathBuf, String> {
+    if target == path {
+        return Ok(target.to_path_buf());
+    }
+    if path.parent() == target.parent() {
+        let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return rename(path, &name);
+    }
+    let dir = target.parent().ok_or("Nowhere to move it")?;
+    let checked = move_target(path, dir)?;
+    std::fs::rename(path, &checked).map_err(|e| format!("Couldn't move: {e}"))?;
+    Ok(checked)
+}
+
 /// Where renaming `path` to `new_name` would put it, if that's allowed.
 pub fn rename_target(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     check_name(new_name, false)?;
@@ -137,6 +170,25 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn moves_into_another_folder_but_not_into_itself_or_over_something() {
+        let dir = std::env::temp_dir().join(format!("null-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/inner")).unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("notes.md"), "n").unwrap();
+        std::fs::write(dir.join("docs/notes.md"), "other").unwrap();
+        std::fs::write(dir.join("todo.md"), "t").unwrap();
+        // Into a folder: there, with its name.
+        assert_eq!(move_path(&dir.join("todo.md"), &dir.join("src/todo.md")).unwrap(), dir.join("src/todo.md"));
+        assert!(dir.join("src/todo.md").is_file() && !dir.join("todo.md").exists());
+        // Not into itself, nor over a file of the same name.
+        assert!(move_target(&dir.join("src"), &dir.join("src/inner")).is_err());
+        assert_eq!(move_target(&dir.join("notes.md"), &dir.join("docs")).unwrap_err(), "docs already has a notes.md");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {

@@ -5524,6 +5524,32 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_file_moved_to_a_folder_keeps_its_tab(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-move-tab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("notes.md"), "hello\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let (from, to) = (dir.join("notes.md"), dir.join("docs/notes.md"));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(from.clone(), window, cx);
+            // What dropping it on the folder asks for.
+            w.rename_file(from.clone(), to.clone(), cx);
+        });
+        cx.run_until_parked();
+        assert!(!from.exists() && to.is_file());
+        workspace.update(cx, |w, cx| assert_eq!(w.active_editor().unwrap().read(cx).path(), Some(to.as_path())));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
     fn a_file_open_on_both_sides_stays_the_same_on_both(cx: &mut gpui::TestAppContext) {
         let dir = std::env::temp_dir().join(format!("null-twins-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

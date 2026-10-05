@@ -91,6 +91,36 @@ pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Open Containing Folder"
 };
 
+/// A file or folder being dragged to another folder.
+#[derive(Clone)]
+pub struct DraggedEntry {
+    path: PathBuf,
+    name: SharedString,
+}
+
+/// What follows the pointer while dragging: the name, as a small pill.
+struct EntryGhost {
+    name: SharedString,
+}
+
+impl Render for EntryGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.global::<Theme>();
+        div()
+            .px(px(10.))
+            .py(px(3.))
+            .rounded(px(ui::R_CONTROL))
+            .bg(theme.raised)
+            .border_1()
+            .border_color(theme.line_strong)
+            .shadow_md()
+            .text_size(px(ui::T_MD))
+            .text_color(theme.foreground)
+            .font_family(cx.global::<crate::fonts::Fonts>().ui.clone())
+            .child(self.name.clone())
+    }
+}
+
 pub enum FileTreeEvent {
     /// Open and move to the file (double-click, Enter).
     Open(PathBuf),
@@ -617,10 +647,29 @@ impl FileTree {
         cx.notify();
     }
 
+    /// A file or folder dropped on a folder: it moves there (through the workspace, which
+    /// lets language servers update the code naming it).
+    fn drop_into(&mut self, dragged: &DraggedEntry, dir: PathBuf, cx: &mut Context<Self>) {
+        if dragged.path.parent() == Some(dir.as_path()) {
+            return;
+        }
+        match fs_ops::move_target(&dragged.path, &dir) {
+            Err(message) => cx.emit(FileTreeEvent::Notice(message)),
+            Ok(to) if self.ask_before_renaming => {
+                cx.emit(FileTreeEvent::RenameRequested { from: dragged.path.clone(), to })
+            }
+            Ok(to) => {
+                if let Err(message) = self.finish_rename(&dragged.path, &to, cx) {
+                    cx.emit(FileTreeEvent::Notice(message));
+                }
+            }
+        }
+    }
+
     /// Renames what the workspace was asked about (see [`FileTreeEvent::RenameRequested`]).
     pub fn finish_rename(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) -> Result<(), String> {
-        let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let to = fs_ops::rename(from, &name)?;
+        // A new name in the same folder, or (dragged) the same name in another.
+        let to = fs_ops::move_path(from, to)?;
         self.children.clear();
         self.expand_to(&to);
         self.selected = Some(to.clone());
@@ -907,6 +956,14 @@ impl FileTree {
                 let dot = if active { theme.caret } else { theme.faint };
                 let path = entry.path.clone();
                 let menu_entry = entry.clone();
+                // Dropped on a folder: into it; on a file: beside it.
+                let drop_dir = if entry.is_dir {
+                    entry.path.clone()
+                } else {
+                    entry.path.parent().map(Path::to_path_buf).unwrap_or_default()
+                };
+                let dragged = DraggedEntry { path: entry.path.clone(), name: entry.name.clone() };
+                let tint = theme.accent_soft;
                 let row_el = base
                     .text_color(color)
                     .when(active, |r| r.bg(theme.accent_soft))
@@ -924,6 +981,12 @@ impl FileTree {
                             r.child(div().flex_none().size(px(5.)).rounded_full().bg(theme.git_modified.opacity(0.8)))
                         })
                         .active(|s| s.opacity(0.7))
+                        .on_drag(dragged, |d, _, _, cx| cx.new(|_| EntryGhost { name: d.name.clone() }))
+                        .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(tint))
+                        .on_drop(cx.listener(move |this, dragged: &DraggedEntry, _, cx| {
+                            cx.stop_propagation();
+                            this.drop_into(dragged, drop_dir.clone(), cx);
+                        }))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click(ix, event.click_count(), window, cx)
                         }))
@@ -1112,6 +1175,11 @@ impl Render for FileTree {
                     .id("tree-body")
                     .flex_1()
                     .min_h_0()
+                    // Dropped below the files: to the project's top folder.
+                    .on_drop(cx.listener(|this, dragged: &DraggedEntry, _, cx| {
+                        let root = this.root.clone();
+                        this.drop_into(dragged, root, cx);
+                    }))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
