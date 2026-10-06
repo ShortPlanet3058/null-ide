@@ -540,6 +540,7 @@ impl Workspace {
                 FileTreeEvent::Renamed { from, to } => this.paths_renamed(from, to, cx),
                 FileTreeEvent::RenameRequested { from, to } => this.rename_file(from.clone(), to.clone(), cx),
                 FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
+                FileTreeEvent::OpenTerminal(dir) => this.open_terminal_in(dir.clone(), window, cx),
                 FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
@@ -4042,7 +4043,23 @@ impl Workspace {
     /// Starts a shell in the project folder, as the terminal shown.
     fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let root = self.tree.read(cx).root().to_path_buf();
-        let shell = match Shell::start(root) {
+        self.add_terminal_in(root, window, cx)
+    }
+
+    /// A terminal in folder `dir`, opened and focused (the tree's Open in Terminal).
+    fn open_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.add_terminal_in(dir, window, cx) {
+            return;
+        }
+        self.terminal_open.set(true, TERMINAL_SLIDE, TERMINAL_SLIDE);
+        if let Some(terminal) = self.terminal() {
+            window.focus(&terminal.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    fn add_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let shell = match Shell::start(dir) {
             Ok(shell) => shell,
             Err(err) => {
                 self.show_notice(format!("Couldn't start a terminal: {err}"), cx);

@@ -139,6 +139,8 @@ pub enum FileTreeEvent {
         to: PathBuf,
     },
     Trashed(PathBuf),
+    /// A new terminal, started in this folder.
+    OpenTerminal(PathBuf),
     /// Something to tell the person, like a failed operation.
     Notice(String),
 }
@@ -181,6 +183,16 @@ struct Edit {
     _subscription: Subscription,
 }
 
+/// Where Open in Terminal starts: in a folder, the folder; at a file, its folder; on the
+/// empty space below the files, the project's.
+fn terminal_dir(target: Option<(&Path, bool)>, root: &Path) -> PathBuf {
+    match target {
+        Some((path, true)) => path.to_path_buf(),
+        Some((path, false)) => path.parent().unwrap_or(root).to_path_buf(),
+        None => root.to_path_buf(),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum MenuItem {
     Open,
@@ -191,6 +203,7 @@ enum MenuItem {
     CopyPath,
     CopyRelativePath,
     Reveal,
+    OpenInTerminal,
     CollapseAll,
     Trash,
 }
@@ -206,6 +219,7 @@ impl MenuItem {
             MenuItem::CopyPath => "Copy Path",
             MenuItem::CopyRelativePath => "Copy Relative Path",
             MenuItem::Reveal => REVEAL_LABEL,
+            MenuItem::OpenInTerminal => "Open in Terminal",
             MenuItem::CollapseAll => "Collapse All Folders",
             MenuItem::Trash => "Move to Trash",
         }
@@ -813,10 +827,23 @@ impl FileTree {
         use MenuItem::*;
         let items = match &target {
             Some(e) if e.is_dir => {
-                vec![NewFile, NewFolder, Rename, Duplicate, CopyPath, CopyRelativePath, Reveal, Trash]
+                vec![NewFile, NewFolder, Rename, Duplicate, CopyPath, CopyRelativePath, Reveal, OpenInTerminal, Trash]
             }
-            Some(_) => vec![Open, NewFile, NewFolder, Rename, Duplicate, CopyPath, CopyRelativePath, Reveal, Trash],
-            None => vec![NewFile, NewFolder, CopyPath, Reveal, CollapseAll],
+            Some(_) => {
+                vec![
+                    Open,
+                    NewFile,
+                    NewFolder,
+                    Rename,
+                    Duplicate,
+                    CopyPath,
+                    CopyRelativePath,
+                    Reveal,
+                    OpenInTerminal,
+                    Trash,
+                ]
+            }
+            None => vec![NewFile, NewFolder, CopyPath, Reveal, OpenInTerminal, CollapseAll],
         };
         self.selected = target.as_ref().map(|e| e.path.clone());
         self.menu = Some(Menu { target, position, items, selected: None });
@@ -846,6 +873,10 @@ impl FileTree {
             MenuItem::CopyPath => self.copy_path(&CopyPath, window, cx),
             MenuItem::CopyRelativePath => self.copy_relative_path(&CopyRelativePath, window, cx),
             MenuItem::Reveal => self.reveal(&Reveal, window, cx),
+            MenuItem::OpenInTerminal => {
+                let dir = terminal_dir(target.as_ref().map(|e| (e.path.as_path(), e.is_dir)), &self.root);
+                cx.emit(FileTreeEvent::OpenTerminal(dir));
+            }
             MenuItem::CollapseAll => self.collapse_all(&CollapseAll, window, cx),
             MenuItem::Trash => self.trash(&Trash, window, cx),
         }
@@ -1242,6 +1273,14 @@ impl Render for FileTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_terminal_opens_in_the_folder_chosen() {
+        let root = Path::new("/p");
+        assert_eq!(terminal_dir(Some((Path::new("/p/src"), true)), root), Path::new("/p/src"));
+        assert_eq!(terminal_dir(Some((Path::new("/p/src/a.rs"), false)), root), Path::new("/p/src"));
+        assert_eq!(terminal_dir(None, root), root);
+    }
 
     #[test]
     fn lists_folders_first_and_dims_ignored_files() {
