@@ -46,6 +46,8 @@ pub struct Settings {
     pub line_blame: bool,
     /// Faint lines down the indentation, one per level.
     pub indent_guides: bool,
+    /// The caret blinks for a while once typing stops; off, it stays lit.
+    pub caret_blink: bool,
     /// A faint line at the length the project keeps lines to, when it sets one.
     pub line_guide: bool,
     /// Keep the first lines of the blocks scrolled into pinned at the top.
@@ -83,6 +85,7 @@ impl Default for Settings {
             line_blame: true,
             inlay_hints: false,
             indent_guides: true,
+            caret_blink: true,
             line_guide: true,
             sticky_scroll: true,
             symbol_marks: true,
@@ -283,6 +286,12 @@ mod tests {
         assert_eq!(Settings::default().line_spacing, LineSpacing::Normal);
         let settings = Settings::parse(r#"{ "line_spacing": "relaxed" }"#).unwrap();
         assert_eq!(settings.line_spacing.factor(), 2.0);
+    }
+
+    #[test]
+    fn the_caret_blinks_unless_told_not_to() {
+        assert!(Settings::default().caret_blink);
+        assert!(!Settings::parse(r#"{ "caret_blink": false }"#).unwrap().caret_blink);
     }
 
     #[test]
