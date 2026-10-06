@@ -1611,7 +1611,7 @@ mod problem_notes {
     #[test]
     fn whitespace_shows_only_where_selected() {
         // "\tlet a = 1;" starting at char 10 of the file, selected from its tab to "a".
-        assert_eq!(whitespace_marks("\tlet a = 1;", 10, &[10..16]), [(0, true), (4, false)]);
+        assert_eq!(whitespace_marks("\tlet a = 1;", 10, std::slice::from_ref(&(10..16))), [(0, true), (4, false)]);
         assert_eq!(whitespace_marks("a b", 0, &[]), []);
         assert_eq!(whitespace_marks("a b c", 0, &[0..2, 3..4]), [(1, false), (3, false)]);
     }
