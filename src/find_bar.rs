@@ -25,6 +25,7 @@ actions!(
         OlderSearch,
         NewerSearch,
         UseSelectionForFind,
+        SelectAllMatches,
     ]
 );
 
@@ -44,6 +45,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-enter", FindPrevious, bar),
         KeyBinding::new("secondary-shift-g", FindPrevious, bar),
         KeyBinding::new("escape", CloseFind, bar),
+        KeyBinding::new("alt-enter", SelectAllMatches, bar),
         KeyBinding::new("up", OlderSearch, bar),
         KeyBinding::new("down", NewerSearch, bar),
         KeyBinding::new("enter", ReplaceNext, replace),
@@ -226,6 +228,12 @@ impl FindBar {
     fn find_previous(&mut self, _: &FindPrevious, _: &mut Window, cx: &mut Context<Self>) {
         self.remember_search(cx);
         self.editor.update(cx, |editor, cx| editor.select_previous_match(cx)).ok();
+    }
+
+    /// ⌥↵: a cursor on every match, back in the text to type over them all.
+    fn select_all_matches(&mut self, _: &SelectAllMatches, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_search(cx);
+        self.editor.update(cx, |editor, cx| editor.select_all_matches(window, cx)).ok();
     }
 
     fn close(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
@@ -565,6 +573,7 @@ impl Render for FindBar {
             .on_action(cx.listener(Self::toggle_regex))
             .on_action(cx.listener(Self::replace_next))
             .on_action(cx.listener(Self::replace_all))
+            .on_action(cx.listener(Self::select_all_matches))
             .on_action(cx.listener(Self::older_search))
             .on_action(cx.listener(Self::newer_search))
             .occlude()
@@ -634,6 +643,30 @@ mod tests {
         cx.simulate_input("x");
         cx.simulate_keystrokes("up");
         assert_eq!(field(cx), "alpha");
+    }
+
+    /// ⌥↵ in the find field: a cursor on every match, typing goes to all of them.
+    #[gpui::test]
+    fn every_match_gets_a_cursor(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(crate::buffer::Buffer::from_text("let a = b + a;\nprint(a)\n"), Some("x.py".into()), cx)
+        });
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            e.selection = Selection { anchor: 0, head: 0 };
+        });
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("a");
+        cx.simulate_keystrokes("alt-enter");
+        e.update(cx, |e, _| assert_eq!(e.extra.len(), 2, "three cursors"));
+        cx.simulate_input("total");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "let total = b + total;\nprint(total)\n"));
     }
 
     #[test]
