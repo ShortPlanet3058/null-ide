@@ -30,7 +30,7 @@ pub use cursors::Cursor;
 pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
-pub use intel::HoverCard;
+pub use intel::{HoverCard, Problem};
 pub use refactor::{FindReferences, FormatDocument, FormatSelection, RenameSymbol, apply_edits};
 pub use review::{KeepHunk, UndoHunk};
 pub use rewrap::Rewrap;
