@@ -480,6 +480,8 @@ pub struct Editor {
     pub reveal_only: bool,
     dragging: Option<DragUnit>,
     pub font_size: Pixels,
+    /// A line's height as a multiple of the font size (the "Line spacing" setting).
+    line_spacing: f32,
     pub search: Option<SearchState>,
     find_bar: Option<Entity<FindBar>>,
     /// Reused by Find Next when the find bar is closed, and to prefill it.
@@ -648,6 +650,7 @@ impl Editor {
             reveal_only: false,
             dragging: None,
             font_size: px(cx.global::<Settings>().font_size),
+            line_spacing: cx.global::<Settings>().line_spacing.factor(),
             search: None,
             find_bar: None,
             last_query: SearchQuery::default(),
@@ -848,7 +851,7 @@ impl Editor {
     }
 
     pub fn line_height(&self) -> Pixels {
-        (self.font_size * 1.7).round()
+        (self.font_size * self.line_spacing).round()
     }
 
     /// Call after every change to the text.
@@ -2101,9 +2104,11 @@ impl Editor {
         }
     }
 
-    pub fn set_font_size(&mut self, size: Pixels, cx: &mut Context<Self>) {
-        if size != self.font_size {
+    /// The text's size and the room between its lines, from the settings.
+    pub fn set_text_size(&mut self, size: Pixels, spacing: f32, cx: &mut Context<Self>) {
+        if size != self.font_size || spacing != self.line_spacing {
             self.font_size = size;
+            self.line_spacing = spacing;
             self.caret.placed = false;
             self.touch(cx);
         }

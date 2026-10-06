@@ -497,6 +497,26 @@ impl SettingsPanel {
                 size,
                 &theme,
             ),
+            Self::row(
+                "Line spacing",
+                Some("Room between lines of code"),
+                {
+                    use crate::settings::LineSpacing;
+                    Self::choices(
+                        "line-spacing",
+                        vec![
+                            (LineSpacing::Compact, "Compact".into()),
+                            (LineSpacing::Normal, "Normal".into()),
+                            (LineSpacing::Relaxed, "Relaxed".into()),
+                        ],
+                        s.line_spacing,
+                        &theme,
+                        cx,
+                        |_, spacing, cx| settings::update(cx, |s| s.line_spacing = spacing),
+                    )
+                },
+                &theme,
+            ),
             Self::stacked_row(
                 "Code font",
                 Some("Five come with Null; fonts you install show up here too"),
