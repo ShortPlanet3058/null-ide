@@ -48,6 +48,9 @@ const OPEN_FILE_CHARS: usize = 2_000;
 const CACHE_SIZE: usize = 60;
 /// Names suggested from the file need at least this much typed.
 const MIN_PREFIX: usize = 2;
+/// How far around the caret names are looked for, in lines and characters.
+const NAMES_AROUND: usize = 2000;
+const NAMES_AROUND_CHARS: usize = 100_000;
 
 pub(super) struct Ghost {
     /// Where it goes, and the text it was made for: it disappears once either changes.
@@ -303,6 +306,19 @@ impl Editor {
     /// After typing: suggest at once from the file (or from what was suggested here
     /// before), then ask the AI after a pause. `kept` is a suggestion that what was
     /// typed matched, which then stays as it is.
+    /// The name from the file `prefix` most likely starts, looked for around the caret
+    /// (2000 lines, 100k characters each way): typing stays quick in a big file.
+    fn best_name_near(&self, prefix: &str) -> Option<String> {
+        let caret = self.selection.head;
+        let line = self.buffer.point(caret).0;
+        let from =
+            self.buffer.line_to_char(line.saturating_sub(NAMES_AROUND)).max(caret.saturating_sub(NAMES_AROUND_CHARS));
+        let to = self.buffer.line_to_char(line + NAMES_AROUND).min(caret + NAMES_AROUND_CHARS);
+        let text = self.buffer.slice(from..to);
+        let rope = self.buffer.rope();
+        best_name(&text, prefix, rope.char_to_byte(caret) - rope.char_to_byte(from))
+    }
+
     pub(super) fn schedule_ghost(&mut self, kept: Option<Ghost>, cx: &mut Context<Self>) {
         self.ghost_task = None;
         let ai_settings = cx.global::<Settings>().ai.clone();
@@ -337,7 +353,7 @@ impl Editor {
         }
         let word = typed_word(&before);
         if word.chars().count() >= MIN_PREFIX
-            && let Some(name) = best_name(&self.buffer.to_string(), word, self.selection.head)
+            && let Some(name) = self.best_name_near(word)
         {
             self.set_ghost(vec![name[word.len()..].to_string()], cx);
         } else if self.ghost.is_some() {
@@ -381,16 +397,16 @@ impl Editor {
     ) -> SuggestionRequest {
         let provider = ai_settings.active();
         let offset = self.selection.head;
-        let text = self.buffer.to_string();
-        let caret_byte = self.buffer.rope().char_to_byte(offset);
-        let mut from = caret_byte.saturating_sub(CONTEXT_BEFORE);
-        while !text.is_char_boundary(from) {
+        // Only the text around the caret: the file can be big.
+        let rope = self.buffer.rope();
+        let caret_byte = rope.char_to_byte(offset);
+        let from_byte = caret_byte.saturating_sub(CONTEXT_BEFORE);
+        let mut from = rope.byte_to_char(from_byte);
+        if rope.char_to_byte(from) < from_byte {
             from += 1;
         }
-        let mut to = (caret_byte + CONTEXT_AFTER).min(text.len());
-        while !text.is_char_boundary(to) {
-            to -= 1;
-        }
+        let to = rope.byte_to_char((caret_byte + CONTEXT_AFTER).min(rope.len_bytes()));
+        let prefix = self.buffer.slice(from..offset);
         let path_buf = self.path.clone().unwrap_or_default();
         let path = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into());
         let comment = self.language().and_then(|l| l.line_comment).unwrap_or("//");
@@ -407,7 +423,7 @@ impl Editor {
                 }
             }
         }
-        let suffix = text[caret_byte..to].to_string();
+        let suffix = self.buffer.slice(offset..to);
         let files: String = others.iter().map(|(name, body)| format!("{comment} File: {name}\n{body}\n\n")).collect();
         let outline_block = if outline.is_empty() {
             String::new()
@@ -415,7 +431,7 @@ impl Editor {
             format!("{comment} Defined elsewhere in the project:\n{outline}\n")
         };
         let fill = ai::Fim {
-            prefix: format!("{outline_block}{files}{comment} File: {path}\n{}", &text[from..caret_byte]),
+            prefix: format!("{outline_block}{files}{comment} File: {path}\n{prefix}"),
             suffix: suffix.clone(),
             max_tokens: if single_line { 48 } else { 160 },
             temperature: 0.2,
@@ -442,7 +458,7 @@ impl Editor {
             user: format!(
                 "{chat_outline}{chat_context}File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {before:?}",
                 self.language_name(),
-                &text[from..caret_byte],
+                prefix,
                 suffix,
             ),
             // A fill-only code model can't chat; the usual model does it then.
@@ -593,8 +609,8 @@ impl Editor {
         if matches!(path.extension().and_then(|e| e.to_str()), Some("c" | "cpp" | "cc")) {
             candidates.push(path.with_extension("h"));
         }
-        let text = self.buffer.to_string();
-        for line in text.lines().take(200) {
+        let text = self.buffer.slice(0..self.buffer.line_to_char(200));
+        for line in text.lines() {
             let line = line.trim();
             let quoted = |l: &str| l.split(['"', '\'']).nth(1).map(str::to_string);
             if let Some(rest) = line.strip_prefix("#include") {
@@ -713,6 +729,35 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Not a check: finding a name to suggest in an 8 MB file, the whole file against
+    /// around the caret. `cargo test --release timing -- --ignored --nocapture`
+    #[gpui::test]
+    #[ignore]
+    fn timing_names_in_a_big_file(cx: &mut gpui::TestAppContext) {
+        let source = std::fs::read_to_string("src/workspace.rs").unwrap();
+        let big = source.repeat((8 << 20) / source.len() + 1);
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(crate::buffer::Buffer::from_text(&big), Some("big.rs".into()), cx));
+        e.update(cx, |e, _| {
+            e.selection = super::super::Selection::caret(e.buffer.len_chars() / 2);
+            let time = |f: &dyn Fn() -> Option<String>| {
+                let start = std::time::Instant::now();
+                for _ in 0..10 {
+                    f();
+                }
+                start.elapsed() / 10
+            };
+            let whole = time(&|| best_name(&e.buffer.to_string(), "comp", e.selection.head));
+            let near = time(&|| e.best_name_near("comp"));
+            println!("names, whole file: {whole:?}; around the caret: {near:?}");
+        });
+    }
 
     #[test]
     fn suggests_names_defined_in_the_file() {
