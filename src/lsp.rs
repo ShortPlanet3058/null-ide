@@ -381,7 +381,7 @@ mod rust_analyzer_tests {
             let deadline = Instant::now() + Duration::from_secs(120);
             let mut found = Vec::new();
             while found.len() < 2 && Instant::now() < deadline {
-                while let Ok(Some(message)) = messages.try_next() {
+                while let Ok(message) = messages.try_recv() {
                     if let ServerMessage::Request { id, .. } = message {
                         server.respond(id, Value::Null);
                     }
