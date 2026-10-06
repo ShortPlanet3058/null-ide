@@ -2713,6 +2713,7 @@ impl Workspace {
                 (Go, "Go to Symbol…".into(), Box::new(GoToSymbol)),
                 (Go, "Go to Definition".into(), Box::new(GoToDefinition)),
                 (Go, "Find References".into(), Box::new(crate::editor::FindReferences)),
+                (Go, "Show Callers".into(), Box::new(crate::editor::ShowCallers)),
                 (Go, "Go to Implementation".into(), Box::new(crate::editor::GoToImplementation)),
                 (Go, "Go to Type Definition".into(), Box::new(crate::editor::GoToTypeDefinition)),
                 (Go, "Show Problems".into(), Box::new(ShowProblems)),

@@ -114,6 +114,7 @@ actions!(
         GoToDefinition,
         GoToTypeDefinition,
         GoToImplementation,
+        ShowCallers,
         ShowInfo,
         ShowCompletions,
         CompletionNext,
@@ -198,6 +199,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-s", Save, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("secondary-f12", GoToImplementation, ctx),
+        KeyBinding::new("ctrl-alt-h", ShowCallers, ctx),
         KeyBinding::new("secondary-shift-i", ShowInfo, ctx),
         KeyBinding::new("ctrl-space", ShowCompletions, ctx),
         KeyBinding::new("secondary-i", InlineAssist, ctx),
@@ -3015,6 +3017,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::go_to_matching_bracket))
             .on_action(cx.listener(Self::newline_below))
             .on_action(cx.listener(Self::newline_above))
+            .on_action(cx.listener(Self::show_callers))
             .on_action(cx.listener(Self::join_lines))
             .on_action(cx.listener(Self::rewrap))
             .on_action(cx.listener(Self::delete_to_line_end))
