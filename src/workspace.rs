@@ -5015,6 +5015,25 @@ pub fn theme_action(theme: ThemeName) -> Box<dyn Action> {
 /// The status bar's path is cut to about this many characters, from the left.
 const STATUS_PATH_CHARS: usize = 60;
 
+/// Where the caret is, and how much is selected: "Ln 4, Col 9 · 12 selected" on one line,
+/// "· 3 lines selected" over several.
+fn position_label(editor: &Editor, line: usize, col: usize) -> String {
+    let place = format!("Ln {}, Col {}", line + 1, col + 1);
+    let range = editor.selection.range();
+    if range.is_empty() {
+        return place;
+    }
+    let (first, _) = editor.buffer.point(range.start);
+    let (last, last_col) = editor.buffer.point(range.end);
+    // A selection ending at the start of a line doesn't take that line.
+    let lines = last + 1 - first - usize::from(last > first && last_col == 0);
+    if lines > 1 {
+        format!("{place} · {lines} lines selected")
+    } else {
+        format!("{place} · {} selected", range.len())
+    }
+}
+
 /// A long path with its first folders replaced by "…", keeping the file and the folders
 /// nearest to it, which say the most: `…/editor/assist.rs`.
 fn shorten_path(path: &str, max: usize) -> String {
@@ -5142,7 +5161,7 @@ impl Render for Workspace {
                             path,
                             match editor.extra.len() {
                                 _ if editor.reading => "Preview".into(),
-                                0 => format!("Ln {}, Col {}", line + 1, col + 1),
+                                0 => position_label(editor, line, col),
                                 n => format!("{} cursors · Esc for one", n + 1),
                             },
                             editor.language_name().into(),
@@ -6710,6 +6729,29 @@ mod tests {
         cx.simulate_keystrokes("shift-f8");
         workspace.update(cx, |w, cx| assert_eq!(at(w, cx), ("b.txt".into(), 1)));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn the_status_bar_counts_what_is_selected(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(crate::buffer::Buffer::from_text("one two\nthree\nfour\n"), Some("x.txt".into()), cx)
+        });
+        let label = |cx: &mut gpui::VisualTestContext, anchor: usize, head: usize| {
+            e.update(cx, |e, _| {
+                e.selection = crate::editor::Selection { anchor, head };
+                let (line, col) = e.caret_point();
+                position_label(e, line, col)
+            })
+        };
+        assert_eq!(label(cx, 4, 4), "Ln 1, Col 5");
+        assert_eq!(label(cx, 4, 7), "Ln 1, Col 8 · 3 selected");
+        assert_eq!(label(cx, 0, 14), "Ln 3, Col 1 · 2 lines selected");
+        assert_eq!(label(cx, 16, 2), "Ln 1, Col 3 · 3 lines selected");
     }
 
     #[test]
