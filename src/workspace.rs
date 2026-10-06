@@ -549,6 +549,7 @@ impl Workspace {
                 FileTreeEvent::RenameRequested { from, to } => this.rename_file(from.clone(), to.clone(), cx),
                 FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
                 FileTreeEvent::OpenTerminal(dir) => this.open_terminal_in(dir.clone(), window, cx),
+                FileTreeEvent::DiscardChanges(path, status) => this.discard_changes(path.clone(), *status, window, cx),
                 FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
@@ -1666,6 +1667,48 @@ impl Workspace {
     }
 
     /// Every change back to the last commit, after asking (new files go to the Trash).
+    /// One file back to its last commit, after asking (a new one goes to the Trash).
+    fn discard_changes(&mut self, path: PathBuf, status: git::FileStatus, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let detail = if status == git::FileStatus::Added {
+            "It's new since the last commit: it goes to the Trash."
+        } else {
+            "It goes back to how it was at the last commit."
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Discard the changes to {name}?"),
+            Some(detail),
+            &["Discard", "Cancel"],
+            cx,
+        );
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let reverting = path.clone();
+            let result = cx.background_executor().spawn(async move { git::revert(&root, &reverting, status) }).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.show_notice(format!("Discarded the changes to {name}."), cx),
+                    Err(error) => this.show_notice(format!("Couldn't discard them: {error}"), cx),
+                }
+                for tab in &this.tabs {
+                    if tab.editor.read(cx).path() == Some(path.as_path()) {
+                        tab.editor.update(cx, |editor, cx| {
+                            editor.end_review(cx);
+                            editor.reload_from_disk(cx);
+                        });
+                    }
+                }
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn revert_all_changes(&mut self, _: &RevertAllChanges, window: &mut Window, cx: &mut Context<Self>) {
         let count = self.git_status.len();
         if count == 0 {
@@ -6680,6 +6723,47 @@ mod tests {
         workspace.read_with(cx, |w, cx| {
             assert_eq!(w.active_editor().unwrap().read(cx).buffer.to_string(), "xa\n");
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Discard Changes… on a file: asked first, then back to its last commit, the open tab too.
+    #[gpui::test]
+    #[cfg(unix)]
+    fn a_files_changes_are_discarded(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-discard-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+        if git(&["init", "-q", "-b", "main"]).is_err() {
+            return; // No git here.
+        }
+        git(&["config", "user.name", "t"]).unwrap();
+        git(&["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(dir.join("f.txt"), "one\n").unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "first"]).unwrap();
+        std::fs::write(dir.join("f.txt"), "ONE\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let file = dir.join("f.txt");
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(file.clone(), window, cx);
+            w.discard_changes(file.clone(), git::FileStatus::Modified, window, cx);
+        });
+        // Cancel first: nothing changes.
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\n");
+        workspace.update_in(cx, |w, window, cx| w.discard_changes(file.clone(), git::FileStatus::Modified, window, cx));
+        cx.simulate_prompt_answer("Discard");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
+        workspace.read_with(cx, |w, cx| assert_eq!(w.active_editor().unwrap().read(cx).buffer.to_string(), "one\n"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

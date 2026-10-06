@@ -141,6 +141,8 @@ pub enum FileTreeEvent {
     Trashed(PathBuf),
     /// A new terminal, started in this folder.
     OpenTerminal(PathBuf),
+    /// Back to the last commit, this file (after asking).
+    DiscardChanges(PathBuf, crate::git::FileStatus),
     /// Something to tell the person, like a failed operation.
     Notice(String),
 }
@@ -204,6 +206,7 @@ enum MenuItem {
     CopyRelativePath,
     Reveal,
     OpenInTerminal,
+    DiscardChanges,
     CollapseAll,
     Trash,
 }
@@ -220,6 +223,7 @@ impl MenuItem {
             MenuItem::CopyRelativePath => "Copy Relative Path",
             MenuItem::Reveal => REVEAL_LABEL,
             MenuItem::OpenInTerminal => "Open in Terminal",
+            MenuItem::DiscardChanges => "Discard Changes…",
             MenuItem::CollapseAll => "Collapse All Folders",
             MenuItem::Trash => "Move to Trash",
         }
@@ -235,7 +239,7 @@ impl MenuItem {
 
     /// A line is drawn above these, to group the menu.
     fn starts_group(self) -> bool {
-        matches!(self, MenuItem::Rename | MenuItem::CopyPath | MenuItem::Trash)
+        matches!(self, MenuItem::Rename | MenuItem::CopyPath | MenuItem::DiscardChanges | MenuItem::Trash)
     }
 }
 
@@ -829,8 +833,8 @@ impl FileTree {
             Some(e) if e.is_dir => {
                 vec![NewFile, NewFolder, Rename, Duplicate, CopyPath, CopyRelativePath, Reveal, OpenInTerminal, Trash]
             }
-            Some(_) => {
-                vec![
+            Some(e) => {
+                let mut items = vec![
                     Open,
                     NewFile,
                     NewFolder,
@@ -840,8 +844,13 @@ impl FileTree {
                     CopyRelativePath,
                     Reveal,
                     OpenInTerminal,
-                    Trash,
-                ]
+                ];
+                // A changed file (not one in a merge conflict: that's resolved, not discarded).
+                if self.git.get(&e.path).is_some_and(|s| *s != crate::git::FileStatus::Conflicted) {
+                    items.push(DiscardChanges);
+                }
+                items.push(Trash);
+                items
             }
             None => vec![NewFile, NewFolder, CopyPath, Reveal, OpenInTerminal, CollapseAll],
         };
@@ -873,6 +882,13 @@ impl FileTree {
             MenuItem::CopyPath => self.copy_path(&CopyPath, window, cx),
             MenuItem::CopyRelativePath => self.copy_relative_path(&CopyRelativePath, window, cx),
             MenuItem::Reveal => self.reveal(&Reveal, window, cx),
+            MenuItem::DiscardChanges => {
+                if let Some(entry) = target
+                    && let Some(&status) = self.git.get(&entry.path)
+                {
+                    cx.emit(FileTreeEvent::DiscardChanges(entry.path, status));
+                }
+            }
             MenuItem::OpenInTerminal => {
                 let dir = terminal_dir(target.as_ref().map(|e| (e.path.as_path(), e.is_dir)), &self.root);
                 cx.emit(FileTreeEvent::OpenTerminal(dir));
