@@ -44,6 +44,9 @@ actions!(
         FileHistory,
         CompareWithSaved,
         CopyLineLink,
+        CopyFilePath,
+        CopyRelativeFilePath,
+        RevealFile,
         CompareWithClipboard,
         RevertAllChanges,
         SwitchBranch,
@@ -2596,6 +2599,9 @@ impl Workspace {
             (File, "Show File History".into(), Box::new(FileHistory)),
             (File, "Compare with Saved".into(), Box::new(CompareWithSaved)),
             (File, "Copy Link to Line".into(), Box::new(CopyLineLink)),
+            (File, "Copy Path".into(), Box::new(CopyFilePath)),
+            (File, "Copy Relative Path".into(), Box::new(CopyRelativeFilePath)),
+            (File, crate::file_tree::REVEAL_LABEL.into(), Box::new(RevealFile)),
             (File, "Compare with Clipboard".into(), Box::new(CompareWithClipboard)),
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
@@ -4848,18 +4854,8 @@ impl Workspace {
                 let editors = after.map(|&i| self.tabs[i].editor.clone()).collect();
                 self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
             }
-            TabMenuItem::CopyPath => {
-                if let Some(path) = path {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.display().to_string()));
-                }
-            }
-            TabMenuItem::CopyRelativePath => {
-                if let Some(path) = path {
-                    let root = self.tree.read(cx).root().to_path_buf();
-                    let relative = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(relative));
-                }
-            }
+            TabMenuItem::CopyPath => self.copy_path(path.as_deref(), false, cx),
+            TabMenuItem::CopyRelativePath => self.copy_path(path.as_deref(), true, cx),
             TabMenuItem::Reveal => {
                 if let Some(path) = path {
                     cx.reveal_path(&path);
@@ -4879,6 +4875,19 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// A file's path on the clipboard: in full, or from the project's folder.
+    fn copy_path(&self, path: Option<&Path>, relative: bool, cx: &mut Context<Self>) {
+        let Some(path) = path else { return };
+        let root = self.tree.read(cx).root().to_path_buf();
+        let shown = if relative { path.strip_prefix(&root).unwrap_or(path) } else { path };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(shown.display().to_string()));
+    }
+
+    /// The open file's path, for the commands about it.
+    fn active_path(&self, cx: &App) -> Option<PathBuf> {
+        self.active_editor()?.read(cx).path().map(Path::to_path_buf)
     }
 
     fn render_tab_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -5575,6 +5584,17 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::file_history))
             .on_action(cx.listener(|this, _: &CompareWithSaved, window, cx| this.compare_with_saved(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLineLink, _, cx| this.copy_line_link(cx)))
+            .on_action(
+                cx.listener(|this, _: &CopyFilePath, _, cx| this.copy_path(this.active_path(cx).as_deref(), false, cx)),
+            )
+            .on_action(cx.listener(|this, _: &CopyRelativeFilePath, _, cx| {
+                this.copy_path(this.active_path(cx).as_deref(), true, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RevealFile, _, cx| {
+                if let Some(path) = this.active_path(cx) {
+                    cx.reveal_path(&path);
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &CompareWithClipboard, window, cx| this.compare_with_clipboard(window, cx)),
             )
@@ -6712,7 +6732,14 @@ mod tests {
             w.run_tab_menu_item(CloseToTheRight, window, cx);
             assert_eq!(w.tabs.len(), 1);
             assert!(w.tab_menu.is_none());
+            window.focus(&w.focus_handle(cx));
         });
+        // The same from ⌘K, for the open file.
+        let clipboard = |cx: &mut gpui::VisualTestContext| cx.read_from_clipboard().and_then(|c| c.text());
+        cx.dispatch_action(CopyRelativeFilePath);
+        assert_eq!(clipboard(cx), Some("a.txt".into()));
+        cx.dispatch_action(CopyFilePath);
+        assert_eq!(clipboard(cx), Some(dir.join("a.txt").display().to_string()));
         std::fs::remove_dir_all(&dir).ok();
     }
 
