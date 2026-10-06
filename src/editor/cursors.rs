@@ -474,7 +474,8 @@ impl Editor {
         let mut next = count;
         self.for_each_cursor(cx, |this, cx| {
             next = next.saturating_sub(1);
-            let piece = if split { lines[next] } else { text.as_str() };
+            // A "\r\n" file's pieces: without the "\r" that came before each "\n".
+            let piece = if split { lines[next].trim_end_matches('\r') } else { text.as_str() };
             this.edit(this.selection.range(), piece, super::EditKind::Other, cx);
         });
     }
@@ -788,5 +789,18 @@ mod tests {
             e.for_each_cursor(cx, |this, cx| this.toggle_comment(cx));
         });
         assert_eq!(text(cx, &e), "# a = 1\n# b = 2\n");
+    }
+
+    #[gpui::test]
+    fn pieces_pasted_in_a_crlf_file_keep_no_stray_return(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "a\r\nb\r\n");
+        e.update_in(cx, |e, _, cx| {
+            e.set_cursors(vec![
+                (super::Cursor::new(Selection::caret(0)), true),
+                (super::Cursor::new(Selection::caret(3)), false),
+            ]);
+            e.paste_text("1\r\n2".into(), super::PIECES, true, cx);
+            assert_eq!(e.buffer.to_string(), "1a\r\n2b\r\n");
+        });
     }
 }

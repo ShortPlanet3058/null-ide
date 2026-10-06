@@ -377,6 +377,10 @@ fn list(lines: &[&str], start: usize, first: Marker) -> (Block, usize) {
 }
 
 fn is_table_rule(line: &str) -> bool {
+    // At least one pipe: a lone `---` under a line is a heading's underline, or a rule.
+    if !line.contains('|') {
+        return false;
+    }
     let cells = cells_text(line);
     !cells.is_empty()
         && cells.iter().all(|c| {
@@ -561,6 +565,9 @@ pub fn table_step(lines: &[&str], at: usize, column: usize, forward: bool) -> Op
 
 /// One table's lines (head, rule, rows) with every column as wide as its widest cell.
 fn align_table(lines: &[&str]) -> Vec<String> {
+    if lines.len() < 2 {
+        return lines.iter().map(|l| l.to_string()).collect();
+    }
     let indent = &lines[0][..lines[0].len() - lines[0].trim_start().len()];
     let rows: Vec<Vec<String>> = lines.iter().map(|l| raw_cells(l)).collect();
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
@@ -935,11 +942,26 @@ pub fn task_lines(source: &str) -> Vec<usize> {
     found
 }
 
-/// The line with its task's box ticked, or unticked.
+/// The line with its task's box ticked, or unticked: the box right after the list's
+/// marker (in a quote too), never a `[ ]` written in the item's text.
 pub fn toggle_task(line: &str) -> Option<String> {
-    let at = line.find("[ ] ").or_else(|| line.find("[x] ")).or_else(|| line.find("[X] "))?;
-    let mark = if &line[at + 1..at + 2] == " " { "x" } else { " " };
-    Some(format!("{}{mark}{}", &line[..at + 1], &line[at + 2..]))
+    let mut start = 0;
+    let mut text = line;
+    while let Some(rest) = text.trim_start().strip_prefix('>') {
+        let rest = rest.strip_prefix(' ').unwrap_or(rest);
+        start += text.len() - rest.len();
+        text = rest;
+    }
+    let at = start + list_marker(text)?.content;
+    let rest = line.get(at..)?;
+    let mark = if rest.starts_with("[ ] ") {
+        "x"
+    } else if rest.starts_with("[x] ") || rest.starts_with("[X] ") {
+        " "
+    } else {
+        return None;
+    };
+    Some(format!("{}[{mark}]{}", &line[..at], &line[at + 3..]))
 }
 
 /// Each block drawn, in order (the preview scrolls to them one by one).
@@ -1266,6 +1288,11 @@ mod tests {
         assert_eq!(step(3, 2, false).caret, (0, 9));
         assert_eq!(step(1, 2, false).caret, (0, 2));
         assert_eq!(table_step(&lines, 0, 0, true), None);
+        // A rule line after the table isn't the table's: ⇥ on its last row still works.
+        let ruled = ["|h|i|", "|-|-|", "|a|b|", "---"];
+        assert_eq!(table_step(&ruled, 2, 1, true).unwrap().lines, 0..3);
+        // A heading underlined with `---` isn't a table.
+        assert!(aligned_tables("a | b\n---\n").is_empty());
     }
 
     #[test]
@@ -1301,6 +1328,9 @@ mod tests {
         assert_eq!(toggle_task("- [ ] milk").as_deref(), Some("- [x] milk"));
         assert_eq!(toggle_task("  1. [X] eggs").as_deref(), Some("  1. [ ] eggs"));
         assert_eq!(toggle_task("- plain"), None);
+        // The box, not a `[ ]` in the text; in a quote too.
+        assert_eq!(toggle_task("- [x] support [ ] syntax").as_deref(), Some("- [ ] support [ ] syntax"));
+        assert_eq!(toggle_task("> - [ ] quoted").as_deref(), Some("> - [x] quoted"));
     }
 
     fn count_tasks(block: &Block) -> usize {

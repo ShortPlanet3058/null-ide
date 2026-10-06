@@ -32,7 +32,11 @@ pub(super) fn reindent(text: &str, base: usize, target: usize, first: bool, unit
             if words.trim().is_empty() {
                 return if line.ends_with('\r') { "\r".into() } else { String::new() };
             }
-            let columns = (target + indent_columns(line, tab)).saturating_sub(base);
+            // The first line was copied from `base` deep or less (from part way into its line):
+            // it lands at `target` (or deeper, if it was deeper).
+            let indent = indent_columns(line, tab);
+            let columns =
+                if i == 0 { target + indent.saturating_sub(base) } else { (target + indent).saturating_sub(base) };
             format!("{}{words}", indentation(columns, unit, tab))
         })
         .collect::<Vec<_>>()
@@ -141,6 +145,12 @@ mod tests {
         e.update(cx, |e, _| e.selection = Selection::caret(at(e, 2)));
         cx.simulate_keystrokes("cmd-v");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "fn a() {\n    x();\n    // y();\n}\n// y();\n"));
+    }
+
+    #[test]
+    fn a_first_line_copied_from_part_way_still_lands_at_the_depth() {
+        // `foo(…)` copied from a line indented 4, starting at `f`; pasted 4 deep.
+        assert_eq!(reindent("foo(\n        a,\n    )", 4, 4, true, SPACES, 4), "    foo(\n        a,\n    )");
     }
 
     #[test]
