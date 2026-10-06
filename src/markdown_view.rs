@@ -69,9 +69,36 @@ pub fn parse(source: &str) -> Vec<Block> {
     parse_located(source).into_iter().map(|(_, b)| b).collect()
 }
 
+/// The text's lines as the editor counts them: a line ends at "\n", "\r\n" or a lone
+/// "\r" (old Mac files), so line numbers here are the editor's.
+fn buffer_lines(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut lines = Vec::new();
+    let (mut start, mut i) = (0, 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                lines.push(&text[start..i]);
+                i += 1;
+                start = i;
+            }
+            b'\r' => {
+                lines.push(&text[start..i]);
+                i += if bytes.get(i + 1) == Some(&b'\n') { 2 } else { 1 };
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
 /// The document's blocks, each with the source line it starts on.
 pub fn parse_located(source: &str) -> Vec<(usize, Block)> {
-    let lines: Vec<&str> = source.lines().collect();
+    let lines: Vec<&str> = buffer_lines(source);
     // Front matter (--- … --- at the very top) is the file's settings, not its text.
     let mut start = 0;
     if lines.first().is_some_and(|l| l.trim() == "---")
@@ -441,7 +468,7 @@ fn raw_cells(line: &str) -> Vec<String> {
 /// The tables of a Markdown file with their columns lined up: each table's line range and
 /// its new lines (only those that change). Tables in code blocks are left alone.
 pub fn aligned_tables(source: &str) -> Vec<(Range<usize>, Vec<String>)> {
-    let lines: Vec<&str> = source.lines().collect();
+    let lines: Vec<&str> = buffer_lines(source);
     let mut found = Vec::new();
     let mut fence: Option<&str> = None;
     let mut i = 0;
@@ -904,7 +931,7 @@ pub struct Style {
 /// The source lines of the task list's boxes (`- [ ] milk`), top to bottom, as the preview
 /// draws them: not in front matter or code, and inside quotes too.
 pub fn task_lines(source: &str) -> Vec<usize> {
-    let lines: Vec<&str> = source.lines().collect();
+    let lines: Vec<&str> = buffer_lines(source);
     let mut start = 0;
     if lines.first().is_some_and(|l| l.trim() == "---")
         && let Some(end) = lines.iter().skip(1).position(|l| l.trim() == "---")
@@ -1267,6 +1294,15 @@ fn flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lines_are_counted_as_the_editor_counts_them() {
+        assert_eq!(buffer_lines("a\nb\r\nc\rd\n"), ["a", "b", "c", "d"]);
+        assert_eq!(buffer_lines("x"), ["x"]);
+        assert!(buffer_lines("").is_empty());
+        // A lone "\r" before a task moves it a line down, as in the editor.
+        assert_eq!(task_lines("note\r- [ ] milk\n"), [1]);
+    }
 
     #[test]
     fn tab_goes_from_cell_to_cell() {
