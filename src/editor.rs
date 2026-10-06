@@ -3445,6 +3445,24 @@ mod tests {
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "# Shop\n\n- [ ] milk\n- [x] eggs\n"));
     }
 
+    /// ⌥⇧F in Markdown (no server for it) lines the tables up, as one undo step.
+    #[gpui::test]
+    fn format_lines_markdown_tables_up(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let text = "|a|bb|\n|-|-|\n|ccc|d|\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("t.md")), cx));
+        e.update_in(cx, |e, window, _| window.focus(&e.focus_handle));
+        cx.simulate_keystrokes("alt-shift-f");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "| a   | bb  |\n| --- | --- |\n| ccc | d   |\n"));
+        cx.simulate_keystrokes("cmd-z");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), text));
+    }
+
     #[test]
     fn an_address_pasted_over_words_links_them() {
         let url = "https://example.com/a";

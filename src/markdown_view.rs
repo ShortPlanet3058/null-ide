@@ -408,6 +408,116 @@ fn cells_text(line: &str) -> Vec<String> {
     cells.into_iter().map(|c| c.trim().to_string()).collect()
 }
 
+/// A table row's cells as written (escaped pipes kept), trimmed.
+fn raw_cells(line: &str) -> Vec<String> {
+    let line = line.trim();
+    let line = line.strip_prefix('|').unwrap_or(line);
+    let line = if line.ends_with('|') && !line.ends_with("\\|") { &line[..line.len() - 1] } else { line };
+    let mut cells = vec![String::new()];
+    let mut in_code = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => {
+                let cell = cells.last_mut().unwrap();
+                cell.push(c);
+                cell.push(chars.next().unwrap());
+            }
+            '`' => {
+                in_code = !in_code;
+                cells.last_mut().unwrap().push(c);
+            }
+            '|' if !in_code => cells.push(String::new()),
+            _ => cells.last_mut().unwrap().push(c),
+        }
+    }
+    cells.into_iter().map(|c| c.trim().to_string()).collect()
+}
+
+/// The tables of a Markdown file with their columns lined up: each table's line range and
+/// its new lines (only those that change). Tables in code blocks are left alone.
+pub fn aligned_tables(source: &str) -> Vec<(Range<usize>, Vec<String>)> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut found = Vec::new();
+    let mut fence: Option<&str> = None;
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        if let Some(open) = fence {
+            if trimmed.starts_with(open) {
+                fence = None;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(open) = fence_of(trimmed) {
+            fence = Some(open);
+            i += 1;
+            continue;
+        }
+        if !(lines[i].contains('|') && lines.get(i + 1).is_some_and(|l| is_table_rule(l))) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 2;
+        while i < lines.len() && lines[i].contains('|') && !lines[i].trim().is_empty() {
+            i += 1;
+        }
+        let new = align_table(&lines[start..i]);
+        if new.iter().map(String::as_str).ne(lines[start..i].iter().copied()) {
+            found.push((start..i, new));
+        }
+    }
+    found
+}
+
+/// One table's lines (head, rule, rows) with every column as wide as its widest cell.
+fn align_table(lines: &[&str]) -> Vec<String> {
+    let indent = &lines[0][..lines[0].len() - lines[0].trim_start().len()];
+    let rows: Vec<Vec<String>> = lines.iter().map(|l| raw_cells(l)).collect();
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let aligns: Vec<Align> = (0..columns).map(|c| rows[1].get(c).map_or(Align::Left, |r| align_of(r))).collect();
+    let explicit_left: Vec<bool> = (0..columns).map(|c| rows[1].get(c).is_some_and(|r| r.starts_with(':'))).collect();
+    let width = |c: usize| {
+        rows.iter()
+            .enumerate()
+            .filter(|(n, _)| *n != 1)
+            .filter_map(|(_, r)| r.get(c))
+            .map(|t| t.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(3)
+    };
+    let widths: Vec<usize> = (0..columns).map(width).collect();
+    rows.iter()
+        .enumerate()
+        .map(|(n, row)| {
+            let cells: Vec<String> = (0..columns)
+                .map(|c| {
+                    let w = widths[c];
+                    if n == 1 {
+                        return match aligns[c] {
+                            Align::Center => format!(":{}:", "-".repeat(w - 2)),
+                            Align::Right => format!("{}:", "-".repeat(w - 1)),
+                            Align::Left if explicit_left[c] => format!(":{}", "-".repeat(w - 1)),
+                            Align::Left => "-".repeat(w),
+                        };
+                    }
+                    let text = row.get(c).map_or("", String::as_str);
+                    let room = w - text.chars().count();
+                    match aligns[c] {
+                        Align::Right => format!("{}{text}", " ".repeat(room)),
+                        Align::Center => format!("{}{text}{}", " ".repeat(room / 2), " ".repeat(room - room / 2)),
+                        Align::Left => format!("{text}{}", " ".repeat(room)),
+                    }
+                })
+                .collect();
+            format!("{indent}| {} |", cells.join(" | "))
+        })
+        .collect()
+}
+
 fn cells(line: &str) -> Vec<Vec<Inline>> {
     cells_text(line).iter().map(|c| inlines(c)).collect()
 }
@@ -1048,6 +1158,29 @@ fn flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tables_are_lined_up() {
+        let doc = "Intro\n\n|Name|Qty|Note|\n|:-:|--:|---|\n|milk|2|`a|b` and \\| pipe|\n|eggs|12|\n\n```\n|a|b|\n|-|-|\n```\n";
+        let found = aligned_tables(doc);
+        assert_eq!(found.len(), 1, "the table in code is left alone");
+        assert_eq!(found[0].0, 2..6);
+        let notes = " ".repeat(17);
+        assert_eq!(
+            found[0].1,
+            [
+                "| Name | Qty | Note              |".to_string(),
+                "| :--: | --: | ----------------- |".to_string(),
+                "| milk |   2 | `a|b` and \\| pipe |".to_string(),
+                format!("| eggs |  12 | {notes} |"),
+            ]
+        );
+        // Lined up already: nothing to change.
+        let lined: String = found[0].1.iter().map(|l| format!("{l}\n")).collect();
+        assert!(aligned_tables(&lined).is_empty());
+        // In a list item, the indentation stays.
+        assert_eq!(aligned_tables("- x\n  |a|b|\n  |-|-|\n")[0].1[0], "  | a   | b   |");
+    }
 
     #[test]
     fn task_boxes_are_found_where_the_preview_draws_them() {
