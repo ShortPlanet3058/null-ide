@@ -22,6 +22,8 @@ actions!(
         ToggleRegex,
         ReplaceNext,
         ReplaceAll,
+        OlderSearch,
+        NewerSearch,
     ]
 );
 
@@ -40,6 +42,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-enter", FindPrevious, bar),
         KeyBinding::new("secondary-shift-g", FindPrevious, bar),
         KeyBinding::new("escape", CloseFind, bar),
+        KeyBinding::new("up", OlderSearch, bar),
+        KeyBinding::new("down", NewerSearch, bar),
         KeyBinding::new("enter", ReplaceNext, replace),
         KeyBinding::new("secondary-enter", ReplaceAll, replace),
     ];
@@ -63,6 +67,27 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(keys);
 }
 
+/// What was searched for, oldest first, in any editor since Null started: ↑ and ↓ in the
+/// find field go back through it.
+#[derive(Default)]
+struct SearchHistory(Vec<String>);
+
+impl gpui::Global for SearchHistory {}
+
+const HISTORY_LEN: usize = 50;
+
+/// Keeps `text` as the latest search (once, however often it's searched).
+fn remember(history: &mut Vec<String>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    history.retain(|t| t != text);
+    history.push(text.to_string());
+    if history.len() > HISTORY_LEN {
+        history.remove(0);
+    }
+}
+
 const CHEVRON: &str = "icons/chevron-right.svg";
 const CLOSE: &str = "icons/x.svg";
 const WIDTH: f32 = 460.;
@@ -77,6 +102,9 @@ pub struct FindBar {
     case_sensitive: bool,
     whole_word: bool,
     regex: bool,
+    /// While going through earlier searches with ↑ ↓: which one shows, and what was typed
+    /// before, to come back to.
+    recalled: Option<(usize, String)>,
     _subscription: Subscription,
 }
 
@@ -88,7 +116,15 @@ impl FindBar {
             input
         });
         let replace = cx.new(|cx| TextInput::new("Replace", cx));
-        let subscription = cx.subscribe(&find, |this, _, TextInputEvent::Changed, cx| this.search(cx));
+        let subscription = cx.subscribe(&find, |this, input, TextInputEvent::Changed, cx| {
+            // Typing (rather than a search recalled) starts again from the newest.
+            let history = cx.try_global::<SearchHistory>().map(|h| &h.0);
+            let shown = this.recalled.as_ref().and_then(|(at, _)| history?.get(*at));
+            if shown.map(String::as_str) != Some(input.read(cx).text()) {
+                this.recalled = None;
+            }
+            this.search(cx)
+        });
         Self {
             editor,
             find,
@@ -97,6 +133,7 @@ impl FindBar {
             case_sensitive: query.case_sensitive,
             whole_word: query.whole_word,
             regex: query.regex,
+            recalled: None,
             _subscription: subscription,
         }
     }
@@ -138,15 +175,61 @@ impl FindBar {
     }
 
     fn find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.remember_search(cx);
         self.editor.update(cx, |editor, cx| editor.select_next_match(cx)).ok();
     }
 
     fn find_previous(&mut self, _: &FindPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.remember_search(cx);
         self.editor.update(cx, |editor, cx| editor.select_previous_match(cx)).ok();
     }
 
     fn close(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_search(cx);
         self.editor.update(cx, |editor, cx| editor.close_find(window, cx)).ok();
+    }
+
+    /// What the find field holds becomes the latest search, unless it's one being recalled.
+    fn remember_search(&mut self, cx: &mut Context<Self>) {
+        let text = self.find.read(cx).text().to_string();
+        remember(&mut cx.default_global::<SearchHistory>().0, &text);
+        self.recalled = None;
+    }
+
+    /// ↑: the search before the one showing (skipping what's in the field already).
+    fn older_search(&mut self, _: &OlderSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.find.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let history = cx.try_global::<SearchHistory>().map(|h| h.0.clone()).unwrap_or_default();
+        let typed = self.find.read(cx).text().to_string();
+        let (from, draft) = match self.recalled.take() {
+            Some((at, draft)) => (at, draft),
+            None => (history.len(), typed.clone()),
+        };
+        let older = (0..from).rev().find(|&i| history[i] != typed);
+        match older {
+            Some(at) => self.recall(at, &history[at].clone(), draft, cx),
+            None => self.recalled = (from < history.len()).then_some((from, draft)),
+        }
+    }
+
+    /// ↓: the search after the one showing, then what was typed before going back.
+    fn newer_search(&mut self, _: &NewerSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.find.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let Some((at, draft)) = self.recalled.take() else { return };
+        let history = cx.try_global::<SearchHistory>().map(|h| h.0.clone()).unwrap_or_default();
+        match history.get(at + 1) {
+            Some(newer) => self.recall(at + 1, &newer.clone(), draft, cx),
+            None => self.find.update(cx, |input, cx| input.set_text(&draft, cx)),
+        }
+    }
+
+    fn recall(&mut self, at: usize, text: &str, draft: String, cx: &mut Context<Self>) {
+        self.find.update(cx, |input, cx| input.set_text(text, cx));
+        self.recalled = Some((at, draft));
     }
 
     fn toggle_case_sensitive(&mut self, _: &ToggleCaseSensitive, _: &mut Window, cx: &mut Context<Self>) {
@@ -438,6 +521,8 @@ impl Render for FindBar {
             .on_action(cx.listener(Self::toggle_regex))
             .on_action(cx.listener(Self::replace_next))
             .on_action(cx.listener(Self::replace_all))
+            .on_action(cx.listener(Self::older_search))
+            .on_action(cx.listener(Self::newer_search))
             .occlude()
             .w(px(WIDTH))
             .max_w_full()
@@ -455,5 +540,64 @@ impl Render for FindBar {
             .text_color(theme.foreground)
             .child(find_row)
             .when(self.show_replace, |bar| bar.child(replace_row))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::editor::Selection;
+
+    /// ↑ goes back through what was searched for (in any editor), ↓ comes forward again
+    /// and back to what was being typed.
+    #[gpui::test]
+    fn up_and_down_go_through_earlier_searches(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(crate::buffer::Buffer::from_text("alpha beta gamma\n"), Some("x.txt".into()), cx)
+        });
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            e.selection = Selection { anchor: 0, head: 0 };
+        });
+        let field = |cx: &mut gpui::VisualTestContext| e.read_with(cx, |e, cx| e.find_query(cx).unwrap().text);
+        cx.simulate_keystrokes("cmd-f");
+        for word in ["alpha", "beta", "alpha"] {
+            cx.simulate_keystrokes("cmd-a");
+            cx.simulate_input(word);
+            cx.simulate_keystrokes("enter");
+        }
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("gam");
+        cx.simulate_keystrokes("up");
+        assert_eq!(field(cx), "alpha");
+        cx.simulate_keystrokes("up");
+        assert_eq!(field(cx), "beta");
+        // The oldest stays.
+        cx.simulate_keystrokes("up");
+        assert_eq!(field(cx), "beta");
+        cx.simulate_keystrokes("down");
+        assert_eq!(field(cx), "alpha");
+        cx.simulate_keystrokes("down");
+        assert_eq!(field(cx), "gam");
+        // Typing over a recalled one starts from the newest again.
+        cx.simulate_keystrokes("up");
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("up");
+        assert_eq!(field(cx), "alpha");
+    }
+
+    #[test]
+    fn a_search_is_kept_once_newest_last() {
+        let mut history = Vec::new();
+        for text in ["a", "b", "", "a"] {
+            remember(&mut history, text);
+        }
+        assert_eq!(history, ["b", "a"]);
     }
 }

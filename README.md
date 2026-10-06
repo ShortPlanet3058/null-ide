@@ -48,6 +48,7 @@ Getting around:
 | ⌃G | go to a line |
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
 | ⌘P `file:42:7` | open a file at a place, as compilers print it |
+| ⌘F | find in the file; ↑ ↓ bring back earlier searches |
 | ⌘⇧F / ⌘⇧H | search / replace across the project (the chevron also picks which files: `*.rs, src/, !tests`) |
 | ⌃- / ⌃⇧- | back / forward to where you were |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
