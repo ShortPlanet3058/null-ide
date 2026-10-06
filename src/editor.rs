@@ -484,6 +484,8 @@ pub struct Editor {
     pub font_size: Pixels,
     /// A line's height as a multiple of the font size (the "Line spacing" setting).
     line_spacing: f32,
+    /// The words in a prose file, for the revision counted.
+    words: std::cell::Cell<Option<(u64, usize)>>,
     pub search: Option<SearchState>,
     find_bar: Option<Entity<FindBar>>,
     /// Reused by Find Next when the find bar is closed, and to prefill it.
@@ -653,6 +655,7 @@ impl Editor {
             dragging: None,
             font_size: px(cx.global::<Settings>().font_size),
             line_spacing: cx.global::<Settings>().line_spacing.factor(),
+            words: Default::default(),
             search: None,
             find_bar: None,
             last_query: SearchQuery::default(),
@@ -2010,6 +2013,24 @@ impl Editor {
         self.edit(start..end, &ticked, EditKind::Other, cx);
         // Reading, the caret stays where it was.
         self.selection = selection;
+    }
+
+    /// How many words a prose file has (counted again only after it changes); None for a
+    /// file too big to count on every keystroke.
+    pub fn word_count(&self) -> Option<usize> {
+        let revision = self.buffer.revision();
+        if let Some((counted, words)) = self.words.get()
+            && counted == revision
+        {
+            return Some(words);
+        }
+        if self.buffer.rope().len_bytes() > WORD_COUNT_BYTES {
+            return None;
+        }
+        let words = self.buffer.rope().chunks().fold((0, false), |(n, carried), chunk| count_words(chunk, n, carried));
+        let words = words.0 + usize::from(words.1);
+        self.words.set(Some((revision, words)));
+        Some(words)
     }
 
     /// Text put in at char offset `at`, as one undo step, the caret after it.
@@ -3422,6 +3443,29 @@ impl Editor {
     }
 }
 
+/// Prose files bigger than this don't show their word count.
+const WORD_COUNT_BYTES: usize = 1 << 20;
+
+/// Words in `text`: runs of non-space with a letter or digit in them (so `#`, `-` and `|`
+/// in Markdown don't count). `n` and `in_word` carry the count over from the text before.
+fn count_words(text: &str, mut n: usize, mut in_word: bool) -> (usize, bool) {
+    for c in text.chars() {
+        if c.is_whitespace() {
+            n += usize::from(in_word);
+            in_word = false;
+        } else if c.is_alphanumeric() {
+            in_word = true;
+        }
+    }
+    (n, in_word)
+}
+
+/// The words in `text`.
+pub fn words_in(text: &str) -> usize {
+    let (n, in_word) = count_words(text, 0, false);
+    n + usize::from(in_word)
+}
+
 /// `[words](address)` when `selected` is some words on one line and `pasted` a single web
 /// address (and the words aren't an address themselves). ⌥⇧⌘V pastes the address as it is.
 fn markdown_link(selected: &str, pasted: &str) -> Option<String> {
@@ -3563,6 +3607,16 @@ mod tests {
         // ⌘/ still uses line comments.
         cx.simulate_keystrokes("cmd-z cmd-/");
         e.update(cx, |e, _| assert!(e.buffer.to_string().starts_with("// let a")));
+    }
+
+    #[test]
+    fn words_are_counted_as_people_count_them() {
+        assert_eq!(words_in("# A title\n\n- one two | three\n"), 5);
+        assert_eq!(words_in("l'été, c'est ça."), 3);
+        assert_eq!(words_in("   "), 0);
+        // Across the rope's pieces, a word cut in two is one.
+        let (n, carried) = count_words("hel", 0, false);
+        assert_eq!(count_words("lo world", n, carried), (1, true));
     }
 
     #[test]

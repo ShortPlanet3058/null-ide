@@ -5062,6 +5062,17 @@ const STATUS_PATH_CHARS: usize = 60;
 fn position_label(editor: &Editor, line: usize, col: usize) -> String {
     let place = format!("Ln {}, Col {}", line + 1, col + 1);
     let range = editor.selection.range();
+    // Prose: how many words, in the file or the selection.
+    if editor.is_prose() {
+        let plural = |n: usize| if n == 1 { "1 word".to_string() } else { format!("{} words", thousands(n)) };
+        return match (range.is_empty(), editor.word_count()) {
+            (true, Some(words)) => format!("{place} · {}", plural(words)),
+            (true, None) => place,
+            (false, _) => {
+                format!("{place} · {} selected", plural(crate::editor::words_in(&editor.buffer.slice(range))))
+            }
+        };
+    }
     if range.is_empty() {
         return place;
     }
@@ -5074,6 +5085,19 @@ fn position_label(editor: &Editor, line: usize, col: usize) -> String {
     } else {
         format!("{place} · {} selected", range.len())
     }
+}
+
+/// 1234567 as "1,234,567".
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(d);
+    }
+    out
 }
 
 /// A long path with its first folders replaced by "…", keeping the file and the folders
@@ -6866,7 +6890,7 @@ mod tests {
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });
         let (e, cx) = cx.add_window_view(|_, cx| {
-            Editor::new(crate::buffer::Buffer::from_text("one two\nthree\nfour\n"), Some("x.txt".into()), cx)
+            Editor::new(crate::buffer::Buffer::from_text("one two\nthree\nfour\n"), Some("x.rs".into()), cx)
         });
         let label = |cx: &mut gpui::VisualTestContext, anchor: usize, head: usize| {
             e.update(cx, |e, _| {
@@ -6879,6 +6903,20 @@ mod tests {
         assert_eq!(label(cx, 4, 7), "Ln 1, Col 8 · 3 selected");
         assert_eq!(label(cx, 0, 14), "Ln 3, Col 1 · 2 lines selected");
         assert_eq!(label(cx, 16, 2), "Ln 1, Col 3 · 3 lines selected");
+        // In prose, words: in the file, or in the selection.
+        let (notes, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(crate::buffer::Buffer::from_text("# Plan\n\n- buy milk\n"), Some("notes.md".into()), cx)
+        });
+        let label = |cx: &mut gpui::VisualTestContext, anchor: usize, head: usize| {
+            notes.update(cx, |e, _| {
+                e.selection = crate::editor::Selection { anchor, head };
+                position_label(e, 0, 0)
+            })
+        };
+        assert_eq!(label(cx, 0, 0), "Ln 1, Col 1 · 3 words");
+        assert_eq!(label(cx, 10, 18), "Ln 1, Col 1 · 2 words selected");
+        assert_eq!(thousands(1234567), "1,234,567");
+        assert_eq!(thousands(999), "999");
     }
 
     #[test]
