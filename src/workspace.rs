@@ -2823,6 +2823,8 @@ impl Workspace {
                 (Lines, "Insert Line Above".into(), Box::new(crate::editor::NewlineAbove)),
                 (Lines, "Join Lines".into(), Box::new(crate::editor::JoinLines)),
                 (Lines, "Sort Lines".into(), Box::new(crate::editor::SortLines)),
+                (Lines, "Reverse Lines".into(), Box::new(crate::editor::ReverseLines)),
+                (Lines, "Remove Duplicate Lines".into(), Box::new(crate::editor::RemoveDuplicateLines)),
                 (Lines, "Rewrap Comment or Paragraph".into(), Box::new(crate::editor::Rewrap)),
                 (Edit, "Upper Case".into(), Box::new(crate::editor::UpperCase)),
                 (Edit, "To snake_case".into(), Box::new(crate::editor::SnakeCase)),

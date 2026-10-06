@@ -36,7 +36,8 @@ pub use review::{KeepHunk, UndoHunk};
 pub use rewrap::Rewrap;
 pub use structure::{
     CamelCase, ExpandSelection, GoToMatchingBracket, JoinLines, KebabCase, LowerCase, NewlineAbove, NewlineBelow,
-    NextChange, PascalCase, PreviousChange, ShrinkSelection, SnakeCase, SortLines, TitleCase, UpperCase,
+    NextChange, PascalCase, PreviousChange, RemoveDuplicateLines, ReverseLines, ShrinkSelection, SnakeCase, SortLines,
+    TitleCase, UpperCase,
 };
 
 use crate::buffer::Buffer;
@@ -3226,6 +3227,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::next_conflict))
             .on_action(cx.listener(Self::previous_conflict))
             .on_action(cx.listener(Self::previous_change))
+            .on_action(cx.listener(Self::reverse_lines))
+            .on_action(cx.listener(Self::remove_duplicate_lines))
             .on_action(cx.listener(Self::sort_lines))
             .on_action(cx.listener(Self::upper_case))
             .on_action(cx.listener(Self::lower_case))
