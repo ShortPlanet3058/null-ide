@@ -47,6 +47,8 @@ actions!(
         CopyFilePath,
         CopyRelativeFilePath,
         RevealFile,
+        RenameFile,
+        TrashFile,
         CompareWithClipboard,
         RevertAllChanges,
         SwitchBranch,
@@ -2599,6 +2601,8 @@ impl Workspace {
             (File, "Show File History".into(), Box::new(FileHistory)),
             (File, "Compare with Saved".into(), Box::new(CompareWithSaved)),
             (File, "Copy Link to Line".into(), Box::new(CopyLineLink)),
+            (File, "Rename File…".into(), Box::new(RenameFile)),
+            (File, "Move File to Trash…".into(), Box::new(TrashFile)),
             (File, "Copy Path".into(), Box::new(CopyFilePath)),
             (File, "Copy Relative Path".into(), Box::new(CopyRelativeFilePath)),
             (File, crate::file_tree::REVEAL_LABEL.into(), Box::new(RevealFile)),
@@ -4885,6 +4889,24 @@ impl Workspace {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(shown.display().to_string()));
     }
 
+    /// Rename File… and Move File to Trash… from ⌘K: the open file chosen in the files,
+    /// which then asks for its new name, or whether to trash it, as it does from there.
+    fn open_file_in_tree(&mut self, rename: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.active_path(cx) else { return };
+        if !path.starts_with(self.tree.read(cx).root()) {
+            return self.show_notice("Only files in the project can be renamed or trashed here.".into(), cx);
+        }
+        self.show_files(&ShowFiles, window, cx);
+        self.tree.update(cx, |tree, cx| {
+            tree.set_active(Some(path), cx);
+            if rename {
+                tree.rename(&crate::file_tree::Rename, window, cx);
+            } else {
+                tree.trash(&crate::file_tree::Trash, window, cx);
+            }
+        });
+    }
+
     /// The open file's path, for the commands about it.
     fn active_path(&self, cx: &App) -> Option<PathBuf> {
         self.active_editor()?.read(cx).path().map(Path::to_path_buf)
@@ -5590,6 +5612,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopyRelativeFilePath, _, cx| {
                 this.copy_path(this.active_path(cx).as_deref(), true, cx)
             }))
+            .on_action(cx.listener(|this, _: &RenameFile, window, cx| this.open_file_in_tree(true, window, cx)))
+            .on_action(cx.listener(|this, _: &TrashFile, window, cx| this.open_file_in_tree(false, window, cx)))
             .on_action(cx.listener(|this, _: &RevealFile, _, cx| {
                 if let Some(path) = this.active_path(cx) {
                     cx.reveal_path(&path);
@@ -6767,6 +6791,27 @@ mod tests {
         workspace.update(cx, |w, cx| {
             assert_eq!(w.active_editor().unwrap().read(cx).path(), Some(to.as_path()));
         });
+        // From ⌘K: the name is asked for in the files, as there.
+        workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
+        cx.dispatch_action(RenameFile);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("plans.txt");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let renamed = dir.join("plans.txt");
+        assert!(!to.exists() && renamed.exists());
+        workspace.update(cx, |w, cx| {
+            assert_eq!(w.active_editor().unwrap().read(cx).path(), Some(renamed.as_path()));
+        });
+        // Move File to Trash… asks first (answered Cancel: the test leaves the real Trash alone).
+        workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
+        cx.dispatch_action(TrashFile);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(renamed.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

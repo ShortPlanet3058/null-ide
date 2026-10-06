@@ -587,7 +587,7 @@ impl FileTree {
         self.start_edit(EditKind::NewFolder { dir }, "", window, cx);
     }
 
-    fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(entry) = self.selected_entry() {
             self.start_edit(EditKind::Rename { path: entry.path }, &entry.name, window, cx);
         }
@@ -702,7 +702,7 @@ impl FileTree {
         }
     }
 
-    fn trash(&mut self, _: &Trash, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn trash(&mut self, _: &Trash, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.selected_entry() else { return };
         let what = if entry.is_dir { "folder" } else { "file" };
         let answer = window.prompt(
