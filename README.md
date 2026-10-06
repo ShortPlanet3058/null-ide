@@ -173,7 +173,8 @@ bar or Settings → Languages, into its own folder rather than the system.
 | YAML | yaml-language-server | npm |
 
 With a server running: ⌘R (or F2) renames a symbol everywhere, right where it's written;
-⇧F12 lists where it's used (⌘-clicking a definition does too); ⌥⇧F formats the file, and
+⇧F12 lists where it's used (⌘-clicking a definition does too), ⌃⌥H where a function is
+called from; ⌥⇧F formats the file, and
 "Format on save" does it on ⌘S; ⌘⇧M, or the error count in the status bar, lists every
 problem found.
 

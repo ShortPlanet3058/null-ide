@@ -487,31 +487,60 @@ impl Editor {
         let word = self.buffer.slice(self.word_at(offset));
         self.definition_task = Some(cx.spawn(async move |this, cx| {
             let found = request.await;
-            this.update(cx, |this, cx| match found.as_slice() {
-                [] => {
-                    let what = if target == Target::Implementation { "implementation" } else { "type definition" };
-                    this.show_notice(offset, format!("No {what} found here."), cx);
-                }
-                [location] => {
-                    let Some(target) = path_for(&location.uri) else { return };
-                    if this.path.as_deref() == Some(target.as_path()) {
-                        cx.emit(EditorEvent::Jumped { from: this.caret_point() });
-                        this.select_lsp_range(location.range, cx);
-                    } else {
-                        cx.emit(EditorEvent::GoTo { path: target, range: location.range });
-                    }
-                }
-                many => {
-                    let title = if target == Target::Implementation {
-                        format!("{} implementations of {word}", many.len())
-                    } else {
-                        format!("{} types of {word}", many.len())
-                    };
-                    cx.emit(EditorEvent::ShowLocations { title, locations: many.to_vec() });
-                }
+            this.update(cx, |this, cx| {
+                let (none, many) = if target == Target::Implementation {
+                    ("No implementation found here.", "implementations")
+                } else {
+                    ("No type definition found here.", "types")
+                };
+                this.go_or_list(found, offset, none, &format!("{many} of {word}"), cx);
             })
             .ok();
         }));
+    }
+
+    /// ⌃⌥H: where the function at the caret is called from, listed (or gone to, when once).
+    pub(super) fn show_callers(&mut self, _: &super::ShowCallers, _: &mut gpui::Window, cx: &mut Context<Self>) {
+        let offset = self.selection.head;
+        if let Some(message) = self.not_ready_message(cx) {
+            return self.show_notice(offset, message, cx);
+        }
+        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return };
+        let request = lsp.read(cx).callers(path, self.lsp_position(offset));
+        let word = self.buffer.slice(self.word_at(offset));
+        self.definition_task = Some(cx.spawn(async move |this, cx| {
+            let found = request.await;
+            this.update(cx, |this, cx| {
+                this.go_or_list(found, offset, "Nothing calls this here.", &format!("callers of {word}"), cx)
+            })
+            .ok();
+        }));
+    }
+
+    /// Places found for the symbol at `offset`: none says so, one is gone to, several are
+    /// listed as "{count} {what}".
+    fn go_or_list(
+        &mut self,
+        found: Vec<lsp_types::Location>,
+        offset: usize,
+        none: &str,
+        what: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match found.as_slice() {
+            [] => self.show_notice(offset, none.into(), cx),
+            [location] => {
+                let Some(target) = path_for(&location.uri) else { return };
+                if self.path.as_deref() == Some(target.as_path()) {
+                    cx.emit(EditorEvent::Jumped { from: self.caret_point() });
+                    self.select_lsp_range(location.range, cx);
+                } else {
+                    cx.emit(EditorEvent::GoTo { path: target, range: location.range });
+                }
+            }
+            many => cx
+                .emit(EditorEvent::ShowLocations { title: format!("{} {what}", many.len()), locations: many.to_vec() }),
+        }
     }
 
     pub fn go_to_definition_at(&mut self, offset: usize, cx: &mut Context<Self>) {
