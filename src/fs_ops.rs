@@ -182,7 +182,8 @@ fn copy_recursively(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Writes a file whole or not at all: the bytes go to a file beside it first, then take
 /// its place, so a crash or a full disk mid-write leaves the old file as it was. A link
 /// is written through to its file; the file keeps its permissions. A file with other
-/// hard links, or a folder Null can't add to, is written in place instead.
+/// hard links, or a folder Null can't add to, is written in place instead. What the file
+/// held before is kept in its local history.
 pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -192,6 +193,8 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(not(unix))]
     let shared = false;
     let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else { return std::fs::write(path, bytes) };
+    // What it held is kept a while, to go back to (Show File History).
+    crate::local_history::keep_before_writing(&target, bytes);
     if shared {
         return std::fs::write(&target, bytes);
     }

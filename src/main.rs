@@ -19,6 +19,7 @@ mod highlight;
 mod key_prompt;
 mod keymap;
 mod languages;
+mod local_history;
 mod lsp;
 mod lsp_store;
 mod markdown;

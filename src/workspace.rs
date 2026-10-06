@@ -457,7 +457,7 @@ pub struct Workspace {
     /// The list of changes is open: opening a file from it shows its changes.
     git_listing: bool,
     /// The history a list shows (⌥ picking one compares the file with it), and its file.
-    history: Option<(PathBuf, Vec<git::FileCommit>)>,
+    history: Option<(PathBuf, Vec<Past>)>,
     /// A tab's right-click menu, while open.
     tab_menu: Option<TabMenu>,
     /// Only the code: no sidebar, tabs, status bar or terminal, the text centered.
@@ -1377,36 +1377,51 @@ impl Workspace {
         .detach();
     }
 
-    /// The commits that changed the current file, newest first. Picking one shows the file
-    /// against that version, each change since kept or taken back one by one.
+    /// The file's past, newest first: the commits that changed it, and the versions Null
+    /// wrote over (its local history, git or not). Picking one shows the file against that
+    /// version, each change since kept or taken back one by one.
     fn file_history(&mut self, _: &FileHistory, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf)) else {
             return self.show_notice("Save the file first: it has no history yet.".into(), cx);
         };
         let file = path.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let commits = cx.background_executor().spawn(async move { git::file_history(&file, 300) }).await;
+            let past = cx
+                .background_executor()
+                .spawn(async move {
+                    let commits = git::file_history(&file, 300).into_iter().map(Past::Commit);
+                    let mut past: Vec<Past> =
+                        commits.chain(crate::local_history::versions(&file).into_iter().map(Past::Saved)).collect();
+                    past.sort_by_key(|p| std::cmp::Reverse(p.time()));
+                    past
+                })
+                .await;
             this.update_in(cx, |this, window, cx| {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                if commits.is_empty() {
-                    return this.show_notice(format!("{name} has no history in git."), cx);
+                if past.is_empty() {
+                    return this.show_notice(format!("{name} has no history yet."), cx);
                 }
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs() as i64);
-                let locations = commits
+                let locations = past
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| crate::palette::Location {
+                    .map(|(i, p)| crate::palette::Location {
                         path: path.clone(),
-                        // The row's place is its commit's index in the history.
+                        // The row's place is its index in the history.
                         position: lsp_types::Position { line: i as u32, character: 0 },
-                        text: format!("{}\t{} · {} · {}", c.subject, c.author, git::ago(c.time, now), c.short),
+                        text: match p {
+                            Past::Commit(c) => {
+                                format!("{}\t{} · {} · {}", c.subject, c.author, git::ago(c.time, now), c.short)
+                            }
+                            Past::Saved(_) => format!("Saved\t{}", git::ago(p.time(), now)),
+                        },
                         kind: crate::palette::LocationKind::Commit,
                     })
                     .collect();
                 this.open_locations(format!("History of {name}"), locations, window, cx);
-                this.history = Some((path, commits));
+                this.history = Some((path, past));
             })
             .ok();
         })
@@ -1606,6 +1621,26 @@ impl Workspace {
         let Some(editor) = self.active_editor().cloned() else { return };
         let since = format!("Since {} “{}”", commit.short, commit.subject);
         self.compare_editor(&editor, before, &since, &format!("Unchanged since {}.", commit.short), cx);
+    }
+
+    /// The file against a version Null wrote over: what changed since, to keep or take back.
+    fn compare_with_version(
+        &mut self,
+        path: &Path,
+        saved: &crate::local_history::Saved,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
+        let Some(before) = saved.text(encoding) else {
+            return self.show_notice("Couldn't read that version.".into(), cx);
+        };
+        self.open_file(path.to_path_buf(), window, cx);
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let ago = git::ago(saved.time / 1000, now);
+        let (what, same) = (format!("Against the version saved {ago}"), format!("Same as the version saved {ago}."));
+        self.compare_editor(&editor, before, &what, &same, cx);
     }
 
     /// Pulls the branch (open files saved first). Conflicts open at the first one, where
@@ -3170,10 +3205,13 @@ impl Workspace {
                 // What the list was, before closing it forgets.
                 let (git_listing, history) = (this.git_listing, this.history.take());
                 this.close_palette(window, cx);
-                if let Some((file, commits)) = history
-                    && let Some(commit) = commits.get(position.line as usize)
+                if let Some((file, past)) = history
+                    && let Some(version) = past.get(position.line as usize)
                 {
-                    return this.compare_with(&file, commit.clone(), window, cx);
+                    return match version {
+                        Past::Commit(commit) => this.compare_with(&file, commit.clone(), window, cx),
+                        Past::Saved(saved) => this.compare_with_version(&file, saved, window, cx),
+                    };
                 }
                 if this.review_file(&path, window, cx) {
                     return;
@@ -5480,6 +5518,23 @@ fn moved_to(
     (files.len() == 1).then(|| found.swap_remove(0)).map(|(from, to, _)| (from, to))
 }
 
+/// A version in a file's history: a commit, or one Null wrote over.
+#[derive(Clone)]
+enum Past {
+    Commit(git::FileCommit),
+    Saved(crate::local_history::Saved),
+}
+
+impl Past {
+    /// Unix seconds.
+    fn time(&self) -> i64 {
+        match self {
+            Past::Commit(c) => c.time,
+            Past::Saved(s) => s.time / 1000,
+        }
+    }
+}
+
 /// Whether two paths name the same file, one maybe through a link (/tmp and /private/tmp
 /// on macOS, as git gives paths). The file itself needn't exist anymore.
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -6831,6 +6886,43 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
         workspace.read_with(cx, |w, cx| assert_eq!(w.active_editor().unwrap().read(cx).buffer.to_string(), "one\n"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// No git: a file's history is what Null wrote over. ↵ on it compares, change by change.
+    #[gpui::test]
+    fn history_without_git_keeps_what_saves_replaced(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-history-no-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+        };
+        workspace.update_in(cx, |w, window, cx| w.open_file(file.clone(), window, cx));
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+        editor.update(cx, |e, cx| {
+            e.restore_unsaved("one\ntwo\n", cx);
+            assert!(e.save_to_disk(cx));
+        });
+        workspace.update_in(cx, |w, window, cx| w.file_history(&FileHistory, window, cx));
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        editor.read_with(cx, |e, _| {
+            assert!(e.in_review(), "compared with the version saved over");
+            assert_eq!(e.review_base(), Some("one\n"));
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 
