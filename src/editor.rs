@@ -746,6 +746,15 @@ impl Editor {
     /// Picks up a change made to the file outside Null. Unsaved edits are never
     /// overwritten; the reload itself can be undone.
     pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
+        self.reload(false, cx);
+    }
+
+    /// The file as it is on disk now, unsaved edits or not (after they were discarded).
+    pub fn revert_to_disk(&mut self, cx: &mut Context<Self>) {
+        self.reload(true, cx);
+    }
+
+    fn reload(&mut self, discard_edits: bool, cx: &mut Context<Self>) {
         if self.check_missing(cx) {
             return;
         }
@@ -762,7 +771,7 @@ impl Editor {
         if text == self.buffer.to_string() {
             return;
         }
-        if self.buffer.is_dirty() {
+        if self.buffer.is_dirty() && !discard_edits {
             cx.emit(EditorEvent::ChangedOnDisk);
             return;
         }

@@ -828,11 +828,18 @@ fn bracketed(chars: &[char], start: usize) -> Option<(String, String, usize)> {
     if chars.get(close + 1) != Some(&'(') {
         return None;
     }
-    let end = (close + 2..chars.len()).find(|&n| chars[n] == ')')?;
     let label: String = chars[start + 1..close].iter().collect();
+    // `(<path with spaces>)`: everything to the `>`, spaces and `)` included.
+    if chars.get(close + 2) == Some(&'<') {
+        let gt = (close + 3..chars.len()).find(|&n| chars[n] == '>')?;
+        let end = (gt + 1..chars.len()).find(|&n| chars[n] == ')')?;
+        let url: String = chars[close + 3..gt].iter().collect();
+        return Some((label, url, end + 1 - start));
+    }
+    let end = (close + 2..chars.len()).find(|&n| chars[n] == ')')?;
     let target: String = chars[close + 2..end].iter().collect();
     // `(url "title")`: the title is left out.
-    let url = target.split_whitespace().next().unwrap_or("").trim_matches(['<', '>']).to_string();
+    let url = target.split_whitespace().next().unwrap_or("").to_string();
     Some((label, url, end + 1 - start))
 }
 
@@ -1294,6 +1301,14 @@ fn flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_in_angle_brackets_keep_their_spaces() {
+        let blocks = parse("![shot](<My Shot.png>) and [doc](<a b).md>)");
+        let Block::Paragraph(inlines) = &blocks[0] else { panic!("{blocks:?}") };
+        assert!(matches!(&inlines[0], Inline::Image { url, .. } if url == "My Shot.png"), "{inlines:?}");
+        assert!(inlines.iter().any(|i| matches!(i, Inline::Link { url, .. } if url == "a b).md")), "{inlines:?}");
+    }
 
     #[test]
     fn lines_are_counted_as_the_editor_counts_them() {

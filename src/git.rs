@@ -56,9 +56,17 @@ pub fn status(root: &Path) -> Vec<(std::path::PathBuf, FileStatus)> {
     while let Some(entry) = entries.next() {
         let (code, path) = entry.split_at(entry.len().min(3));
         let (x, y) = (code.chars().next().unwrap_or(' '), code.chars().nth(1).unwrap_or(' '));
-        // A rename lists its old path next: skip it.
+        // A rename (or copy) lists its old path next. The new path isn't in the last commit:
+        // it counts as new (taking it back sends it to the Trash, never deletes it), and a
+        // renamed file's old path as deleted (taking that back restores it).
         if x == 'R' || x == 'C' {
-            entries.next();
+            if let Some(old) = entries.next()
+                && x == 'R'
+            {
+                found.push((top.join(old), FileStatus::Deleted));
+            }
+            found.push((top.join(path), FileStatus::Added));
+            continue;
         }
         let status = match (x, y) {
             ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => FileStatus::Conflicted,
@@ -519,6 +527,34 @@ mod tests {
         assert_eq!(committed_text(&dir.join("link/src/a.rs"), Default::default()).as_deref(), Some("committed\n"));
         assert_eq!(committed_text(&repo.join("src/new.rs"), Default::default()), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A renamed file: the new name is new (taking it back trashes it, never deletes it),
+    /// the old one deleted (taking it back restores it).
+    #[test]
+    #[cfg(unix)]
+    fn a_rename_is_a_new_file_and_a_deleted_one() {
+        let repo = std::env::temp_dir().join(format!("null-git-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| git(&repo, args);
+        if run(&["init", "-q"]).is_none() {
+            return;
+        }
+        std::fs::write(repo.join("a.txt"), "text\n").unwrap();
+        run(&["add", "."]).unwrap();
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]).unwrap();
+        run(&["mv", "a.txt", "b.txt"]).unwrap();
+        std::fs::write(repo.join("b.txt"), "text, edited\n").unwrap();
+        let found = status(&repo);
+        let top = std::path::PathBuf::from(git(&repo, &["rev-parse", "--show-toplevel"]).unwrap().trim());
+        assert!(found.contains(&(top.join("b.txt"), FileStatus::Added)), "{found:?}");
+        assert!(found.contains(&(top.join("a.txt"), FileStatus::Deleted)), "{found:?}");
+        // Taking the old name back restores it; the new file is untouched.
+        revert(&repo, &top.join("a.txt"), FileStatus::Deleted).unwrap();
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "text\n");
+        assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "text, edited\n");
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]

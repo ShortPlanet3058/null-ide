@@ -78,7 +78,8 @@ impl Editor {
         let (last, _) = self.buffer.point(range.end);
         if !range.is_empty() && first == last {
             let text = self.buffer.slice(range.clone());
-            let inner = text.strip_prefix(open).and_then(|t| t.strip_suffix(close));
+            let inner =
+                text.strip_prefix(open).and_then(|t| t.strip_suffix(close)).filter(|inner| !inner.contains(close));
             let new = match inner {
                 Some(inner) => {
                     let inner = inner.strip_prefix(' ').unwrap_or(inner);
@@ -360,7 +361,12 @@ fn toggle_block_comment(lines: &[String], open: &str, close: &str) -> Vec<String
     let first = lines.first().map(|l| l.trim_start()).unwrap_or("");
     let last = lines.last().map(|l| l.trim_end()).unwrap_or("");
     let mut lines = lines.to_vec();
-    if first.starts_with(open) && last.ends_with(close) {
+    // One comment from the first line's start to the last line's end (not two that happen
+    // to start and end there, `/* a */ f(); /* b */`).
+    let all = lines.join("\n");
+    let all = all.trim();
+    let one = all.len() >= open.len() + close.len() && !all[open.len()..all.len() - close.len()].contains(close);
+    if first.starts_with(open) && last.ends_with(close) && one {
         let f = &mut lines[0];
         let at = f.find(open).unwrap_or(0);
         f.replace_range(at..at + open.len(), "");
@@ -385,6 +391,14 @@ fn toggle_block_comment(lines: &[String], open: &str, close: &str) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_comments_on_a_line_are_not_one() {
+        let line = ["/* a */ f(); /* b */".to_string()];
+        assert_eq!(toggle_block_comment(&line, "/*", "*/"), ["/* /* a */ f(); /* b */ */"]);
+        let one = ["/* a".to_string(), "b */".to_string()];
+        assert_eq!(toggle_block_comment(&one, "/*", "*/"), ["a", "b"]);
+    }
 
     fn strings(lines: &[&str]) -> Vec<String> {
         lines.iter().map(|s| s.to_string()).collect()
