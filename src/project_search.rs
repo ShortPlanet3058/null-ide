@@ -591,15 +591,18 @@ fn file_filter(root: &Path, written: &str) -> Option<ignore::overrides::Override
         if name.is_empty() {
             continue;
         }
-        let glob = if term.contains(['*', '?', '[']) {
-            term.to_string()
-        } else if term.ends_with('/') || !name.contains('.') {
+        let globs = if term.contains(['*', '?', '[']) {
+            vec![term.to_string()]
+        } else if term.ends_with('/') {
             // A folder, wherever it is.
-            format!("**/{name}/**")
+            vec![format!("**/{name}/**")]
         } else {
-            format!("**/{name}")
+            // A file's name or a folder's (`Makefile`, `.github`, `main.rs`, `src`).
+            vec![format!("**/{name}"), format!("**/{name}/**")]
         };
-        any |= only.add(&if leave_out { format!("!{glob}") } else { glob }).is_ok();
+        for glob in globs {
+            any |= only.add(&if leave_out { format!("!{glob}") } else { glob }).is_ok();
+        }
     }
     any.then(|| only.build().ok()).flatten()
 }
@@ -916,6 +919,9 @@ mod tests {
         assert_eq!(found("ui"), "src/ui/view.rs");
         assert_eq!(found("main.rs"), "docs/main.rs src/main.rs");
         assert_eq!(found("!src, !docs"), "tests/it.rs");
+        // A name without a dot can be a file, and one with a dot a folder.
+        assert_eq!(found("it.rs"), "tests/it.rs");
+        assert_eq!(found("notes.md, tests"), "src/notes.md tests/it.rs");
         std::fs::remove_dir_all(&root).ok();
     }
 

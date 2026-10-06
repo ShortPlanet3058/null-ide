@@ -93,9 +93,29 @@ fn join_words(words: &[String], between: &str, each: fn(&str) -> String) -> Stri
     words.iter().map(|w| each(w)).collect::<Vec<_>>().join(between)
 }
 
-/// A name style applied to each line on its own, so lines stay lines.
+/// A name style applied to each line on its own: its line breaks ("\n", "\r\n" or "\r")
+/// and the spaces around its words stay as they are.
 fn by_line(text: &str, style: impl Fn(&[String]) -> String) -> String {
-    text.split('\n').map(|line| style(&name_words(line))).collect::<Vec<_>>().join("\n")
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
+        let (line, after) = rest.split_at(end);
+        let words = line.trim();
+        if words.is_empty() {
+            out.push_str(line);
+        } else {
+            let lead = &line[..line.len() - line.trim_start().len()];
+            let trail = &line[line.trim_end().len()..];
+            out.push_str(lead);
+            out.push_str(&style(&name_words(words)));
+            out.push_str(trail);
+        }
+        let brk = if after.starts_with("\r\n") { 2 } else { usize::from(!after.is_empty()) };
+        out.push_str(&after[..brk]);
+        rest = &after[brk..];
+    }
+    out
 }
 
 /// Selections grown by [`ExpandSelection`], to shrink back through.
@@ -332,6 +352,7 @@ impl Editor {
 
     /// The selected lines rewritten by `change` (which may drop some), still selected.
     fn reorder_lines(&mut self, change: impl FnOnce(Vec<String>) -> Vec<String>, verb: &str, cx: &mut Context<Self>) {
+        self.single_cursor();
         let lines = self.selected_lines();
         if lines.len() < 2 {
             let at = self.selection.head;
@@ -477,8 +498,10 @@ mod tests {
         assert_eq!(pascal("user_id"), "UserId");
         assert_eq!(by_line("max-retry count", |w| join_words(w, " ", capital)), "Max Retry Count");
         assert_eq!(by_line("ÉtéChaud", |w| join_words(w, "-", lower)), "été-chaud");
-        // Each line on its own.
+        // Each line on its own, its indentation and its line break kept.
         assert_eq!(snake("aB\ncD"), "a_b\nc_d");
+        assert_eq!(snake("    fooBar\r\n    bazQux"), "    foo_bar\r\n    baz_qux");
+        assert_eq!(snake("a b\rc d"), "a_b\rc_d");
     }
     use crate::buffer::Buffer;
     use gpui::TestAppContext;

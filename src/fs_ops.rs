@@ -122,7 +122,13 @@ pub fn copy_into(path: &Path, dir: &Path) -> Result<PathBuf, String> {
 
 /// A name in `dir` for a copy of `path` nothing has yet: "name copy.ext", "name copy 2.ext"...
 fn copy_name(path: &Path, dir: &Path) -> Result<PathBuf, String> {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    // A folder's whole name (`my.app`), a file's without its extension.
+    let whole = |p: &Path| p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = if path.is_dir() {
+        whole(path)
+    } else {
+        path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    };
     let ext = if path.is_dir() { None } else { path.extension().map(|e| e.to_string_lossy().into_owned()) };
     let name = |n: usize| {
         let copy = if n == 1 { format!("{stem} copy") } else { format!("{stem} copy {n}") };
@@ -227,6 +233,9 @@ mod tests {
         assert_eq!(copy_into(&from.join("assets"), &into), Ok(into.join("assets")));
         assert!(into.join("assets/logo.svg").is_file());
         assert!(copy_into(&root.join("project"), &into).is_err());
+        // A folder with a dot keeps its whole name.
+        std::fs::create_dir_all(into.join("my.app")).unwrap();
+        assert_eq!(duplicate(&into.join("my.app")), Ok(into.join("my.app copy")));
         std::fs::remove_dir_all(&root).ok();
     }
 

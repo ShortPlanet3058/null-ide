@@ -1417,7 +1417,8 @@ impl Workspace {
     /// ⌘I in the commit list: AI reads what changed in `files` and writes the message into
     /// the field as it goes, to edit or commit with ↵.
     fn write_commit_message(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(palette) = self.palette.as_ref().map(|(p, _)| p.clone()) else { return };
+        // Weak: once the list is closed, the message stops coming.
+        let Some(palette) = self.palette.as_ref().map(|(p, _)| p.downgrade()) else { return };
         let settings = cx.global::<Settings>().ai.clone();
         let root = self.tree.read(cx).root().to_path_buf();
         // Nothing in the field meanwhile: ↵ there must never commit a placeholder.
@@ -1461,7 +1462,7 @@ impl Workspace {
                     crate::ai::AiEvent::Done => true,
                     crate::ai::AiEvent::Failed(error) => {
                         this.update(cx, |this, cx| {
-                            palette.update(cx, |p, cx| p.set_query("", cx));
+                            palette.update(cx, |p, cx| p.set_query("", cx)).ok();
                             this.show_notice(format!("Couldn't write the message: {error}"), cx);
                         })
                         .ok();
@@ -1698,7 +1699,7 @@ impl Workspace {
                     if tab.editor.read(cx).path() == Some(path.as_path()) {
                         tab.editor.update(cx, |editor, cx| {
                             editor.end_review(cx);
-                            editor.reload_from_disk(cx);
+                            editor.revert_to_disk(cx);
                         });
                     }
                 }
@@ -1745,7 +1746,7 @@ impl Workspace {
                 for tab in &this.tabs {
                     tab.editor.update(cx, |editor, cx| {
                         editor.end_review(cx);
-                        editor.reload_from_disk(cx);
+                        editor.revert_to_disk(cx);
                     });
                 }
                 this.refresh_git(cx);
@@ -5130,7 +5131,10 @@ impl Workspace {
             links.push(crate::markdown_view::link_to(&dir, &target));
         }
         if !links.is_empty() {
-            editor.update(cx, |editor, cx| editor.insert_at(at, &links.join("\n"), cx));
+            editor.update(cx, |editor, cx| {
+                let ending = editor.style.line_ending.text();
+                editor.insert_at(at, &links.join(ending), cx)
+            });
         }
     }
 
