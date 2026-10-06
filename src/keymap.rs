@@ -59,6 +59,8 @@ impl Keymap {
             Keymap::JetBrains => vec![
                 KeyBinding::new("secondary-shift-o", TogglePalette, workspace),
                 KeyBinding::new("secondary-e", TogglePalette, workspace),
+                // Over the editor's own ⌘E (use the selection for find).
+                KeyBinding::new("secondary-e", TogglePalette, editor),
                 KeyBinding::new("secondary-shift-a", ShowCommands, workspace),
                 KeyBinding::new("secondary-1", ToggleSidebar, workspace),
                 KeyBinding::new("alt-f12", ToggleTerminal, workspace),
@@ -215,6 +217,25 @@ mod tests {
             assert_eq!(run("ctrl-p", "Editor showing_completions"), Some(crate::editor::CompletionPrevious.name()));
             assert_eq!(run("ctrl-a", "TextInput"), Some(crate::text_input::Home.name()));
         });
+    }
+
+    /// ⌘E uses the selection for find, but stays the palette for JetBrains hands.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn command_e_finds_except_on_jetbrains(cx: &mut gpui::TestAppContext) {
+        let first = |preset: Keymap, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                register(preset, cx);
+                let keymap = cx.key_bindings();
+                let keymap = keymap.borrow();
+                let context: Vec<gpui::KeyContext> =
+                    ["Workspace", "Editor"].iter().map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+                let (bindings, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse("cmd-e").unwrap()], &context);
+                bindings.first().map(|b| b.action().name())
+            })
+        };
+        assert_eq!(first(Keymap::Null, cx), Some(crate::find_bar::UseSelectionForFind.name()));
+        assert_eq!(first(Keymap::JetBrains, cx), Some(TogglePalette.name()));
     }
 
     /// The preset's keys win over Null's own: on JetBrains, ⌘D duplicates the line.
