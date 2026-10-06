@@ -312,6 +312,9 @@ pub enum EditorEvent {
     NeedsPath,
     /// The file changed on disk while there were unsaved edits here.
     ChangedOnDisk,
+    /// Save was asked for, but the file changed on disk under the unsaved edits: saving
+    /// would write over that, so it waits for an answer.
+    SaveConflict,
     /// Writing the file failed; the message says why.
     SaveFailed(String),
     /// Go to definition landed in another file.
@@ -436,6 +439,9 @@ pub struct Editor {
     /// The file was deleted on disk while open (a checkout, the terminal): the text is
     /// still here, and saving puts the file back.
     pub missing: bool,
+    /// The file changed on disk under unsaved edits here (or under ones brought back from
+    /// last time): a save asks before writing over it.
+    pub disk_changed: bool,
     /// What the file last held on disk, as far as Null knows, to recognise it moved.
     pub on_disk: Option<Fingerprint>,
     /// How the file's bytes are text, kept when saving.
@@ -621,6 +627,7 @@ impl Editor {
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
             preview: None,
             missing: false,
+            disk_changed: false,
             on_disk: None,
             encoding: Default::default(),
             viewport_height: None,
@@ -762,19 +769,28 @@ impl Editor {
         let read = crate::encoding::read(path);
         if self.preview.is_some() {
             let text = read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind());
-            self.preview = crate::preview::of(path, &text).or(self.preview.take());
-            return cx.notify();
+            let now = crate::preview::of(path, &text);
+            // Readable now (its permissions were fixed): it opens as text after all.
+            let readable_now = now.is_none() && read.is_ok();
+            if !(readable_now && matches!(self.preview, Some(crate::preview::Preview::Unreadable { .. }))) {
+                self.preview = now.or(self.preview.take());
+                return cx.notify();
+            }
+            self.preview = None;
         }
         let Ok((text, encoding)) = read else { return };
         self.on_disk = Some(fingerprint(&text));
         self.encoding = encoding;
         if text == self.buffer.to_string() {
+            self.disk_changed = false;
             return;
         }
         if self.buffer.is_dirty() && !discard_edits {
+            self.disk_changed = true;
             cx.emit(EditorEvent::ChangedOnDisk);
             return;
         }
+        self.disk_changed = false;
         let (line, column) = self.caret_point();
         self.record_undo(EditKind::Other);
         self.buffer.replace(0..self.buffer.len_chars(), &text);
@@ -798,6 +814,7 @@ impl Editor {
     /// Gives the buffer a new file (after a rename, or the first save of an untitled file).
     pub fn set_path(&mut self, path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) {
         self.missing = false;
+        self.disk_changed = false;
         self.release_lsp(cx);
         self.highlighter = highlighter_for(&path, &self.buffer);
         self.spans.clear();
@@ -2135,6 +2152,12 @@ impl Editor {
         cx.notify();
     }
 
+    /// Saves over a file that changed on disk, once that was asked.
+    pub fn overwrite_disk(&mut self, cx: &mut Context<Self>) -> bool {
+        self.disk_changed = false;
+        self.save_to_disk(cx)
+    }
+
     pub fn save_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
         // Nothing to write: what's shown is the file itself.
         if self.preview.is_some() {
@@ -2142,6 +2165,10 @@ impl Editor {
         }
         if self.path.is_none() {
             cx.emit(EditorEvent::NeedsPath);
+            return false;
+        }
+        if self.disk_changed {
+            cx.emit(EditorEvent::SaveConflict);
             return false;
         }
         self.tidy_for_save(cx);
@@ -2164,10 +2191,11 @@ impl Editor {
                 return false;
             }
         };
-        match std::fs::write(path, bytes) {
+        match crate::fs_ops::write_file(path, &bytes) {
             Ok(()) => {
                 self.on_disk = Some(fingerprint(&text));
                 self.missing = false;
+                self.disk_changed = false;
                 self.buffer.mark_saved();
                 self.lsp_saved(cx);
                 cx.emit(EditorEvent::Saved);
@@ -3500,6 +3528,11 @@ impl Editor {
                     .size_full()
                     .object_fit(ObjectFit::ScaleDown)
                     .with_fallback(move || note(format!("Couldn't show {name}")).into_any_element())
+                    .into_any_element()
+            }
+            (crate::preview::Preview::Unreadable { .. }, _) => {
+                note(format!("Couldn't read {}", name.unwrap_or_else(|| "this file".into())))
+                    .child(div().text_size(px(crate::ui::T_SM)).text_color(faint).child(preview.summary()))
                     .into_any_element()
             }
             _ => note(format!("{} isn't text", name.unwrap_or_else(|| "This file".into())))

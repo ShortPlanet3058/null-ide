@@ -130,7 +130,7 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
                 n => return Err(format!("old_text appears {n} times: include more lines around it.")),
             }
             on_event(TaskEvent::File(arg("path")));
-            std::fs::write(&path, text.replacen(&old, &new, 1)).map_err(|e| e.to_string())?;
+            crate::fs_ops::write_file(&path, text.replacen(&old, &new, 1).as_bytes()).map_err(|e| e.to_string())?;
             Ok("Done.".into())
         }
         "write_file" => {
@@ -139,7 +139,7 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
                 std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             }
             on_event(TaskEvent::File(arg("path")));
-            std::fs::write(&path, arg("content")).map_err(|e| e.to_string())?;
+            crate::fs_ops::write_file(&path, arg("content").as_bytes()).map_err(|e| e.to_string())?;
             Ok("Done.".into())
         }
         other => Err(format!("There's no tool called {other}.")),

@@ -6,8 +6,16 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// git, run in `dir`. Paths given to it are names, never patterns: discarding `app/[id].tsx`
+/// mustn't touch `app/d.tsx`.
+fn command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir).env("GIT_LITERAL_PATHSPECS", "1").env("GIT_TERMINAL_PROMPT", "0");
+    command
+}
+
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+    let output = command(dir).args(args).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -16,8 +24,7 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 /// /tmp, which is /private/tmp on macOS) still finds it.
 pub fn committed_text(path: &Path, encoding: crate::encoding::Encoding) -> Option<String> {
     let name = path.file_name()?.to_str()?;
-    let output =
-        Command::new("git").arg("-C").arg(path.parent()?).args(["show", &format!("HEAD:./{name}")]).output().ok()?;
+    let output = command(path.parent()?).args(["show", &format!("HEAD:./{name}")]).output().ok()?;
     // In the file's own encoding, so a Windows-1252 file compares with its accents.
     output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
 }
@@ -45,12 +52,15 @@ pub enum FileStatus {
 }
 
 /// Every changed file under `root`, by absolute path (untracked ones included, ignored
-/// ones not). Empty outside a repository.
+/// ones not), and only under it: a project inside a bigger repository sees its own.
+/// Empty outside a repository.
 pub fn status(root: &Path) -> Vec<(std::path::PathBuf, FileStatus)> {
     let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| std::path::PathBuf::from(t.trim())) else {
         return Vec::new();
     };
-    let Some(out) = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]) else { return Vec::new() };
+    let Some(out) = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]) else {
+        return Vec::new();
+    };
     let mut entries = out.split('\0').filter(|e| !e.is_empty());
     let mut found = Vec::new();
     while let Some(entry) = entries.next() {
@@ -70,7 +80,8 @@ pub fn status(root: &Path) -> Vec<(std::path::PathBuf, FileStatus)> {
         }
         let status = match (x, y) {
             ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => FileStatus::Conflicted,
-            ('?', '?') | ('A', _) => FileStatus::Added,
+            // Added, or only meant to be (`git add -N`): not in the last commit either way.
+            ('?', '?') | ('A', _) | (_, 'A') => FileStatus::Added,
             ('D', _) | (_, 'D') => FileStatus::Deleted,
             _ => FileStatus::Modified,
         };
@@ -87,7 +98,7 @@ pub fn commit_all(root: &Path, message: &str) -> Result<String, String> {
 
 /// Commits every change but those to `left_out`, which stay as they are, uncommitted.
 pub fn commit(root: &Path, message: &str, left_out: &[PathBuf]) -> Result<String, String> {
-    run(root, &["add", "-A"])?;
+    run(root, &["add", "-A", "--", "."])?;
     if !left_out.is_empty() {
         let paths: Vec<String> = left_out.iter().map(|p| p.to_string_lossy().into_owned()).collect();
         let mut args = vec!["reset", "-q", "--"];
@@ -150,12 +161,8 @@ pub fn file_history(path: &Path, max: usize) -> Vec<FileCommit> {
 /// The file as it was in `commit`, in its own encoding.
 pub fn file_at(path: &Path, commit: &FileCommit, encoding: crate::encoding::Encoding) -> Option<String> {
     let top = git(path.parent()?, &["rev-parse", "--show-toplevel"])?;
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(top.trim())
-        .args(["show", &format!("{}:{}", commit.hash, commit.path)])
-        .output()
-        .ok()?;
+    let output =
+        command(Path::new(top.trim())).args(["show", &format!("{}:{}", commit.hash, commit.path)]).output().ok()?;
     output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
 }
 
@@ -196,13 +203,22 @@ pub fn push(root: &Path) -> Result<String, String> {
     Ok(branch)
 }
 
-/// A file back as it was in the last commit; a new file goes to the Trash.
+/// A file back as it was in the last commit; a file the last commit doesn't have goes to
+/// the Trash (and out of what's staged), whatever `status` says: never deleted.
 pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String> {
-    if status == FileStatus::Added {
-        return crate::fs_ops::move_to_trash(path);
+    let name = path.to_string_lossy();
+    if status == FileStatus::Added || (path.exists() && !in_last_commit(path)) {
+        crate::fs_ops::move_to_trash(path)?;
+        run(root, &["rm", "-q", "--cached", "--ignore-unmatch", "--", &name]).ok();
+        return Ok(());
     }
-    let path = path.to_string_lossy();
-    run(root, &["restore", "--source=HEAD", "--staged", "--worktree", "--", &path]).map(|_| ())
+    run(root, &["restore", "--source=HEAD", "--staged", "--worktree", "--", &name]).map(|_| ())
+}
+
+/// Whether the last commit has the file at `path`.
+fn in_last_commit(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return false };
+    command(dir).args(["cat-file", "-e", &format!("HEAD:./{name}")]).output().is_ok_and(|o| o.status.success())
 }
 
 /// A branch to switch to.
@@ -291,12 +307,22 @@ pub const WOULD_LOSE_CHANGES: &str = "Changes here would be lost on that branch:
 /// Switches to `branch` taking the changes not committed along: set aside, switched,
 /// put back. The files they conflict in, if putting them back does (they're left marked).
 pub fn switch_carrying_changes(root: &Path, branch: &Branch) -> Result<Vec<PathBuf>, String> {
+    let latest_stash = || git(root, &["rev-parse", "-q", "--verify", "refs/stash"]);
+    let before = latest_stash();
     run(root, &["stash", "push", "-q", "--include-untracked", "-m", &format!("Null: carried to {}", branch.name)])
         .map_err(|e| format!("Couldn't set the changes aside: {e}"))?;
+    // Nothing set aside (no changes after all): there's nothing to put back either, and
+    // popping would bring back some older stash instead.
+    let set_aside = latest_stash() != before;
     if let Err(error) = switch_branch(root, branch) {
         // Back as they were, on the branch they were on.
-        run(root, &["stash", "pop", "-q"]).ok();
+        if set_aside {
+            run(root, &["stash", "pop", "-q"]).ok();
+        }
         return Err(error);
+    }
+    if !set_aside {
+        return Ok(Vec::new());
     }
     match run(root, &["stash", "pop", "-q"]) {
         Ok(_) => Ok(Vec::new()),
@@ -338,11 +364,8 @@ pub fn blame_line(path: &Path, text: &str, line: usize) -> Option<LineBlame> {
     let dir = path.parent()?;
     let name = path.file_name()?.to_str()?;
     let range = format!("{},{}", line + 1, line + 1);
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let mut child = command(dir)
         .args(["blame", "--porcelain", "-L", &range, "--contents", "-", "--", name])
-        .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -391,13 +414,7 @@ pub fn ago(time: i64, now: i64) -> String {
 
 /// Runs git, with its own words when it fails.
 fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    let output = command(dir).args(args).output().map_err(|e| format!("Couldn't run git: {e}"))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
@@ -723,6 +740,52 @@ mod tests {
         assert_eq!(left, ["b.txt", "new.txt"]);
         // Still changed, as left.
         assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "b2\n");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Taking changes back never loses work it shouldn't: a name is a name, not a pattern;
+    /// a file only meant to be added (`git add -N`) goes to the Trash, not away; and a
+    /// project inside a bigger repository sees only its own changes.
+    #[test]
+    #[cfg(unix)]
+    fn reverting_touches_only_what_it_names() {
+        let repo = std::env::temp_dir().join(format!("null-git-literal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("app/[id]")).unwrap();
+        std::fs::create_dir_all(repo.join("app/d")).unwrap();
+        std::fs::create_dir_all(repo.join("other")).unwrap();
+        if run(&repo, &["init", "-q"]).is_err() {
+            return; // No git here.
+        }
+        run(&repo, &["config", "user.name", "t"]).unwrap();
+        run(&repo, &["config", "user.email", "t@t"]).unwrap();
+        for f in ["app/[id]/page.tsx", "app/d/page.tsx", "other/o.txt"] {
+            std::fs::write(repo.join(f), "old\n").unwrap();
+        }
+        commit_all(&repo, "first").unwrap();
+        for f in ["app/[id]/page.tsx", "app/d/page.tsx", "other/o.txt"] {
+            std::fs::write(repo.join(f), "new\n").unwrap();
+        }
+        let top = PathBuf::from(git(&repo, &["rev-parse", "--show-toplevel"]).unwrap().trim());
+        revert(&repo, &top.join("app/[id]/page.tsx"), FileStatus::Modified).unwrap();
+        assert_eq!(std::fs::read_to_string(repo.join("app/[id]/page.tsx")).unwrap(), "old\n");
+        assert_eq!(std::fs::read_to_string(repo.join("app/d/page.tsx")).unwrap(), "new\n", "a pattern took it back");
+        // Only meant to be added: new, and taking it back keeps it (in the Trash).
+        std::fs::write(repo.join("app/planned.ts"), "plan\n").unwrap();
+        run(&repo, &["add", "-N", "app/planned.ts"]).unwrap();
+        let app = status(&repo.join("app"));
+        assert!(app.contains(&(top.join("app/planned.ts"), FileStatus::Added)), "{app:?}");
+        // The project is app/: other/ isn't its business.
+        assert!(app.iter().all(|(p, _)| p.starts_with(top.join("app"))), "{app:?}");
+        revert(&repo.join("app"), &top.join("app/planned.ts"), FileStatus::Modified).unwrap();
+        assert!(!repo.join("app/planned.ts").exists());
+        assert!(
+            crate::fs_ops::test_trash().join("planned.ts").exists() || {
+                let trash = std::fs::read_dir(crate::fs_ops::test_trash()).unwrap();
+                trash.filter_map(Result::ok).any(|e| e.file_name().to_string_lossy().starts_with("planned.ts"))
+            }
+        );
+        assert!(!status(&repo).iter().any(|(p, _)| p.ends_with("planned.ts")), "still staged");
         std::fs::remove_dir_all(&repo).ok();
     }
 

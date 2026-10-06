@@ -1343,7 +1343,8 @@ impl Workspace {
     /// Saves a file with unsaved changes, if it has a name to save under.
     fn save_if_named(editor: &Entity<Editor>, cx: &mut App) {
         let e = editor.read(cx);
-        if e.buffer.is_dirty() && e.path().is_some() {
+        // Not over a file that changed on disk: that waits for a save that asks.
+        if e.buffer.is_dirty() && e.path().is_some() && !e.disk_changed {
             editor.update(cx, |editor, cx| editor.save_to_disk(cx));
         }
     }
@@ -1691,12 +1692,12 @@ impl Workspace {
             let reverting = path.clone();
             let result = cx.background_executor().spawn(async move { git::revert(&root, &reverting, status) }).await;
             this.update(cx, |this, cx| {
-                match result {
+                match &result {
                     Ok(()) => this.show_notice(format!("Discarded the changes to {name}."), cx),
                     Err(error) => this.show_notice(format!("Couldn't discard them: {error}"), cx),
                 }
                 for tab in &this.tabs {
-                    if tab.editor.read(cx).path() == Some(path.as_path()) {
+                    if result.is_ok() && tab.editor.read(cx).path().is_some_and(|p| same_file(p, &path)) {
                         tab.editor.update(cx, |editor, cx| {
                             editor.end_review(cx);
                             editor.revert_to_disk(cx);
@@ -1729,25 +1730,32 @@ impl Workspace {
             if answer.await != Ok(0) {
                 return;
             }
-            let failed: Vec<String> = cx
+            let (reverted, failed) = cx
                 .background_executor()
                 .spawn(async move {
-                    changed
-                        .iter()
-                        .filter_map(|(path, status)| {
-                            git::revert(&root, path, *status).err().map(|e| format!("{}: {e}", path.display()))
-                        })
-                        .collect()
+                    let (mut reverted, mut failed) = (Vec::new(), Vec::new());
+                    for (path, status) in &changed {
+                        match git::revert(&root, path, *status) {
+                            Ok(()) => reverted.push(path.clone()),
+                            Err(e) => failed.push(format!("{}: {e}", path.display())),
+                        }
+                    }
+                    (reverted, failed)
                 })
                 .await;
             this.update(cx, |this, cx| {
                 let notice = if failed.is_empty() { "Reverted every change.".to_string() } else { failed.join("; ") };
                 this.show_notice(notice, cx);
+                // Only the files that went back: edits not yet saved in any other stay.
                 for tab in &this.tabs {
-                    tab.editor.update(cx, |editor, cx| {
-                        editor.end_review(cx);
-                        editor.revert_to_disk(cx);
-                    });
+                    let was_reverted =
+                        tab.editor.read(cx).path().is_some_and(|p| reverted.iter().any(|r| same_file(p, r)));
+                    if was_reverted {
+                        tab.editor.update(cx, |editor, cx| {
+                            editor.end_review(cx);
+                            editor.revert_to_disk(cx);
+                        });
+                    }
                 }
                 this.refresh_git(cx);
             })
@@ -2049,6 +2057,7 @@ impl Workspace {
                     let name = editor.read(cx).file_name();
                     this.show_notice(format!("{name} changed on disk. Your unsaved edits were kept."), cx);
                 }
+                EditorEvent::SaveConflict => this.resolve_save_conflict(editor.clone(), window, cx),
                 EditorEvent::Rename { position, new_name } => {
                     let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
                     let request = this.lsp.read(cx).rename(&path, *position, new_name.clone());
@@ -2180,7 +2189,21 @@ impl Workspace {
         self.show_notice(message, cx);
     }
 
+    /// The project's folder.
+    pub fn root<'a>(&self, cx: &'a App) -> &'a Path {
+        self.tree.read(cx).root()
+    }
+
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // A folder another window has open: that window comes forward.
+        if path.is_dir()
+            && let Some(other) = crate::window_on(&path, Some(window.window_handle()), cx)
+        {
+            cx.defer(move |cx| {
+                other.update(cx, |_, window, _| window.activate_window()).ok();
+            });
+            return;
+        }
         if path.is_dir() {
             // The project being left keeps its session.
             self.save_session(cx);
@@ -2618,8 +2641,13 @@ impl Workspace {
                     Some(editor)
                 }
             };
+            let disk_changed = backup.path.as_ref().is_some_and(|p| backup.disk != crate::session::disk_fingerprint(p));
             if let Some(editor) = editor {
-                editor.update(cx, |editor, cx| editor.restore_unsaved(&backup.text, cx));
+                editor.update(cx, |editor, cx| {
+                    editor.restore_unsaved(&backup.text, cx);
+                    // Written over a file that changed since: saving asks first.
+                    editor.disk_changed |= disk_changed && editor.buffer.is_dirty();
+                });
             }
         }
         let files = if backups.len() == 1 { "1 file".to_string() } else { format!("{} files", backups.len()) };
@@ -2683,6 +2711,31 @@ impl Workspace {
     }
 
     /// Asks for a location, then saves the editor there.
+    /// Saving a file that changed on disk under unsaved edits: which version stays.
+    fn resolve_save_conflict(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
+        let name = editor.read(cx).file_name();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("{name} changed on disk since you started editing it."),
+            Some("Saving writes your version over it. Reloading takes the one on disk, losing your edits."),
+            &["Save Mine", "Reload From Disk", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |_, cx| {
+            let answer = answer.await;
+            editor
+                .update(cx, |editor, cx| match answer {
+                    Ok(0) => {
+                        editor.overwrite_disk(cx);
+                    }
+                    Ok(1) => editor.revert_to_disk(cx),
+                    _ => {}
+                })
+                .ok();
+        })
+        .detach();
+    }
+
     fn ask_where_to_save(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         let current = editor.read(cx).path().map(Path::to_path_buf);
         let dir = current
@@ -3575,7 +3628,7 @@ impl Workspace {
                     // Written back in its own encoding; one that can't hold the new text fails.
                     let written = crate::encoding::encode(&new, encoding)
                         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))
-                        .and_then(|bytes| std::fs::write(path, bytes));
+                        .and_then(|bytes| crate::fs_ops::write_file(path, &bytes));
                     match written {
                         Ok(()) => {
                             replaced += edits.len();
@@ -4654,7 +4707,7 @@ impl Workspace {
                     crate::editor::apply_edits(&mut buffer, &edits);
                     let bytes = crate::encoding::encode(&buffer.to_string(), encoding)
                         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
-                    std::fs::write(&path, bytes)
+                    crate::fs_ops::write_file(&path, &bytes)
                 });
                 if written.is_err() {
                     failed.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
@@ -5425,6 +5478,16 @@ fn moved_to(
     files.sort();
     files.dedup();
     (files.len() == 1).then(|| found.swap_remove(0)).map(|(from, to, _)| (from, to))
+}
+
+/// Whether two paths name the same file, one maybe through a link (/tmp and /private/tmp
+/// on macOS, as git gives paths). The file itself needn't exist anymore.
+fn same_file(a: &Path, b: &Path) -> bool {
+    let real = |p: &Path| match (p.parent().and_then(|d| std::fs::canonicalize(d).ok()), p.file_name()) {
+        (Some(dir), Some(name)) => dir.join(name),
+        _ => p.to_path_buf(),
+    };
+    a == b || (a.file_name() == b.file_name() && real(a) == real(b))
 }
 
 fn moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
@@ -6768,6 +6831,52 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
         workspace.read_with(cx, |w, cx| assert_eq!(w.active_editor().unwrap().read(cx).buffer.to_string(), "one\n"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file changed on disk under unsaved edits: saving asks before writing over it,
+    /// auto-save leaves it be, and Cancel writes nothing.
+    #[gpui::test]
+    fn saving_over_a_file_changed_on_disk_asks(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-save-conflict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(file.clone(), window, cx));
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+        editor.update(cx, |e, cx| e.restore_unsaved("mine\n", cx));
+        std::fs::write(&file, "theirs\n").unwrap();
+        editor.update(cx, |e, cx| e.reload_from_disk(cx));
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |e, _| e.disk_changed));
+        // Auto-save doesn't write over it.
+        cx.update(|_, cx| Workspace::save_if_named(&editor, cx));
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "theirs\n");
+        // A save asks; Cancel keeps theirs on disk and mine in the editor.
+        editor.update(cx, |e, cx| e.save_to_disk(cx));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "asked before writing over it");
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "theirs\n");
+        assert_eq!(editor.read_with(cx, |e, _| e.buffer.to_string()), "mine\n");
+        // Save Mine writes it.
+        editor.update(cx, |e, cx| e.save_to_disk(cx));
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Save Mine");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine\n");
+        assert!(!editor.read_with(cx, |e, _| e.disk_changed));
         std::fs::remove_dir_all(&dir).ok();
     }
 

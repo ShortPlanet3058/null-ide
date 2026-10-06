@@ -11,6 +11,9 @@ const MAX_FILES: usize = 20_000;
 
 pub struct Snapshot {
     files: HashMap<PathBuf, String>,
+    /// Every file there was, copied or not (too big, not text, past the limit): one of
+    /// these isn't new afterwards, so undoing never trashes it.
+    present: std::collections::HashSet<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,14 +34,19 @@ pub struct FileChange {
     pub before: String,
 }
 
-/// The project's text files, respecting .gitignore (hidden files included, .git not).
-fn text_files(root: &Path) -> HashMap<PathBuf, String> {
+/// The project's files, respecting .gitignore (hidden files included, .git not).
+fn all_files(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(root)
         .hidden(false)
         .filter_entry(|e| e.file_name() != ".git")
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+}
+
+/// The project's text files, by path.
+fn text_files(root: &Path) -> HashMap<PathBuf, String> {
+    all_files(root)
         .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_FILE_BYTES))
         .take(MAX_FILES)
         .filter_map(|e| {
@@ -51,7 +59,7 @@ fn text_files(root: &Path) -> HashMap<PathBuf, String> {
 impl Snapshot {
     /// Copies the project's text files. Takes a moment on big projects: off the main thread.
     pub fn take(root: &Path) -> Self {
-        Self { files: text_files(root) }
+        Self { files: text_files(root), present: all_files(root).map(ignore::DirEntry::into_path).collect() }
     }
 
     /// What changed since: files changed, added and deleted, by path.
@@ -62,6 +70,8 @@ impl Snapshot {
             let (kind, before) = match self.files.get(path) {
                 Some(before) if before == after => continue,
                 Some(before) => (ChangeKind::Changed, before.as_str()),
+                // There before, but not copied: there's nothing to compare or put back.
+                None if self.present.contains(path) => continue,
                 None => (ChangeKind::Added, ""),
             };
             let (added, removed) = line_counts(before, after);
@@ -112,7 +122,7 @@ pub fn undo(change: &FileChange) -> Result<(), String> {
             if let Some(dir) = change.path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             }
-            std::fs::write(&change.path, &change.before).map_err(|e| e.to_string())
+            crate::fs_ops::write_file(&change.path, change.before.as_bytes()).map_err(|e| e.to_string())
         }
     }
 }
@@ -129,7 +139,10 @@ mod tests {
         std::fs::write(root.join("src/a.rs"), "one\ntwo\n").unwrap();
         std::fs::write(root.join("src/b.rs"), "keep\n").unwrap();
         std::fs::write(root.join("gone.txt"), "bye\n").unwrap();
+        // Not text when the task starts, text after: it was there, so it isn't new.
+        std::fs::write(root.join("data.bin"), "a\0b").unwrap();
         let snapshot = Snapshot::take(&root);
+        std::fs::write(root.join("data.bin"), "ab\n").unwrap();
         std::fs::write(root.join("src/a.rs"), "one\n2\nthree\n").unwrap();
         std::fs::write(root.join("src/new.rs"), "fresh\n").unwrap();
         std::fs::remove_file(root.join("gone.txt")).unwrap();

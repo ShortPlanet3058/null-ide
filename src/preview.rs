@@ -15,8 +15,18 @@ pub fn is_image(path: &Path) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Preview {
-    Image { bytes: u64, size: Option<(u32, u32)> },
-    NotText { bytes: u64 },
+    Image {
+        bytes: u64,
+        size: Option<(u32, u32)>,
+    },
+    NotText {
+        bytes: u64,
+    },
+    /// There, but it couldn't be read: shown as such, so an empty editor can't be saved
+    /// over it.
+    Unreadable {
+        why: &'static str,
+    },
 }
 
 impl Preview {
@@ -25,6 +35,7 @@ impl Preview {
         match self {
             Preview::Image { bytes, size: Some((w, h)) } => format!("{w} × {h} · {}", file_size(*bytes)),
             Preview::Image { bytes, size: None } | Preview::NotText { bytes } => file_size(*bytes),
+            Preview::Unreadable { why } => why.to_string(),
         }
     }
 }
@@ -43,8 +54,10 @@ pub fn of(path: &Path, text: &Result<&str, std::io::ErrorKind>) -> Option<Previe
         Ok(text) if text.as_bytes().iter().take(8192).any(|&b| b == 0) => Some(Preview::NotText { bytes }),
         Ok(_) => None,
         Err(std::io::ErrorKind::InvalidData) => Some(Preview::NotText { bytes }),
-        // Missing or unreadable: an empty editor, as before (a new file is written on save).
-        Err(_) => None,
+        // Not there yet: an empty editor, and saving makes the file.
+        Err(std::io::ErrorKind::NotFound) => None,
+        Err(std::io::ErrorKind::PermissionDenied) => Some(Preview::Unreadable { why: "Null isn't allowed to read it" }),
+        Err(_) => Some(Preview::Unreadable { why: "It couldn't be read" }),
     }
 }
 
@@ -159,6 +172,12 @@ mod tests {
         assert_eq!(open("a.svg", b"<svg/>"), None);
         assert_eq!(open("a.o", b"\xcf\xfa\xed\xfe\x07"), Some(Preview::NotText { bytes: 5 }));
         assert_eq!(open("nul.txt", b"a\0b"), Some(Preview::NotText { bytes: 3 }));
+        // Not there: a new file. There but unreadable: never an empty editor to save over it.
+        assert_eq!(of(Path::new("new.txt"), &Err(std::io::ErrorKind::NotFound)), None);
+        assert!(matches!(
+            of(Path::new("locked.txt"), &Err(std::io::ErrorKind::PermissionDenied)),
+            Some(Preview::Unreadable { .. })
+        ));
         assert!(matches!(open("a.png", b"\x89PNG"), Some(Preview::Image { size: None, .. })));
         assert_eq!(read(&dir.join("missing.rs")), None);
         // Text in an older encoding is text, not a binary.
