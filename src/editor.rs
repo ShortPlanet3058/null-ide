@@ -35,8 +35,8 @@ pub use refactor::{FindReferences, FormatDocument, FormatSelection, RenameSymbol
 pub use review::{KeepHunk, UndoHunk};
 pub use rewrap::Rewrap;
 pub use structure::{
-    ExpandSelection, GoToMatchingBracket, JoinLines, LowerCase, NewlineAbove, NewlineBelow, NextChange, PreviousChange,
-    ShrinkSelection, SortLines, UpperCase,
+    CamelCase, ExpandSelection, GoToMatchingBracket, JoinLines, KebabCase, LowerCase, NewlineAbove, NewlineBelow,
+    NextChange, PascalCase, PreviousChange, ShrinkSelection, SnakeCase, SortLines, TitleCase, UpperCase,
 };
 
 use crate::buffer::Buffer;
@@ -3229,6 +3229,11 @@ impl Render for Editor {
             .on_action(cx.listener(Self::sort_lines))
             .on_action(cx.listener(Self::upper_case))
             .on_action(cx.listener(Self::lower_case))
+            .on_action(cx.listener(Self::snake_case))
+            .on_action(cx.listener(Self::camel_case))
+            .on_action(cx.listener(Self::pascal_case))
+            .on_action(cx.listener(Self::kebab_case))
+            .on_action(cx.listener(Self::title_case))
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::format_document))
             .on_action(cx.listener(Self::format_selection))

@@ -18,6 +18,11 @@ actions!(
         SortLines,
         UpperCase,
         LowerCase,
+        SnakeCase,
+        CamelCase,
+        PascalCase,
+        KebabCase,
+        TitleCase,
         NextChange,
         PreviousChange
     ]
@@ -40,6 +45,55 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-f5", NextChange, ctx),
         KeyBinding::new("alt-shift-f5", PreviousChange, ctx),
     ]);
+}
+
+/// The words a name is made of: split at `_`, `-`, spaces and dots, and where the case
+/// changes (`parseHTTPResponse` → parse, HTTP, Response).
+fn name_words(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut words = Vec::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if matches!(c, '_' | '-' | '.') || c.is_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        let before = i.checked_sub(1).map(|j| chars[j]);
+        let after = chars.get(i + 1);
+        let starts = c.is_uppercase()
+            && (before.is_some_and(|b| b.is_lowercase() || b.is_ascii_digit())
+                || before.is_some_and(char::is_uppercase) && after.is_some_and(|a| a.is_lowercase()));
+        if starts && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        word.push(c);
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+fn lower(word: &str) -> String {
+    word.to_lowercase()
+}
+
+fn capital(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map_or_else(String::new, |first| first.to_uppercase().chain(chars.flat_map(char::to_lowercase)).collect())
+}
+
+fn join_words(words: &[String], between: &str, each: fn(&str) -> String) -> String {
+    words.iter().map(|w| each(w)).collect::<Vec<_>>().join(between)
+}
+
+/// A name style applied to each line on its own, so lines stay lines.
+fn by_line(text: &str, style: impl Fn(&[String]) -> String) -> String {
+    text.split('\n').map(|line| style(&name_words(line))).collect::<Vec<_>>().join("\n")
 }
 
 /// Selections grown by [`ExpandSelection`], to shrink back through.
@@ -266,6 +320,33 @@ impl Editor {
         self.change_case(str::to_lowercase, cx);
     }
 
+    pub(super) fn snake_case(&mut self, _: &SnakeCase, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_case(|t| by_line(t, |w| join_words(w, "_", lower)), cx);
+    }
+
+    pub(super) fn camel_case(&mut self, _: &CamelCase, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_case(
+            |t| {
+                by_line(t, |words| {
+                    words.iter().enumerate().map(|(i, w)| if i == 0 { lower(w) } else { capital(w) }).collect()
+                })
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn pascal_case(&mut self, _: &PascalCase, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_case(|t| by_line(t, |w| join_words(w, "", capital)), cx);
+    }
+
+    pub(super) fn kebab_case(&mut self, _: &KebabCase, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_case(|t| by_line(t, |w| join_words(w, "-", lower)), cx);
+    }
+
+    pub(super) fn title_case(&mut self, _: &TitleCase, _: &mut Window, cx: &mut Context<Self>) {
+        self.change_case(|t| by_line(t, |w| join_words(w, " ", capital)), cx);
+    }
+
     /// The selection (or the word at the caret) in another case, still selected.
     fn change_case(&mut self, change: fn(&str) -> String, cx: &mut Context<Self>) {
         self.for_each_cursor(cx, |this, cx| {
@@ -306,6 +387,20 @@ fn join(lines: &[String]) -> (String, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_change_style() {
+        assert_eq!(name_words("parseHTTPResponse"), ["parse", "HTTP", "Response"]);
+        assert_eq!(name_words("user_id-v2 Name"), ["user", "id", "v2", "Name"]);
+        let snake = |t: &str| by_line(t, |w| join_words(w, "_", lower));
+        let pascal = |t: &str| by_line(t, |w| join_words(w, "", capital));
+        assert_eq!(snake("parseHTTPResponse"), "parse_http_response");
+        assert_eq!(pascal("user_id"), "UserId");
+        assert_eq!(by_line("max-retry count", |w| join_words(w, " ", capital)), "Max Retry Count");
+        assert_eq!(by_line("ÉtéChaud", |w| join_words(w, "-", lower)), "été-chaud");
+        // Each line on its own.
+        assert_eq!(snake("aB\ncD"), "a_b\nc_d");
+    }
     use crate::buffer::Buffer;
     use gpui::TestAppContext;
     use std::path::PathBuf;
