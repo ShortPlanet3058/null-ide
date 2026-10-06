@@ -104,6 +104,22 @@ pub enum LineSpacing {
 }
 
 impl LineSpacing {
+    pub const ALL: [LineSpacing; 3] = [LineSpacing::Compact, LineSpacing::Normal, LineSpacing::Relaxed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LineSpacing::Compact => "Compact",
+            LineSpacing::Normal => "Normal",
+            LineSpacing::Relaxed => "Relaxed",
+        }
+    }
+
+    /// The next one (or the one before), going round.
+    pub fn step(self, step: isize) -> Self {
+        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(1) as isize;
+        Self::ALL[(i + step).rem_euclid(Self::ALL.len() as isize) as usize]
+    }
+
     /// A line's height, as a multiple of the text's size.
     pub fn factor(self) -> f32 {
         match self {

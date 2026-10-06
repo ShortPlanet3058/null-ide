@@ -96,6 +96,9 @@ actions!(
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
+        CompactLineSpacing,
+        NormalLineSpacing,
+        RelaxedLineSpacing,
         UseNullTheme,
         UseAshTheme,
         UseMidnightTheme,
@@ -2624,6 +2627,9 @@ impl Workspace {
             (Appearance, theme_label(ThemeName::Paper), theme_action(ThemeName::Paper)),
             (Appearance, theme_label(ThemeName::Dune), theme_action(ThemeName::Dune)),
             (Appearance, "Bigger Text".into(), Box::new(IncreaseFontSize)),
+            (Appearance, "Compact Line Spacing".into(), Box::new(CompactLineSpacing)),
+            (Appearance, "Normal Line Spacing".into(), Box::new(NormalLineSpacing)),
+            (Appearance, "Relaxed Line Spacing".into(), Box::new(RelaxedLineSpacing)),
             (Appearance, "Smaller Text".into(), Box::new(DecreaseFontSize)),
             (Appearance, "Actual Size".into(), Box::new(ResetFontSize)),
             (
@@ -5027,6 +5033,15 @@ impl Workspace {
 }
 
 /// The action that switches to `theme` (menus and ⌘K).
+pub fn spacing_action(spacing: crate::settings::LineSpacing) -> Box<dyn Action> {
+    use crate::settings::LineSpacing;
+    match spacing {
+        LineSpacing::Compact => Box::new(CompactLineSpacing),
+        LineSpacing::Normal => Box::new(NormalLineSpacing),
+        LineSpacing::Relaxed => Box::new(RelaxedLineSpacing),
+    }
+}
+
 pub fn theme_action(theme: ThemeName) -> Box<dyn Action> {
     match theme {
         ThemeName::Null => Box::new(UseNullTheme),
@@ -5781,6 +5796,15 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
             .on_action(cx.listener(|_, _: &UseNullTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Null)))
+            .on_action(cx.listener(|_, _: &CompactLineSpacing, _, cx| {
+                settings::update(cx, |s| s.line_spacing = crate::settings::LineSpacing::Compact)
+            }))
+            .on_action(cx.listener(|_, _: &NormalLineSpacing, _, cx| {
+                settings::update(cx, |s| s.line_spacing = crate::settings::LineSpacing::Normal)
+            }))
+            .on_action(cx.listener(|_, _: &RelaxedLineSpacing, _, cx| {
+                settings::update(cx, |s| s.line_spacing = crate::settings::LineSpacing::Relaxed)
+            }))
             .on_action(cx.listener(|_, _: &UseAshTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Ash)))
             .on_action(
                 cx.listener(|_, _: &UseMidnightTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Midnight)),
@@ -6814,6 +6838,22 @@ mod tests {
         cx.update(|_, cx| settings::update(cx, |s| s.line_spacing = crate::settings::LineSpacing::Relaxed));
         cx.run_until_parked();
         assert_eq!(height(cx), px(28.));
+        // From ⌘K: "spacing", then → for the next one (round to Compact after Relaxed).
+        cx.update(|_, cx| crate::keymap::register(crate::keymap::Keymap::Null, cx));
+        workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        cx.simulate_input("spacing");
+        cx.executor().advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        let spacing = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| cx.global::<Settings>().line_spacing);
+        assert_eq!(spacing(cx), crate::settings::LineSpacing::Compact);
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        assert_eq!(spacing(cx), crate::settings::LineSpacing::Normal);
+        assert_eq!(height(cx), px(24.));
         std::fs::remove_dir_all(&dir).ok();
     }
 

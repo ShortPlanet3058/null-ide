@@ -169,6 +169,7 @@ pub struct Command {
 enum Quick {
     Theme,
     TextSize,
+    LineSpacing,
     Wrap,
     Sidebar,
     Terminal,
@@ -179,9 +180,10 @@ enum Quick {
 }
 
 impl Quick {
-    const ALL: [Quick; 9] = [
+    const ALL: [Quick; 10] = [
         Quick::Theme,
         Quick::TextSize,
+        Quick::LineSpacing,
         Quick::Wrap,
         Quick::Sidebar,
         Quick::Terminal,
@@ -195,6 +197,7 @@ impl Quick {
         match self {
             Quick::Theme => "Theme",
             Quick::TextSize => "Text size",
+            Quick::LineSpacing => "Line spacing",
             Quick::Wrap => "Wrap lines",
             Quick::Sidebar => "Sidebar",
             Quick::Terminal => "Terminal",
@@ -211,6 +214,7 @@ impl Quick {
         match self {
             Quick::Theme => theme_action(next_theme(settings.theme, 1)),
             Quick::TextSize => Box::new(IncreaseFontSize),
+            Quick::LineSpacing => spacing_action(settings.line_spacing.step(1)),
             Quick::Wrap => Box::new(crate::menus::ToggleWordWrap),
             Quick::Sidebar => Box::new(ToggleSidebar),
             Quick::Terminal => Box::new(ToggleTerminal),
@@ -222,7 +226,7 @@ impl Quick {
     }
 
     fn is_choice(self) -> bool {
-        matches!(self, Quick::Theme | Quick::TextSize)
+        matches!(self, Quick::Theme | Quick::TextSize | Quick::LineSpacing)
     }
 }
 
@@ -251,6 +255,7 @@ fn quick_for(name: &str) -> Option<Quick> {
             Quick::Theme
         }
         "IncreaseFontSize" | "DecreaseFontSize" => Quick::TextSize,
+        "CompactLineSpacing" | "NormalLineSpacing" | "RelaxedLineSpacing" => Quick::LineSpacing,
         "OpenSettings" => Quick::AllSettings,
         _ => return None,
     })
@@ -750,6 +755,7 @@ impl Palette {
             Some(Item::Quick(Quick::Theme)) => theme_action(next_theme(settings.theme, step)),
             Some(Item::Quick(Quick::TextSize)) if step > 0 => Box::new(crate::workspace::IncreaseFontSize),
             Some(Item::Quick(Quick::TextSize)) => Box::new(crate::workspace::DecreaseFontSize),
+            Some(Item::Quick(Quick::LineSpacing)) => crate::workspace::spacing_action(settings.line_spacing.step(step)),
             _ => return,
         };
         cx.emit(PaletteEvent::Apply(action));
@@ -894,6 +900,18 @@ impl Palette {
                         .child(format!("{}", settings.font_size)),
                 )
                 .child(ui::key_cap("+", theme))
+                .into_any_element(),
+            Quick::LineSpacing => row
+                .text_size(px(ui::T_SM))
+                .child(ui::key_cap("←", theme))
+                .child(
+                    div()
+                        .min_w(px(64.))
+                        .text_center()
+                        .text_color(theme.foreground)
+                        .child(settings.line_spacing.label()),
+                )
+                .child(ui::key_cap("→", theme))
                 .into_any_element(),
             Quick::AllSettings => row.children(keys(&crate::workspace::OpenSettings)).into_any_element(),
             _ => {
@@ -1554,6 +1572,8 @@ mod tests {
         // A command a quick setting covers isn't listed twice.
         type_query(cx, &p, "wrap");
         assert_eq!(items(cx, &p), ["quick: Wrap lines"]);
+        type_query(cx, &p, "spacing");
+        assert_eq!(items(cx, &p), ["quick: Line spacing"]);
     }
 
     #[gpui::test]

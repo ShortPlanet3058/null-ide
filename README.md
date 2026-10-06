@@ -43,7 +43,7 @@ Getting around:
 | Shortcut | Does |
 |---|---|
 | ⌘P | go to a file, recent ones first |
-| ⌘K | quick settings (theme, text size, wrap, sidebar, terminal, AI…) changed right in the list, and every command once you type |
+| ⌘K | quick settings (theme, text size, line spacing, wrap, sidebar, terminal, AI…) changed right in the list, and every command once you type |
 | ⌘, | all settings |
 | ⌃G | go to a line |
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
