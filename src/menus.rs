@@ -161,6 +161,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Replace in Project…", crate::workspace::ReplaceInProject),
                 MenuItem::separator(),
                 MenuItem::action("Back", crate::workspace::GoBack),
+                MenuItem::action("Go to Last Edit", crate::workspace::GoToLastEdit),
                 MenuItem::action("Forward", crate::workspace::GoForward),
                 MenuItem::action("Go to Matching Bracket", crate::editor::GoToMatchingBracket),
                 MenuItem::separator(),
