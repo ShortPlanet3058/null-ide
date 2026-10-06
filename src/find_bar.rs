@@ -669,6 +669,30 @@ mod tests {
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "let total = b + total;\nprint(total)\n"));
     }
 
+    /// Esc on a match, then ⌘G: on to the next match, not staying on that one.
+    #[gpui::test]
+    fn find_next_after_closing_moves_on(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(crate::buffer::Buffer::from_text("ab ab ab\n"), Some("x.txt".into()), cx)
+        });
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            e.selection = Selection { anchor: 0, head: 0 };
+        });
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("ab");
+        cx.simulate_keystrokes("escape");
+        e.update(cx, |e, _| assert_eq!(e.selection.range(), 0..2));
+        cx.simulate_keystrokes("cmd-g");
+        e.update(cx, |e, _| assert_eq!(e.selection.range(), 3..5));
+    }
+
     #[test]
     fn searches_are_kept_between_launches() {
         let path = std::env::temp_dir().join(format!("null-searches-{}", std::process::id())).join("searches.json");

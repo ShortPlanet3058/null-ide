@@ -252,8 +252,8 @@ fn whitespace_marks(text: &str, start: usize, selected: &[Range<usize>]) -> Vec<
 }
 
 /// The note at the end of the caret's line when something's wrong there: the most serious
-/// problem starting on it (`bytes` of the text), its first line, cut short.
-fn problem_note(problems: &[crate::editor::Problem], bytes: Range<usize>) -> Option<(String, DiagnosticSeverity)> {
+/// problem starting on it (`chars` of the text), its first line, cut short.
+fn problem_note(problems: &[crate::editor::Problem], chars: Range<usize>) -> Option<(String, DiagnosticSeverity)> {
     let rank = |s: DiagnosticSeverity| match s {
         DiagnosticSeverity::ERROR => 0,
         DiagnosticSeverity::WARNING => 1,
@@ -262,7 +262,7 @@ fn problem_note(problems: &[crate::editor::Problem], bytes: Range<usize>) -> Opt
     };
     let problem = problems
         .iter()
-        .filter(|p| bytes.contains(&p.range.start) && rank(p.severity) <= 1)
+        .filter(|p| chars.contains(&p.range.start) && rank(p.severity) <= 1)
         .min_by_key(|p| rank(p.severity))?;
     let first = problem.message.lines().next().unwrap_or("").trim();
     let note = match first.char_indices().nth(PROBLEM_NOTE_CHARS) {
@@ -612,9 +612,10 @@ impl Element for EditorElement {
             // Something wrong on the caret's line: said at its end, before who changed it.
             let caret_note = {
                 let rope = editor.buffer.rope();
-                let bytes = rope.line_to_byte(caret_line)..rope.line_to_byte((caret_line + 1).min(rope.len_lines()));
-                let bytes = bytes.start..bytes.end.max(bytes.start + 1);
-                problem_note(&editor.problems(cx), bytes).map(|(note, severity)| {
+                // Problems are in chars.
+                let chars = rope.line_to_char(caret_line)..rope.line_to_char((caret_line + 1).min(rope.len_lines()));
+                let chars = chars.start..chars.end.max(chars.start + 1);
+                problem_note(&editor.problems(cx), chars).map(|(note, severity)| {
                     let color = if severity == DiagnosticSeverity::ERROR { theme.error } else { theme.warning };
                     (format!("{BLAME_GAP}{note}"), color.opacity(0.75))
                 })
@@ -1016,7 +1017,12 @@ impl Element for EditorElement {
                     for (col, tab) in whitespace_marks(&r.text, row_start, &selected) {
                         let col = r.row.cols.start + col;
                         let (_, x0) = pos(r.row.line, col);
-                        let (_, x1) = pos(r.row.line, col + 1);
+                        // The last char of a wrapped row: its end is this row's, not the next one's start.
+                        let x1 = if col + 1 == r.row.cols.end && !r.row.last {
+                            r.x + r.shaped.width
+                        } else {
+                            pos(r.row.line, col + 1).1
+                        };
                         let mid = origin.x + (x0 + x1) / 2.;
                         let y = top + line_height / 2.;
                         whitespace.push(if tab {

@@ -60,7 +60,10 @@ impl Editor {
     /// back, the caret in that one (⇥ keeps it, Esc takes it back).
     pub(super) fn review_change_at(&mut self, line: usize, cx: &mut Context<Self>) {
         let Some(base) = self.git_base.clone() else { return };
-        self.start_review(base.to_string(), cx);
+        // A review already showing (an AI task's) stays: the click only goes there.
+        if !self.in_review() {
+            self.start_review(base.to_string(), cx);
+        }
         self.single_cursor();
         self.selection = super::Selection::caret(self.buffer.line_to_char(line));
         self.touch(cx);

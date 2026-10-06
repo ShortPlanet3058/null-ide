@@ -142,7 +142,27 @@ fn rewrap(
     width: usize,
     tab: usize,
 ) -> Vec<(Range<usize>, Vec<String>)> {
-    let lines: Vec<Option<Line>> = text.iter().map(|l| split(l, kind)).collect();
+    // Code between fences (```, ~~~, in Markdown or in doc comments) is never text to wrap.
+    let mut fence: Option<String> = None;
+    let lines: Vec<Option<Line>> = text
+        .iter()
+        .map(|l| {
+            let words = l.trim_start().trim_start_matches(['/', '!', '#', '>', '*']).trim_start();
+            let opens = ["```", "~~~"].into_iter().find(|f| words.starts_with(f));
+            match (&fence, opens) {
+                (Some(open), Some(f)) if f == open => {
+                    fence = None;
+                    None
+                }
+                (Some(_), _) => None,
+                (None, Some(f)) => {
+                    fence = Some(f.to_string());
+                    None
+                }
+                (None, None) => split(l, kind),
+            }
+        })
+        .collect();
     let mut found = Vec::new();
     let mut at = selected.start;
     while at < selected.end.min(lines.len()) {
@@ -164,6 +184,7 @@ const AROUND: usize = 200;
 
 impl Editor {
     pub(super) fn rewrap(&mut self, _: &Rewrap, _: &mut Window, cx: &mut Context<Self>) {
+        self.single_cursor();
         let kind = Kind {
             comment: self.language().and_then(|l| l.line_comment),
             prose: self.is_prose() || self.language().is_none(),
@@ -289,6 +310,14 @@ mod tests {
         });
         cx.simulate_keystrokes("cmd-z cmd-z");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), text));
+    }
+
+    #[test]
+    fn code_in_fences_is_left_alone() {
+        let md = "Some words\n\n```sh\ncargo build\ncargo run\n```\n";
+        assert_eq!(wrap(md, 3, MARKDOWN, 80), md.trim_end());
+        let doc = "/// ```\n/// let x = 1;\n/// let y = 2;\n/// ```";
+        assert_eq!(wrap(doc, 1, RUST, 80), doc);
     }
 
     #[test]

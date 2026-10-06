@@ -98,6 +98,10 @@ impl Editor {
             }
             let caret = this.selection.head;
             let (line, column) = this.buffer.point(caret);
+            // Two letters of the caret's own line (an empty line has none to swap).
+            if this.buffer.line_len(line) < 2 {
+                return;
+            }
             let at = if column < this.buffer.line_len(line) { caret } else { caret.saturating_sub(1) };
             if this.buffer.point(at).1 == 0 {
                 return;
@@ -112,7 +116,8 @@ impl Editor {
     pub(super) fn open_line(&mut self, _: &OpenLine, _: &mut Window, cx: &mut Context<Self>) {
         self.for_each_cursor(cx, |this, cx| {
             let start = this.selection.range().start;
-            this.edit(this.selection.range(), "\n", EditKind::Other, cx);
+            let ending = this.style.line_ending.text();
+            this.edit(this.selection.range(), ending, EditKind::Other, cx);
             this.selection = Selection::caret(start);
         });
     }
@@ -150,6 +155,12 @@ mod tests {
         assert_eq!(state(cx), ("oenthree\nfour two\n\n".into(), 18));
         cx.simulate_keystrokes("ctrl-p ctrl-a ctrl-o");
         assert_eq!(state(cx), ("oenthree\n\nfour two\n\n".into(), 9));
+        // ⌃T on an empty line: nothing to swap.
+        e.update(cx, |e, _| e.selection = Selection::caret(e.buffer.len_chars()));
+        let before = state(cx);
+        cx.simulate_keystrokes("ctrl-t");
+        assert_eq!(state(cx), before);
+        e.update(cx, |e, _| e.selection = Selection::caret(9));
         cx.simulate_keystrokes("ctrl-d ctrl-f ctrl-h");
         assert_eq!(state(cx), ("oenthree\nour two\n\n".into(), 9));
     }

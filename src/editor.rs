@@ -1044,7 +1044,10 @@ impl Editor {
     /// between apps), else this file's own.
     fn known_query(&self, cx: &App) -> SearchQuery {
         match crate::find_bar::latest_search(cx) {
-            Some(text) => SearchQuery { text, ..self.last_query.clone() },
+            // Searched here: with this file's choices (case, word, regex).
+            Some(text) if text == self.last_query.text => self.last_query.clone(),
+            // From another file: as plain text (its choices there aren't known here).
+            Some(text) => SearchQuery { text, ..SearchQuery::default() },
             None => self.last_query.clone(),
         }
     }
@@ -1052,10 +1055,15 @@ impl Editor {
     fn step_match(&mut self, forward: bool, cx: &mut Context<Self>) {
         if self.search.is_none() {
             let query = self.known_query(cx);
-            if !query.text.is_empty() {
-                self.set_search(query, cx);
+            if query.text.is_empty() {
+                return;
             }
-            return;
+            let before = self.selection.range();
+            self.set_search(query, cx);
+            // Already on that match (the find bar was just closed on it): on to the next.
+            if self.selection.range() != before {
+                return;
+            }
         }
         let selection = self.selection.range();
         let Some(search) = &mut self.search else { return };

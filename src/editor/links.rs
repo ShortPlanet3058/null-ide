@@ -42,7 +42,8 @@ impl Editor {
             return None;
         }
         let row: Vec<char> = self.buffer.line_text(line).chars().collect();
-        let (columns, link) = link_at(&row, column)?;
+        // A click lands on the nearest gap between letters: past a link's last letter too.
+        let (columns, link) = link_at(&row, column).or_else(|| link_at(&row, column.checked_sub(1)?))?;
         let start = self.buffer.line_to_char(line);
         let target = match link {
             Link::Url(url) => Target::Url(url),
@@ -100,6 +101,9 @@ mod tests {
             assert!(matches!(target, Target::File { path, line: Some(12), column: Some(5) } if path == root.join("src/lib.rs")));
             let (_, target) = e.link_under(at("README")).unwrap();
             assert!(matches!(target, Target::File { path, line: None, .. } if path == root.join("README.md")));
+            // Just past the address's last letter (where a click on its right half lands).
+            let end = text.find("/docs").unwrap() + 5;
+            assert!(matches!(e.link_under(end), Some((_, Target::Url(_)))));
             // Code that only looks like a file name is no link.
             assert!(e.link_under(at("self.buffer")).is_none());
         });
