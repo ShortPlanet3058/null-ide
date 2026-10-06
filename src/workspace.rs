@@ -3043,7 +3043,7 @@ impl Workspace {
         }
         for tab in &self.tabs {
             tab.editor.update(cx, |editor, cx| {
-                editor.set_font_size(px(settings.font_size), cx);
+                editor.set_text_size(px(settings.font_size), settings.line_spacing.factor(), cx);
                 // Wrapping on or off moves everything: keep the caret in view.
                 editor.autoscroll = true;
                 cx.notify();
@@ -6789,6 +6789,31 @@ mod tests {
             assert_eq!(editor.read(cx).buffer.to_string(), "# Notes\n\n![logo](../assets/logo.png)\n![shot](shot.png)");
         });
         assert!(project.join("docs/shot.png").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Line spacing from the settings reaches the open files.
+    #[gpui::test]
+    fn line_spacing_applies_to_open_files(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-line-spacing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        let height = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.active_editor().unwrap().read(cx).line_height())
+        };
+        assert_eq!(height(cx), px(24.));
+        cx.update(|_, cx| settings::update(cx, |s| s.line_spacing = crate::settings::LineSpacing::Relaxed));
+        cx.run_until_parked();
+        assert_eq!(height(cx), px(28.));
         std::fs::remove_dir_all(&dir).ok();
     }
 

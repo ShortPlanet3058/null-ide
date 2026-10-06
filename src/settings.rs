@@ -19,6 +19,8 @@ pub struct Settings {
     /// Font family for menus, tabs and the palette. Instrument Sans ships with Null.
     pub ui_font: String,
     pub font_size: f32,
+    /// Room between lines of code.
+    pub line_spacing: LineSpacing,
     pub sidebar_visible: bool,
     /// Dim the title bar, sidebar and status bar while typing.
     pub fade_bars_while_typing: bool,
@@ -65,6 +67,7 @@ impl Default for Settings {
             code_font: DEFAULT_CODE_FONT.into(),
             ui_font: DEFAULT_UI_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
+            line_spacing: LineSpacing::Normal,
             sidebar_visible: true,
             fade_bars_while_typing: false,
             word_wrap: false,
@@ -89,6 +92,27 @@ impl Default for Settings {
 }
 
 impl Global for Settings {}
+
+/// How much room there is between lines of code.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineSpacing {
+    Compact,
+    #[default]
+    Normal,
+    Relaxed,
+}
+
+impl LineSpacing {
+    /// A line's height, as a multiple of the text's size.
+    pub fn factor(self) -> f32 {
+        match self {
+            LineSpacing::Compact => 1.45,
+            LineSpacing::Normal => 1.7,
+            LineSpacing::Relaxed => 2.0,
+        }
+    }
+}
 
 /// When files save by themselves. Only files with a name: a new one waits for ⌘S.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +260,13 @@ mod tests {
     fn font_size_is_clamped_and_unknown_fields_ignored() {
         let settings = Settings::parse(r#"{ "font_size": 400, "something_new": 1 }"#).unwrap();
         assert_eq!(settings.font_size, MAX_FONT_SIZE);
+    }
+
+    #[test]
+    fn line_spacing_is_saved_by_name_and_normal_unless_set() {
+        assert_eq!(Settings::default().line_spacing, LineSpacing::Normal);
+        let settings = Settings::parse(r#"{ "line_spacing": "relaxed" }"#).unwrap();
+        assert_eq!(settings.line_spacing.factor(), 2.0);
     }
 
     #[test]
