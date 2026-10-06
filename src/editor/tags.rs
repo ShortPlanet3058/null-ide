@@ -28,27 +28,55 @@ fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')
 }
 
-/// The name of the opening tag `text` is exactly, from its `<` to its `>` (attributes and
-/// all); None when it's anything else (a closing or self-closing tag, a comparison...).
-fn opening_tag(text: &str, flavor: Flavor) -> Option<&str> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TagKind {
+    Opening,
+    Closing,
+    SelfClosing,
+}
+
+/// A tag at the start of some text: its name, and how long it is up to its `>`, in bytes.
+#[derive(Debug, PartialEq)]
+struct Tag<'a> {
+    name: &'a str,
+    len: usize,
+    kind: TagKind,
+}
+
+/// The tag `text` starts with (`<div class="a">`, `</div>`, `<br/>`); None when its `<`
+/// starts something else (a comparison...) or the tag isn't finished.
+fn tag(text: &str, flavor: Flavor) -> Option<Tag<'_>> {
     let rest = text.strip_prefix('<')?;
+    let (rest, closing) = match rest.strip_prefix('/') {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    let skipped = if closing { 2 } else { 1 };
+    let kind = if closing { TagKind::Closing } else { TagKind::Opening };
     let name_len = rest.find(|c: char| !is_name_char(c)).unwrap_or(rest.len());
     let name = &rest[..name_len];
-    // `<>` is a fragment in JSX; otherwise a name starts with a letter.
+    // `<>` and `</>` are fragments in JSX; otherwise a name starts with a letter.
     match name.chars().next() {
         Some(c) if c.is_alphabetic() => {}
-        None if flavor == Flavor::Jsx && rest == ">" => return Some(""),
+        None if flavor == Flavor::Jsx && rest.starts_with('>') => return Some(Tag { name, len: skipped + 1, kind }),
         _ => return None,
     }
     let mut chars = rest[name_len..].char_indices().peekable();
     // Straight after the name: space or the end of the tag.
-    if !matches!(chars.peek(), Some((_, c)) if c.is_whitespace() || *c == '>') {
+    if !matches!(chars.peek(), Some((_, c)) if c.is_whitespace() || *c == '>' || *c == '/' && !closing) {
         return None;
     }
-    let end = rest.len() - name_len;
+    let len = |at: usize| skipped + name_len + at + 1;
     while let Some((at, c)) = chars.next() {
         match c {
-            '>' => return (at + 1 == end).then_some(name),
+            '>' => return Some(Tag { name, len: len(at), kind }),
+            '/' if !closing => {
+                let (at, _) = chars.next().filter(|&(_, c)| c == '>')?;
+                return Some(Tag { name, len: len(at), kind: TagKind::SelfClosing });
+            }
+            c if c.is_whitespace() => {}
+            // A closing tag is only its name.
+            _ if closing => return None,
             '"' | '\'' => {
                 chars.find(|&(_, q)| q == c)?;
             }
@@ -68,11 +96,20 @@ fn opening_tag(text: &str, flavor: Flavor) -> Option<&str> {
                 }
             }
             '=' => {}
-            c if c.is_whitespace() || is_name_char(c) => {}
+            c if is_name_char(c) => {}
             _ => return None,
         }
     }
     None
+}
+
+/// The name of the opening tag `text` is exactly, from its `<` to its `>`.
+fn opening_tag(text: &str, flavor: Flavor) -> Option<&str> {
+    tag(text, flavor).filter(|t| t.kind == TagKind::Opening && t.len == text.len()).map(|t| t.name)
+}
+
+fn is_void(name: &str, flavor: Flavor) -> bool {
+    flavor == Flavor::Html && VOID.contains(&name.to_ascii_lowercase().as_str())
 }
 
 /// Whether the `<` at `byte` starts a tag, as the file's syntax sees it: not inside a
@@ -113,7 +150,7 @@ fn closing_tag(before: &str, start: usize, tree: &Tree, flavor: Flavor) -> Optio
         if !starts_a_tag(tree, start + at, flavor) {
             return None;
         }
-        if flavor == Flavor::Html && VOID.contains(&name.to_ascii_lowercase().as_str()) {
+        if is_void(name, flavor) {
             return None;
         }
         return Some(format!("</{name}>"));
@@ -140,6 +177,36 @@ fn pair_of(tag: Node<'_>) -> Option<Node<'_>> {
             (0..parent.child_count()).filter_map(|i| parent.child(i)).find(|c| c.kind() == wanted)
         }
     }
+}
+
+/// The innermost tag still open at the end of `before` (which starts at byte `start` of
+/// the file): the one `</` closes.
+fn innermost_open(before: &str, start: usize, tree: &Tree, flavor: Flavor) -> Option<String> {
+    let same = |a: &str, b: &str| if flavor == Flavor::Html { a.eq_ignore_ascii_case(b) } else { a == b };
+    let mut open: Vec<&str> = Vec::new();
+    let mut at = 0;
+    while let Some(found) = before[at..].find('<') {
+        let here = at + found;
+        if before[here..].starts_with("<!--") {
+            at = before[here..].find("-->").map_or(before.len(), |end| here + end + 3);
+            continue;
+        }
+        let Some(tag) = tag(&before[here..], flavor).filter(|_| starts_a_tag(tree, start + here, flavor)) else {
+            at = here + 1;
+            continue;
+        };
+        match tag.kind {
+            TagKind::Opening if !is_void(tag.name, flavor) => open.push(tag.name),
+            TagKind::Closing => {
+                if let Some(ix) = open.iter().rposition(|name| same(name, tag.name)) {
+                    open.truncate(ix);
+                }
+            }
+            _ => {}
+        }
+        at = here + tag.len;
+    }
+    open.pop().map(String::from)
 }
 
 /// The name of the tag at `range` (bytes, within the name) and the name of its pair, when
@@ -205,6 +272,32 @@ impl Editor {
         }
         self.buffer.replace(caret..caret, &closing);
         self.selection = Selection::caret(caret);
+        self.text_changed(cx);
+        cx.emit(EditorEvent::Edited);
+    }
+
+    /// After typing the `/` of `</`: the name of the tag it closes, and its `>`.
+    pub(super) fn finish_closing_tag(&mut self, cx: &mut Context<Self>) {
+        let Some(flavor) = self.tag_flavor() else { return };
+        let caret = self.selection.head;
+        if !self.selection.is_empty() || !self.extra.is_empty() || caret < 2 {
+            return;
+        }
+        if self.buffer.slice(caret - 2..caret) != "</" {
+            return;
+        }
+        let Some(tree) = self.synced_tree() else { return };
+        let from = caret.saturating_sub(20_000);
+        let before = self.buffer.slice(from..caret - 2);
+        let start = self.buffer.rope().char_to_byte(from);
+        let Some(name) = innermost_open(&before, start, &tree, flavor) else { return };
+        let rest = format!("{name}>");
+        let len = rest.chars().count();
+        if self.buffer.slice(caret..(caret + len).min(self.buffer.len_chars())) == rest {
+            return;
+        }
+        self.buffer.replace(caret..caret, &rest);
+        self.selection = Selection::caret(caret + len);
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
     }
@@ -318,6 +411,35 @@ mod tests {
     }
 
     #[test]
+    fn reads_every_kind_of_tag() {
+        let html = Flavor::Html;
+        assert_eq!(tag("<div a=\"1\">x", html), Some(Tag { name: "div", len: 11, kind: TagKind::Opening }));
+        assert_eq!(tag("</div >x", html), Some(Tag { name: "div", len: 7, kind: TagKind::Closing }));
+        assert_eq!(tag("<br/>", html), Some(Tag { name: "br", len: 5, kind: TagKind::SelfClosing }));
+        assert_eq!(tag("</>", Flavor::Jsx), Some(Tag { name: "", len: 3, kind: TagKind::Closing }));
+        assert_eq!(tag("< b", html), None);
+        assert_eq!(tag("<div", html), None);
+    }
+
+    /// What `</` typed at the end of `text` closes.
+    fn closes_with_slash(text: &str, flavor: Flavor) -> Option<String> {
+        let full = format!("{text}</");
+        innermost_open(text, 0, &tree(&full, flavor), flavor)
+    }
+
+    #[test]
+    fn a_slash_closes_the_innermost_open_tag() {
+        let html = Flavor::Html;
+        assert_eq!(closes_with_slash("<ul>\n  <li>one</li>\n  <li>two", html).as_deref(), Some("li"));
+        assert_eq!(closes_with_slash("<ul>\n  <li>one</li>\n  <br><img src=x>\n", html).as_deref(), Some("ul"));
+        assert_eq!(closes_with_slash("<div><!-- <p> --><span/>", html).as_deref(), Some("div"));
+        assert_eq!(closes_with_slash("<p></p>", html), None);
+        let jsx = Flavor::Jsx;
+        assert_eq!(closes_with_slash("const a = <List>{xs.map(x => <Item key={x} />)}", jsx).as_deref(), Some("List"));
+        assert_eq!(closes_with_slash("const a = <>{a < b}", jsx).as_deref(), Some(""));
+    }
+
+    #[test]
     fn a_type_in_tsx_is_no_tag() {
         let text = "const [a, setA] = useState<string>();";
         let caret = text.find('(').unwrap();
@@ -397,6 +519,18 @@ mod tests {
             });
         }
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), ""));
+    }
+
+    #[gpui::test]
+    fn typing_a_closing_slash_names_the_tag(cx: &mut gpui::TestAppContext) {
+        let (e, cx) = editor(cx, "page.html", "<section>\n  <p>Hi");
+        type_keys(cx, "</");
+        e.update(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "<section>\n  <p>Hi</p>");
+            assert_eq!(e.selection.head, e.buffer.len_chars());
+        });
+        type_keys(cx, "\n</");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "<section>\n  <p>Hi</p>\n</section>"));
     }
 
     #[gpui::test]

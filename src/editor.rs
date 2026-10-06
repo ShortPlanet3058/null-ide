@@ -2833,8 +2833,10 @@ impl EntityInputHandler for Editor {
             return;
         }
         self.edit(range, text, EditKind::Typing, cx);
-        if text == ">" {
-            self.close_tag(cx);
+        match text {
+            ">" => self.close_tag(cx),
+            "/" => self.finish_closing_tag(cx),
+            _ => {}
         }
         self.completion_after_typing(text, cx);
         self.signature_after_typing(text, cx);
