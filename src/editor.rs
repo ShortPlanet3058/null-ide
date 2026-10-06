@@ -1695,6 +1695,10 @@ impl Editor {
         if !self.selection.is_empty() {
             return self.indent_lines(cx);
         }
+        // In a Markdown table, Tab goes to the next cell.
+        if self.table_step(true, cx) {
+            return;
+        }
         // In a Markdown list item, Tab nests the item, wherever the caret is in it.
         if self.is_markdown() {
             let line = self.buffer.point(self.selection.head).0;
@@ -2623,7 +2627,33 @@ impl Editor {
     }
 
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
+        // In a Markdown table, Shift+Tab goes to the cell before.
+        if !self.multi_cursor() && self.table_step(false, cx) {
+            return;
+        }
         self.on_each_cursors_lines(cx, |this, cx| this.outdent_lines(cx));
+    }
+
+    /// ⇥ or ⇧⇥ with the caret in a Markdown table: the table lined up and the caret in the
+    /// next (or previous) cell, as one undo step. False out of a table.
+    fn table_step(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        if !self.is_markdown() || !self.selection.is_empty() || self.multi_cursor() {
+            return false;
+        }
+        let (line, column) = self.buffer.point(self.selection.head);
+        // The table is around the caret: a window of lines is enough.
+        let first = line.saturating_sub(500);
+        let last = (line + 500).min(self.buffer.len_lines());
+        let texts: Vec<String> = (first..last).map(|l| self.buffer.line_text(l)).collect();
+        let lines: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let Some(step) = crate::markdown_view::table_step(&lines, line - first, column, forward) else { return false };
+        let (start, end) = (first + step.lines.start, first + step.lines.end - 1);
+        let range = self.buffer.line_to_char(start)..self.buffer.line_to_char(end) + self.buffer.line_len(end);
+        self.edit(range, &step.new.join(self.style.line_ending.text()), EditKind::Other, cx);
+        let (row, col) = step.caret;
+        self.selection = Selection::caret(self.buffer.offset(start + row, col));
+        self.touch(cx);
+        true
     }
 
     // Moving lines works on the main cursor only: with several, the blocks would trip over each other.
@@ -3466,6 +3496,34 @@ mod tests {
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "| a   | bb  |\n| --- | --- |\n| ccc | d   |\n"));
         cx.simulate_keystrokes("cmd-z");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), text));
+    }
+
+    /// ⇥ in a Markdown table goes cell to cell, lining it up, and makes a row at the end;
+    /// ⇧⇥ goes back.
+    #[gpui::test]
+    fn tab_moves_through_a_markdown_table(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let text = "|Item|Qty|\n|-|-|\n|milk|2|\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("t.md")), cx));
+        e.update_in(cx, |e, window, _| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection::caret(2);
+        });
+        let caret = |cx: &mut gpui::VisualTestContext| e.read_with(cx, |e, _| e.caret_point());
+        cx.simulate_keystrokes("tab");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "| Item | Qty |\n| ---- | --- |\n| milk | 2   |\n"));
+        assert_eq!(caret(cx), (0, 9));
+        cx.simulate_keystrokes("tab tab tab");
+        assert_eq!(caret(cx), (3, 2));
+        cx.simulate_input("eggs");
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(caret(cx), (2, 9));
+        e.update(cx, |e, _| assert_eq!(e.buffer.line_text(3), "| eggs |     |"));
     }
 
     #[test]
