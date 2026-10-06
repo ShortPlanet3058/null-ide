@@ -78,6 +78,31 @@ impl gpui::Global for SearchHistory {}
 
 const HISTORY_LEN: usize = 50;
 
+/// Where the searches are kept between launches.
+fn history_file() -> Option<std::path::PathBuf> {
+    Some(crate::tools::data_dir()?.join("searches.json"))
+}
+
+fn load_history(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+fn save_history(path: &std::path::Path, history: &[String]) {
+    let saved = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(path, serde_json::to_string(history).unwrap_or_default()));
+    if let Err(err) = saved {
+        eprintln!("null: couldn't keep the searches in {}: {err}", path.display());
+    }
+}
+
+/// The searches from last time, for ↑ in the find field and ⌘G.
+pub fn init(cx: &mut App) {
+    let saved = history_file().map(|p| load_history(&p)).unwrap_or_default();
+    cx.set_global(SearchHistory(saved));
+}
+
 /// What was searched for last, in any file.
 pub fn latest_search(cx: &App) -> Option<String> {
     cx.try_global::<SearchHistory>().and_then(|h| h.0.last().cloned())
@@ -85,7 +110,14 @@ pub fn latest_search(cx: &App) -> Option<String> {
 
 /// `text` kept as the latest search, for ↑ in the find field.
 pub fn remember_search(text: &str, cx: &mut App) {
-    remember(&mut cx.default_global::<SearchHistory>().0, text);
+    let history = &mut cx.default_global::<SearchHistory>().0;
+    if text.is_empty() || history.last().is_some_and(|last| last == text) {
+        return;
+    }
+    remember(history, text);
+    if let Some(path) = history_file() {
+        save_history(&path, history);
+    }
 }
 
 /// Keeps `text` as the latest search (once, however often it's searched).
@@ -204,7 +236,7 @@ impl FindBar {
     /// What the find field holds becomes the latest search, unless it's one being recalled.
     fn remember_search(&mut self, cx: &mut Context<Self>) {
         let text = self.find.read(cx).text().to_string();
-        remember(&mut cx.default_global::<SearchHistory>().0, &text);
+        remember_search(&text, cx);
         self.recalled = None;
     }
 
@@ -602,6 +634,15 @@ mod tests {
         cx.simulate_input("x");
         cx.simulate_keystrokes("up");
         assert_eq!(field(cx), "alpha");
+    }
+
+    #[test]
+    fn searches_are_kept_between_launches() {
+        let path = std::env::temp_dir().join(format!("null-searches-{}", std::process::id())).join("searches.json");
+        assert!(load_history(&path).is_empty());
+        save_history(&path, &["alpha".into(), "beta \"quoted\"".into()]);
+        assert_eq!(load_history(&path), ["alpha", "beta \"quoted\""]);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]

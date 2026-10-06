@@ -154,6 +154,7 @@ fn main() {
         })
         .detach();
         settings::init(cx);
+        find_bar::init(cx);
         keymap::register(cx.global::<settings::Settings>().keymap, cx);
         // ⌘Q with no window focused still asks about unsaved changes, in the main window.
         cx.on_action(|_: &Quit, cx| {
