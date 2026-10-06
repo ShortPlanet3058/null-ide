@@ -16,6 +16,8 @@ actions!(
         NewlineAbove,
         JoinLines,
         SortLines,
+        ReverseLines,
+        RemoveDuplicateLines,
         UpperCase,
         LowerCase,
         SnakeCase,
@@ -294,20 +296,56 @@ impl Editor {
 
     /// The selected lines, in order (letters before case, then as written).
     pub(super) fn sort_lines(&mut self, _: &SortLines, _: &mut Window, cx: &mut Context<Self>) {
+        self.reorder_lines(
+            |mut texts| {
+                texts.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
+                texts
+            },
+            "sort",
+            cx,
+        );
+    }
+
+    /// The selected lines, last first.
+    pub(super) fn reverse_lines(&mut self, _: &ReverseLines, _: &mut Window, cx: &mut Context<Self>) {
+        self.reorder_lines(
+            |mut texts| {
+                texts.reverse();
+                texts
+            },
+            "reverse",
+            cx,
+        );
+    }
+
+    /// Of the selected lines, each one only once (where it first is).
+    pub(super) fn remove_duplicate_lines(&mut self, _: &RemoveDuplicateLines, _: &mut Window, cx: &mut Context<Self>) {
+        self.reorder_lines(
+            |texts| {
+                let mut seen = std::collections::HashSet::new();
+                texts.into_iter().filter(|t| seen.insert(t.clone())).collect()
+            },
+            "go through",
+            cx,
+        );
+    }
+
+    /// The selected lines rewritten by `change` (which may drop some), still selected.
+    fn reorder_lines(&mut self, change: impl FnOnce(Vec<String>) -> Vec<String>, verb: &str, cx: &mut Context<Self>) {
         let lines = self.selected_lines();
         if lines.len() < 2 {
             let at = self.selection.head;
-            return self.show_notice(at, "Select the lines to sort.".into(), cx);
+            return self.show_notice(at, format!("Select the lines to {verb}."), cx);
         }
-        let mut texts = self.line_texts(&lines);
-        texts.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
-        let end_col = |l: usize| self.buffer.line_len(l);
-        let (first, last) = (lines.start, lines.end - 1);
-        let last_len = end_col(last).max(texts.last().map_or(0, |t| t.chars().count()));
-        self.rewrite_lines(lines, texts, move |(l, c)| (l, if l == last { c.min(last_len) } else { c }), cx);
-        // The sorted lines stay selected.
+        let texts = change(self.line_texts(&lines));
+        let first = lines.start;
+        let count = texts.len().max(1);
+        let last_len = texts.last().map_or(0, |t| t.chars().count());
+        self.rewrite_lines(lines, texts, |p| p, cx);
+        // The new lines stay selected.
+        let last = first + count - 1;
         let start = self.buffer.line_to_char(first);
-        let end = self.buffer.line_to_char(last) + self.buffer.line_len(last);
+        let end = self.buffer.line_to_char(last) + last_len.min(self.buffer.line_len(last));
         self.selection = Selection { anchor: start, head: end };
         cx.notify();
     }
@@ -387,6 +425,28 @@ fn join(lines: &[String]) -> (String, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn lines_reverse_and_lose_their_repeats(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(crate::buffer::Buffer::from_text("b\na\nb\nc\na\nend\n"), Some("x.txt".into()), cx)
+        });
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            e.selection = Selection { anchor: 0, head: 10 };
+            e.remove_duplicate_lines(&RemoveDuplicateLines, window, cx);
+            assert_eq!(e.buffer.to_string(), "b\na\nc\nend\n");
+            assert_eq!(e.buffer.slice(e.selection.range()), "b\na\nc");
+            e.reverse_lines(&ReverseLines, window, cx);
+            assert_eq!(e.buffer.to_string(), "c\na\nb\nend\n");
+        });
+    }
 
     #[test]
     fn names_change_style() {
