@@ -666,6 +666,28 @@ impl FileTree {
         }
     }
 
+    /// Files and folders dropped from the Finder on a folder: copied into it (beside what
+    /// has the same name, never over it), the last one chosen.
+    fn copy_in(&mut self, paths: &[PathBuf], dir: &Path, cx: &mut Context<Self>) {
+        let mut problems = Vec::new();
+        for path in paths {
+            match fs_ops::copy_into(path, dir) {
+                Ok(copy) => {
+                    self.expand_to(&copy);
+                    self.selected = Some(copy);
+                }
+                Err(problem) => problems.push(problem),
+            }
+        }
+        self.children.clear();
+        self.rebuild();
+        self.reveal_selected();
+        if !problems.is_empty() {
+            cx.emit(FileTreeEvent::Notice(problems.join("; ")));
+        }
+        cx.notify();
+    }
+
     /// Renames what the workspace was asked about (see [`FileTreeEvent::RenameRequested`]).
     pub fn finish_rename(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) -> Result<(), String> {
         // A new name in the same folder, or (dragged) the same name in another.
@@ -985,9 +1007,17 @@ impl FileTree {
                         .active(|s| s.opacity(0.7))
                         .on_drag(dragged, |d, _, _, cx| cx.new(|_| EntryGhost { name: d.name.clone() }))
                         .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(tint))
-                        .on_drop(cx.listener(move |this, dragged: &DraggedEntry, _, cx| {
+                        .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(tint))
+                        .on_drop(cx.listener({
+                            let drop_dir = drop_dir.clone();
+                            move |this, dragged: &DraggedEntry, _, cx| {
+                                cx.stop_propagation();
+                                this.drop_into(dragged, drop_dir.clone(), cx);
+                            }
+                        }))
+                        .on_drop(cx.listener(move |this, dropped: &gpui::ExternalPaths, _, cx| {
                             cx.stop_propagation();
-                            this.drop_into(dragged, drop_dir.clone(), cx);
+                            this.copy_in(dropped.paths(), &drop_dir, cx);
                         }))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click(ix, event.click_count(), window, cx)
@@ -1181,6 +1211,11 @@ impl Render for FileTree {
                     .on_drop(cx.listener(|this, dragged: &DraggedEntry, _, cx| {
                         let root = this.root.clone();
                         this.drop_into(dragged, root, cx);
+                    }))
+                    .on_drop(cx.listener(|this, dropped: &gpui::ExternalPaths, _, cx| {
+                        cx.stop_propagation();
+                        let root = this.root.clone();
+                        this.copy_in(dropped.paths(), &root, cx);
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
