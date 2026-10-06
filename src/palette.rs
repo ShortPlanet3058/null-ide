@@ -22,7 +22,17 @@ use std::time::{Duration, Instant};
 
 actions!(
     palette,
-    [SelectNext, SelectPrevious, Confirm, ConfirmAside, Dismiss, AdjustLeft, AdjustRight, ToggleCommitFile]
+    [
+        SelectNext,
+        SelectPrevious,
+        Confirm,
+        ConfirmAside,
+        Dismiss,
+        AdjustLeft,
+        AdjustRight,
+        ToggleCommitFile,
+        WriteCommitMessage
+    ]
 );
 
 /// Registered after the text field's keys: on a choice row, ←→ change the choice
@@ -39,6 +49,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-enter", ConfirmAside, ctx),
         KeyBinding::new("escape", Dismiss, ctx),
         KeyBinding::new("tab", ToggleCommitFile, Some("Palette && committing")),
+        KeyBinding::new("secondary-i", WriteCommitMessage, Some("Palette && committing")),
         KeyBinding::new("left", AdjustLeft, adjusting),
         KeyBinding::new("right", AdjustRight, adjusting),
     ]);
@@ -338,6 +349,8 @@ pub enum PaletteEvent {
     StartTask(String),
     /// Commit with this message: every change but the files left out.
     Commit(String, Vec<PathBuf>),
+    /// ⌘I in the commit list: a message written by AI from these files' changes.
+    WriteCommitMessage(Vec<PathBuf>),
     SwitchBranch(crate::git::Branch),
     /// Start a branch with this name, here.
     CreateBranch(String),
@@ -794,6 +807,20 @@ impl Palette {
     #[cfg(test)]
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    /// ⌘I while committing: the files that go in, for AI to write the message from.
+    fn write_commit_message(&mut self, _: &WriteCommitMessage, _: &mut Window, cx: &mut Context<Self>) {
+        if self.kind != PaletteKind::Commit || !cx.global::<Settings>().ai.enabled {
+            return;
+        }
+        let files: Vec<PathBuf> = (0..self.locations.len())
+            .filter(|i| !self.left_out.contains(i))
+            .map(|i| self.locations[i].path.clone())
+            .collect();
+        if !files.is_empty() {
+            cx.emit(PaletteEvent::WriteCommitMessage(files));
+        }
     }
 
     fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
@@ -1366,6 +1393,8 @@ impl Render for Palette {
                     (k, t) if k == t => format!("Commits every change on {branch}: {} · ⇥ leaves one out", files(t)),
                     (k, t) => format!("Commits {k} of {} on {branch}", files(t)),
                 };
+                let ai = cx.global::<Settings>().ai.enabled && kept > 0 && self.query.is_empty();
+                let text = if ai { format!("{text} · ⌘I writes the message") } else { text };
                 let rows: Vec<AnyElement> = (0..self.rows.len()).map(|i| self.render_row(i, window, cx)).collect();
                 Some(
                     div()
@@ -1441,6 +1470,7 @@ impl Render for Palette {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::write_commit_message))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::toggle_commit_file))
             .on_action(cx.listener(Self::confirm_aside))

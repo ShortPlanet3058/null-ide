@@ -1389,6 +1389,69 @@ impl Workspace {
 
     /// A link to the selected lines (or the caret's) on the repository's site, at the commit
     /// checked out, copied: GitHub, GitLab or Bitbucket.
+    /// ⌘I in the commit list: AI reads what changed in `files` and writes the message into
+    /// the field as it goes, to edit or commit with ↵.
+    fn write_commit_message(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref().map(|(p, _)| p.clone()) else { return };
+        let settings = cx.global::<Settings>().ai.clone();
+        let root = self.tree.read(cx).root().to_path_buf();
+        // Nothing in the field meanwhile: ↵ there must never commit a placeholder.
+        self.show_notice("Writing the commit message…".into(), cx);
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            let diff = cx
+                .background_executor()
+                .spawn(async move {
+                    let changes: Vec<(String, Option<String>, Option<String>)> = files
+                        .iter()
+                        .map(|path| {
+                            let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
+                            let name = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+                            let before = git::committed_text(path, encoding);
+                            let after = crate::encoding::read(path).ok().map(|(text, _)| text);
+                            (name, before, after)
+                        })
+                        .collect();
+                    changes_as_diff(&changes, COMMIT_DIFF_CHARS)
+                })
+                .await;
+            let prompt = crate::ai::Prompt {
+                system: "You write git commit messages. From the changes given, write one: a first line of at most 72 \
+                         characters saying what the change does, in the imperative (\"Add…\", \"Fix…\"); then, only if it \
+                         helps, a blank line and a few short lines on why. Reply with the message only: no quotes, no \
+                         markdown, nothing before or after."
+                    .into(),
+                user: diff,
+                max_tokens: Some(300),
+                ..Default::default()
+            };
+            let mut events = crate::ai::stream(settings, prompt);
+            let mut message = String::new();
+            while let Some(event) = events.next().await {
+                let done = match event {
+                    crate::ai::AiEvent::Text(chunk) => {
+                        message.push_str(&chunk);
+                        false
+                    }
+                    crate::ai::AiEvent::Done => true,
+                    crate::ai::AiEvent::Failed(error) => {
+                        this.update(cx, |this, cx| {
+                            palette.update(cx, |p, cx| p.set_query("", cx));
+                            this.show_notice(format!("Couldn't write the message: {error}"), cx);
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+                let shown = message.trim().to_string();
+                if palette.update(cx, |p, cx| p.set_query(&shown, cx)).is_err() || done {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// The selected lines (or the caret's) on the clipboard as Markdown, to paste in an
     /// issue or a chat: where they're from, then the code fenced, its common indentation off.
     fn copy_as_code_block(&mut self, cx: &mut Context<Self>) {
@@ -2929,6 +2992,7 @@ impl Workspace {
                 this.close_palette(window, cx);
                 this.change_branch(Err(name), window, cx);
             }
+            PaletteEvent::WriteCommitMessage(files) => this.write_commit_message(files.clone(), cx),
             PaletteEvent::Commit(message, left_out) => {
                 let (message, left_out) = (message.clone(), left_out.clone());
                 this.close_palette(window, cx);
@@ -5141,6 +5205,32 @@ fn position_label(editor: &Editor, line: usize, col: usize) -> String {
     }
 }
 
+/// How much of the changes AI reads to write a commit message, in characters.
+const COMMIT_DIFF_CHARS: usize = 24_000;
+
+/// What changed in files (name, committed text, text now), as a unified diff, cut short
+/// past `max` characters.
+fn changes_as_diff(changes: &[(String, Option<String>, Option<String>)], max: usize) -> String {
+    let mut out = String::new();
+    for (name, before, after) in changes {
+        let (before, after) = (before.as_deref().unwrap_or(""), after.as_deref().unwrap_or(""));
+        let diff = similar::TextDiff::from_lines(before, after);
+        let patch =
+            diff.unified_diff().context_radius(3).header(&format!("a/{name}"), &format!("b/{name}")).to_string();
+        out.push_str(&patch);
+        if out.len() > max {
+            let mut cut = max;
+            while !out.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            out.truncate(cut);
+            out.push_str("\n[… more changes left out]\n");
+            break;
+        }
+    }
+    out
+}
+
 /// Lines of code as Markdown: "`src/a.rs` lines 3–5", then the code fenced (named by the
 /// file's extension, the fence longer than any in the code), the indentation they share off.
 fn code_block(name: &str, ext: &str, first: usize, last: usize, lines: &[String]) -> String {
@@ -7008,6 +7098,18 @@ mod tests {
         assert_eq!(label(cx, 10, 18), "Ln 1, Col 1 · 2 words selected");
         assert_eq!(thousands(1234567), "1,234,567");
         assert_eq!(thousands(999), "999");
+    }
+
+    #[test]
+    fn changes_are_read_as_a_diff() {
+        let changes = vec![
+            ("src/a.rs".to_string(), Some("one\ntwo\n".to_string()), Some("one\n2\n".to_string())),
+            ("new.txt".to_string(), None, Some("hello\n".to_string())),
+        ];
+        let diff = changes_as_diff(&changes, 10_000);
+        assert!(diff.contains("--- a/src/a.rs\n+++ b/src/a.rs\n"), "{diff}");
+        assert!(diff.contains("-two\n+2\n") && diff.contains("+hello\n"), "{diff}");
+        assert!(changes_as_diff(&changes, 20).ends_with("[… more changes left out]\n"));
     }
 
     #[test]
