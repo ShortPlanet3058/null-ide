@@ -1271,6 +1271,8 @@ impl Palette {
     /// What Enter does right now, shown at the end of the field.
     fn hint(&self) -> &'static str {
         match self.kind {
+            // Picking a file to compare with (its title says so).
+            PaletteKind::Files if self.title.is_some() => "↵ compare",
             PaletteKind::Files if split_place(&self.query).1.is_some() => "↵ open there",
             PaletteKind::Files => "↵ open",
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
