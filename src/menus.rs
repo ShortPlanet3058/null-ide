@@ -128,6 +128,11 @@ pub fn set(cx: &mut App) {
                         MenuItem::separator(),
                         MenuItem::action("Upper Case", crate::editor::UpperCase),
                         MenuItem::action("Lower Case", crate::editor::LowerCase),
+                        MenuItem::action("snake_case", crate::editor::SnakeCase),
+                        MenuItem::action("camelCase", crate::editor::CamelCase),
+                        MenuItem::action("PascalCase", crate::editor::PascalCase),
+                        MenuItem::action("kebab-case", crate::editor::KebabCase),
+                        MenuItem::action("Title Case", crate::editor::TitleCase),
                     ],
                 }),
                 MenuItem::submenu(Menu {
