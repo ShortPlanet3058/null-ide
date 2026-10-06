@@ -101,6 +101,27 @@ pub fn rename_target(path: &Path, new_name: &str) -> Result<PathBuf, String> {
 
 /// Copies a file or folder next to itself as "name copy.ext", "name copy 2.ext", ...
 pub fn duplicate(path: &Path) -> Result<PathBuf, String> {
+    let dir = path.parent().ok_or("Nowhere to copy it")?;
+    let target = copy_name(path, dir)?;
+    copy_recursively(path, &target).map_err(|e| format!("Couldn't duplicate: {e}"))?;
+    Ok(target)
+}
+
+/// Copies a file or folder into folder `dir`, under its own name, or "name copy.ext" when
+/// that's taken: nothing there is written over.
+pub fn copy_into(path: &Path, dir: &Path) -> Result<PathBuf, String> {
+    if dir.starts_with(path) {
+        return Err("A folder can't go inside itself".into());
+    }
+    let name = path.file_name().ok_or("Nothing to copy")?;
+    let target = dir.join(name);
+    let target = if target.exists() { copy_name(path, dir)? } else { target };
+    copy_recursively(path, &target).map_err(|e| format!("Couldn't copy {}: {e}", name.to_string_lossy()))?;
+    Ok(target)
+}
+
+/// A name in `dir` for a copy of `path` nothing has yet: "name copy.ext", "name copy 2.ext"...
+fn copy_name(path: &Path, dir: &Path) -> Result<PathBuf, String> {
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let ext = if path.is_dir() { None } else { path.extension().map(|e| e.to_string_lossy().into_owned()) };
     let name = |n: usize| {
@@ -110,9 +131,7 @@ pub fn duplicate(path: &Path) -> Result<PathBuf, String> {
             None => copy,
         }
     };
-    let target = (1..1000).map(|n| path.with_file_name(name(n))).find(|p| !p.exists()).ok_or("Too many copies")?;
-    copy_recursively(path, &target).map_err(|e| format!("Couldn't duplicate: {e}"))?;
-    Ok(target)
+    Ok((1..1000).map(|n| dir.join(name(n))).find(|p| !p.exists()).ok_or("Too many copies")?)
 }
 
 /// Whether two paths name the same file on disk (one file under two spellings).
@@ -190,6 +209,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn copies_dropped_files_without_writing_over_anything() {
+        let root = std::env::temp_dir().join(format!("null-copy-into-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (from, into) = (root.join("outside"), root.join("project/src"));
+        std::fs::create_dir_all(from.join("assets")).unwrap();
+        std::fs::create_dir_all(&into).unwrap();
+        std::fs::write(from.join("a.txt"), "new").unwrap();
+        std::fs::write(from.join("assets/logo.svg"), "<svg/>").unwrap();
+        std::fs::write(into.join("a.txt"), "old").unwrap();
+        // Taken: a copy beside it, the old one kept.
+        assert_eq!(copy_into(&from.join("a.txt"), &into), Ok(into.join("a copy.txt")));
+        assert_eq!(std::fs::read_to_string(into.join("a.txt")).unwrap(), "old");
+        // A folder, with what's in it.
+        assert_eq!(copy_into(&from.join("assets"), &into), Ok(into.join("assets")));
+        assert!(into.join("assets/logo.svg").is_file());
+        assert!(copy_into(&root.join("project"), &into).is_err());
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("null-fs-{name}-{}", std::process::id()));
