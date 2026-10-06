@@ -681,6 +681,8 @@ pub fn follow(url: &str, base: &Path) -> Option<Follow> {
 
 /// Opens what a link points to.
 pub type Opener = Rc<dyn Fn(Follow, &mut Window, &mut App)>;
+/// What a click on a task's box does, given which box it is.
+pub type Ticker = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 pub struct Style {
     pub theme: Theme,
@@ -689,6 +691,58 @@ pub struct Style {
     /// Where relative links and images are found from: the file's folder.
     pub base: PathBuf,
     pub open: Opener,
+    /// A task's box clicked: which one, counting from the top (see [`task_lines`]).
+    pub tick: Option<Ticker>,
+    /// Boxes drawn so far, to number them.
+    pub tasks: std::cell::Cell<usize>,
+}
+
+/// The source lines of the task list's boxes (`- [ ] milk`), top to bottom, as the preview
+/// draws them: not in front matter or code, and inside quotes too.
+pub fn task_lines(source: &str) -> Vec<usize> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut start = 0;
+    if lines.first().is_some_and(|l| l.trim() == "---")
+        && let Some(end) = lines.iter().skip(1).position(|l| l.trim() == "---")
+    {
+        start = end + 2;
+    }
+    let mut fence: Option<&str> = None;
+    let mut found = Vec::new();
+    for (n, line) in lines.iter().enumerate().skip(start) {
+        let mut text = *line;
+        while let Some(rest) = text.trim_start().strip_prefix('>') {
+            text = rest.strip_prefix(' ').unwrap_or(rest);
+        }
+        let trimmed = text.trim_start();
+        match fence {
+            Some(open) => {
+                if trimmed.starts_with(open) {
+                    fence = None;
+                }
+                continue;
+            }
+            None => {
+                if let Some(open) = fence_of(trimmed) {
+                    fence = Some(open);
+                    continue;
+                }
+            }
+        }
+        if let Some(marker) = list_marker(text)
+            && ["[ ] ", "[x] ", "[X] "].iter().any(|b| text.get(marker.content..).is_some_and(|t| t.starts_with(b)))
+        {
+            found.push(n);
+        }
+    }
+    found
+}
+
+/// The line with its task's box ticked, or unticked.
+pub fn toggle_task(line: &str) -> Option<String> {
+    let at = line.find("[ ] ").or_else(|| line.find("[x] ")).or_else(|| line.find("[X] "))?;
+    let mark = if &line[at + 1..at + 2] == " " { "x" } else { " " };
+    Some(format!("{}{mark}{}", &line[..at + 1], &line[at + 2..]))
 }
 
 /// Each block drawn, in order (the preview scrolls to them one by one).
@@ -774,14 +828,25 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
             .gap(px(4.))
             .children(items.iter().enumerate().map(|(n, item)| {
                 let mark: AnyElement = match (item.task, start) {
-                    (Some(done), _) => div()
-                        .mt(px(4.))
-                        .size(px(13.))
-                        .rounded(px(3.))
-                        .border_1()
-                        .border_color(if done { theme.caret } else { theme.muted })
-                        .when(done, |d| d.bg(theme.caret.opacity(0.85)))
-                        .into_any_element(),
+                    (Some(done), _) => {
+                        let task = style.tasks.get();
+                        style.tasks.set(task + 1);
+                        let tick = style.tick.clone();
+                        div()
+                            .id(("task", task))
+                            .debug_selector(move || format!("task {task}"))
+                            .mt(px(4.))
+                            .size(px(13.))
+                            .rounded(px(3.))
+                            .border_1()
+                            .border_color(if done { theme.caret } else { theme.muted })
+                            .when(done, |d| d.bg(theme.caret.opacity(0.85)))
+                            // Clicking it ticks it (or not) in the file.
+                            .when_some(tick, |d, tick| {
+                                d.cursor_pointer().on_click(move |_, window, cx| tick(task, window, cx))
+                            })
+                            .into_any_element()
+                    }
                     (None, Some(first)) => {
                         div().text_color(theme.muted).child(format!("{}.", first + n as u64)).into_any_element()
                     }
@@ -983,6 +1048,29 @@ fn flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_boxes_are_found_where_the_preview_draws_them() {
+        let doc = "---\ntitle: x\n---\n- [ ] milk\n- [x] eggs\n  - [ ] free range\n\n```\n- [ ] not a task\n```\n> - [X] quoted\n- plain\n";
+        assert_eq!(task_lines(doc), [3, 4, 5, 10]);
+        // As many as the preview draws.
+        let drawn: usize = parse(doc).iter().map(count_tasks).sum();
+        assert_eq!(drawn, 4);
+        assert_eq!(toggle_task("- [ ] milk").as_deref(), Some("- [x] milk"));
+        assert_eq!(toggle_task("  1. [X] eggs").as_deref(), Some("  1. [ ] eggs"));
+        assert_eq!(toggle_task("- plain"), None);
+    }
+
+    fn count_tasks(block: &Block) -> usize {
+        match block {
+            Block::List { items, .. } => items
+                .iter()
+                .map(|i| usize::from(i.task.is_some()) + i.blocks.iter().map(count_tasks).sum::<usize>())
+                .sum(),
+            Block::Quote(blocks) => blocks.iter().map(count_tasks).sum(),
+            _ => 0,
+        }
+    }
 
     #[test]
     fn dropped_files_become_relative_links() {
