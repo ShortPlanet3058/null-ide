@@ -46,6 +46,7 @@ actions!(
         CopyLineLink,
         CopyFilePath,
         CopyRelativeFilePath,
+        CopyAsCodeBlock,
         RevealFile,
         RenameFile,
         TrashFile,
@@ -1388,6 +1389,31 @@ impl Workspace {
 
     /// A link to the selected lines (or the caret's) on the repository's site, at the commit
     /// checked out, copied: GitHub, GitLab or Bitbucket.
+    /// The selected lines (or the caret's) on the clipboard as Markdown, to paste in an
+    /// issue or a chat: where they're from, then the code fenced, its common indentation off.
+    fn copy_as_code_block(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor() else { return };
+        let root = self.tree.read(cx).root().to_path_buf();
+        let e = editor.read(cx);
+        let range = e.selection.range();
+        let (first, _) = e.buffer.point(range.start);
+        let (mut last, col) = e.buffer.point(range.end);
+        if col == 0 && last > first {
+            last -= 1;
+        }
+        let lines: Vec<String> = (first..=last).map(|l| e.buffer.line_text(l)).collect();
+        let name = match e.path() {
+            Some(path) => path.strip_prefix(&root).unwrap_or(path).display().to_string(),
+            None => "Untitled".into(),
+        };
+        let ext = e.path().and_then(|p| p.extension()).and_then(|x| x.to_str()).unwrap_or("").to_string();
+        let block = code_block(&name, &ext, first + 1, last + 1, &lines);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(block));
+        let what =
+            if first == last { format!("line {}", first + 1) } else { format!("lines {}–{}", first + 1, last + 1) };
+        self.show_notice(format!("Copied {what} as a code block."), cx);
+    }
+
     fn copy_line_link(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor().cloned() else { return };
         let (path, first, last) = {
@@ -2608,6 +2634,7 @@ impl Workspace {
             (File, "Show File History".into(), Box::new(FileHistory)),
             (File, "Compare with Saved".into(), Box::new(CompareWithSaved)),
             (File, "Copy Link to Line".into(), Box::new(CopyLineLink)),
+            (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
             (File, "Copy Path".into(), Box::new(CopyFilePath)),
@@ -5114,6 +5141,18 @@ fn position_label(editor: &Editor, line: usize, col: usize) -> String {
     }
 }
 
+/// Lines of code as Markdown: "`src/a.rs` lines 3–5", then the code fenced (named by the
+/// file's extension, the fence longer than any in the code), the indentation they share off.
+fn code_block(name: &str, ext: &str, first: usize, last: usize, lines: &[String]) -> String {
+    let indent = |l: &String| l.len() - l.trim_start_matches([' ', '\t']).len();
+    let shared = lines.iter().filter(|l| !l.trim().is_empty()).map(indent).min().unwrap_or(0);
+    let body: Vec<&str> = lines.iter().map(|l| l.get(shared..).unwrap_or("").trim_end()).collect();
+    let longest_run = body.iter().flat_map(|l| l.split(|c| c != '`').map(str::len)).max().unwrap_or(0);
+    let fence = "`".repeat(longest_run.max(2) + 1);
+    let place = if first == last { format!("line {first}") } else { format!("lines {first}–{last}") };
+    format!("`{name}` {place}\n\n{fence}{ext}\n{}\n{fence}\n", body.join("\n"))
+}
+
 /// 1234567 as "1,234,567".
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
@@ -5722,6 +5761,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::file_history))
             .on_action(cx.listener(|this, _: &CompareWithSaved, window, cx| this.compare_with_saved(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLineLink, _, cx| this.copy_line_link(cx)))
+            .on_action(cx.listener(|this, _: &CopyAsCodeBlock, _, cx| this.copy_as_code_block(cx)))
             .on_action(
                 cx.listener(|this, _: &CopyFilePath, _, cx| this.copy_path(this.active_path(cx).as_deref(), false, cx)),
             )
@@ -6968,6 +7008,19 @@ mod tests {
         assert_eq!(label(cx, 10, 18), "Ln 1, Col 1 · 2 words selected");
         assert_eq!(thousands(1234567), "1,234,567");
         assert_eq!(thousands(999), "999");
+    }
+
+    #[test]
+    fn code_is_copied_as_a_markdown_block() {
+        let lines = ["    if a {".to_string(), "        b();".into(), "    }".into()];
+        assert_eq!(
+            code_block("src/a.rs", "rs", 3, 5, &lines),
+            "`src/a.rs` lines 3–5\n\n```rs\nif a {\n    b();\n}\n```\n"
+        );
+        // A fence in the code: a longer one around it.
+        let md = ["```".to_string(), "x".into(), "```".into()];
+        assert!(code_block("notes.md", "md", 1, 3, &md).contains("\n````md\n```\nx\n```\n````\n"));
+        assert!(code_block("a.py", "py", 7, 7, &["pass".into()]).starts_with("`a.py` line 7"));
     }
 
     #[test]
