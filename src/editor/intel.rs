@@ -293,13 +293,16 @@ impl Editor {
         cx.notify();
     }
 
-    /// Underlines the word under the mouse while Cmd/Ctrl is held, to show it can be clicked.
+    /// Underlines what's under the mouse while Cmd/Ctrl is held, to show it can be clicked:
+    /// a web address or a file's path, or a name to go to the definition of.
     fn update_link(&mut self, cx: &mut Context<Self>) {
-        let link = (self.secondary_held && self.lsp.is_some())
-            .then(|| self.text_under_mouse())
-            .flatten()
-            .map(|offset| self.word_at(offset))
-            .filter(|word| self.buffer.char_at(word.start).is_some_and(|c| c.is_alphanumeric() || c == '_'));
+        let offset = self.secondary_held.then(|| self.text_under_mouse()).flatten();
+        let link = offset.and_then(|offset| self.link_under(offset).map(|(range, _)| range)).or_else(|| {
+            offset
+                .filter(|_| self.lsp.is_some())
+                .map(|offset| self.word_at(offset))
+                .filter(|word| self.buffer.char_at(word.start).is_some_and(|c| c.is_alphanumeric() || c == '_'))
+        });
         if link != self.link_word {
             self.link_word = link;
             cx.notify();

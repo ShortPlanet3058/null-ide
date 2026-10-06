@@ -10,6 +10,7 @@ mod fold;
 mod ghost;
 mod hints;
 mod intel;
+mod links;
 mod mac_keys;
 mod marks;
 mod refactor;
@@ -2297,7 +2298,10 @@ impl Editor {
         self.reveal_only = true;
         if event.modifiers.secondary() && !add_cursor && event.click_count == 1 {
             self.dragging = None;
-            self.go_to_definition_at(offset, cx);
+            match self.link_under(offset) {
+                Some((_, target)) => self.follow_link(target, cx),
+                None => self.go_to_definition_at(offset, cx),
+            }
         }
     }
 
