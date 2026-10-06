@@ -188,6 +188,10 @@ impl Editor {
 
     /// ⌥⇧F: the file, or with some text selected, just that.
     pub(super) fn format_document(&mut self, _: &FormatDocument, _: &mut Window, cx: &mut Context<Self>) {
+        // Markdown without a server: its tables lined up.
+        if self.is_markdown() && !self.served(cx) {
+            return self.align_markdown_tables(cx);
+        }
         if let Some(message) = self.not_ready_message(cx) {
             return self.show_notice(self.selection.head, message, cx);
         }
@@ -195,6 +199,28 @@ impl Editor {
             return self.format_selection_now(cx);
         }
         self.format_then(false, cx);
+    }
+
+    /// Every table of a Markdown file with its columns lined up, as one undo step.
+    fn align_markdown_tables(&mut self, cx: &mut Context<Self>) {
+        let tables = crate::markdown_view::aligned_tables(&self.buffer.to_string());
+        if tables.is_empty() {
+            let at = self.selection.head;
+            return self.show_notice(at, "Nothing to tidy: the tables are lined up.".into(), cx);
+        }
+        let (line, column) = self.buffer.point(self.selection.head);
+        self.record_undo(EditKind::Other);
+        for (lines, new) in tables.into_iter().rev() {
+            let start = self.buffer.line_to_char(lines.start);
+            let last = lines.end - 1;
+            let end = self.buffer.line_to_char(last) + self.buffer.line_len(last);
+            self.buffer.replace(start..end, &new.join(self.style.line_ending.text()));
+        }
+        let line = line.min(self.buffer.len_lines().saturating_sub(1));
+        self.selection = Selection::caret(self.buffer.offset(line, column.min(self.buffer.line_len(line))));
+        self.text_changed(cx);
+        cx.emit(EditorEvent::Edited);
+        self.touch(cx);
     }
 
     pub(super) fn format_selection(&mut self, _: &FormatSelection, _: &mut Window, cx: &mut Context<Self>) {

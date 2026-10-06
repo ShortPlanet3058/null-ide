@@ -116,7 +116,7 @@ impl Editor {
     }
 
     /// Whether a language server gives this file's suggestions (otherwise its own words do).
-    fn served(&self, cx: &Context<Self>) -> bool {
+    pub(super) fn served(&self, cx: &Context<Self>) -> bool {
         match (&self.lsp, &self.path) {
             (Some(lsp), Some(path)) => lsp.read(cx).serves(path),
             _ => false,
