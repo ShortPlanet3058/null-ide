@@ -3945,6 +3945,49 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Markdown: * _ ~ over a selection wrap it, and it stays selected to wrap again
+    /// (**bold**). In code, a * over a selection replaces it as ever.
+    #[gpui::test]
+    fn markdown_marks_wrap_the_selection(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let dir = std::env::temp_dir().join(format!("null-markdown-marks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, "a big word\n").unwrap();
+        let code = dir.join("a.rs");
+        std::fs::write(&code, "a * b\n").unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(notes.clone(), None, cx));
+        editor.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection { anchor: 2, head: 5 };
+            cx.notify();
+        });
+        cx.simulate_input("*");
+        cx.simulate_input("*");
+        editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "a **big** word\n"));
+        editor.update(cx, |e, cx| {
+            e.selection = Selection { anchor: 10, head: 14 };
+            cx.notify();
+        });
+        cx.simulate_input("_");
+        editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "a **big** _word_\n"));
+
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(code.clone(), None, cx));
+        editor.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection { anchor: 0, head: 1 };
+            cx.notify();
+        });
+        cx.simulate_input("*");
+        editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "* * b\n"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Misspelled words are marked in prose and comments, never in code; ⌘. on one offers
     /// corrections and ↵ takes the first.
     #[gpui::test]

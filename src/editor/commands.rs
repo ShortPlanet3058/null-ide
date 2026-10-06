@@ -232,7 +232,10 @@ impl Editor {
     /// Handles typing a single bracket or quote. Returns true when it did something,
     /// so normal typing should be skipped.
     pub(super) fn type_pair_char(&mut self, c: char, cx: &mut Context<Self>) -> bool {
-        let Some(&(open, close)) = PAIRS.iter().find(|(o, cl)| *o == c || *cl == c) else { return false };
+        // In Markdown, * _ ~ over a selection mark it up: *once* for italic, **twice** for bold.
+        let marks = self.is_markdown() && !self.selection.is_empty() && matches!(c, '*' | '_' | '~');
+        let pair = PAIRS.iter().copied().find(|(o, cl)| *o == c || *cl == c).or(marks.then_some((c, c)));
+        let Some((open, close)) = pair else { return false };
         let caret = self.selection.head;
         let next = self.buffer.char_at(caret);
         let previous = caret.checked_sub(1).and_then(|i| self.buffer.char_at(i));
