@@ -50,7 +50,7 @@ Getting around:
 | ⌘P `file:42:7` | open a file at a place, as compilers print it |
 | ⌘F | find in the file; ↑ ↓ bring back earlier searches; ⌘E searches for the selection, ⌘G the next |
 | ⌘⇧F / ⌘⇧H | search / replace across the project (the chevron also picks which files: `*.rs, src/, !tests`) |
-| ⌃- / ⌃⇧- | back / forward to where you were |
+| ⌃- / ⌃⇧- | back / forward to where you were; ⇧⌘⌫ to the last edit |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
 | ⌘⇧N / ⌥⌘O | a new window / a recent project |
 | drop from the Finder | files open; on a folder in the files, they're copied there; on the terminal, their paths are typed in |

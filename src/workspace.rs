@@ -55,6 +55,7 @@ actions!(
         SwitchBranch,
         GoBack,
         GoForward,
+        GoToLastEdit,
         ShowWelcome,
         InstallShellCommand,
         ReviewAiTask,
@@ -186,6 +187,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
         KeyBinding::new("secondary--", DecreaseFontSize, ctx),
         KeyBinding::new("secondary-0", ResetFontSize, ctx),
+        KeyBinding::new("secondary-shift-backspace", GoToLastEdit, ctx),
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
@@ -464,6 +466,8 @@ pub struct Workspace {
     forward: Vec<Place>,
     /// Going back or forward: the moves it makes aren't places to remember.
     navigating: bool,
+    /// Where the last edit was made, in any file: Go to Last Edit goes back there.
+    last_edit: Option<Place>,
     /// Commands run from ⌘⇧B, the last first.
     recent_runs: Vec<String>,
     /// The debugger, and its panel (shown while debugging, and after, until closed).
@@ -661,6 +665,7 @@ impl Workspace {
             back: Vec::new(),
             forward: Vec::new(),
             navigating: false,
+            last_edit: None,
             pending_commands: Vec::new(),
             ignore_rules,
             key_prompt: None,
@@ -1167,6 +1172,21 @@ impl Workspace {
 
     fn go_forward(&mut self, _: &GoForward, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(false, window, cx);
+    }
+
+    /// ⇧⌘⌫: back to where the last edit was made, in whichever file (Back returns).
+    fn go_to_last_edit(&mut self, _: &GoToLastEdit, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(place) = self.last_edit.clone().filter(|p| p.path.is_file()) else {
+            return self.show_notice("Nothing edited yet.".into(), cx);
+        };
+        let here = self.here(cx);
+        self.remember_place(here);
+        self.navigating = true;
+        self.open_file(place.path, window, cx);
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| editor.set_caret_point(place.point, cx));
+        }
+        self.navigating = false;
     }
 
     /// Back (or Forward) to the last place, skipping ones that are here already or whose
@@ -1921,6 +1941,10 @@ impl Workspace {
             }),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited => {
+                    if let Some(path) = editor.read(cx).path() {
+                        let place = Place { path: path.to_path_buf(), point: editor.read(cx).caret_point() };
+                        this.last_edit = Some(place);
+                    }
                     this.schedule_backup(cx);
                     if cx.global::<Settings>().auto_save == AutoSave::AfterPause {
                         this.save_after_pause(editor, cx);
@@ -2683,6 +2707,7 @@ impl Workspace {
             (Go, "Go to Symbol in Project…".into(), Box::new(GoToSymbolInProject)),
             (Go, "Search in Project…".into(), Box::new(SearchProject)),
             (Go, "Back".into(), Box::new(GoBack)),
+            (Go, "Go to Last Edit".into(), Box::new(GoToLastEdit)),
             (Go, "Forward".into(), Box::new(GoForward)),
             (File, "Review Changes…".into(), Box::new(ReviewChanges)),
             (
@@ -5870,6 +5895,7 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::switch_branch))
             .on_action(cx.listener(Self::go_back))
+            .on_action(cx.listener(Self::go_to_last_edit))
             .on_action(cx.listener(Self::go_forward))
             // The mouse's back and forward buttons.
             .on_mouse_down(
@@ -7060,6 +7086,46 @@ mod tests {
         cx.run_until_parked();
         workspace.read_with(cx, |w, cx| assert!(w.project_search.read(cx).has_query(cx)));
         assert_eq!(workspace.read_with(cx, |w, cx| w.project_search_text(cx)), None, "the field already has it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Go to Last Edit opens the file last edited, at the edit; Back comes back.
+    #[gpui::test]
+    fn go_to_last_edit_goes_back_to_the_typing(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-last-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "three\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.txt"), window, cx);
+            let editor = w.active_editor().unwrap().clone();
+            window.focus(&editor.focus_handle(cx));
+            editor.update(cx, |e, cx| e.set_caret_point((1, 3), cx));
+        });
+        cx.simulate_input("!");
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("b.txt"), window, cx);
+            window.focus(&w.focus_handle(cx));
+        });
+        let place = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |w, cx| {
+                let e = w.active_editor().unwrap().read(cx);
+                (e.file_name(), e.caret_point())
+            })
+        };
+        cx.dispatch_action(GoToLastEdit);
+        assert_eq!(place(cx), ("a.txt".into(), (1, 4)));
+        cx.dispatch_action(GoBack);
+        assert_eq!(place(cx).0, "b.txt");
         std::fs::remove_dir_all(&dir).ok();
     }
 
