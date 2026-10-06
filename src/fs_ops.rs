@@ -179,7 +179,47 @@ fn copy_recursively(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Writes a file whole or not at all: the bytes go to a file beside it first, then take
+/// its place, so a crash or a full disk mid-write leaves the old file as it was. A link
+/// is written through to its file; the file keeps its permissions. A file with other
+/// hard links, or a folder Null can't add to, is written in place instead.
+pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let existing = std::fs::metadata(&target).ok();
+    #[cfg(unix)]
+    let shared = existing.as_ref().is_some_and(|m| std::os::unix::fs::MetadataExt::nlink(m) > 1);
+    #[cfg(not(unix))]
+    let shared = false;
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else { return std::fs::write(path, bytes) };
+    if shared {
+        return std::fs::write(&target, bytes);
+    }
+    let temp = dir.join(format!(".{}.null-saving-{}", name.to_string_lossy(), std::process::id()));
+    let written = std::fs::File::create(&temp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        if let Some(meta) = &existing {
+            file.set_permissions(meta.permissions())?;
+        }
+        file.sync_all()
+    });
+    match written.and_then(|()| std::fs::rename(&temp, &target)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            std::fs::remove_file(&temp).ok();
+            // Couldn't make the file beside it (a folder only the file itself can be
+            // written in): in place, as before.
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                std::fs::write(&target, bytes)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 /// Moves to the Trash (or the platform's recycle bin): never deletes outright.
+#[cfg(not(test))]
 pub fn move_to_trash(path: &Path) -> Result<(), String> {
     #[allow(unused_mut)]
     let mut context = trash::TrashContext::default();
@@ -193,8 +233,59 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
     context.delete(path).map_err(|e| format!("Couldn't move to the Trash: {e}"))
 }
 
+/// In tests, a folder of their own stands in for the Trash: nothing of theirs lands in
+/// the real one.
+#[cfg(test)]
+pub fn move_to_trash(path: &Path) -> Result<(), String> {
+    let trash = test_trash();
+    std::fs::create_dir_all(&trash).map_err(|e| e.to_string())?;
+    let name = path.file_name().ok_or("Nothing to move")?;
+    let mut to = trash.join(name);
+    let mut n = 1;
+    while to.symlink_metadata().is_ok() {
+        n += 1;
+        to = trash.join(format!("{}-{n}", name.to_string_lossy()));
+    }
+    std::fs::rename(path, &to).map_err(|e| format!("Couldn't move to the Trash: {e}"))
+}
+
+/// Where tests' "Trash" is.
+#[cfg(test)]
+pub fn test_trash() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("null-test-trash-{}", std::process::id()))
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// A save takes the old file's place whole, through a link, keeping its permissions.
+    #[test]
+    #[cfg(unix)]
+    fn saves_replace_files_whole() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("null-write-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("run.sh");
+        std::fs::write(&file, "old\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::write_file(&file, b"new\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new\n");
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o755);
+        // Through a link: the file changes, the link stays a link.
+        let link = dir.join("link.sh");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        super::write_file(&link, b"linked\n").unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "linked\n");
+        // A new file, and nothing left beside them.
+        super::write_file(&dir.join("new.txt"), b"x").unwrap();
+        let mut names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["link.sh", "new.txt", "run.sh"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn moves_into_another_folder_but_not_into_itself_or_over_something() {

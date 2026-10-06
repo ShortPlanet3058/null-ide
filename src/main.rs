@@ -180,8 +180,36 @@ fn main() {
     });
 }
 
-/// Opens a window on project `root`, as it was left (and `file` in it, if given).
+/// The window already on project `root`, other than `except`. One project has one window:
+/// two would keep (and clear) the same backup of unsaved work.
+pub(crate) fn window_on(
+    root: &std::path::Path,
+    except: Option<gpui::AnyWindowHandle>,
+    cx: &gpui::App,
+) -> Option<gpui::WindowHandle<Workspace>> {
+    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let root = real(root);
+    cx.windows()
+        .into_iter()
+        .filter(|w| Some(*w) != except)
+        .filter_map(|w| w.downcast::<Workspace>())
+        .find(|handle| handle.read(cx).is_ok_and(|workspace| real(workspace.root(cx)) == root))
+}
+
+/// Opens a window on project `root`, as it was left (and `file` in it, if given); the
+/// window already on it, if there's one.
 pub(crate) fn open_project_window(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::App) {
+    if let Some(handle) = window_on(&root, None, cx) {
+        handle
+            .update(cx, |workspace, window, cx| {
+                window.activate_window();
+                if let Some(file) = file {
+                    workspace.open_file(file, window, cx);
+                }
+            })
+            .ok();
+        return;
+    }
     let session = session::Session::load(&root);
     let options = WindowOptions {
         window_bounds: Some(window_bounds(session.window, cx)),

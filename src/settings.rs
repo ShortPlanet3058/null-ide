@@ -197,10 +197,9 @@ impl Settings {
 
     fn save(&self) {
         let Some(path) = Self::path() else { return };
-        let result = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&path, serde_json::to_string_pretty(self).unwrap_or_default() + "\n"));
+        let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
+            crate::fs_ops::write_file(&path, (serde_json::to_string_pretty(self).unwrap_or_default() + "\n").as_bytes())
+        });
         if let Err(err) = result {
             eprintln!("null: couldn't save settings to {}: {err}", path.display());
         }
