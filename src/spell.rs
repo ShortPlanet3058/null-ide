@@ -1,14 +1,17 @@
 //! Spelling where text is words: Markdown and text files, and comments in code. The Mac's
-//! own checker does it, in the languages chosen in System Settings (it tells them apart
-//! itself). Each word is asked about once. Names, addresses, paths and code aren't words,
-//! so they're never marked.
+//! own checker does it. A line is checked in each of the first languages set in System
+//! Settings, and it's in the one it has the fewest mistakes in: "teh" is a word in
+//! Indonesian, not in an English sentence, and "fôte" is wrong in a French one. Each line
+//! is asked about once. Names, addresses, paths and code aren't words: never marked.
 
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{LazyLock, Mutex};
 
-/// Words asked about, and whether they were wrong.
-static KNOWN: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(Default::default);
+/// Lines asked about, and the byte ranges in them the checker found wrong.
+static KNOWN: LazyLock<Mutex<HashMap<String, Vec<Range<usize>>>>> = LazyLock::new(Default::default);
+/// Past this many lines remembered, they're forgotten and asked about again.
+const REMEMBERED: usize = 20_000;
 
 /// The byte ranges in `text` of the words worth checking: runs of letters (with an
 /// apostrophe inside, as in "don't" or "l’été"), not part of anything that isn't prose: an
@@ -51,16 +54,48 @@ fn is_word(part: &str) -> bool {
     !part.chars().skip(1).any(char::is_uppercase)
 }
 
-/// Whether `word` is spelled wrong.
-pub fn misspelled(word: &str) -> bool {
-    if let Some(wrong) = KNOWN.lock().ok().and_then(|known| known.get(word).copied()) {
+/// What the checker finds wrong in `line`, by byte range (code included: callers keep
+/// only the ranges over `words`).
+pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
+    if let Some(wrong) = KNOWN.lock().ok().and_then(|known| known.get(line).cloned()) {
         return wrong;
     }
-    let wrong = checker::wrong(word);
+    let wrong = checker::wrong_in(line);
     if let Ok(mut known) = KNOWN.lock() {
-        known.insert(word.to_string(), wrong);
+        if known.len() > REMEMBERED {
+            known.clear();
+        }
+        known.insert(line.to_string(), wrong.clone());
     }
     wrong
+}
+
+/// The misspelled words of `line`: its `words` (those `keep` says are checked) that the
+/// checker finds wrong.
+pub fn misspelled_words(line: &str, keep: impl Fn(&Range<usize>) -> bool) -> Vec<Range<usize>> {
+    let checked: Vec<Range<usize>> = words(line).into_iter().filter(|r| keep(r)).collect();
+    if checked.is_empty() {
+        return Vec::new();
+    }
+    let wrong = wrong_in(line);
+    checked.into_iter().filter(|r| wrong.iter().any(|w| w.start < r.end && r.start < w.end)).collect()
+}
+
+/// UTF-16 units (as the Mac counts) of `text` to its bytes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn bytes_of(text: &str, units: Range<usize>) -> Range<usize> {
+    let (mut unit, mut start, mut end) = (0, text.len(), text.len());
+    for (byte, c) in text.char_indices() {
+        if unit == units.start {
+            start = byte;
+        }
+        if unit == units.end {
+            end = byte;
+            break;
+        }
+        unit += c.len_utf16();
+    }
+    start..end.max(start)
 }
 
 /// What `word` may have been meant to be, likeliest first.
@@ -72,18 +107,73 @@ pub fn guesses(word: &str) -> Vec<String> {
 pub fn learn(word: &str) {
     checker::learn(word);
     if let Ok(mut known) = KNOWN.lock() {
-        known.insert(word.to_string(), false);
+        known.clear();
     }
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-mod checker {
+use mac as checker;
+
+/// The Mac's checker (built in tests too, for the test run by hand).
+#[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
+mod mac {
     use objc2_app_kit::NSSpellChecker;
     use objc2_foundation::{NSRange, NSString};
 
-    pub fn wrong(word: &str) -> bool {
-        let word = NSString::from_str(word);
-        NSSpellChecker::sharedSpellChecker().checkSpellingOfString_startingAt(&word, 0).length > 0
+    use std::ops::Range;
+    use std::sync::LazyLock;
+
+    /// The languages lines are tried in: the first ones set in System Settings that can
+    /// find a mistake at all (one whose dictionary isn't on the Mac finds none, and would
+    /// always look best).
+    pub(super) static LANGUAGES: LazyLock<Vec<String>> = LazyLock::new(|| {
+        let nonsense = "qzxvbn";
+        let text = NSString::from_str(nonsense);
+        let languages = NSSpellChecker::sharedSpellChecker().userPreferredLanguages();
+        languages
+            .iter()
+            .map(|l| l.to_string())
+            .filter(|l| !wrong_in_language(nonsense, &text, Some(&NSString::from_str(l))).is_empty())
+            .take(3)
+            .collect()
+    });
+
+    /// What's wrong in `line` in the language it has the fewest mistakes in.
+    pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
+        let text = NSString::from_str(line);
+        let mut best: Option<Vec<Range<usize>>> = None;
+        for language in LANGUAGES.iter() {
+            let wrong = wrong_in_language(line, &text, Some(&NSString::from_str(language)));
+            if best.as_ref().is_none_or(|b| wrong.len() < b.len()) {
+                best = Some(wrong);
+            }
+        }
+        best.unwrap_or_else(|| wrong_in_language(line, &text, None))
+    }
+
+    fn wrong_in_language(line: &str, text: &NSString, language: Option<&NSString>) -> Vec<Range<usize>> {
+        let checker = NSSpellChecker::sharedSpellChecker();
+        let (mut wrong, mut from) = (Vec::new(), 0);
+        while from < text.length() {
+            // Safety: the word count pointer may be null.
+            let found = unsafe {
+                checker.checkSpellingOfString_startingAt_language_wrap_inSpellDocumentWithTag_wordCount(
+                    text,
+                    from as isize,
+                    language,
+                    false,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if found.length == 0 || found.location < from {
+                break;
+            }
+            wrong.push(super::bytes_of(line, found.location..found.location + found.length));
+            from = found.location + found.length;
+        }
+        wrong
     }
 
     pub fn guesses(word: &str) -> Vec<String> {
@@ -103,8 +193,8 @@ mod checker {
 /// Elsewhere (for now), nothing is marked.
 #[cfg(all(not(target_os = "macos"), not(test)))]
 mod checker {
-    pub fn wrong(_: &str) -> bool {
-        false
+    pub fn wrong_in(_: &str) -> Vec<std::ops::Range<usize>> {
+        Vec::new()
     }
     pub fn guesses(_: &str) -> Vec<String> {
         Vec::new()
@@ -120,9 +210,12 @@ mod checker {
 
     static LEARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-    pub fn wrong(word: &str) -> bool {
-        ["teh", "recieve", "speling"].contains(&word.to_lowercase().as_str())
-            && !LEARNED.lock().unwrap().iter().any(|w| w == word)
+    pub fn wrong_in(line: &str) -> Vec<std::ops::Range<usize>> {
+        let wrong = |word: &str| {
+            ["teh", "recieve", "speling"].contains(&word.to_lowercase().as_str())
+                && !LEARNED.lock().unwrap().iter().any(|w| w == word)
+        };
+        super::words(line).into_iter().filter(|r| wrong(&line[r.clone()])).collect()
     }
 
     pub fn guesses(word: &str) -> Vec<String> {
@@ -160,9 +253,14 @@ mod tests {
     #[test]
     fn misspelled_words_and_their_guesses() {
         let text = "teh `teh` recieve";
-        let wrong: Vec<&str> = words(text).into_iter().map(|r| &text[r]).filter(|w| misspelled(w)).collect();
+        let wrong: Vec<&str> = misspelled_words(text, |_| true).into_iter().map(|r| &text[r]).collect();
         assert_eq!(wrong, ["teh", "recieve"]);
+        let wrong = misspelled_words(text, |r| r.start > 3);
+        assert_eq!(wrong.iter().map(|r| &text[r.clone()]).collect::<Vec<_>>(), ["recieve"]);
         assert_eq!(guesses("teh")[0], "the");
+        // The Mac counts in UTF-16: "été 😀 teh" → bytes.
+        let text = "été 😀 teh";
+        assert_eq!(&text[bytes_of(text, 7..10)], "teh");
     }
 
     /// The Mac's own checker, for real (run by hand: it asks AppKit).
@@ -180,5 +278,16 @@ mod tests {
         for word in ["maison", "été", "l’été", "aujourd’hui", "don't", "Teh"] {
             println!("{word}: {}", if wrong(word) { "wrong" } else { "right" });
         }
+        println!("languages: {:?}", *super::mac::LANGUAGES);
+        // In a sentence, the language is clear: "teh" isn't English.
+        let line = "This release fixes teh crash when you recieve a big file.";
+        let found: Vec<&str> = super::mac::wrong_in(line).into_iter().map(|r| &line[r]).collect();
+        assert_eq!(found, ["teh", "recieve"]);
+        let line = "On peut écrire en français aussi : l’été est là, mais pas de fôte.";
+        let found: Vec<&str> = super::mac::wrong_in(line).into_iter().map(|r| &line[r]).collect();
+        assert_eq!(found, ["fôte"]);
+        let line = "Je vais à la maison avec une fôte de frappe.";
+        let found: Vec<&str> = super::mac::wrong_in(line).into_iter().map(|r| &line[r]).collect();
+        assert_eq!(found, ["fôte"]);
     }
 }

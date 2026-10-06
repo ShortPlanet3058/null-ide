@@ -67,25 +67,23 @@ impl Editor {
         fences.as_ref().and_then(|(_, lines)| lines.get(line).copied()).unwrap_or(false)
     }
 
-    /// The words of `text` (line `line`) that are checked: prose outside code, or comments.
-    fn checked_words(&self, line: usize, text: &str, cx: &App) -> Vec<Range<usize>> {
+    /// The misspelled words of `text` (line `line`), among those checked: prose outside
+    /// code, or comments.
+    fn misspelled_words(&self, line: usize, text: &str, cx: &App) -> Vec<Range<usize>> {
         if !self.checks_spelling(cx) || self.in_fence(line) {
             return Vec::new();
         }
         let prose = self.is_prose();
         let line_byte = self.buffer.line_to_byte(line);
-        crate::spell::words(text)
-            .into_iter()
-            .filter(|r| {
-                let syntax = syntax_at(&self.spans, line_byte + r.start);
-                if prose {
-                    // Headings and link text are prose too; code, addresses and marks aren't.
-                    matches!(syntax, None | Some(Syntax::Plain | Syntax::Keyword | Syntax::Function))
-                } else {
-                    syntax == Some(Syntax::Comment)
-                }
-            })
-            .collect()
+        crate::spell::misspelled_words(text, |r| {
+            let syntax = syntax_at(&self.spans, line_byte + r.start);
+            if prose {
+                // Headings and link text are prose too; code, addresses and marks aren't.
+                matches!(syntax, None | Some(Syntax::Plain | Syntax::Keyword | Syntax::Function))
+            } else {
+                syntax == Some(Syntax::Comment)
+            }
+        })
     }
 
     /// The misspelled words on line `line` (its text `text`), by byte range in it. The word
@@ -94,10 +92,7 @@ impl Editor {
         let (caret_line, caret_col) = self.caret_point();
         let typing = (caret_line == line && self.selection.is_empty())
             .then(|| text.char_indices().nth(caret_col).map_or(text.len(), |(b, _)| b));
-        self.checked_words(line, text, cx)
-            .into_iter()
-            .filter(|r| typing != Some(r.end) && crate::spell::misspelled(&text[r.clone()]))
-            .collect()
+        self.misspelled_words(line, text, cx).into_iter().filter(|r| typing != Some(r.end)).collect()
     }
 
     /// The misspelled word the caret is in (or just after), by char range, and the word.
@@ -108,11 +103,8 @@ impl Editor {
         let (line, column) = self.caret_point();
         let text = self.buffer.line_text(line);
         let at = text.char_indices().nth(column).map_or(text.len(), |(b, _)| b);
-        let word = self.checked_words(line, &text, cx).into_iter().find(|r| r.start <= at && at <= r.end)?;
+        let word = self.misspelled_words(line, &text, cx).into_iter().find(|r| r.start <= at && at <= r.end)?;
         let found = text[word.clone()].to_string();
-        if !crate::spell::misspelled(&found) {
-            return None;
-        }
         let start = self.buffer.rope().line_to_char(line) + text[..word.start].chars().count();
         Some((start..start + found.chars().count(), found))
     }
