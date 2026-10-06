@@ -63,6 +63,38 @@ impl Editor {
 
     // ---------- comments ----------
 
+    /// ⌥⌘/: the selection wrapped in a block comment (`/* … */`), or unwrapped when it is
+    /// one; with nothing selected, or over several lines, the whole lines.
+    pub(super) fn toggle_block_comment(&mut self, cx: &mut Context<Self>) {
+        let at = self.selection.head;
+        let Some(language) = self.language() else { return };
+        let Some((open, close)) = language.block_comment else {
+            return self.show_notice(at, format!("{} has no block comments.", language.name), cx);
+        };
+        let range = self.selection.range();
+        let (first, _) = self.buffer.point(range.start);
+        let (last, _) = self.buffer.point(range.end);
+        if !range.is_empty() && first == last {
+            let text = self.buffer.slice(range.clone());
+            let inner = text.strip_prefix(open).and_then(|t| t.strip_suffix(close));
+            let new = match inner {
+                Some(inner) => {
+                    let inner = inner.strip_prefix(' ').unwrap_or(inner);
+                    inner.strip_suffix(' ').unwrap_or(inner).to_string()
+                }
+                None => format!("{open} {text} {close}"),
+            };
+            let len = new.chars().count();
+            self.edit(range.clone(), &new, EditKind::Other, cx);
+            self.selection = Selection { anchor: range.start, head: range.start + len };
+            return;
+        }
+        let lines = self.selected_lines();
+        let texts = self.line_texts(&lines);
+        let new_lines = toggle_block_comment(&texts, open, close);
+        self.rewrite_lines(lines, new_lines, |p| p, cx);
+    }
+
     /// Comments the selected lines out, or back in when they all already are.
     pub(super) fn toggle_comment(&mut self, cx: &mut Context<Self>) {
         let Some(language) = self.language() else { return };

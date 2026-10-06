@@ -2693,6 +2693,7 @@ impl Workspace {
                 (Edit, "Find…".into(), Box::new(DeployFind)),
                 (Edit, "Replace…".into(), Box::new(DeployReplace)),
                 (Lines, "Toggle Comment".into(), Box::new(crate::editor::ToggleComment)),
+                (Lines, "Toggle Block Comment".into(), Box::new(crate::editor::ToggleBlockComment)),
                 (Lines, "Indent (Tab on a selection)".into(), Box::new(crate::editor::Indent)),
                 (Lines, "Outdent (Shift+Tab)".into(), Box::new(crate::editor::Outdent)),
                 (Lines, "Move Line Up".into(), Box::new(crate::editor::MoveLineUp)),

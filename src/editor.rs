@@ -123,6 +123,7 @@ actions!(
         CancelCompletion,
         InlineAssist,
         ToggleComment,
+        ToggleBlockComment,
         Indent,
         Outdent,
         MoveLineUp,
@@ -204,6 +205,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-space", ShowCompletions, ctx),
         KeyBinding::new("secondary-i", InlineAssist, ctx),
         KeyBinding::new("secondary-/", ToggleComment, ctx),
+        KeyBinding::new("alt-secondary-/", ToggleBlockComment, ctx),
         KeyBinding::new("secondary-]", Indent, ctx),
         KeyBinding::new("secondary-[", Outdent, ctx),
         KeyBinding::new("shift-tab", Outdent, ctx),
@@ -2622,6 +2624,11 @@ impl Editor {
         self.on_each_cursors_lines(cx, |this, cx| this.toggle_comment(cx));
     }
 
+    fn toggle_block_comment_action(&mut self, _: &ToggleBlockComment, _: &mut Window, cx: &mut Context<Self>) {
+        self.single_cursor();
+        self.toggle_block_comment(cx);
+    }
+
     fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
         self.on_each_cursors_lines(cx, |this, cx| this.indent_lines(cx));
     }
@@ -3163,6 +3170,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::next_ghost))
             .on_action(cx.listener(Self::previous_ghost))
             .on_action(cx.listener(Self::dismiss_ghost_action))
+            .on_action(cx.listener(Self::toggle_block_comment_action))
             .on_action(cx.listener(Self::toggle_comment_action))
             .on_action(cx.listener(Self::indent))
             .on_action(cx.listener(Self::outdent))
@@ -3524,6 +3532,37 @@ mod tests {
         cx.simulate_keystrokes("shift-tab");
         assert_eq!(caret(cx), (2, 9));
         e.update(cx, |e, _| assert_eq!(e.buffer.line_text(3), "| eggs |     |"));
+    }
+
+    /// ⌥⌘/ wraps the selection in /* */ and back; over lines, the lines; Python has none.
+    #[gpui::test]
+    fn block_comments_wrap_and_unwrap(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let text = "let a = b + c;\nlet d = 1;\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("x.rs")), cx));
+        e.update_in(cx, |e, window, _| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection { anchor: 8, head: 13 };
+        });
+        cx.simulate_keystrokes("alt-cmd-/");
+        e.update(cx, |e, _| {
+            assert_eq!(e.buffer.line_text(0), "let a = /* b + c */;");
+            assert_eq!(e.buffer.slice(e.selection.range()), "/* b + c */");
+        });
+        cx.simulate_keystrokes("alt-cmd-/");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), text));
+        // Two whole lines.
+        e.update(cx, |e, _| e.selection = Selection { anchor: 0, head: 24 });
+        cx.simulate_keystrokes("alt-cmd-/");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "/* let a = b + c;\nlet d = 1; */\n"));
+        // ⌘/ still uses line comments.
+        cx.simulate_keystrokes("cmd-z cmd-/");
+        e.update(cx, |e, _| assert!(e.buffer.to_string().starts_with("// let a")));
     }
 
     #[test]
