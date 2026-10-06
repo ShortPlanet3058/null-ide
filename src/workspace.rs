@@ -1859,6 +1859,7 @@ impl Workspace {
                 }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
                 EditorEvent::Reviewed => this.file_reviewed(editor, cx),
+                EditorEvent::FilesDropped { paths, at } => this.link_dropped(editor.clone(), paths, *at, cx),
                 EditorEvent::SaveFailed(message) => this.show_notice(message.clone(), cx),
                 EditorEvent::ChangedOnDisk => {
                     let name = editor.read(cx).file_name();
@@ -4881,6 +4882,31 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Files dropped on a Markdown file: a link to each where they landed. One from outside
+    /// the project is copied next to the Markdown file first, so the link keeps working.
+    fn link_dropped(&mut self, editor: Entity<Editor>, paths: &[PathBuf], at: usize, cx: &mut Context<Self>) {
+        let Some(dir) = editor.read(cx).path().and_then(Path::parent).map(Path::to_path_buf) else { return };
+        let root = self.tree.read(cx).root().to_path_buf();
+        let mut links = Vec::new();
+        for path in paths {
+            let target = if path.starts_with(&root) {
+                path.clone()
+            } else {
+                match crate::fs_ops::copy_into(path, &dir) {
+                    Ok(copy) => copy,
+                    Err(problem) => {
+                        self.show_notice(problem, cx);
+                        continue;
+                    }
+                }
+            };
+            links.push(crate::markdown_view::link_to(&dir, &target));
+        }
+        if !links.is_empty() {
+            editor.update(cx, |editor, cx| editor.insert_at(at, &links.join("\n"), cx));
+        }
+    }
+
     /// A file's path on the clipboard: in full, or from the project's folder.
     fn copy_path(&self, path: Option<&Path>, relative: bool, cx: &mut Context<Self>) {
         let Some(path) = path else { return };
@@ -6732,6 +6758,37 @@ mod tests {
         assert_eq!(stops, [("a.txt".into(), 2), ("a.txt".into(), 5), ("b.txt".into(), 1), ("a.txt".into(), 2)]);
         cx.simulate_keystrokes("shift-f8");
         workspace.update(cx, |w, cx| assert_eq!(at(w, cx), ("b.txt".into(), 1)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Files dropped on a Markdown file: links where they land; one from outside the
+    /// project copied next to it first.
+    #[gpui::test]
+    fn files_dropped_on_markdown_become_links(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-md-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (project, outside) = (dir.join("project"), dir.join("outside"));
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        std::fs::create_dir_all(project.join("assets")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(project.join("docs/notes.md"), "# Notes\n\n").unwrap();
+        std::fs::write(project.join("assets/logo.png"), "png").unwrap();
+        std::fs::write(outside.join("shot.png"), "png").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = project.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(project.join("docs/notes.md"), window, cx);
+            let editor = w.active_editor().unwrap().clone();
+            let paths = [project.join("assets/logo.png"), outside.join("shot.png")];
+            w.link_dropped(editor.clone(), &paths, 9, cx);
+            assert_eq!(editor.read(cx).buffer.to_string(), "# Notes\n\n![logo](../assets/logo.png)\n![shot](shot.png)");
+        });
+        assert!(project.join("docs/shot.png").is_file());
         std::fs::remove_dir_all(&dir).ok();
     }
 

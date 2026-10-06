@@ -323,6 +323,12 @@ pub enum EditorEvent {
     },
     /// Every change of a review was kept or undone.
     Reviewed,
+    /// Files dropped from the Finder on a Markdown file, at char offset `at`: the workspace
+    /// puts links to them there.
+    FilesDropped {
+        paths: Vec<PathBuf>,
+        at: usize,
+    },
     /// The breakpoints changed (set, removed, or moved by an edit).
     BreakpointsChanged,
     /// Several places to choose from (implementations): the workspace lists them.
@@ -1928,6 +1934,13 @@ impl Editor {
         self.edit(at..at, text, EditKind::Typing, cx);
     }
 
+    /// Text put in at char offset `at`, as one undo step, the caret after it.
+    pub fn insert_at(&mut self, at: usize, text: &str, cx: &mut Context<Self>) {
+        let at = at.min(self.buffer.len_chars());
+        self.single_cursor();
+        self.edit(at..at, text, EditKind::Other, cx);
+    }
+
     /// Switches the file's line endings, converting every line break.
     /// The test the caret is in (or with `at_caret` false, the file's tests), as a command.
     pub fn test_run(&mut self, root: &std::path::Path, at_caret: bool) -> Option<crate::test_at::TestRun> {
@@ -2931,6 +2944,13 @@ impl Render for Editor {
         let text = div()
             .key_context(key_context)
             .track_focus(&self.focus_handle)
+            // In Markdown, files dropped from the Finder become links where they land.
+            .when(self.is_markdown(), |text| {
+                text.on_drop(cx.listener(|this, dropped: &gpui::ExternalPaths, window, cx| {
+                    let at = this.offset_at(window.mouse_position());
+                    cx.emit(EditorEvent::FilesDropped { paths: dropped.paths().to_vec(), at });
+                }))
+            })
             .size_full()
             .cursor(if self.link_word.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
             .on_action(cx.listener(Self::move_left))
