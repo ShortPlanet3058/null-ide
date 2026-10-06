@@ -382,12 +382,24 @@ impl Editor {
         super::reindent::indent_columns(&self.buffer.line_text(line), super::TAB_SIZE)
     }
 
-    /// How indented lines put in at the start of `line` should be: as deep as it is, or as
-    /// the line above leads into (inside a block it opens).
+    /// How indented lines put in at the start of `line` should be: as deep as that line;
+    /// a closing `}` takes them as deep as the block it ends; a blank line as deep as its own
+    /// spaces, or inside the block the line above opens.
     fn indent_for_lines_at(&self, line: usize) -> usize {
+        let tab = super::TAB_SIZE;
         let above = (line.saturating_sub(1000)..line).rev().find(|&l| !self.buffer.line_text(l).trim().is_empty());
-        let after_above = above.map_or(0, |l| super::reindent::indent_columns(&self.indent_after(l), super::TAB_SIZE));
-        self.line_indent(line).max(after_above)
+        let after_above = |l: usize| super::reindent::indent_columns(&self.indent_after(l), tab);
+        let own = self.line_indent(line);
+        let text = self.buffer.line_text(line);
+        let words = text.trim_start();
+        if words.is_empty() {
+            let opened = above.filter(|&l| after_above(l) > self.line_indent(l));
+            return if own > 0 { own } else { opened.map_or(0, after_above) };
+        }
+        if words.starts_with(['}', ')', ']']) {
+            return own.max(above.map_or(0, after_above));
+        }
+        own
     }
 
     /// `text` moved to the indentation of where it goes in at `range`, and where it goes in
