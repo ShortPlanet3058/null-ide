@@ -237,6 +237,29 @@ fn sticky_lines(
 pub const FOLDED: &str = " ⋯";
 /// Space between a line's end and who last changed it.
 const BLAME_GAP: &str = "      ";
+/// A problem's message at the end of its line is cut to this many characters.
+const PROBLEM_NOTE_CHARS: usize = 100;
+
+/// The note at the end of the caret's line when something's wrong there: the most serious
+/// problem starting on it (`bytes` of the text), its first line, cut short.
+fn problem_note(problems: &[crate::editor::Problem], bytes: Range<usize>) -> Option<(String, DiagnosticSeverity)> {
+    let rank = |s: DiagnosticSeverity| match s {
+        DiagnosticSeverity::ERROR => 0,
+        DiagnosticSeverity::WARNING => 1,
+        DiagnosticSeverity::INFORMATION => 2,
+        _ => 3,
+    };
+    let problem = problems
+        .iter()
+        .filter(|p| bytes.contains(&p.range.start) && rank(p.severity) <= 1)
+        .min_by_key(|p| rank(p.severity))?;
+    let first = problem.message.lines().next().unwrap_or("").trim();
+    let note = match first.char_indices().nth(PROBLEM_NOTE_CHARS) {
+        Some((cut, _)) => format!("{}…", &first[..cut]),
+        None => first.to_string(),
+    };
+    Some((note, problem.severity))
+}
 
 /// Draws an [`Editor`]: gutter, current line, selection, text and caret.
 pub struct EditorElement {
@@ -573,6 +596,16 @@ impl Element for EditorElement {
             }
 
             let show_blame = cx.global::<crate::settings::Settings>().line_blame;
+            // Something wrong on the caret's line: said at its end, before who changed it.
+            let caret_note = {
+                let rope = editor.buffer.rope();
+                let bytes = rope.line_to_byte(caret_line)..rope.line_to_byte((caret_line + 1).min(rope.len_lines()));
+                let bytes = bytes.start..bytes.end.max(bytes.start + 1);
+                problem_note(&editor.problems(cx), bytes).map(|(note, severity)| {
+                    let color = if severity == DiagnosticSeverity::ERROR { theme.error } else { theme.warning };
+                    (format!("{BLAME_GAP}{note}"), color.opacity(0.75))
+                })
+            };
             // A merge conflict's first line says how to resolve it, faintly.
             let conflicts = editor.conflicts();
             let resolve_tip = (!conflicts.is_empty())
@@ -687,6 +720,11 @@ impl Element for EditorElement {
                         (Some(run(note.len(), &font, theme.muted)), note)
                     } else if let Some(note) = tip {
                         (Some(run(note.len(), &font, theme.faint)), note)
+                    } else if let Some((note, color)) = caret_note
+                        .as_ref()
+                        .filter(|_| row.last && row.line == caret_line && !editor.is_folded(row.line))
+                    {
+                        (Some(run(note.len(), &font, *color)), note.clone())
                     } else if let Some(note) = blame {
                         (Some(run(note.len(), &font, theme.faint)), note)
                     } else {
@@ -1509,6 +1547,35 @@ mod long_lines {
             // The short line below is whole.
             assert_eq!(layout.rows[1].text, "short");
         });
+    }
+}
+
+#[cfg(test)]
+mod problem_notes {
+    use super::*;
+
+    fn problem(start: usize, severity: DiagnosticSeverity, message: &str) -> crate::editor::Problem {
+        crate::editor::Problem {
+            range: start..start + 1,
+            severity,
+            message: message.into(),
+            diagnostic: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_most_serious_problem_on_the_line_is_said_at_its_end() {
+        let problems = [
+            problem(3, DiagnosticSeverity::WARNING, "unused variable: `x`"),
+            problem(5, DiagnosticSeverity::ERROR, "mismatched types\nexpected `u32`, found `&str`"),
+            problem(40, DiagnosticSeverity::ERROR, "on another line"),
+            problem(7, DiagnosticSeverity::HINT, "a hint stays out"),
+        ];
+        assert_eq!(problem_note(&problems, 0..20), Some(("mismatched types".into(), DiagnosticSeverity::ERROR)));
+        assert_eq!(problem_note(&problems[..1], 0..20).unwrap().0, "unused variable: `x`");
+        assert_eq!(problem_note(&problems[3..], 0..20), None);
+        let long = [problem(0, DiagnosticSeverity::ERROR, &"x".repeat(300))];
+        assert_eq!(problem_note(&long, 0..5).unwrap().0.chars().count(), PROBLEM_NOTE_CHARS + 1);
     }
 }
 
