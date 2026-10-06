@@ -5,6 +5,7 @@
 
 use super::{EditKind, Editor, EditorEvent, Selection};
 use crate::ai::{self, AiEvent, Prompt};
+use crate::fonts::CodeFont;
 use crate::settings::Settings;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
@@ -646,7 +647,6 @@ impl Editor {
     pub(super) fn render_ai_blocks(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(layout) = &self.layout else { return Vec::new() };
         let theme = cx.global::<Theme>().clone();
-        let code_font = cx.global::<crate::fonts::Fonts>().code.clone();
         let lh = layout.line_height;
         let left = layout.text_bounds.left() - layout.bounds.left() + px(4.);
         let width = layout.text_bounds.size.width - px(28.);
@@ -787,7 +787,7 @@ impl Editor {
                                         .py(px(6.))
                                         .rounded(px(ui::R_ROW))
                                         .bg(theme.sunken)
-                                        .font_family(code_font.clone())
+                                        .code_font(cx)
                                         .text_size(px(12.5))
                                         .children(
                                             b.text

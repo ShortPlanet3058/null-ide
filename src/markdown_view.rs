@@ -2,6 +2,7 @@
 //! emphasis, code, links and images, lists and task lists, quotes, tables, rules), and
 //! its drawing for the editor's preview (⌘⇧V).
 
+use crate::fonts::CodeFont;
 use crate::theme::Syntax;
 use crate::theme::Theme;
 use gpui::{
@@ -926,6 +927,8 @@ pub struct Style {
     pub theme: Theme,
     pub ui_font: SharedString,
     pub code_font: SharedString,
+    /// How the code font joins characters (see `fonts::code_features`).
+    pub code_features: gpui::FontFeatures,
     /// Where relative links and images are found from: the file's folder.
     pub base: PathBuf,
     pub open: Opener,
@@ -1058,7 +1061,7 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
                 .rounded(px(crate::ui::R_CONTROL))
                 .bg(theme.raised)
                 .overflow_x_scroll()
-                .font_family(style.code_font.clone())
+                .code_font_as(style.code_font.clone(), style.code_features.clone())
                 .text_size(px(13.))
                 .line_height(px(20.))
                 .whitespace_nowrap()
@@ -1204,6 +1207,9 @@ fn rich(content: &[Inline], style: &Style, id: usize, color: gpui::Hsla, weight:
             let in_code = code.iter().any(|r| r.start <= a && b <= r.end);
             let family = if in_code { style.code_font.clone() } else { style.ui_font.clone() };
             let mut font = gpui::font(family);
+            if in_code {
+                font.features = style.code_features.clone();
+            }
             font.weight = look.font_weight.unwrap_or(weight);
             font.style = look.font_style.unwrap_or(FontStyle::Normal);
             gpui::TextRun {

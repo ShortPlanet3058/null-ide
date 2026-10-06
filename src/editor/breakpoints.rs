@@ -2,6 +2,7 @@
 //! the fold chevrons) or F9, and moved with the code as it's edited.
 
 use super::{Editor, EditorEvent};
+use crate::fonts::CodeFont;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
 use gpui::{
@@ -171,7 +172,6 @@ impl Editor {
         let row = self.wrap.first_row(edit.line);
         let y = layout.text_origin.y + layout.line_height * row as f32;
         let theme = cx.global::<Theme>();
-        let code_font = cx.global::<crate::fonts::Fonts>().code.clone();
         Some(
             deferred(
                 anchored().position(point(layout.text_bounds.left(), y - px(3.))).child(
@@ -188,7 +188,7 @@ impl Editor {
                         .border_color(theme.error.opacity(0.6))
                         .bg(theme.raised)
                         .shadow_md()
-                        .font_family(code_font)
+                        .code_font(cx)
                         .text_size(self.font_size)
                         .line_height(self.line_height())
                         .child(edit.input.clone()),

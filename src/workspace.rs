@@ -2,6 +2,7 @@ use crate::ai::ProviderId;
 use crate::editor::{Editor, EditorEvent, GoToDefinition, Redo, Save, SelectAll, ShowInfo, Undo};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::find_bar::{DeployFind, DeployReplace};
+use crate::fonts::CodeFont;
 use crate::fonts::Fonts;
 use crate::git;
 use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
@@ -4212,7 +4213,6 @@ impl Workspace {
             .children(view_switch)
             .children(controls)
             .child(close);
-        let code_font = cx.global::<crate::fonts::Fonts>().code.clone();
         let body = match stopped.filter(|_| !showing_output) {
             // Paused: the call's variables, and the calls that led to it (a click looks at one).
             Some(stop) => {
@@ -4267,7 +4267,7 @@ impl Workspace {
                     .gap(px(24.))
                     .px(px(14.))
                     .pb(px(8.))
-                    .font_family(code_font)
+                    .code_font(cx)
                     .text_size(px(12.5))
                     .child(column("dbg-variables").children(variables).when(self.debug_locals.is_empty(), |d| {
                         d.child(div().text_color(theme.faint).child("No local variables here"))
@@ -4291,7 +4291,7 @@ impl Workspace {
                     .track_scroll(&self.debug_output_scroll)
                     .px(px(14.))
                     .pb(px(8.))
-                    .font_family(code_font)
+                    .code_font(cx)
                     .text_size(px(12.5))
                     .text_color(theme.muted)
                     .children(output)

@@ -3,7 +3,7 @@
 //! the caret and goes away once it leaves the call (or with Esc).
 
 use super::Editor;
-use crate::fonts::Fonts;
+use crate::fonts::CodeFont;
 use crate::theme::Theme;
 use crate::ui;
 use gpui::{
@@ -131,7 +131,7 @@ impl Editor {
                             .border_1()
                             .border_color(theme.hairline)
                             .shadow_md()
-                            .font_family(cx.global::<Fonts>().code.clone())
+                            .code_font(cx)
                             .text_size(px(ui::T_SM))
                             .text_color(theme.muted)
                             .child(div().min_w_0().truncate().child(text))

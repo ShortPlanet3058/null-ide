@@ -5,6 +5,7 @@
 //!   (switches, ←→ on choices), and every command once you type.
 //! - Line (⌃G): go to a line.
 
+use crate::fonts::CodeFont;
 use crate::fuzzy;
 use crate::settings::Settings;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -1048,7 +1049,7 @@ impl Palette {
                 (
                     div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
                     div()
-                        .font_family(cx.global::<crate::fonts::Fonts>().code.clone())
+                        .code_font(cx)
                         .text_size(px(ui::T_MD))
                         .child(StyledText::new(task.label.clone()).with_highlights(highlights_in(&task.label, 0)))
                         .into_any_element(),
@@ -1072,11 +1073,7 @@ impl Palette {
             }
             Item::RunTyped => (
                 div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
-                div()
-                    .font_family(cx.global::<crate::fonts::Fonts>().code.clone())
-                    .text_size(px(ui::T_MD))
-                    .child(self.query.clone())
-                    .into_any_element(),
+                div().code_font(cx).text_size(px(ui::T_MD)).child(self.query.clone()).into_any_element(),
                 Some(div().text_color(dim).child("in the terminal").into_any_element()),
             ),
             Item::NewBranch => {
@@ -1149,12 +1146,7 @@ impl Palette {
                             .flex()
                             .items_baseline()
                             .gap(px(8.))
-                            .child(
-                                div()
-                                    .font_family(cx.global::<crate::fonts::Fonts>().code.clone())
-                                    .text_size(px(ui::T_MD))
-                                    .child(text),
-                            )
+                            .child(div().code_font(cx).text_size(px(ui::T_MD)).child(text))
                             .child(div().text_size(px(ui::T_SM)).text_color(dim).child(kind))
                             .into_any_element(),
                         Some(div().text_color(dim).child(place).into_any_element()),
@@ -1165,10 +1157,7 @@ impl Palette {
                     let text = StyledText::new(location.text.clone()).with_highlights(marked);
                     // Code shows in the code font; a problem's message in the interface one.
                     let label = if location.kind == LocationKind::Reference {
-                        div()
-                            .font_family(cx.global::<crate::fonts::Fonts>().code.clone())
-                            .text_size(px(13.))
-                            .child(text)
+                        div().code_font(cx).text_size(px(13.)).child(text)
                     } else {
                         div().child(text)
                     };
