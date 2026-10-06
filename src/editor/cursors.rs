@@ -328,6 +328,25 @@ impl Editor {
         self.touch(cx);
     }
 
+    /// ⌥↵ in the find bar: a cursor on every match (the current one the main cursor), the
+    /// bar closed and the keyboard back in the text.
+    pub fn select_all_matches(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let Some(search) = &self.search else { return };
+        let current = search.current;
+        let cursors: Vec<(Cursor, bool)> = search
+            .matches
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (Cursor::new(Selection { anchor: r.start, head: r.end }), Some(i) == current))
+            .collect();
+        if cursors.is_empty() {
+            return;
+        }
+        self.close_find(window, cx);
+        self.set_cursors(cursors);
+        self.touch(cx);
+    }
+
     /// ⌘⇧L: a cursor on every place the selection (or the word at the caret) appears.
     pub(super) fn select_all_occurrences(&mut self, cx: &mut Context<Self>) {
         if self.selection.is_empty() {
