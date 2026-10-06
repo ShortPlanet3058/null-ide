@@ -39,10 +39,12 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let range = self.lines_char_range(&lines);
-        let had_newline = self.buffer.slice(range.clone()).ends_with('\n');
-        let mut text = new_lines.join("\n");
-        if had_newline {
-            text.push('\n');
+        // The lines' own break, so a "\r\n" file stays one.
+        let old = self.buffer.slice(range.clone());
+        let ending = self.style.line_ending.text();
+        let mut text = new_lines.join(ending);
+        if old.ends_with(['\n', '\r']) {
+            text.push_str(ending);
         }
         let anchor = self.buffer.point(self.selection.anchor);
         let head = self.buffer.point(self.selection.head);

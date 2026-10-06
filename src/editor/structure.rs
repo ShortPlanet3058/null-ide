@@ -427,6 +427,25 @@ mod tests {
     use super::*;
 
     #[gpui::test]
+    fn a_crlf_file_keeps_its_line_breaks_when_lines_are_sorted(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(crate::buffer::Buffer::from_text("b\r\na\r\nc\r\n"), Some("x.txt".into()), cx)
+        });
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            e.selection = Selection { anchor: 0, head: 9 };
+            e.sort_lines(&SortLines, window, cx);
+            assert_eq!(e.buffer.to_string(), "a\r\nb\r\nc\r\n");
+        });
+    }
+
+    #[gpui::test]
     fn lines_reverse_and_lose_their_repeats(cx: &mut gpui::TestAppContext) {
         use gpui::Focusable;
         cx.update(|cx| {
