@@ -554,36 +554,12 @@ impl LspStore {
 
     /// Every place the function at `position` is called from: the call itself, in its caller.
     pub fn callers(&self, path: &Path, position: Position) -> impl Future<Output = Vec<lsp_types::Location>> + use<> {
-        use lsp_types::request::{CallHierarchyIncomingCalls, CallHierarchyPrepare};
-        let server = self.server_for(path);
-        let prepare = server.clone().zip(Self::position_params(path, position)).map(|(server, params)| {
-            server.request::<CallHierarchyPrepare>(lsp_types::CallHierarchyPrepareParams {
-                text_document_position_params: params,
-                work_done_progress_params: Default::default(),
-            })
-        });
+        let asked = self.server_for(path).zip(Self::position_params(path, position));
         async move {
-            let (Some(server), Some(prepare)) = (server, prepare) else { return Vec::new() };
-            let Some(item) = prepare.await.ok().flatten().and_then(|items| items.into_iter().next()) else {
-                return Vec::new();
-            };
-            let calls = server
-                .request::<CallHierarchyIncomingCalls>(lsp_types::CallHierarchyIncomingCallsParams {
-                    item,
-                    work_done_progress_params: Default::default(),
-                    partial_result_params: Default::default(),
-                })
-                .await;
-            calls
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-                .into_iter()
-                .flat_map(|call| {
-                    let uri = call.from.uri;
-                    call.from_ranges.into_iter().map(move |range| lsp_types::Location { uri: uri.clone(), range })
-                })
-                .collect()
+            match asked {
+                Some((server, params)) => crate::lsp::callers(&server, params).await,
+                None => Vec::new(),
+            }
         }
     }
 
