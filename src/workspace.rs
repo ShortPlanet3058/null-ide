@@ -73,6 +73,7 @@ actions!(
         ToggleFormatOnSave,
         AutoSaveOff,
         ToggleLineBlame,
+        ToggleSpellCheck,
         ToggleInlayHints,
         ToggleFocusMode,
         RunTask,
@@ -2905,6 +2906,11 @@ impl Workspace {
                 Box::new(ToggleLineBlame),
             ),
             (View, toggle(settings.inlay_hints, "Hide Type Hints", "Show Type Hints"), Box::new(ToggleInlayHints)),
+            (
+                View,
+                toggle(settings.spell_check, "Hide Spelling Mistakes", "Show Spelling Mistakes"),
+                Box::new(ToggleSpellCheck),
+            ),
             (File, "Commit…".into(), Box::new(CommitAll)),
             (File, "Undo Last Commit".into(), Box::new(UndoLastCommit)),
             (File, "Push".into(), Box::new(PushBranch)),
@@ -6165,6 +6171,9 @@ impl Render for Workspace {
             }))
             .on_action(
                 cx.listener(|_, _: &ToggleLineBlame, _, cx| settings::update(cx, |s| s.line_blame = !s.line_blame)),
+            )
+            .on_action(
+                cx.listener(|_, _: &ToggleSpellCheck, _, cx| settings::update(cx, |s| s.spell_check = !s.spell_check)),
             )
             .on_action(
                 cx.listener(|_, _: &ToggleInlayHints, _, cx| settings::update(cx, |s| s.inlay_hints = !s.inlay_hints)),

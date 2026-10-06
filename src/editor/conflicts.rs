@@ -189,7 +189,14 @@ impl Editor {
         self.close_hover(cx);
         // Hung from the end of the first marker, under its hint, off the code it chooses between.
         let at = self.buffer.line_to_char(conflict.start) + self.buffer.line_len(conflict.start);
-        self.fix_menu = Some(FixMenu { fixes, selected: 0, at, scroll: ScrollHandle::new(), conflict: Some(conflict) });
+        self.fix_menu = Some(FixMenu {
+            fixes,
+            selected: 0,
+            at,
+            scroll: ScrollHandle::new(),
+            conflict: Some(conflict),
+            spelling: None,
+        });
         cx.notify();
     }
 

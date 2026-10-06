@@ -617,6 +617,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Spelling",
+                Some("Marks misspelled words in Markdown, text and comments; ⌘. on one offers corrections"),
+                Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),
+                &theme,
+            ),
+            Self::row(
                 "Indent guides",
                 Some("Faint lines down the indentation, to see what's inside what"),
                 Self::toggle("indent-guides", s.indent_guides, &theme, cx, |s| s.indent_guides = !s.indent_guides),

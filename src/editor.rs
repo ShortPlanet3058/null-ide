@@ -19,6 +19,7 @@ mod review;
 mod rewrap;
 mod signature;
 mod snippet;
+mod spelling;
 mod structure;
 mod tags;
 
@@ -493,6 +494,8 @@ pub struct Editor {
     line_spacing: f32,
     /// The words in a prose file, for the revision counted.
     words: std::cell::Cell<Option<(u64, usize)>>,
+    /// Which lines are in Markdown fences, as of a version of the text (for spelling).
+    fences: std::cell::RefCell<Option<(u64, Vec<bool>)>>,
     pub search: Option<SearchState>,
     find_bar: Option<Entity<FindBar>>,
     /// Reused by Find Next when the find bar is closed, and to prefill it.
@@ -666,6 +669,7 @@ impl Editor {
             font_size: px(cx.global::<Settings>().font_size),
             line_spacing: cx.global::<Settings>().line_spacing.factor(),
             words: Default::default(),
+            fences: Default::default(),
             search: None,
             find_bar: None,
             last_query: SearchQuery::default(),
@@ -3938,6 +3942,51 @@ mod tests {
             assert!(!e.missing);
         });
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn a() {}\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Misspelled words are marked in prose and comments, never in code; ⌘. on one offers
+    /// corrections and ↵ takes the first.
+    #[gpui::test]
+    fn misspelled_words_are_marked_and_corrected(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let dir = std::env::temp_dir().join(format!("null-spelling-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, "I saw teh cat `teh` there.\n```\nteh\n```\n").unwrap();
+        let code = dir.join("a.rs");
+        std::fs::write(&code, "// teh end\nfn teh() {}\n").unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(notes.clone(), None, cx));
+        cx.run_until_parked();
+        editor.update_in(cx, |e, window, cx| {
+            let marked = |e: &Editor, line: usize, cx: &App| {
+                let text = e.buffer.line_text(line);
+                e.misspellings_on_line(line, &text, cx).into_iter().map(|r| text[r].to_string()).collect::<Vec<_>>()
+            };
+            assert_eq!(marked(e, 0, cx), ["teh"], "in prose, not in ticks");
+            assert!(marked(e, 2, cx).is_empty(), "not in a fence");
+            window.focus(&e.focus_handle);
+            e.selection = Selection::caret(7);
+        });
+        cx.simulate_keystrokes("cmd-. enter");
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| assert!(e.buffer.to_string().starts_with("I saw the cat `teh`")));
+
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(code.clone(), None, cx));
+        cx.run_until_parked();
+        editor.update(cx, |e, cx| {
+            let marked = |line: usize| {
+                let text = e.buffer.line_text(line);
+                e.misspellings_on_line(line, &text, cx).into_iter().map(|r| text[r].to_string()).collect::<Vec<_>>()
+            };
+            assert_eq!(marked(0), ["teh"], "in a comment");
+            assert!(marked(1).is_empty(), "not in code");
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 }

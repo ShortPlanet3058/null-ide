@@ -26,6 +26,8 @@ pub struct FixMenu {
     pub scroll: ScrollHandle,
     /// Set when the list holds a merge conflict's choices, resolved here, not by a server.
     pub conflict: Option<super::Conflict>,
+    /// Set when the list holds a misspelled word's corrections (the word's chars).
+    pub spelling: Option<std::ops::Range<usize>>,
 }
 
 /// The order fixes are listed in: the server's favourite, then fixes for the problem,
@@ -87,6 +89,10 @@ impl Editor {
         if let Some(conflict) = self.conflict_at_caret() {
             return self.conflict_choices(conflict, cx);
         }
+        // On a misspelled word: its corrections.
+        if self.spelling_choices(cx) {
+            return;
+        }
         if let Some(message) = self.not_ready_message(cx) {
             return self.show_notice(head, message, cx);
         }
@@ -135,8 +141,14 @@ impl Editor {
                     return this.show_notice(head, "No fixes here.".into(), cx);
                 }
                 this.close_hover(cx);
-                this.fix_menu =
-                    Some(FixMenu { fixes, selected: 0, at: head, scroll: ScrollHandle::new(), conflict: None });
+                this.fix_menu = Some(FixMenu {
+                    fixes,
+                    selected: 0,
+                    at: head,
+                    scroll: ScrollHandle::new(),
+                    conflict: None,
+                    spelling: None,
+                });
                 cx.notify();
             })
             .ok();
@@ -172,6 +184,12 @@ impl Editor {
         let Some(mut menu) = self.fix_menu.take() else { return };
         if let Some(conflict) = menu.conflict {
             return self.resolve_conflict(conflict, ix, cx);
+        }
+        if let Some(word) = menu.spelling.clone() {
+            if let Some(fix) = menu.fixes.get(ix) {
+                self.accept_spelling(word, fix, cx);
+            }
+            return cx.notify();
         }
         if menu.fixes.get(ix).is_some_and(is_ai_fix) {
             return self.fix_with_ai(window, cx);

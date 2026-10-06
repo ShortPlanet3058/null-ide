@@ -607,6 +607,12 @@ impl Element for EditorElement {
                     }
                 }
             }
+            // Misspelled words: faintly, after the problems, so a problem's colour wins.
+            for (i, line) in lines_shown.clone().enumerate() {
+                for word in editor.misspellings_on_line(line, &texts[i], cx) {
+                    underlines[i].push((word, theme.muted));
+                }
+            }
 
             let show_blame = cx.global::<crate::settings::Settings>().line_blame;
             // Something wrong on the caret's line: said at its end, before who changed it.

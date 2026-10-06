@@ -48,6 +48,8 @@ pub struct Settings {
     pub indent_guides: bool,
     /// The caret blinks for a while once typing stops; off, it stays lit.
     pub caret_blink: bool,
+    /// Misspelled words in Markdown, text and comments get a faint wavy line.
+    pub spell_check: bool,
     /// A faint line at the length the project keeps lines to, when it sets one.
     pub line_guide: bool,
     /// Keep the first lines of the blocks scrolled into pinned at the top.
@@ -86,6 +88,7 @@ impl Default for Settings {
             inlay_hints: false,
             indent_guides: true,
             caret_blink: true,
+            spell_check: true,
             line_guide: true,
             sticky_scroll: true,
             symbol_marks: true,
