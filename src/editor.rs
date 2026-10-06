@@ -554,6 +554,8 @@ pub struct Editor {
     folds: fold::Folds,
     /// The file as last committed, to mark changed lines in the gutter.
     git_base: Option<std::sync::Arc<str>>,
+    /// The mouse is over a changed line's mark in the gutter (a click opens the change).
+    over_change_mark: bool,
     pub git_hunks: Vec<crate::git::Hunk>,
     git_base_task: Option<Task<()>>,
     /// Who last changed the caret's line, once it rests there.
@@ -698,6 +700,7 @@ impl Editor {
             signature: Default::default(),
             folds: Default::default(),
             git_base: None,
+            over_change_mark: false,
             git_hunks: Vec::new(),
             git_base_task: None,
             blame: None,
@@ -2388,6 +2391,9 @@ impl Editor {
         if self.scrollbar_mouse_down(event.position, cx) {
             return;
         }
+        if let Some(line) = self.change_mark_at(event.position) {
+            return self.review_change_at(line, cx);
+        }
         if let Some(line) = self.breakpoint_click(event.position) {
             return self.toggle_breakpoint_at(line, cx);
         }
@@ -2463,6 +2469,11 @@ impl Editor {
             return self.scrollbar_drag_to(event.position, cx);
         }
         if was_over_scrollbar != self.over_scrollbar() {
+            cx.notify();
+        }
+        let over_mark = self.change_mark_at(event.position).is_some();
+        if over_mark != self.over_change_mark {
+            self.over_change_mark = over_mark;
             cx.notify();
         }
         if self.alt_held || self.secondary_held || self.link_word.is_some() {
@@ -3114,7 +3125,11 @@ impl Render for Editor {
                 }))
             })
             .size_full()
-            .cursor(if self.link_word.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
+            .cursor(if self.link_word.is_some() || self.over_change_mark {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::IBeam
+            })
             .on_action(cx.listener(Self::move_left))
             .on_action(cx.listener(Self::move_right))
             .on_action(cx.listener(Self::move_up))
@@ -3703,6 +3718,42 @@ mod tests {
         let mut second_cx = gpui::VisualTestContext::from_window(second_window, cx);
         second_cx.simulate_keystrokes("cmd-g");
         second.update(&mut second_cx, |e, _| assert_eq!(e.buffer.slice(e.selection.range()), "total"));
+    }
+
+    /// A click on a changed line's mark in the gutter opens the review of the file's
+    /// changes, at that one; Esc takes it back.
+    #[gpui::test]
+    fn clicking_a_change_mark_opens_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let base = "one\ntwo\nthree\nfour\n";
+        let text = "one\ntwo\nTHREE\nfour\n";
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("x.txt")), cx));
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle);
+            e.git_base = Some(base.into());
+            e.refresh_git_hunks(std::time::Duration::ZERO, cx);
+        });
+        cx.run_until_parked();
+        let mark = e.read_with(cx, |e, _| {
+            let layout = e.layout.as_ref().unwrap();
+            gpui::point(layout.text_bounds.left() - px(6.), layout.text_origin.y + layout.line_height * 2.5)
+        });
+        // Over the mark: a hand. On an unchanged line's place: nothing to open.
+        let unchanged = gpui::point(mark.x, mark.y - e.read_with(cx, |e, _| e.line_height()) * 2.);
+        e.read_with(cx, |e, _| assert_eq!(e.change_mark_at(unchanged), None));
+        cx.simulate_click(mark, gpui::Modifiers::none());
+        e.update(cx, |e, _| {
+            assert!(e.in_review());
+            assert_eq!(e.caret_point().0, 2);
+        });
+        cx.simulate_keystrokes("escape");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), base));
     }
 
     #[test]

@@ -108,6 +108,8 @@ pasted over some words links them; ⌥⇧F lines the tables up, and in a table �
 - **Commit** lists the files under the message: ⇥ leaves one out. **Push** and **Pull**;
   ↑ and ↓ beside the branch count what's to push and pull (as last fetched: Null never
   goes to the network on its own). Switch or start a branch from the status bar.
+- A click on a changed line's mark in the gutter shows the change, to keep (⇥) or take
+  back (Esc).
 - Who last changed the caret's line, faintly at its end. **Show File History**, and any
   commit's version compared with the file now.
 - Merge conflicts: each side tinted, **⌘.** keeps one or both, **⌥F8** to the next.
