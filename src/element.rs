@@ -398,7 +398,7 @@ impl Element for EditorElement {
             let line_height = editor.line_height();
             let lh = f32::from(line_height);
             let mut font = font(code_font.clone());
-            if !cx.global::<Settings>().ligatures {
+            if !editor.ligatures(cx) {
                 // Both kinds: some fonts (Geist Mono) join characters through `liga` too.
                 font.features = gpui::FontFeatures(std::sync::Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)]));
             }

@@ -3248,6 +3248,12 @@ impl Editor {
         self.find_bar.as_ref().map(|bar| bar.read(cx).query(cx))
     }
 
+    /// Whether the code font joins characters (`->`, `!=`) here: as the setting says, but
+    /// never in prose, where a table's `|:-:|` or a note's `-->` would show as another symbol.
+    pub fn ligatures(&self, cx: &App) -> bool {
+        cx.global::<Settings>().ligatures && !self.is_prose()
+    }
+
     /// Prose: Markdown, or a text file (no language of its own). It wraps by its own setting.
     pub fn is_prose(&self) -> bool {
         if self.is_markdown() {
@@ -3629,6 +3635,19 @@ mod tests {
         assert_eq!(markdown_link("http://old.example", url), None);
         assert_eq!(markdown_link("words", "not an address"), None);
         assert_eq!(markdown_link("words", "https://a.b c"), None);
+    }
+
+    #[gpui::test]
+    fn no_ligatures_in_prose(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        for (name, joined) in [("main.rs", true), ("notes.md", false), ("todo.txt", false)] {
+            let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(""), Some(PathBuf::from(name)), cx));
+            e.read_with(cx, |e, cx| assert_eq!(e.ligatures(cx), joined, "{name}"));
+        }
     }
 
     #[test]

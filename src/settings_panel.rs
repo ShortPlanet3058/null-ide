@@ -537,7 +537,9 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Ligatures",
-                Some("Join characters like -> and != into one symbol, if the code font has them"),
+                Some(
+                    "Join characters like -> and != into one symbol, if the code font has them (not in Markdown and text)",
+                ),
                 Self::toggle("ligatures", s.ligatures, &theme, cx, |s| s.ligatures = !s.ligatures),
                 &theme,
             ),
