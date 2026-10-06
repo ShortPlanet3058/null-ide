@@ -3758,6 +3758,8 @@ dependencies = [
  "keyring",
  "lsp-types",
  "notify",
+ "objc2-app-kit",
+ "objc2-foundation",
  "regex",
  "ropey",
  "serde",

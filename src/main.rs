@@ -34,6 +34,7 @@ mod servers;
 mod session;
 mod settings;
 mod settings_panel;
+mod spell;
 mod tasks;
 mod terminal;
 mod terminal_links;
