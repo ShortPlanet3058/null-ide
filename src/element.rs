@@ -240,6 +240,17 @@ const BLAME_GAP: &str = "      ";
 /// A problem's message at the end of its line is cut to this many characters.
 const PROBLEM_NOTE_CHARS: usize = 100;
 
+/// The spaces and tabs of a row's `text` (starting at char `start` of the file) that are
+/// inside one of the `selected` ranges: their columns in the row, and whether each is a tab.
+fn whitespace_marks(text: &str, start: usize, selected: &[Range<usize>]) -> Vec<(usize, bool)> {
+    text.chars()
+        .enumerate()
+        .filter(|(_, c)| *c == ' ' || *c == '\t')
+        .filter(|(i, _)| selected.iter().any(|r| r.contains(&(start + i))))
+        .map(|(i, c)| (i, c == '\t'))
+        .collect()
+}
+
 /// The note at the end of the caret's line when something's wrong there: the most serious
 /// problem starting on it (`bytes` of the text), its first line, cut short.
 fn problem_note(problems: &[crate::editor::Problem], bytes: Range<usize>) -> Option<(String, DiagnosticSeverity)> {
@@ -292,6 +303,8 @@ pub struct Prepaint {
     chevrons: Vec<(Bounds<Pixels>, bool)>,
     lines: Vec<(ShapedLine, Point<Pixels>)>,
     selection: Vec<Bounds<Pixels>>,
+    /// Spaces (a dot) and tabs (a dash) inside the selection, so what's selected shows.
+    whitespace: Vec<Bounds<Pixels>>,
     matches: Vec<(Bounds<Pixels>, bool)>,
     /// Other uses of the symbol at the caret.
     symbol_marks: Vec<Bounds<Pixels>>,
@@ -987,6 +1000,34 @@ impl Element for EditorElement {
             for cursor in &editor.extra {
                 selection.extend(range_rects(cursor.selection.range()));
             }
+            // In the selection, on the rows shown: a dot for each space, a dash for each tab.
+            let mut whitespace = Vec::new();
+            let selected: Vec<Range<usize>> = std::iter::once(selection_range.clone())
+                .chain(editor.extra.iter().map(|c| c.selection.range()))
+                .filter(|r| !r.is_empty())
+                .collect();
+            if !selected.is_empty() {
+                for (i, r) in row_layouts.iter().enumerate() {
+                    if r.row.block.is_some() {
+                        continue;
+                    }
+                    let row_start = editor.buffer.line_to_char(r.row.line) + r.row.cols.start;
+                    let top = row_top(visible.start + i);
+                    for (col, tab) in whitespace_marks(&r.text, row_start, &selected) {
+                        let col = r.row.cols.start + col;
+                        let (_, x0) = pos(r.row.line, col);
+                        let (_, x1) = pos(r.row.line, col + 1);
+                        let mid = origin.x + (x0 + x1) / 2.;
+                        let y = top + line_height / 2.;
+                        whitespace.push(if tab {
+                            let half = (x1 - x0) * 0.35;
+                            Bounds::from_corners(point(mid - half, y - px(0.5)), point(mid + half, y + px(0.5)))
+                        } else {
+                            Bounds::from_corners(point(mid - px(1.), y - px(1.)), point(mid + px(1.), y + px(1.)))
+                        });
+                    }
+                }
+            }
             // The bracket next to the caret and its partner get a thin outline.
             let bracket_boxes: Vec<Bounds<Pixels>> = editor
                 .matching_brackets()
@@ -1274,6 +1315,7 @@ impl Element for EditorElement {
                 chevrons,
                 lines,
                 selection,
+                whitespace,
                 matches,
                 symbol_marks,
                 link,
@@ -1370,6 +1412,9 @@ impl Element for EditorElement {
             }
             for rect in &prepaint.selection {
                 window.paint_quad(fill(*rect, theme.selection).corner_radii(px(3.)));
+            }
+            for mark in &prepaint.whitespace {
+                window.paint_quad(fill(*mark, theme.faint).corner_radii(px(1.)));
             }
             for (line, origin) in &prepaint.lines {
                 line.paint(*origin, line_height, window, cx).ok();
@@ -1561,6 +1606,14 @@ mod problem_notes {
             message: message.into(),
             diagnostic: Default::default(),
         }
+    }
+
+    #[test]
+    fn whitespace_shows_only_where_selected() {
+        // "\tlet a = 1;" starting at char 10 of the file, selected from its tab to "a".
+        assert_eq!(whitespace_marks("\tlet a = 1;", 10, std::slice::from_ref(&(10..16))), [(0, true), (4, false)]);
+        assert_eq!(whitespace_marks("a b", 0, &[]), []);
+        assert_eq!(whitespace_marks("a b c", 0, &[0..2, 3..4]), [(1, false), (3, false)]);
     }
 
     #[test]
