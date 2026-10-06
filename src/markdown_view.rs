@@ -472,6 +472,93 @@ pub fn aligned_tables(source: &str) -> Vec<(Range<usize>, Vec<String>)> {
     found
 }
 
+/// ⇥ or ⇧⇥ in a table: its lines (`lines`, in the text) lined up as `new`, and where the
+/// caret goes, as a line and char column in `new`.
+#[derive(Debug, PartialEq)]
+pub struct TableStep {
+    pub lines: Range<usize>,
+    pub new: Vec<String>,
+    pub caret: (usize, usize),
+}
+
+fn is_row(line: &str) -> bool {
+    line.contains('|') && !line.trim().is_empty()
+}
+
+/// The pipes that split `line` into cells, as char columns (not escaped, not in code).
+fn pipes(line: &str) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut in_code = false;
+    let mut escaped = false;
+    for (i, c) in line.chars().enumerate() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '`' => in_code = !in_code,
+            '|' if !in_code => found.push(i),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Where the caret at `column` of line `at` goes with ⇥ (`forward`) or ⇧⇥ in the table it's
+/// in, with the table lined up; a ⇥ past the last cell adds a row. None out of a table.
+pub fn table_step(lines: &[&str], at: usize, column: usize, forward: bool) -> Option<TableStep> {
+    if !is_row(lines.get(at)?) {
+        return None;
+    }
+    let mut top = at;
+    while top > 0 && is_row(lines[top - 1]) {
+        top -= 1;
+    }
+    // The head is the row just above the rule.
+    let rule = (top + 1..=(at + 1).min(lines.len().saturating_sub(1))).rev().find(|&r| is_table_rule(lines[r]))?;
+    let start = rule - 1;
+    if at < start {
+        return None;
+    }
+    let mut end = at + 1;
+    while end < lines.len() && is_row(lines[end]) {
+        end += 1;
+    }
+    let mut new = align_table(&lines[start..end]);
+    let columns = raw_cells(&new[0]).len();
+    let row = at - start;
+    let leading = lines[at].trim_start().starts_with('|');
+    let cell = (pipes(lines[at]).iter().filter(|&&p| p < column).count())
+        .saturating_sub(usize::from(leading))
+        .min(columns - 1);
+    let (row, cell) = if forward {
+        match (row, cell + 1 < columns) {
+            (1, _) => (2, 0),
+            (_, true) => (row, cell + 1),
+            (0, false) => (2, 0),
+            (_, false) => (row + 1, 0),
+        }
+    } else {
+        match (row, cell) {
+            (0, 0) => (0, 0),
+            (1, _) => (0, columns - 1),
+            (_, 0) if row == 2 => (0, columns - 1),
+            (_, 0) => (row - 1, columns - 1),
+            (_, cell) => (row, cell - 1),
+        }
+    };
+    if row >= new.len() {
+        let empty = format!("|{}", " |".repeat(columns));
+        let mut grown: Vec<&str> = new.iter().map(String::as_str).collect();
+        grown.push(&empty);
+        new = align_table(&grown);
+    }
+    let line = &new[row];
+    let after = pipes(line)[cell] + 1;
+    let text_at = line.chars().skip(after).position(|c| c != ' ').map_or(after + 1, |p| after + p);
+    // An empty cell: just inside it.
+    let caret = if line.chars().nth(text_at) == Some('|') { after + 1 } else { text_at };
+    Some(TableStep { lines: start..end, new, caret: (row, caret) })
+}
+
 /// One table's lines (head, rule, rows) with every column as wide as its widest cell.
 fn align_table(lines: &[&str]) -> Vec<String> {
     let indent = &lines[0][..lines[0].len() - lines[0].trim_start().len()];
@@ -1158,6 +1245,28 @@ fn flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_goes_from_cell_to_cell() {
+        let lines = ["Shop:", "|Item|Qty|", "|-|-|", "|milk|2|"];
+        let step = |at: usize, column: usize, forward: bool| table_step(&lines, at, column, forward).unwrap();
+        // From "Item": to "Qty", the table lined up.
+        let first = step(1, 2, true);
+        assert_eq!(first.lines, 1..4);
+        assert_eq!(first.new, ["| Item | Qty |", "| ---- | --- |", "| milk | 2   |"]);
+        assert_eq!(first.caret, (0, 9));
+        // From "Qty": to the next row's first cell, past the rule.
+        assert_eq!(step(1, 7, true).caret, (2, 2));
+        // From the last cell: a new row.
+        let grown = step(3, 7, true);
+        assert_eq!(grown.new.len(), 4);
+        assert_eq!(grown.new[3], "|      |     |");
+        assert_eq!(grown.caret, (3, 2));
+        // ⇧⇥ goes back, up past the rule, and stays at the very first cell.
+        assert_eq!(step(3, 2, false).caret, (0, 9));
+        assert_eq!(step(1, 2, false).caret, (0, 2));
+        assert_eq!(table_step(&lines, 0, 0, true), None);
+    }
 
     #[test]
     fn tables_are_lined_up() {
