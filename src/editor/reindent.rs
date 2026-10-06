@@ -98,6 +98,51 @@ mod tests {
         e.update(cx, |e, _| assert!(e.buffer.to_string().ends_with(end), "{}", e.buffer.to_string()));
     }
 
+    /// Python has no `}` to say a block ended: pasted between two functions or above one,
+    /// code stays at the top level. Above a `}`, it goes inside the block.
+    #[gpui::test]
+    fn pasted_lines_go_where_the_line_says(cx: &mut gpui::TestAppContext) {
+        use crate::editor::{Editor, Selection};
+        use gpui::Focusable;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let code = "def a():\n    return 1\n\ndef b():\n    pass\n";
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(crate::buffer::Buffer::from_text(code), Some("x.py".into()), cx));
+        let at = |e: &Editor, line: usize| e.buffer.line_to_char(line);
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            e.selection = Selection { anchor: at(e, 3), head: at(e, 5) };
+        });
+        cx.simulate_keystrokes("cmd-c");
+        // On the blank line between the functions.
+        e.update(cx, |e, _| e.selection = Selection::caret(at(e, 2)));
+        cx.simulate_keystrokes("cmd-v");
+        e.update(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "def a():\n    return 1\ndef b():\n    pass\n\ndef b():\n    pass\n")
+        });
+        // Above a top-level `def`, as whole lines.
+        e.update(cx, |e, _| e.selection = Selection::caret(at(e, 2)));
+        cx.simulate_keystrokes("cmd-v");
+        e.update(cx, |e, _| assert_eq!(e.buffer.line_text(2), "def b():"));
+
+        let code = "fn a() {\n    x();\n}\n// y();\n";
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(crate::buffer::Buffer::from_text(code), Some("x.rs".into()), cx));
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            e.selection = Selection::caret(at(e, 3) + 3);
+        });
+        cx.simulate_keystrokes("cmd-c");
+        e.update(cx, |e, _| e.selection = Selection::caret(at(e, 2)));
+        cx.simulate_keystrokes("cmd-v");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "fn a() {\n    x();\n    // y();\n}\n// y();\n"));
+    }
+
     #[test]
     fn blank_lines_stay_blank_and_nothing_goes_below_zero() {
         assert_eq!(reindent("  a\n\n    \nb", 2, 0, true, SPACES, 4), "a\n\n\nb");
