@@ -109,6 +109,24 @@ pub fn commit(root: &Path, message: &str, left_out: &[PathBuf]) -> Result<String
     Ok(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default().trim().to_string())
 }
 
+/// Takes the last commit back: its changes stay, not committed, and its message comes
+/// back, to commit them again (with more, or reworded). Never a commit already pushed
+/// (others may have it), a merge, or the first commit.
+pub fn undo_last_commit(root: &Path) -> Result<String, String> {
+    let commit = run(root, &["rev-list", "--parents", "-n", "1", "HEAD"]).map_err(|_| "There's no commit to undo.")?;
+    match commit.split_whitespace().count() {
+        2 => {}
+        1 => return Err("That's the first commit: there's nothing before it to go back to.".into()),
+        _ => return Err("The last commit is a merge: undo it from the terminal.".into()),
+    }
+    if !run(root, &["branch", "-r", "--contains", "HEAD"])?.trim().is_empty() {
+        return Err("The last commit is pushed already: undoing it here would part from what others have.".into());
+    }
+    let message = run(root, &["log", "-1", "--format=%B"])?.trim_end().to_string();
+    run(root, &["reset", "-q", "--soft", "HEAD~1"])?;
+    Ok(message)
+}
+
 /// Commits the branch has that its upstream doesn't, and the other way round, as far as
 /// the last fetch knows: (to push, to pull). None without an upstream.
 pub fn ahead_behind(root: &Path) -> Option<(usize, usize)> {
@@ -786,6 +804,35 @@ mod tests {
             }
         );
         assert!(!status(&repo).iter().any(|(p, _)| p.ends_with("planned.ts")), "still staged");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Undo Last Commit: the changes stay, the message comes back; a pushed one stays put.
+    #[test]
+    #[cfg(unix)]
+    fn the_last_commit_comes_undone() {
+        let repo = std::env::temp_dir().join(format!("null-git-undo-commit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        if run(&repo, &["init", "-q"]).is_err() {
+            return; // No git here.
+        }
+        run(&repo, &["config", "user.name", "t"]).unwrap();
+        run(&repo, &["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(repo.join("f.txt"), "one\n").unwrap();
+        commit_all(&repo, "first").unwrap();
+        assert!(undo_last_commit(&repo).unwrap_err().contains("first commit"));
+        std::fs::write(repo.join("f.txt"), "two\n").unwrap();
+        commit_all(&repo, "Second\n\nWith a body.").unwrap();
+        assert_eq!(undo_last_commit(&repo).unwrap(), "Second\n\nWith a body.");
+        assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), "two\n");
+        assert_eq!(git(&repo, &["log", "-1", "--format=%s"]).unwrap().trim(), "first");
+        assert_eq!(status(&repo).iter().map(|(_, s)| *s).collect::<Vec<_>>(), [FileStatus::Modified]);
+        // Pushed (a remote branch has it): it stays.
+        commit_all(&repo, "Second").unwrap();
+        run(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        assert!(undo_last_commit(&repo).unwrap_err().contains("pushed"));
+        assert_eq!(git(&repo, &["log", "-1", "--format=%s"]).unwrap().trim(), "Second");
         std::fs::remove_dir_all(&repo).ok();
     }
 

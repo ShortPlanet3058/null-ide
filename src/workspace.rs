@@ -39,6 +39,7 @@ actions!(
         NewAiTask,
         ReviewChanges,
         CommitAll,
+        UndoLastCommit,
         PushBranch,
         PullBranch,
         FileHistory,
@@ -429,6 +430,8 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// The message of a commit taken back, waiting in Commit's field for the next one.
+    commit_draft: Option<String>,
     settings_panel: Option<(Entity<SettingsPanel>, Subscription)>,
     /// The first-launch screen, until it's been seen.
     welcome: Option<(Entity<Welcome>, Subscription)>,
@@ -624,6 +627,7 @@ impl Workspace {
             chrome: Transition::new(true),
             last_mouse: None,
             palette: None,
+            commit_draft: None,
             settings_panel: None,
             welcome: None,
             ready_since: None,
@@ -1015,6 +1019,7 @@ impl Workspace {
             };
             this.pending_commands = vec![
                 command("Commit…", Box::new(CommitAll)),
+                command("Undo Last Commit", Box::new(UndoLastCommit)),
                 command("Push", Box::new(PushBranch)),
                 command("Pull", Box::new(PullBranch)),
                 command("Switch Branch…", Box::new(SwitchBranch)),
@@ -1113,7 +1118,35 @@ impl Workspace {
         self.with_changed_files(window, cx, |this, locations, window, cx| {
             let branch = this.branch.clone().unwrap_or_default();
             this.open_palette_with(PaletteKind::Commit, Some(branch), locations, window, cx);
+            if let (Some(draft), Some((palette, _))) = (&this.commit_draft, &this.palette) {
+                palette.update(cx, |palette, cx| palette.set_query(draft, cx));
+            }
         });
+    }
+
+    /// Takes the last commit back (not one already pushed): its changes stay, and its
+    /// message waits in Commit's field, to commit them again with more or reworded.
+    fn undo_last_commit(&mut self, _: &UndoLastCommit, _: &mut Window, cx: &mut Context<Self>) {
+        if self.branch.is_none() {
+            return self.show_notice("This folder isn't a git repository.".into(), cx);
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::undo_last_commit(&root) }).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(message) => {
+                        let subject = message.lines().next().unwrap_or_default().to_string();
+                        this.commit_draft = Some(message);
+                        this.show_notice(format!("Took back “{subject}”: its changes wait for the next Commit."), cx);
+                    }
+                    Err(error) => this.show_notice(error, cx),
+                }
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ---------- back and forward ----------
@@ -1366,7 +1399,10 @@ impl Workspace {
             let result = cx.background_executor().spawn(async move { git::commit(&root, &message, &left_out) }).await;
             this.update(cx, |this, cx| {
                 let notice = match result {
-                    Ok(id) => format!("Committed {id}."),
+                    Ok(id) => {
+                        this.commit_draft = None;
+                        format!("Committed {id}.")
+                    }
                     Err(error) => format!("Couldn't commit: {error}"),
                 };
                 this.show_notice(notice, cx);
@@ -2870,6 +2906,7 @@ impl Workspace {
             ),
             (View, toggle(settings.inlay_hints, "Hide Type Hints", "Show Type Hints"), Box::new(ToggleInlayHints)),
             (File, "Commit…".into(), Box::new(CommitAll)),
+            (File, "Undo Last Commit".into(), Box::new(UndoLastCommit)),
             (File, "Push".into(), Box::new(PushBranch)),
             (File, "Pull".into(), Box::new(PullBranch)),
             (File, "Show File History".into(), Box::new(FileHistory)),
@@ -6107,6 +6144,7 @@ impl Render for Workspace {
                 cx.listener(|this, _: &MouseDownEvent, window, cx| this.navigate(false, window, cx)),
             )
             .on_action(cx.listener(Self::revert_all_changes))
+            .on_action(cx.listener(Self::undo_last_commit))
             .on_action(cx.listener(|this, _: &ShowWelcome, window, cx| this.show_welcome(window, cx)))
             .on_action(cx.listener(Self::install_shell_command))
             .on_action(cx.listener(Self::review_ai_task))
@@ -6886,6 +6924,54 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
         workspace.read_with(cx, |w, cx| assert_eq!(w.active_editor().unwrap().read(cx).buffer.to_string(), "one\n"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Undo Last Commit, then Commit: the message is back in the field, ↵ commits again.
+    #[gpui::test]
+    #[cfg(unix)]
+    fn an_undone_commit_s_message_waits_in_commit(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-undo-commit-flow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+            out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        if git(&["init", "-q"]).is_err() {
+            return; // No git here.
+        }
+        git(&["config", "user.name", "t"]).unwrap();
+        git(&["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "first"]).unwrap();
+        std::fs::write(dir.join("a.txt"), "ab\n").unwrap();
+        git(&["commit", "-qam", "Add b"]).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+        };
+        settle(cx);
+        workspace.update_in(cx, |w, window, cx| w.undo_last_commit(&UndoLastCommit, window, cx));
+        settle(cx);
+        assert_eq!(git(&["log", "-1", "--format=%s"]).unwrap(), "first");
+        workspace.update_in(cx, |w, window, cx| w.commit_all(&CommitAll, window, cx));
+        settle(cx);
+        let query = workspace.read_with(cx, |w, cx| w.palette.as_ref().map(|(p, _)| p.read(cx).query().to_string()));
+        assert_eq!(query.as_deref(), Some("Add b"));
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(git(&["log", "-1", "--format=%s"]).unwrap(), "Add b");
+        assert!(workspace.read_with(cx, |w, _| w.commit_draft.is_none()));
         std::fs::remove_dir_all(&dir).ok();
     }
 
