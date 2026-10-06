@@ -17,7 +17,8 @@ pub struct Language {
     highlights: &'static [&'static str],
     /// How a line comment starts, for toggling comments. None when there is only a block form.
     pub line_comment: Option<&'static str>,
-    /// How a block comment opens and closes, for languages without line comments.
+    /// How a block comment opens and closes, if the language has one (⌥⌘/; ⌘/ uses it only
+    /// when there are no line comments).
     pub block_comment: Option<(&'static str, &'static str)>,
     query: OnceLock<Option<HighlightQuery>>,
 }
@@ -139,7 +140,7 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
     for language in &mut languages {
         language.block_comment = match language.name {
             "HTML" | "Markdown" => Some(("<!--", "-->")),
-            "CSS" => Some(("/*", "*/")),
+            "CSS" | "Rust" | "JavaScript" | "TypeScript" | "TSX" | "Go" | "C" | "C++" => Some(("/*", "*/")),
             _ => None,
         };
     }

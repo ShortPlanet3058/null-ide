@@ -112,6 +112,7 @@ pub fn set(cx: &mut App) {
                         MenuItem::action("Indent (Tab on a selection)", Indent),
                         MenuItem::action("Outdent (Shift+Tab)", Outdent),
                         MenuItem::action("Toggle Comment", ToggleComment),
+                        MenuItem::action("Toggle Block Comment", crate::editor::ToggleBlockComment),
                         MenuItem::separator(),
                         MenuItem::action("Move Line Up", MoveLineUp),
                         MenuItem::action("Move Line Down", MoveLineDown),
