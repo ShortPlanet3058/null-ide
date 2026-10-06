@@ -279,14 +279,14 @@ mod tests {
             let menu = e.fix_menu.as_ref().expect("the conflict's choices");
             let titles: Vec<&str> = menu.fixes.iter().map(super::super::fixes::title).collect();
             assert_eq!(titles, ["Keep current (HEAD)", "Keep incoming (feature)", "Keep both"]);
-            e.accept_fix(2, cx);
+            e.accept_fix(2, window, cx);
             assert_eq!(e.buffer.to_string(), "a\nmine\ntheirs\nb\n<<<<<<< HEAD\n=======\nnew\n>>>>>>> feature\n");
             assert_eq!(e.caret_point(), (1, 0));
             // An empty side kept: the conflict's lines go entirely.
             e.go_to_conflict(true, cx);
             assert_eq!(e.caret_point(), (4, 0));
             e.quick_fix(&super::super::QuickFix, window, cx);
-            e.accept_fix(0, cx);
+            e.accept_fix(0, window, cx);
             assert_eq!(e.buffer.to_string(), "a\nmine\ntheirs\nb\n");
             assert!(e.conflicts().is_empty());
             // Undo brings the conflict back in one step.

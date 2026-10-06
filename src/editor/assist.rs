@@ -265,6 +265,14 @@ impl Editor {
         cx.notify();
     }
 
+    /// ⌘.'s Fix with AI: ⌘I's field on the error's code, sent at once with "Fix this error".
+    pub(super) fn fix_with_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_inline_assist(false, window, cx);
+        if self.prompt.as_ref().is_some_and(|p| p.error.is_some()) {
+            self.submit_prompt(&SubmitPrompt, window, cx);
+        }
+    }
+
     fn submit_prompt(&mut self, _: &SubmitPrompt, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = &self.prompt else { return };
         if prompt.writing {
