@@ -1754,6 +1754,14 @@ impl Editor {
             }
         }
         let Some(text) = item.text() else { return };
+        // A web address pasted over some words in Markdown links them: [words](address).
+        if adjust
+            && self.is_markdown()
+            && self.extra.is_empty()
+            && let Some(link) = markdown_link(&self.buffer.slice(self.selection.range()), text.trim())
+        {
+            return self.edit(self.selection.range(), &link, EditKind::Other, cx);
+        }
         let kind = item.metadata().cloned().unwrap_or_default();
         // Pasted line breaks become the file's own.
         let text = text.replace("\r\n", "\n");
@@ -3336,6 +3344,20 @@ impl Editor {
     }
 }
 
+/// `[words](address)` when `selected` is some words on one line and `pasted` a single web
+/// address (and the words aren't an address themselves). ⌥⇧⌘V pastes the address as it is.
+fn markdown_link(selected: &str, pasted: &str) -> Option<String> {
+    let is_address =
+        |t: &str| (t.starts_with("https://") || t.starts_with("http://")) && !t.contains(char::is_whitespace);
+    let words = selected.trim();
+    (is_address(pasted) && !words.is_empty() && !words.contains('\n') && !is_address(words)).then(|| {
+        // Spaces around the words stay outside the link.
+        let before = &selected[..selected.len() - selected.trim_start().len()];
+        let after = &selected[selected.trim_end().len()..];
+        format!("{before}[{words}]({pasted}){after}")
+    })
+}
+
 /// A moment as `2026-10-06-120312`, in UTC (seconds since 1970).
 fn utc_stamp(secs: u64) -> String {
     let (days, rest) = (secs / 86_400, secs % 86_400);
@@ -3356,6 +3378,18 @@ fn utc_stamp(secs: u64) -> String {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn an_address_pasted_over_words_links_them() {
+        let url = "https://example.com/a";
+        assert_eq!(markdown_link("the docs", url).as_deref(), Some("[the docs](https://example.com/a)"));
+        assert_eq!(markdown_link(" the docs ", url).as_deref(), Some(" [the docs](https://example.com/a) "));
+        assert_eq!(markdown_link("", url), None);
+        assert_eq!(markdown_link("two\nlines", url), None);
+        assert_eq!(markdown_link("http://old.example", url), None);
+        assert_eq!(markdown_link("words", "not an address"), None);
+        assert_eq!(markdown_link("words", "https://a.b c"), None);
+    }
 
     #[test]
     fn stamps_are_dates_and_times() {
