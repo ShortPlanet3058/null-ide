@@ -1986,6 +1986,23 @@ impl Editor {
         self.edit(self.selection.range(), &link, EditKind::Other, cx);
     }
 
+    /// A box clicked in the preview: the `task`th of the `drawn` ones, ticked or unticked in
+    /// the text. Left alone if the text doesn't show as many (it changed, or reads differently).
+    fn tick_task(&mut self, task: usize, drawn: usize, cx: &mut Context<Self>) {
+        let lines = crate::markdown_view::task_lines(&self.buffer.to_string());
+        if lines.len() != drawn {
+            return;
+        }
+        let Some(&line) = lines.get(task) else { return };
+        let Some(ticked) = crate::markdown_view::toggle_task(&self.buffer.line_text(line)) else { return };
+        let start = self.buffer.line_to_char(line);
+        let end = start + self.buffer.line_len(line);
+        let selection = self.selection;
+        self.edit(start..end, &ticked, EditKind::Other, cx);
+        // Reading, the caret stays where it was.
+        self.selection = selection;
+    }
+
     /// Text put in at char offset `at`, as one undo step, the caret after it.
     pub fn insert_at(&mut self, at: usize, text: &str, cx: &mut Context<Self>) {
         let at = at.min(self.buffer.len_chars());
@@ -3248,6 +3265,14 @@ impl Editor {
         let theme = cx.global::<Theme>().clone();
         let fonts = cx.global::<Fonts>();
         let this = cx.entity().downgrade();
+        // How many boxes are drawn, for a click to check it finds as many in the text.
+        let drawn = Rc::new(std::cell::Cell::new(0));
+        let tick = {
+            let (this, drawn) = (this.clone(), drawn.clone());
+            Rc::new(move |task: usize, _: &mut Window, cx: &mut App| {
+                this.update(cx, |editor, cx| editor.tick_task(task, drawn.get(), cx)).ok();
+            }) as crate::markdown_view::Ticker
+        };
         let style = crate::markdown_view::Style {
             theme: theme.clone(),
             ui_font: fonts.ui.clone(),
@@ -3262,6 +3287,8 @@ impl Editor {
                     this.update(cx, |editor, cx| editor.scroll_preview_to(&anchor, cx)).ok();
                 }
             }),
+            tick: Some(tick),
+            tasks: Default::default(),
         };
         let mut context = KeyContext::new_with_defaults();
         context.add("Editor");
@@ -3287,15 +3314,23 @@ impl Editor {
                     .text_size(px(15.))
                     .line_height(px(24.))
                     .text_color(theme.foreground)
-                    .children(crate::markdown_view::render_blocks(&blocks, &style).into_iter().map(|block| {
-                        div()
-                            .w_full()
-                            .flex_none()
-                            .flex()
-                            .justify_center()
-                            .px(px(32.))
-                            .child(div().w_full().max_w(px(760.)).flex().flex_col().child(block))
-                    })),
+                    .children(
+                        {
+                            let rendered = crate::markdown_view::render_blocks(&blocks, &style);
+                            drawn.set(style.tasks.get());
+                            rendered
+                        }
+                        .into_iter()
+                        .map(|block| {
+                            div()
+                                .w_full()
+                                .flex_none()
+                                .flex()
+                                .justify_center()
+                                .px(px(32.))
+                                .child(div().w_full().max_w(px(760.)).flex().flex_col().child(block))
+                        }),
+                    ),
             )
             .into_any_element()
     }
@@ -3378,6 +3413,37 @@ fn utc_stamp(secs: u64) -> String {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    /// A box clicked in the preview ticks its line; with the text reading differently from
+    /// what was drawn, nothing changes.
+    #[gpui::test]
+    fn ticking_a_task_in_the_preview(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let text = "# Shop\n\n- [ ] milk\n- [ ] eggs\n";
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("todo.md")), cx));
+        e.update(cx, |e, cx| {
+            e.tick_task(1, 2, cx);
+            assert_eq!(e.buffer.to_string(), "# Shop\n\n- [ ] milk\n- [x] eggs\n");
+            e.tick_task(1, 2, cx);
+            assert_eq!(e.buffer.to_string(), text);
+            e.tick_task(0, 3, cx);
+            assert_eq!(e.buffer.to_string(), text);
+        });
+        // A real click on the second box, in the preview.
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle);
+            e.toggle_markdown_preview(&ToggleMarkdownPreview, window, cx);
+        });
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("task 1").expect("the second box is drawn");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "# Shop\n\n- [ ] milk\n- [x] eggs\n"));
+    }
 
     #[test]
     fn an_address_pasted_over_words_links_them() {
