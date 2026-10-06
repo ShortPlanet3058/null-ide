@@ -618,6 +618,27 @@ pub enum Follow {
 
 /// A heading's anchor as GitHub makes it: lowercase, spaces to dashes, other punctuation
 /// dropped ("Getting started!" is `getting-started`).
+/// A Markdown link from a file in `dir` to `target`: `![name](path)` for an image, else
+/// `[name](path)`, the path relative (`../assets/logo.png`), in `<…>` when it has spaces.
+pub fn link_to(dir: &std::path::Path, target: &std::path::Path) -> String {
+    use std::path::Component;
+    let ups: Vec<Component> = dir.components().collect();
+    let downs: Vec<Component> = target.components().collect();
+    let shared = ups.iter().zip(&downs).take_while(|(a, b)| a == b).count();
+    let parts: Vec<String> = std::iter::repeat_n("..".to_string(), ups.len() - shared)
+        .chain(downs[shared..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()))
+        .collect();
+    let path = parts.join("/");
+    let path = if path.contains(' ') { format!("<{path}>") } else { path };
+    let name = target.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if crate::preview::is_image(target) {
+        format!("![{name}]({path})")
+    } else {
+        let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(name);
+        format!("[{name}]({path})")
+    }
+}
+
 pub fn slug(heading: &str) -> String {
     heading
         .trim()
@@ -962,6 +983,15 @@ fn flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_files_become_relative_links() {
+        let dir = std::path::Path::new("/p/docs");
+        assert_eq!(link_to(dir, std::path::Path::new("/p/docs/shot.png")), "![shot](shot.png)");
+        assert_eq!(link_to(dir, std::path::Path::new("/p/assets/logo.svg")), "![logo](../assets/logo.svg)");
+        assert_eq!(link_to(dir, std::path::Path::new("/p/docs/specs/api.pdf")), "[api.pdf](specs/api.pdf)");
+        assert_eq!(link_to(dir, std::path::Path::new("/p/docs/My Shot.PNG")), "![My Shot](<My Shot.PNG>)");
+    }
 
     fn text(s: &str) -> Inline {
         Inline::Text(s.into())

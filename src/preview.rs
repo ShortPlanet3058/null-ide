@@ -7,6 +7,12 @@ use std::path::Path;
 /// The images shown in place of text. SVG stays text: it's code people edit.
 const IMAGES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "avif", "qoi", "tga"];
 
+/// Whether `path` is an image, by its name.
+pub fn is_image(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    IMAGES.contains(&ext.as_str()) || ext == "svg"
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Preview {
     Image { bytes: u64, size: Option<(u32, u32)> },
