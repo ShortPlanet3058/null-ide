@@ -109,11 +109,15 @@ pub struct ProjectSearch {
     selected: Option<usize>,
     scroll: UniformListScrollHandle,
     replace_input: Entity<TextInput>,
+    /// Which files to search (`*.rs, src/, !tests`), under the replace field.
+    files_input: Entity<TextInput>,
+    /// The replace field and the files field show (opened with the chevron, or ⌘⇧H).
     show_replace: bool,
     /// The query compiled, for previewing replacements.
     compiled: Option<regex::Regex>,
     _subscription: Subscription,
     _replace_subscription: Subscription,
+    _files_subscription: Subscription,
 }
 
 impl EventEmitter<ProjectSearchEvent> for ProjectSearch {}
@@ -124,6 +128,8 @@ impl ProjectSearch {
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.search(cx));
         let replace_input = cx.new(|cx| TextInput::new("Replace with", cx));
         let replace_subscription = cx.subscribe(&replace_input, |_, _, TextInputEvent::Changed, cx| cx.notify());
+        let files_input = cx.new(|cx| TextInput::new("In files: *.rs, src/, !tests", cx));
+        let files_subscription = cx.subscribe(&files_input, |this, _, TextInputEvent::Changed, cx| this.search(cx));
         Self {
             root,
             input,
@@ -139,10 +145,12 @@ impl ProjectSearch {
             selected: None,
             scroll: UniformListScrollHandle::new(),
             replace_input,
+            files_input,
             show_replace: false,
             compiled: None,
             _subscription: subscription,
             _replace_subscription: replace_subscription,
+            _files_subscription: files_subscription,
         }
     }
 
@@ -223,6 +231,8 @@ impl ProjectSearch {
         self.status = Status::Searching;
         cx.notify();
         let root = self.root.clone();
+        // The files field counts only while it shows.
+        let files = if self.show_replace { self.files_input.read(cx).text().to_string() } else { String::new() };
         let unsaved = cx.try_global::<UnsavedFiles>().map(|u| u.0.clone()).unwrap_or_default();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = cancel.clone();
@@ -233,7 +243,7 @@ impl ProjectSearch {
             let (tx, mut rx) = futures::channel::mpsc::unbounded();
             cx.background_executor()
                 .spawn(async move {
-                    search_files(&root, &query, &unsaved, &cancel, |found| {
+                    search_files(&root, &query, &files, &unsaved, &cancel, |found| {
                         tx.unbounded_send(found).ok();
                     })
                 })
@@ -490,12 +500,17 @@ impl ProjectSearch {
 fn search_files(
     root: &Path,
     query: &SearchQuery,
+    files_wanted: &str,
     unsaved: &std::collections::HashMap<PathBuf, ropey::Rope>,
     cancel: &AtomicBool,
     mut report: impl FnMut(Found),
 ) {
     let Ok(regex) = query.build() else { return };
-    let mut files: Vec<PathBuf> = ignore::WalkBuilder::new(root)
+    let mut walk = ignore::WalkBuilder::new(root);
+    if let Some(only) = file_filter(root, files_wanted) {
+        walk.overrides(only);
+    }
+    let mut files: Vec<PathBuf> = walk
         .hidden(false)
         .filter_entry(|e| e.file_name() != ".git")
         .build()
@@ -554,6 +569,34 @@ fn search_files(
         report(Found::Files(batch));
     }
     report(Found::Done { truncated: false });
+}
+
+/// Which files to search, from what's written in the files field: names and patterns
+/// (`*.rs`, `main.go`), folders (`src/`, `tests`), any of them; `!` before one leaves those
+/// out. None when it says nothing (every file).
+fn file_filter(root: &Path, written: &str) -> Option<ignore::overrides::Override> {
+    let mut only = ignore::overrides::OverrideBuilder::new(root);
+    let mut any = false;
+    for term in written.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        let (leave_out, term) = match term.strip_prefix('!') {
+            Some(rest) => (true, rest.trim()),
+            None => (false, term),
+        };
+        let name = term.trim_matches('/');
+        if name.is_empty() {
+            continue;
+        }
+        let glob = if term.contains(['*', '?', '[']) {
+            term.to_string()
+        } else if term.ends_with('/') || !name.contains('.') {
+            // A folder, wherever it is.
+            format!("**/{name}/**")
+        } else {
+            format!("**/{name}")
+        };
+        any |= only.add(&if leave_out { format!("!{glob}") } else { glob }).is_ok();
+    }
+    any.then(|| only.build().ok()).flatten()
 }
 
 /// A match's replacement: `$1`-style groups filled in for a regex search.
@@ -721,11 +764,16 @@ impl Render for ProjectSearch {
                                         if self.show_replace { std::f32::consts::FRAC_PI_2 } else { 0. },
                                     ))),
                             )
+                            .tooltip(ui::tip("Replace, and which files", None))
                             .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.show_replace = !this.show_replace;
                                 if this.show_replace {
                                     window.focus(&this.replace_input.focus_handle(cx));
+                                }
+                                // The files field stops (or starts) counting.
+                                if !this.files_input.read(cx).text().is_empty() {
+                                    this.search(cx);
                                 }
                                 cx.notify();
                             })),
@@ -737,52 +785,70 @@ impl Render for ProjectSearch {
             )
             .when(self.show_replace, |panel| {
                 let can_replace = !self.results.is_empty();
-                panel.child(
-                    div()
-                        .mx(px(12.))
-                        .mt(px(6.))
-                        .flex()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h(px(ui::FIELD))
-                                .px(px(8.))
-                                .flex()
-                                .items_center()
-                                .rounded(px(ui::R_ROW))
-                                .bg(theme.background)
-                                .border_1()
-                                .border_color(theme.hairline)
-                                .text_size(px(ui::T_MD))
-                                .line_height(px(20.))
-                                .overflow_hidden()
-                                .child(self.replace_input.clone()),
-                        )
-                        .child(
-                            div()
-                                .id("replace-all")
-                                .flex_none()
-                                .h(px(ui::FIELD))
-                                .px(px(10.))
-                                .flex()
-                                .items_center()
-                                .rounded(px(ui::R_ROW))
-                                .text_size(px(ui::T_SM))
-                                .when(can_replace, |b| {
-                                    b.cursor_pointer()
-                                        .text_color(theme.foreground)
-                                        .hover(|s| s.bg(theme.hairline))
-                                        .active(|s| s.opacity(0.7))
-                                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                            this.replace_all(&ReplaceAllResults, window, cx)
-                                        }))
-                                })
-                                .when(!can_replace, |b| b.text_color(theme.faint))
-                                .child("Replace all"),
-                        ),
-                )
+                panel
+                    .child(
+                        div()
+                            .mx(px(12.))
+                            .mt(px(6.))
+                            .flex()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(px(ui::FIELD))
+                                    .px(px(8.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(ui::R_ROW))
+                                    .bg(theme.background)
+                                    .border_1()
+                                    .border_color(theme.hairline)
+                                    .text_size(px(ui::T_MD))
+                                    .line_height(px(20.))
+                                    .overflow_hidden()
+                                    .child(self.replace_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("replace-all")
+                                    .flex_none()
+                                    .h(px(ui::FIELD))
+                                    .px(px(10.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(ui::R_ROW))
+                                    .text_size(px(ui::T_SM))
+                                    .when(can_replace, |b| {
+                                        b.cursor_pointer()
+                                            .text_color(theme.foreground)
+                                            .hover(|s| s.bg(theme.hairline))
+                                            .active(|s| s.opacity(0.7))
+                                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                                this.replace_all(&ReplaceAllResults, window, cx)
+                                            }))
+                                    })
+                                    .when(!can_replace, |b| b.text_color(theme.faint))
+                                    .child("Replace all"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mx(px(12.))
+                            .mt(px(6.))
+                            .h(px(ui::FIELD))
+                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(ui::R_ROW))
+                            .bg(theme.background)
+                            .border_1()
+                            .border_color(theme.hairline)
+                            .text_size(px(ui::T_MD))
+                            .line_height(px(20.))
+                            .overflow_hidden()
+                            .child(self.files_input.clone()),
+                    )
             })
             .child(
                 div()
@@ -819,6 +885,33 @@ mod tests {
         assert_eq!(found[1].1, "new(2, 0)");
         // In a plain search, "$1" is just text.
         assert_eq!(replacements(text, &plain, "$1", Some(0))[0].1, "$1");
+    }
+
+    #[test]
+    fn the_files_field_picks_which_files_are_searched() {
+        let root = std::env::temp_dir().join(format!("null-search-files-{}", std::process::id()));
+        for file in ["src/main.rs", "src/ui/view.rs", "src/notes.md", "tests/it.rs", "docs/main.rs"] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "needle\n").unwrap();
+        }
+        let query = SearchQuery { text: "needle".into(), ..Default::default() };
+        let found = |files: &str| {
+            let mut found = Vec::new();
+            search_files(&root, &query, files, &Default::default(), &AtomicBool::new(false), |f| {
+                if let Found::Files(files) = f {
+                    found.extend(files.into_iter().map(|f| f.relative));
+                }
+            });
+            found.join(" ")
+        };
+        assert_eq!(found(""), "docs/main.rs src/main.rs src/notes.md src/ui/view.rs tests/it.rs");
+        assert_eq!(found("*.rs, !tests"), "docs/main.rs src/main.rs src/ui/view.rs");
+        assert_eq!(found("src/"), "src/main.rs src/notes.md src/ui/view.rs");
+        assert_eq!(found("ui"), "src/ui/view.rs");
+        assert_eq!(found("main.rs"), "docs/main.rs src/main.rs");
+        assert_eq!(found("!src, !docs"), "tests/it.rs");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -861,7 +954,7 @@ mod tests {
         std::fs::write(dir.join("old.txt"), b"caf\xe9 cr\xe8me\n").unwrap();
         let query = SearchQuery { text: "crème".into(), ..Default::default() };
         let mut results = Vec::new();
-        search_files(&dir, &query, &Default::default(), &AtomicBool::new(false), |found| {
+        search_files(&dir, &query, "", &Default::default(), &AtomicBool::new(false), |found| {
             if let Found::Files(files) = found {
                 results.extend(files)
             }
@@ -886,7 +979,7 @@ mod tests {
         let query = SearchQuery { text: "alpha".into(), ..Default::default() };
         let mut results = Vec::new();
         let mut truncated = None;
-        search_files(&dir, &query, &Default::default(), &AtomicBool::new(false), |found| match found {
+        search_files(&dir, &query, "", &Default::default(), &AtomicBool::new(false), |found| match found {
             Found::Files(files) => results.extend(files),
             Found::Done { truncated: t } => truncated = Some(t),
         });
@@ -903,7 +996,7 @@ mod tests {
 
         // A cancelled search reports nothing.
         let mut reported = false;
-        search_files(&dir, &query, &Default::default(), &AtomicBool::new(true), |_| reported = true);
+        search_files(&dir, &query, "", &Default::default(), &AtomicBool::new(true), |_| reported = true);
         assert!(!reported);
 
         std::fs::remove_dir_all(&dir).unwrap();
