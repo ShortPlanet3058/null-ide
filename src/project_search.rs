@@ -198,6 +198,11 @@ impl ProjectSearch {
         self.search(cx);
     }
 
+    /// Whether something is typed in the field.
+    pub fn has_query(&self, cx: &App) -> bool {
+        !self.input.read(cx).text().is_empty()
+    }
+
     /// Focuses the field, optionally replacing its text.
     pub fn focus(&mut self, text: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| match text {
