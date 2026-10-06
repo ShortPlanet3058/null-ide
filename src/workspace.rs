@@ -51,6 +51,7 @@ actions!(
         RenameFile,
         TrashFile,
         CompareWithClipboard,
+        CompareWithFile,
         RevertAllChanges,
         SwitchBranch,
         GoBack,
@@ -466,6 +467,8 @@ pub struct Workspace {
     forward: Vec<Place>,
     /// Going back or forward: the moves it makes aren't places to remember.
     navigating: bool,
+    /// The file Compare with File… was asked from, while a file to compare it with is picked.
+    compare_from: Option<Entity<Editor>>,
     /// Where the last edit was made, in any file: Go to Last Edit goes back there.
     last_edit: Option<Place>,
     /// Commands run from ⌘⇧B, the last first.
@@ -665,6 +668,7 @@ impl Workspace {
             back: Vec::new(),
             forward: Vec::new(),
             navigating: false,
+            compare_from: None,
             last_edit: None,
             pending_commands: Vec::new(),
             ignore_rules,
@@ -1553,6 +1557,23 @@ impl Workspace {
             return self.show_notice("The clipboard has no text.".into(), cx);
         };
         self.compare_editor(&editor, clipboard, "Against the clipboard", "Same as the clipboard.", cx);
+    }
+
+    /// Compare with File…: a file picked in the files' list, then the open one against it.
+    fn pick_file_to_compare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        self.open_palette_with(PaletteKind::Files, Some("Compare with a file".into()), Vec::new(), window, cx);
+        // After opening it: opening the palette closes any before it, which forgets this.
+        self.compare_from = Some(editor);
+    }
+
+    /// The open file against `path`: each difference kept, or changed to the other file's.
+    fn compare_with_file(&mut self, editor: &Entity<Editor>, path: &Path, cx: &mut Context<Self>) {
+        let Ok((other, _)) = crate::encoding::read(path) else {
+            return self.show_notice("Couldn't read that file.".into(), cx);
+        };
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.compare_editor(editor, other, &format!("Against {name}"), &format!("Same as {name}."), cx);
     }
 
     fn compare_editor(
@@ -2729,6 +2750,7 @@ impl Workspace {
             (File, "Copy Relative Path".into(), Box::new(CopyRelativeFilePath)),
             (File, crate::file_tree::REVEAL_LABEL.into(), Box::new(RevealFile)),
             (File, "Compare with Clipboard".into(), Box::new(CompareWithClipboard)),
+            (File, "Compare with File…".into(), Box::new(CompareWithFile)),
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
@@ -3037,8 +3059,12 @@ impl Workspace {
             }
             PaletteEvent::OpenFile(path) => {
                 let path = path.clone();
+                let compare_from = this.compare_from.take();
                 this.close_palette(window, cx);
-                this.open_file(path, window, cx);
+                match compare_from {
+                    Some(editor) => this.compare_with_file(&editor, &path, cx),
+                    None => this.open_file(path, window, cx),
+                }
             }
             PaletteEvent::OpenLocation(path, position) => {
                 let (path, position) = (path.clone(), *position);
@@ -3162,6 +3188,7 @@ impl Workspace {
         }
         self.palette = None;
         self.settings_panel = None;
+        self.compare_from = None;
         let fallback = self.active_editor().map(|e| e.focus_handle(cx)).unwrap_or(self.focus_handle.clone());
         window.focus(&self.focus_before_palette.take().unwrap_or(fallback));
         cx.notify();
@@ -5900,6 +5927,7 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &CompareWithClipboard, window, cx| this.compare_with_clipboard(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &CompareWithFile, window, cx| this.pick_file_to_compare(window, cx)))
             .on_action(cx.listener(Self::switch_branch))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_to_last_edit))
@@ -7133,6 +7161,42 @@ mod tests {
         assert_eq!(place(cx), ("a.txt".into(), (1, 4)));
         cx.dispatch_action(GoBack);
         assert_eq!(place(cx).0, "b.txt");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Compare with File…: the files' list, a file picked, the open one against it.
+    #[gpui::test]
+    fn a_file_is_compared_with_another(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-compare-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("new.txt"), "one\nTWO\nthree\n").unwrap();
+        std::fs::write(dir.join("old.txt"), "one\ntwo\nthree\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("new.txt"), window, cx);
+            w.pick_file_to_compare(window, cx);
+        });
+        cx.executor().advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        cx.simulate_input("old");
+        cx.executor().advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        workspace.update(cx, |w, cx| {
+            let editor = w.active_editor().unwrap().read(cx);
+            assert_eq!(editor.file_name(), "new.txt", "still the same file");
+            assert!(editor.in_review(), "its difference with old.txt shows");
+            assert!(w.compare_from.is_none());
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 

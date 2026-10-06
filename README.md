@@ -112,7 +112,8 @@ pasted over some words links them; ⌥⇧F lines the tables up, and in a table �
 - A click on a changed line's mark in the gutter shows the change, to keep (⇥) or take
   back (Esc).
 - Who last changed the caret's line, faintly at its end. **Show File History**, and any
-  commit's version compared with the file now.
+  commit's version compared with the file now. Compare with Saved, the Clipboard, or another
+  File, each difference kept or taken back.
 - Merge conflicts: each side tinted, **⌘.** keeps one or both, **⌥F8** to the next.
 
 ## Running, testing, debugging
