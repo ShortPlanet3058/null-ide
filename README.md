@@ -105,7 +105,8 @@ pasted over some words links them; ⌥⇧F lines the tables up, and in a table �
 
 - **⌃⇧G** lists what changed since the last commit; each file opens with its changes to
   keep or take back one by one.
-- **Commit** lists the files under the message: ⇥ leaves one out. **Push** and **Pull**;
+- **Commit** lists the files under the message: ⇥ leaves one out; with AI on, ⌘I writes the
+  message from the changes. **Push** and **Pull**;
   ↑ and ↓ beside the branch count what's to push and pull (as last fetched: Null never
   goes to the network on its own). Switch or start a branch from the status bar.
 - A click on a changed line's mark in the gutter shows the change, to keep (⇥) or take
