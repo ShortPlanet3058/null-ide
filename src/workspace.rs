@@ -559,6 +559,8 @@ impl Workspace {
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
                 ProjectSearchEvent::Open { path, line, columns, query, keep_focus } => {
                     let (line, columns, query) = (*line, columns.clone(), query.clone());
+                    // It becomes the latest search: ⌘G and ⌘F in any file go on with it.
+                    crate::find_bar::remember_search(&query.text, cx);
                     if this.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf)).as_ref()
                         == Some(path)
                     {
@@ -3061,9 +3063,18 @@ impl Workspace {
         cx.notify();
     }
 
-    fn search_project(&mut self, _: &SearchProject, window: &mut Window, cx: &mut Context<Self>) {
+    /// What project search starts with: the selection, or with nothing selected and nothing
+    /// typed yet, the latest search in any file.
+    fn project_search_text(&self, cx: &App) -> Option<String> {
         let selected =
             self.active_editor().map(|e| e.read(cx).selected_text()).filter(|t| !t.is_empty() && !t.contains('\n'));
+        selected.or_else(|| {
+            (!self.project_search.read(cx).has_query(cx)).then(|| crate::find_bar::latest_search(cx)).flatten()
+        })
+    }
+
+    fn search_project(&mut self, _: &SearchProject, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.project_search_text(cx);
         self.sidebar_search.set(true, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.project_search.update(cx, |search, cx| search.focus(selected, window, cx));
@@ -3072,8 +3083,7 @@ impl Workspace {
 
     /// ⌘⇧H: project search with its replace field open.
     fn replace_in_project(&mut self, _: &ReplaceInProject, window: &mut Window, cx: &mut Context<Self>) {
-        let selected =
-            self.active_editor().map(|e| e.read(cx).selected_text()).filter(|t| !t.is_empty() && !t.contains('\n'));
+        let selected = self.project_search_text(cx);
         self.sidebar_search.set(true, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.project_search.update(cx, |search, cx| search.show_replace(selected, window, cx));
@@ -6896,6 +6906,30 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(spacing(cx), crate::settings::LineSpacing::Normal);
         assert_eq!(height(cx), px(24.));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ⌘⇧F with nothing selected starts from the latest search made in a file.
+    #[gpui::test]
+    fn project_search_starts_from_the_latest_search(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-search-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "alpha beta\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        cx.update(|_, cx| crate::find_bar::remember_search("beta", cx));
+        workspace.update_in(cx, |w, window, cx| w.search_project(&SearchProject, window, cx));
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, cx| assert!(w.project_search.read(cx).has_query(cx)));
+        assert_eq!(workspace.read_with(cx, |w, cx| w.project_search_text(cx)), None, "the field already has it");
         std::fs::remove_dir_all(&dir).ok();
     }
 
