@@ -24,6 +24,7 @@ actions!(
         ReplaceAll,
         OlderSearch,
         NewerSearch,
+        UseSelectionForFind,
     ]
 );
 
@@ -36,6 +37,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-g", FindNext, editor),
         KeyBinding::new("secondary-shift-g", FindPrevious, editor),
         KeyBinding::new("escape", CloseFind, editor),
+        KeyBinding::new("cmd-e", UseSelectionForFind, editor),
         KeyBinding::new("secondary-f", DeployFind, bar),
         KeyBinding::new("enter", FindNext, bar),
         KeyBinding::new("secondary-g", FindNext, bar),
@@ -75,6 +77,11 @@ struct SearchHistory(Vec<String>);
 impl gpui::Global for SearchHistory {}
 
 const HISTORY_LEN: usize = 50;
+
+/// `text` kept as the latest search, for ↑ in the find field.
+pub fn remember_search(text: &str, cx: &mut App) {
+    remember(&mut cx.default_global::<SearchHistory>().0, text);
+}
 
 /// Keeps `text` as the latest search (once, however often it's searched).
 fn remember(history: &mut Vec<String>, text: &str) {

@@ -42,7 +42,7 @@ pub use structure::{
 use crate::buffer::Buffer;
 use crate::element::{EditorElement, RowLayout};
 use crate::file_style::Indent as IndentStyle;
-use crate::find_bar::{CloseFind, DeployFind, DeployReplace, FindBar, FindNext, FindPrevious};
+use crate::find_bar::{CloseFind, DeployFind, DeployReplace, FindBar, FindNext, FindPrevious, UseSelectionForFind};
 use crate::fonts::Fonts;
 use crate::highlight::{Highlighter, Span};
 use crate::languages;
@@ -978,6 +978,24 @@ impl Editor {
     }
 
     // ---------- find & replace ----------
+
+    /// ⌘E: the selection (or the word at the caret) becomes what's searched for, its matches
+    /// shown and ⌘G ⌘⇧G going through them, the find bar open or not.
+    fn use_selection_for_find(&mut self, _: &UseSelectionForFind, window: &mut Window, cx: &mut Context<Self>) {
+        let range = if self.selection.is_empty() { self.word_at(self.selection.head) } else { self.selection.range() };
+        let text = self.buffer.slice(range.clone());
+        if text.is_empty() || text.contains('\n') {
+            return;
+        }
+        crate::find_bar::remember_search(&text, cx);
+        if let Some(bar) = self.find_bar.clone() {
+            return bar.update(cx, |bar, cx| bar.show(Some(text), false, window, cx));
+        }
+        // The word itself is the match it's on, so ⌘G goes on to the next.
+        self.selection = Selection { anchor: range.start, head: range.end };
+        let query = SearchQuery { text, regex: false, ..self.last_query.clone() };
+        self.set_search(query, cx);
+    }
 
     pub fn set_search(&mut self, query: SearchQuery, cx: &mut Context<Self>) {
         if !query.text.is_empty() {
@@ -3169,6 +3187,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::go_to_matching_bracket))
             .on_action(cx.listener(Self::newline_below))
             .on_action(cx.listener(Self::newline_above))
+            .on_action(cx.listener(Self::use_selection_for_find))
             .on_action(cx.listener(Self::show_callers))
             .on_action(cx.listener(Self::join_lines))
             .on_action(cx.listener(Self::rewrap))
@@ -3623,6 +3642,29 @@ mod tests {
         // Across the rope's pieces, a word cut in two is one.
         let (n, carried) = count_words("hel", 0, false);
         assert_eq!(count_words("lo world", n, carried), (1, true));
+    }
+
+    /// ⌘E: the word at the caret is searched for; ⌘G goes to its next use.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn the_selection_becomes_the_search(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let text = "let total = price * qty;\nprint(total);\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("x.py")), cx));
+        e.update_in(cx, |e, window, _| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection::caret(6);
+        });
+        cx.simulate_keystrokes("cmd-e cmd-g");
+        e.update(cx, |e, _| {
+            assert_eq!(e.buffer.slice(e.selection.range()), "total");
+            assert_eq!(e.selection.range(), 31..36);
+        });
     }
 
     #[test]
