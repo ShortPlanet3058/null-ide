@@ -97,7 +97,7 @@ images); **Open Markdown Preview to the Side** keeps it next to the source, foll
 scroll and type. Markdown and text wrap on their own setting (⌥Z switches it in one of
 those files); Enter carries lists and quotes on, Tab nests an item. Images and files dropped
 from the Finder become links where they land (copied next to the file when from outside
-the project).
+the project); an image pasted (a screenshot) is saved next to the file and linked.
 
 ## Git
 
