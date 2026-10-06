@@ -69,6 +69,8 @@ doesn't need Xcode's separate Metal Toolchain download.
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
 - In HTML and JSX, typing the `>` of a tag adds its closing tag, and renaming a tag
   renames its pair.
+- ⌘-click a web address or a file's path written in the text (`src/a.rs:12`, a README's
+  links) to open it; anywhere else, ⌘-click goes to the definition.
 - Files no language server knows (YAML, shell, a language not installed yet) still get
   suggestions: the file's own words, nearest first. In Markdown and text, only on ⌃Space.
 - Pasted code takes the indentation of where it goes, its lines keeping theirs relative
