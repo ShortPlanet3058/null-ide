@@ -53,6 +53,7 @@ Getting around:
 | ⌃- / ⌃⇧- | back / forward to where you were |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
 | ⌘⇧N / ⌥⌘O | a new window / a recent project |
+| drop from the Finder | files open; on the terminal, their paths are typed in |
 | ⌥⌘↵ | focus mode: only the code |
 | ⌥⌘I | an AI task, reviewed change by change (with Claude Code or Codex) |
 

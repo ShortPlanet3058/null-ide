@@ -5604,6 +5604,10 @@ impl Render for Workspace {
         div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            // Files dropped from the Finder open, as with Open With (a folder becomes the project).
+            .on_drop(cx.listener(|this, dropped: &gpui::ExternalPaths, window, cx| {
+                this.open_paths(dropped.paths().to_vec(), window, cx)
+            }))
             .size_full()
             .flex()
             .flex_col()

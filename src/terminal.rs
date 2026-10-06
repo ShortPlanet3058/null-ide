@@ -359,7 +359,7 @@ impl TerminalView {
         }
     }
 
-    fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
+    pub(crate) fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
         self.sender.send(Msg::Input(bytes.into())).ok();
     }
 
@@ -789,6 +789,10 @@ impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .key_context("Terminal")
+            // Files dropped on the terminal are typed in, quoted for the shell, as Terminal does.
+            .on_drop(cx.listener(|this, dropped: &gpui::ExternalPaths, _, _| {
+                this.write(shell_words(dropped.paths()).into_bytes())
+            }))
             .track_focus(&self.focus_handle)
             .size_full()
             .cursor(if self.link.is_some() { gpui::CursorStyle::PointingHand } else { gpui::CursorStyle::IBeam })
@@ -1260,9 +1264,28 @@ impl Element for TerminalElement {
     }
 }
 
+/// Paths as a shell reads them back: plain ones as they are, others in single quotes; each
+/// followed by a space, ready for the next word.
+fn shell_words(paths: &[std::path::PathBuf]) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%~".contains(c);
+    paths
+        .iter()
+        .map(|path| {
+            let path = path.display().to_string();
+            if path.chars().all(plain) { format!("{path} ") } else { format!("'{}' ", path.replace('\'', r"'\''")) }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_paths_are_quoted_for_the_shell() {
+        let paths = ["/Users/me/src/main.rs", "/Users/me/My Notes.md", "/tmp/it's.txt"].map(std::path::PathBuf::from);
+        assert_eq!(shell_words(&paths), r"/Users/me/src/main.rs '/Users/me/My Notes.md' '/tmp/it'\''s.txt' ");
+    }
 
     fn keys(s: &str) -> Option<Vec<u8>> {
         key_to_bytes(&Keystroke::parse(s).unwrap(), false)
