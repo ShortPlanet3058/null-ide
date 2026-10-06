@@ -78,6 +78,11 @@ impl gpui::Global for SearchHistory {}
 
 const HISTORY_LEN: usize = 50;
 
+/// What was searched for last, in any file.
+pub fn latest_search(cx: &App) -> Option<String> {
+    cx.try_global::<SearchHistory>().and_then(|h| h.0.last().cloned())
+}
+
 /// `text` kept as the latest search, for ↑ in the find field.
 pub fn remember_search(text: &str, cx: &mut App) {
     remember(&mut cx.default_global::<SearchHistory>().0, text);

@@ -1036,9 +1036,21 @@ impl Editor {
         self.touch(cx);
     }
 
+    /// What ⌘G and ⌘F start from: the latest search in any file (as the Mac shares one
+    /// between apps), else this file's own.
+    fn known_query(&self, cx: &App) -> SearchQuery {
+        match crate::find_bar::latest_search(cx) {
+            Some(text) => SearchQuery { text, ..self.last_query.clone() },
+            None => self.last_query.clone(),
+        }
+    }
+
     fn step_match(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if self.search.is_none() && !self.last_query.text.is_empty() {
-            self.set_search(self.last_query.clone(), cx);
+        if self.search.is_none() {
+            let query = self.known_query(cx);
+            if !query.text.is_empty() {
+                self.set_search(query, cx);
+            }
             return;
         }
         let selection = self.selection.range();
@@ -1115,8 +1127,8 @@ impl Editor {
             bar.update(cx, |bar, cx| bar.show(prefill, replace, window, cx));
             return;
         }
-        let query =
-            SearchQuery { text: prefill.unwrap_or_else(|| self.last_query.text.clone()), ..self.last_query.clone() };
+        let known = self.known_query(cx);
+        let query = SearchQuery { text: prefill.unwrap_or_else(|| known.text.clone()), ..known };
         let editor = cx.entity().downgrade();
         let bar = cx.new(|cx| FindBar::new(editor, &query, replace, cx));
         bar.update(cx, |bar, cx| bar.show(None, replace, window, cx));
@@ -3665,6 +3677,32 @@ mod tests {
             assert_eq!(e.buffer.slice(e.selection.range()), "total");
             assert_eq!(e.selection.range(), 31..36);
         });
+    }
+
+    /// A search made in one file is what ⌘G looks for in another.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn searches_carry_from_file_to_file(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let open = |cx: &mut TestAppContext, name: &str, text: &str| {
+            let (name, text) = (PathBuf::from(name), text.to_string());
+            let (e, vcx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(name), cx));
+            e.update_in(vcx, |e, window, _| window.focus(&e.focus_handle));
+            (e, vcx.window_handle())
+        };
+        let (first, first_window) = open(cx, "a.py", "total = 1\n");
+        let (second, second_window) = open(cx, "b.py", "x = 2\nprint(total)\n");
+        let mut first_cx = gpui::VisualTestContext::from_window(first_window, cx);
+        first.update(&mut first_cx, |e, _| e.selection = Selection::caret(2));
+        first_cx.simulate_keystrokes("cmd-e");
+        let mut second_cx = gpui::VisualTestContext::from_window(second_window, cx);
+        second_cx.simulate_keystrokes("cmd-g");
+        second.update(&mut second_cx, |e, _| assert_eq!(e.buffer.slice(e.selection.range()), "total"));
     }
 
     #[test]
