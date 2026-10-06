@@ -1193,9 +1193,10 @@ impl Element for EditorElement {
             }
             let visual = motion.visual;
 
+            let blinks = cx.global::<Settings>().caret_blink;
             let opacity = if !focused {
                 0.35
-            } else if gliding {
+            } else if gliding || !blinks {
                 1.
             } else {
                 let idle = now - editor.last_activity;

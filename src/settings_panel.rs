@@ -611,6 +611,12 @@ impl SettingsPanel {
             ),
             Self::heading("Around the code", &theme),
             Self::row(
+                "Blinking caret",
+                Some("Blinks a while once typing stops, then rests lit; off, it stays lit"),
+                Self::toggle("caret-blink", s.caret_blink, &theme, cx, |s| s.caret_blink = !s.caret_blink),
+                &theme,
+            ),
+            Self::row(
                 "Indent guides",
                 Some("Faint lines down the indentation, to see what's inside what"),
                 Self::toggle("indent-guides", s.indent_guides, &theme, cx, |s| s.indent_guides = !s.indent_guides),
