@@ -1743,6 +1743,16 @@ impl Editor {
 
     fn paste_clipboard(&mut self, adjust: bool, cx: &mut Context<Self>) {
         let Some(item) = cx.read_from_clipboard() else { return };
+        // An image (a screenshot) pasted in Markdown: saved next to the file, linked here.
+        if self.is_markdown() && item.text().is_none() {
+            let image = item.entries().iter().find_map(|entry| match entry {
+                gpui::ClipboardEntry::Image(image) => Some(image.clone()),
+                _ => None,
+            });
+            if let Some(image) = image {
+                return self.paste_image(image, cx);
+            }
+        }
         let Some(text) = item.text() else { return };
         let kind = item.metadata().cloned().unwrap_or_default();
         // Pasted line breaks become the file's own.
@@ -1932,6 +1942,40 @@ impl Editor {
     #[cfg(test)]
     pub fn type_text_for_test(&mut self, at: usize, text: &str, cx: &mut Context<Self>) {
         self.edit(at..at, text, EditKind::Typing, cx);
+    }
+
+    /// An image from the clipboard saved next to this Markdown file as
+    /// `pasted-2026-10-06-120312.png` (UTC), and a link to it in place of the selection.
+    fn paste_image(&mut self, image: gpui::Image, cx: &mut Context<Self>) {
+        use gpui::ImageFormat as F;
+        let at = self.selection.head;
+        let Some(dir) = self.path.as_deref().and_then(Path::parent).map(Path::to_path_buf) else {
+            return self.show_notice(at, "Save the file first: the image goes next to it.".into(), cx);
+        };
+        let ext = match image.format {
+            F::Png => "png",
+            F::Jpeg => "jpg",
+            F::Webp => "webp",
+            F::Gif => "gif",
+            F::Svg => "svg",
+            F::Bmp => "bmp",
+            F::Tiff => "tiff",
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let stamp = utc_stamp(now.as_secs());
+        let Some(target) = (1..100)
+            .map(|n| if n == 1 { format!("pasted-{stamp}.{ext}") } else { format!("pasted-{stamp}-{n}.{ext}") })
+            .map(|name| dir.join(name))
+            .find(|p| !p.exists())
+        else {
+            return;
+        };
+        if let Err(error) = std::fs::write(&target, &image.bytes) {
+            return self.show_notice(at, format!("Couldn't save the image: {error}"), cx);
+        }
+        let link = crate::markdown_view::link_to(&dir, &target);
+        self.single_cursor();
+        self.edit(self.selection.range(), &link, EditKind::Other, cx);
     }
 
     /// Text put in at char offset `at`, as one undo step, the caret after it.
@@ -3292,10 +3336,65 @@ impl Editor {
     }
 }
 
+/// A moment as `2026-10-06-120312`, in UTC (seconds since 1970).
+fn utc_stamp(secs: u64) -> String {
+    let (days, rest) = (secs / 86_400, secs % 86_400);
+    // Days since 1970 to a date (Howard Hinnant's civil_from_days).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}-{:02}{:02}{:02}", rest / 3600, rest % 3600 / 60, rest % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn stamps_are_dates_and_times() {
+        assert_eq!(utc_stamp(0), "1970-01-01-000000");
+        assert_eq!(utc_stamp(951_782_400 + 3_723), "2000-02-29-010203");
+        assert_eq!(utc_stamp(1_791_201_600), "2026-10-05-120000");
+    }
+
+    /// An image pasted in Markdown is saved next to the file and linked where it goes.
+    #[gpui::test]
+    fn an_image_pasted_in_markdown_is_saved_and_linked(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-paste-image-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let path = dir.join("notes.md");
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("See: \n"), Some(path), cx));
+        e.update_in(cx, |e, window, _| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection::caret(5);
+        });
+        let png = vec![0x89, b'P', b'N', b'G'];
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(
+            gpui::ImageFormat::Png,
+            png.clone(),
+        )));
+        cx.simulate_keystrokes("cmd-v");
+        let text = e.read_with(cx, |e, _| e.buffer.to_string());
+        let name = text.strip_prefix("See: ![").and_then(|rest| rest.split(']').next()).unwrap_or_default().to_string();
+        assert!(name.starts_with("pasted-"), "{text}");
+        assert_eq!(text, format!("See: ![{name}]({name}.png)\n"));
+        assert_eq!(std::fs::read(dir.join(format!("{name}.png"))).unwrap(), png);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Enter in a Markdown list starts the next item; on an empty one, it ends the list.
     #[gpui::test]
