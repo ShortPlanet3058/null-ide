@@ -9,6 +9,8 @@ use std::time::Duration;
 
 /// Recompute after typing pauses this long.
 const DIFF_PAUSE: Duration = Duration::from_millis(150);
+/// How wide the strip of the gutter is where a click opens a change (pixels).
+const MARK_STRIP: f32 = 12.;
 /// The caret rests on a line this long before saying who changed it.
 const BLAME_PAUSE: Duration = Duration::from_millis(700);
 
@@ -32,6 +34,36 @@ impl Editor {
             })
             .ok();
         }));
+    }
+
+    /// The changed line whose gutter mark is at `position`, if one is: the mark sits in the
+    /// last strip of the gutter, just before the text.
+    pub(super) fn change_mark_at(&self, position: gpui::Point<gpui::Pixels>) -> Option<usize> {
+        let layout = self.layout.as_ref()?;
+        let strip = layout.text_bounds.left() - gpui::px(MARK_STRIP)..layout.text_bounds.left();
+        if !layout.bounds.contains(&position) || !strip.contains(&position.x) {
+            return None;
+        }
+        let row = ((position.y - layout.text_origin.y) / layout.line_height).floor();
+        let r = layout.rows.get((row as usize).checked_sub(layout.first_row)?)?;
+        let line = r.row.line;
+        self.git_hunks
+            .iter()
+            .any(|h| match h.change {
+                git::Change::Deleted => h.lines.start == line,
+                _ => h.lines.contains(&line),
+            })
+            .then_some(line)
+    }
+
+    /// A change's mark clicked: the file's changes since the last commit to keep or take
+    /// back, the caret in that one (⇥ keeps it, Esc takes it back).
+    pub(super) fn review_change_at(&mut self, line: usize, cx: &mut Context<Self>) {
+        let Some(base) = self.git_base.clone() else { return };
+        self.start_review(base.to_string(), cx);
+        self.single_cursor();
+        self.selection = super::Selection::caret(self.buffer.line_to_char(line));
+        self.touch(cx);
     }
 
     /// "You, 3 days ago · Fix the parser" for the caret's line, while it's still true.
@@ -89,7 +121,7 @@ impl Editor {
         self.refresh_git_hunks(DIFF_PAUSE, cx);
     }
 
-    fn refresh_git_hunks(&mut self, delay: Duration, cx: &mut Context<Self>) {
+    pub(super) fn refresh_git_hunks(&mut self, delay: Duration, cx: &mut Context<Self>) {
         let Some(base) = self.git_base.clone() else {
             if !self.git_hunks.is_empty() {
                 self.git_hunks.clear();
