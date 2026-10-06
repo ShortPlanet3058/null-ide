@@ -2668,9 +2668,9 @@ impl Editor {
         self.move_completion(-1, cx);
     }
 
-    fn confirm_completion(&mut self, _: &ConfirmCompletion, _: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_completion(&mut self, _: &ConfirmCompletion, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(menu) = &self.fix_menu {
-            return self.accept_fix(menu.selected, cx);
+            return self.accept_fix(menu.selected, window, cx);
         }
         let selected = self.completion.as_ref().map_or(0, |m| m.selected);
         self.accept_completion(selected, cx);

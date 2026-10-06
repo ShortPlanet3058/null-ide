@@ -49,6 +49,31 @@ pub fn title(fix: &CodeActionOrCommand) -> &str {
     }
 }
 
+/// Stands for "Fix with AI" in the list: not the server's, run here.
+const AI_FIX: &str = "null.fixWithAi";
+
+/// The list's last row when the caret's line has an error and AI is on: the error fixed
+/// by AI, shown as a change to keep or take back, as ⌘I's are.
+fn ai_fix() -> CodeActionOrCommand {
+    CodeActionOrCommand::Command(lsp_types::Command {
+        title: "Fix with AI".into(),
+        command: AI_FIX.into(),
+        arguments: None,
+    })
+}
+
+fn is_ai_fix(fix: &CodeActionOrCommand) -> bool {
+    matches!(fix, CodeActionOrCommand::Command(c) if c.command == AI_FIX)
+}
+
+/// The server's fixes, then AI's when it's offered.
+fn with_ai_fix(mut fixes: Vec<CodeActionOrCommand>, offer: bool) -> Vec<CodeActionOrCommand> {
+    if offer {
+        fixes.push(ai_fix());
+    }
+    fixes
+}
+
 /// The fixes worth showing, best first. Ones the server says can't apply here are left out.
 fn arrange(mut fixes: Vec<CodeActionOrCommand>) -> Vec<CodeActionOrCommand> {
     fixes.retain(|f| !matches!(f, CodeActionOrCommand::CodeAction(a) if a.disabled.is_some()));
@@ -93,12 +118,15 @@ impl Editor {
                 end: self.lsp_position(first.range.end),
             };
         }
+        // An error here, and AI on: it can try too.
+        let offer_ai = cx.global::<crate::settings::Settings>().ai.enabled
+            && problems.iter().any(|p| p.severity == lsp_types::DiagnosticSeverity::ERROR);
         let diagnostics = problems.into_iter().map(|p| p.diagnostic).collect();
         let request = lsp.read(cx).code_actions(&path, range, diagnostics);
         let version = self.buffer.version();
         self.close_completion(cx);
         self.fixes_task = Some(cx.spawn(async move |this, cx| {
-            let fixes = arrange(request.await);
+            let fixes = with_ai_fix(arrange(request.await), offer_ai);
             this.update(cx, |this, cx| {
                 if this.buffer.version() != version {
                     return;
@@ -140,10 +168,13 @@ impl Editor {
     }
 
     /// Hands the fix to the workspace, which works out its edits and applies them.
-    pub(super) fn accept_fix(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub(super) fn accept_fix(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut menu) = self.fix_menu.take() else { return };
         if let Some(conflict) = menu.conflict {
             return self.resolve_conflict(conflict, ix, cx);
+        }
+        if menu.fixes.get(ix).is_some_and(is_ai_fix) {
+            return self.fix_with_ai(window, cx);
         }
         if ix < menu.fixes.len() {
             cx.emit(EditorEvent::CodeAction(menu.fixes.swap_remove(ix)));
@@ -189,7 +220,7 @@ impl Editor {
                         .child(title(fix).to_string()),
                 )
                 .active(|s| s.opacity(0.7))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.accept_fix(ix, cx)))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.accept_fix(ix, window, cx)))
         });
         let list = div()
             .id("fixes")
@@ -223,6 +254,16 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_comes_last_and_only_when_offered() {
+        let server = vec![action("Import `HashMap`", Some(CodeActionKind::QUICKFIX), true)];
+        let titles = |fixes: &[CodeActionOrCommand]| fixes.iter().map(|f| title(f).to_string()).collect::<Vec<_>>();
+        assert_eq!(titles(&with_ai_fix(server.clone(), true)), ["Import `HashMap`", "Fix with AI"]);
+        assert_eq!(titles(&with_ai_fix(server, false)), ["Import `HashMap`"]);
+        assert!(is_ai_fix(&ai_fix()));
+        assert!(!is_ai_fix(&action("Fix with AI", None, false)));
+    }
     use lsp_types::{CodeAction, CodeActionDisabled, Command};
 
     fn action(title: &str, kind: Option<CodeActionKind>, preferred: bool) -> CodeActionOrCommand {
