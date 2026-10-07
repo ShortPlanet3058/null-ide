@@ -307,7 +307,7 @@ fn default_attributes(tag: &str) -> &'static [&'static str] {
 }
 
 /// `text` as it goes into a snippet: `$`, `}` and `\` taken literally.
-fn literal(text: &str) -> String {
+pub(crate) fn literal(text: &str) -> String {
     text.replace('\\', "\\\\").replace('$', "\\$").replace('}', "\\}")
 }
 
