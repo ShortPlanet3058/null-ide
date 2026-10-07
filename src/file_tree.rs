@@ -549,7 +549,7 @@ impl FileTree {
         *at = Instant::now();
         let wanted = so_far.clone();
         // The same letter again goes on to the next name with it (as in the Finder).
-        let again = wanted.len() > 1 && wanted.chars().all(|c| Some(c) == wanted.chars().next());
+        let again = wanted.len() > 1 && wanted.chars().all(|c| wanted.starts_with(c));
         let prefix = if again { &wanted[..wanted.chars().next().map_or(1, char::len_utf8)] } else { &wanted[..] };
         let current = self.selected_ix().unwrap_or(0);
         let start = if again { current + 1 } else { current };
