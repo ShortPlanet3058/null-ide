@@ -44,6 +44,8 @@ tree-sitter-typescript = "0.23"
 tree-sitter-yaml = "0.7"
 unicode-segmentation = "1"
 ureq = { version = "3", features = ["json"] }
+# The date and time for snippets ($CURRENT_YEAR…). Already built for a dependency.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 url = "2"
 
 # The Mac's own spell checker and color panel. Already built for GPUI: only the parts used are named.
