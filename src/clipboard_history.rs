@@ -6,6 +6,8 @@ use gpui::{App, ClipboardItem, Global};
 use std::time::Instant;
 
 const KEEP: usize = 20;
+/// Copies bigger than this aren't kept.
+const MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
 struct ClipboardHistory(Vec<(ClipboardItem, Instant)>);
@@ -15,11 +17,12 @@ impl Global for ClipboardHistory {}
 /// `item` was just copied: first in the history (once, however often it's copied).
 pub fn remember(item: &ClipboardItem, cx: &mut App) {
     let Some(text) = item.text() else { return };
-    if text.trim().is_empty() {
+    // A huge copy (a whole log) isn't kept: twenty of them would weigh on memory.
+    if text.trim().is_empty() || text.len() > MAX_BYTES {
         return;
     }
     let history = &mut cx.default_global::<ClipboardHistory>().0;
-    history.retain(|(kept, _)| kept.text().as_deref() != Some(text.as_str()));
+    history.retain(|(kept, _)| kept.text().is_none_or(|t| t.len() != text.len() || t != text));
     history.insert(0, (item.clone(), Instant::now()));
     history.truncate(KEEP);
 }

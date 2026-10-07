@@ -581,13 +581,7 @@ impl Workspace {
                 crate::lsp_store::LspEvent::ApplyEdit(edit) => this.apply_fix_edit(edit.clone(), cx),
                 // Files with errors stand out in the files.
                 crate::lsp_store::LspEvent::DiagnosticsChanged => {
-                    let errors = this
-                        .lsp
-                        .read(cx)
-                        .all_diagnostics()
-                        .filter(|(_, d)| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
-                        .map(|(path, _)| path.clone())
-                        .collect();
+                    let errors = this.lsp.read(cx).files_with_errors();
                     this.tree.update(cx, |tree, cx| tree.set_errors(errors, cx));
                 }
             }),
@@ -3343,6 +3337,10 @@ impl Workspace {
         if self.welcome.is_some() {
             return;
         }
+        // A list replacing another: what the last one's rows stood for is forgotten (its
+        // own is set after this, by whoever opens it).
+        self.clipboard_list = None;
+        self.history = None;
         if let Some((palette, _)) = &self.palette {
             if palette.read(cx).kind() == kind {
                 return self.close_palette(window, cx);

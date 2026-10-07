@@ -2602,7 +2602,8 @@ impl Editor {
         let plain = !(event.modifiers.shift || event.modifiers.secondary() || event.modifiers.control);
         let range = self.selection.range();
         if event.click_count == 1 && plain && self.extra.is_empty() && range.start < offset && offset < range.end {
-            self.dragging = Some(DragUnit::Move { range, pressed: offset });
+            self.dragging =
+                Some(DragUnit::Move { range, pressed: offset, version: self.buffer.version(), moved: false });
             self.drop_at = None;
             return cx.notify();
         }
@@ -2733,10 +2734,16 @@ impl Editor {
         let offset = self.offset_at(position);
         let (origin, target) = match &self.dragging {
             None => return,
-            Some(DragUnit::Move { range, .. }) => {
-                // Over the text itself, it wouldn't go anywhere.
+            Some(DragUnit::Move { range, moved, .. }) => {
+                // Over the text itself it wouldn't go anywhere; outside this editor's text (the
+                // other side, the files) it isn't dropped at all.
                 let within = range.start <= offset && offset <= range.end;
-                self.drop_at = (!within).then_some(offset);
+                let over_text = self.layout.as_ref().is_some_and(|l| l.text_bounds.contains(&position));
+                self.drop_at = (!within && over_text).then_some(offset);
+                let left = *moved || !within || !over_text;
+                if let Some(DragUnit::Move { moved, .. }) = &mut self.dragging {
+                    *moved = left;
+                }
                 return cx.notify();
             }
             Some(DragUnit::Char) => {
@@ -2803,14 +2810,18 @@ impl Editor {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(DragUnit::Move { range, pressed }) = self.dragging.take() {
+        if let Some(DragUnit::Move { range, pressed, version, moved }) = self.dragging.take() {
             match self.drop_at.take() {
+                // The text changed under the drag: what was picked up isn't there anymore.
+                Some(_) if self.buffer.version() != version => cx.notify(),
                 Some(at) => self.drop_text(range, at, event.modifiers.alt, cx),
-                // A click in the selection without a drag: the caret goes there.
-                None => {
+                // A click in the selection without a drag: the caret goes there. Dragged and
+                // brought back (or let go elsewhere): nothing changes.
+                None if !moved => {
                     self.selection = Selection::caret(pressed);
                     self.touch(cx);
                 }
+                None => cx.notify(),
             }
             return;
         }
@@ -3116,11 +3127,14 @@ impl Editor {
 /// What a mouse drag selects by, set by the click that started it.
 enum DragUnit {
     Char,
-    /// The selection itself, pressed to be dragged elsewhere: its chars, and where it was
-    /// pressed (a click that doesn't drag puts the caret there).
+    /// The selection itself, pressed to be dragged elsewhere: its chars, where it was
+    /// pressed (a click that doesn't drag puts the caret there), the text's version then (if
+    /// the text changes under the drag, it's off), and whether it has left the selection.
     Move {
         range: Range<usize>,
         pressed: usize,
+        version: u64,
+        moved: bool,
     },
     /// ⌥⇧-drag: a box from this (line, column), a cursor on each line.
     Column(usize, usize),
@@ -4305,6 +4319,36 @@ mod tests {
         select(cx, 0..3);
         drag(cx, 1, 5, true);
         e.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "one  onethreetwo\n"));
+        // Let go outside the text (over the gutter): nothing moves, the selection stays.
+        select(cx, 0..3);
+        let gutter = e.read_with(cx, |e, _| {
+            let l = e.layout.as_ref().expect("drawn");
+            gpui::point(l.bounds.left() + gpui::px(4.), l.text_origin.y + l.line_height / 2.)
+        });
+        let inside = e.read_with(cx, |e, _| e.caret_bounds(1).expect("drawn").center());
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: inside,
+            button: gpui::MouseButton::Left,
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: gutter,
+            pressed_button: Some(gpui::MouseButton::Left),
+            modifiers: Default::default(),
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: gutter,
+            button: gpui::MouseButton::Left,
+            modifiers: Default::default(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        e.read_with(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "one  onethreetwo\n");
+            assert_eq!(e.selection.range(), 0..3);
+        });
         // A click inside without dragging: just the caret.
         select(cx, 0..3);
         drag(cx, 2, 2, false);

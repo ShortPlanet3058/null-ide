@@ -174,7 +174,8 @@ impl ProjectSearch {
     /// with it, the search field focused.
     pub fn search_in_folder(&mut self, folder: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.show_replace = true;
-        self.files_input.update(cx, |input, cx| input.set_text(&format!("{folder}/"), cx));
+        // From the root, as written: not every folder of that name, nor a pattern.
+        self.files_input.update(cx, |input, cx| input.set_text(&format!("/{folder}/"), cx));
         self.focus(None, window, cx);
         cx.notify();
     }
@@ -612,7 +613,13 @@ fn file_filter(root: &Path, written: &str) -> Option<ignore::overrides::Override
         if name.is_empty() {
             continue;
         }
-        let globs = if term.contains(['*', '?', '[']) {
+        let globs = if term.starts_with('/') {
+            // From the project's root, exactly as written (Find in Folder writes it so):
+            // `[id]` is a folder's name there, not a pattern.
+            let exact: String =
+                name.chars().flat_map(|c| if "*?[]{}\\!".contains(c) { vec!['\\', c] } else { vec![c] }).collect();
+            vec![format!("/{exact}"), format!("/{exact}/**")]
+        } else if term.contains(['*', '?', '[']) {
             vec![term.to_string()]
         } else if term.ends_with('/') {
             // A folder, wherever it is.
@@ -984,7 +991,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("null-find-in-folder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("lib/src")).unwrap();
+        std::fs::create_dir_all(dir.join("app/[id]")).unwrap();
         std::fs::write(dir.join("src/a.rs"), "needle\n").unwrap();
+        std::fs::write(dir.join("lib/src/c.rs"), "needle\n").unwrap();
+        std::fs::write(dir.join("app/[id]/page.tsx"), "needle\n").unwrap();
         std::fs::write(dir.join("b.rs"), "needle\n").unwrap();
         cx.update(|cx| {
             cx.set_global(crate::settings::Settings::default());
@@ -998,7 +1009,13 @@ mod tests {
         cx.executor().advance_clock(std::time::Duration::from_millis(500));
         cx.run_until_parked();
         let found: Vec<String> = search.read_with(cx, |s, _| s.results.iter().map(|r| r.relative.clone()).collect());
-        assert_eq!(found, ["src/a.rs"]);
+        assert_eq!(found, ["src/a.rs"], "not lib/src");
+        // A folder named like a pattern is that folder.
+        search.update_in(cx, |s, window, cx| s.search_in_folder("app/[id]", window, cx));
+        cx.executor().advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        let found: Vec<String> = search.read_with(cx, |s, _| s.results.iter().map(|r| r.relative.clone()).collect());
+        assert_eq!(found, ["app/[id]/page.tsx"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
