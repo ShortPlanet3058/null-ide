@@ -3,8 +3,15 @@
 //! the way it was written (`#f80`, `rgb(…)`, `hsl(…)`), and undoes as one step.
 
 use super::{EditKind, Editor, EditorEvent, Selection};
-use gpui::{Context, Hsla, Pixels, Point, Rgba, Task};
+use crate::color_panel::Panel;
+use gpui::{Context, EntityId, Global, Hsla, Pixels, Point, Rgba, Task};
 use std::time::Duration;
+
+/// The editor that picked last: the panel is one for them all, so a pick elsewhere stops
+/// the one before.
+struct LatestPick(EntityId);
+
+impl Global for LatestPick {}
 
 /// How often the open panel is asked for its color.
 const FOLLOW_EVERY: Duration = Duration::from_millis(120);
@@ -31,6 +38,10 @@ impl Editor {
             return None;
         }
         let layout = self.layout.as_ref()?;
+        // A line pinned at the top covers the rows under it.
+        if layout.sticky.iter().any(|(bounds, _)| bounds.contains(&position)) {
+            return None;
+        }
         let row = ((position.y - layout.text_origin.y) / layout.line_height).floor();
         if row < 0. {
             return None;
@@ -59,31 +70,44 @@ impl Editor {
         let follow = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(FOLLOW_EVERY).await;
-                let following = this.update(cx, |this, cx| this.follow_color(crate::color_panel::color(), cx));
+                let following = this.update(cx, |this, cx| this.follow_color(crate::color_panel::state(), cx));
                 if !following.unwrap_or(false) {
                     break;
                 }
             }
         });
+        let me = cx.entity_id();
+        cx.set_global(LatestPick(me));
         self.color_pick = Some(ColorPick { start, written, kept_for_undo: false, _follow: follow });
         cx.notify();
     }
 
-    /// The panel's color now (None: it was closed): written in place of the one being
-    /// picked when it's another. Returns whether to go on following it.
-    pub(super) fn follow_color(&mut self, color: Option<Rgba>, cx: &mut Context<Self>) -> bool {
+    /// The panel now: its color written in place of the one being picked when it's another.
+    /// Returns whether to go on following it.
+    pub(super) fn follow_color(&mut self, panel: Panel, cx: &mut Context<Self>) -> bool {
         let Some(pick) = &self.color_pick else { return false };
         let len = pick.written.chars().count();
-        // Closed, or the color's text changed some other way: done.
-        let (Some(color), true) = (color, self.buffer.slice(pick.start..pick.start + len) == pick.written) else {
-            self.color_pick = None;
-            return false;
+        // Closed, picking another color somewhere else, or the color's text changed some
+        // other way: done. Away with Null in the background: waiting for it.
+        let latest = cx.try_global::<LatestPick>().is_some_and(|l| l.0 == cx.entity_id());
+        let unchanged = self.buffer.slice(pick.start..pick.start + len) == pick.written;
+        let color = match panel {
+            Panel::Open(color) if latest && unchanged => color,
+            Panel::Away if latest && unchanged => return true,
+            _ => {
+                self.color_pick = None;
+                return false;
+            }
         };
         let now = crate::colors::color_at(&pick.written, 0).map(|(c, _)| bytes(c.into()));
         if now == Some(bytes(color)) {
             return true;
         }
         let text = crate::colors::written_like(&pick.written, color);
+        // Written that way already (a color hsl() can only come near): nothing to write.
+        if text == pick.written {
+            return true;
+        }
         let (start, keep) = (pick.start, !pick.kept_for_undo);
         if keep {
             self.record_undo(EditKind::Other);
@@ -106,6 +130,7 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use crate::buffer::Buffer;
+    use crate::color_panel::Panel;
     use crate::editor::Editor;
     use gpui::{Rgba, TestAppContext, point, px};
     use std::path::PathBuf;
@@ -140,15 +165,46 @@ mod tests {
             let (start, written, color) = e.swatch_at(on_square).unwrap();
             e.pick_color(start, written, color, cx);
             // The panel still on the same color: nothing written.
-            assert!(e.follow_color(Some(Rgba { r: 1., g: 136. / 255., b: 0., a: 1. }), cx));
+            assert!(e.follow_color(Panel::Open(Rgba { r: 1., g: 136. / 255., b: 0., a: 1. }), cx));
             assert_eq!(e.buffer.to_string(), text);
-            assert!(e.follow_color(Some(Rgba { r: 0., g: 0.5, b: 1., a: 1. }), cx));
-            assert!(e.follow_color(Some(Rgba { r: 0., g: 0., b: 1., a: 0.5 }), cx));
+            assert!(e.follow_color(Panel::Open(Rgba { r: 0., g: 0.5, b: 1., a: 1. }), cx));
+            // Away while Null is in the background: still following, nothing written.
+            assert!(e.follow_color(Panel::Away, cx));
+            assert!(e.follow_color(Panel::Open(Rgba { r: 0., g: 0., b: 1., a: 0.5 }), cx));
             assert_eq!(e.buffer.to_string(), "a { color: #0000ff80; top: 0 }\n");
             // Closed: no more following.
-            assert!(!e.follow_color(None, cx));
+            assert!(!e.follow_color(Panel::Closed, cx));
             e.step_history(true, cx);
             assert_eq!(e.buffer.to_string(), text, "one undo for the whole pick");
         });
+    }
+
+    /// A color the notation can't hold exactly (hsl's whole percents) isn't written again
+    /// and again; and a pick started elsewhere stops this one.
+    #[gpui::test]
+    fn a_pick_writes_once_and_gives_way_to_the_next(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let text = "a { color: hsl(0, 0%, 0%); }\n";
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("a.css")), cx));
+        e.update(cx, |e, cx| {
+            let (color, _) = crate::colors::color_at("hsl(0, 0%, 0%)", 0).unwrap();
+            e.pick_color(11, "hsl(0, 0%, 0%)".into(), color, cx);
+            let between = Rgba { r: 0.123, g: 0.456, b: 0.789, a: 1. };
+            assert!(e.follow_color(Panel::Open(between), cx));
+            let once = e.buffer.to_string();
+            let version = e.buffer.version();
+            assert!(e.follow_color(Panel::Open(between), cx));
+            assert_eq!((e.buffer.to_string(), e.buffer.version()), (once, version), "not written again");
+        });
+        // A pick in another editor: this one stops following.
+        let (other, cx) = cx
+            .add_window_view(|_, cx| Editor::new(Buffer::from_text("b { color: #000; }\n"), Some("b.css".into()), cx));
+        other.update(cx, |o, cx| o.pick_color(11, "#000".into(), gpui::black(), cx));
+        e.update(cx, |e, cx| assert!(!e.follow_color(Panel::Open(Rgba { r: 1., g: 0., b: 0., a: 1. }), cx)));
     }
 }

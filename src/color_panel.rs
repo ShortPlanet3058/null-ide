@@ -1,5 +1,6 @@
 //! The Mac's own color panel, to pick a color written in the code: shown set to that color,
-//! then asked what it's set to while it stays open.
+//! then asked what it's set to while it stays open. It hides while Null is in the background,
+//! as the Mac's panels do, and the color being picked waits for it.
 
 use gpui::Rgba;
 
@@ -11,18 +12,30 @@ pub fn open(color: Rgba) {
     let _ = color;
 }
 
-/// The panel's color while it's open; None once it's closed (or there's no panel).
-pub fn color() -> Option<Rgba> {
+/// What the panel shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Panel {
+    /// Open, on this color.
+    Open(Rgba),
+    /// Hidden while Null is in the background (the Mac hides panels then); back with it.
+    Away,
+    /// Closed (or there's no panel).
+    Closed,
+}
+
+/// The panel now.
+pub fn state() -> Panel {
     #[cfg(target_os = "macos")]
-    return mac::color();
+    return mac::state();
     #[cfg(not(target_os = "macos"))]
-    None
+    Panel::Closed
 }
 
 #[cfg(target_os = "macos")]
 mod mac {
+    use super::Panel;
     use gpui::Rgba;
-    use objc2_app_kit::{NSColor, NSColorPanel, NSColorSpace};
+    use objc2_app_kit::{NSApplication, NSColor, NSColorPanel, NSColorSpace};
     use objc2_foundation::MainThreadMarker;
 
     pub fn open(color: Rgba) {
@@ -34,21 +47,24 @@ mod mac {
         panel.orderFront(None);
     }
 
-    pub fn color() -> Option<Rgba> {
-        let mtm = MainThreadMarker::new()?;
+    pub fn state() -> Panel {
+        let Some(mtm) = MainThreadMarker::new() else { return Panel::Closed };
         if !NSColorPanel::sharedColorPanelExists(mtm) {
-            return None;
+            return Panel::Closed;
         }
         let panel = NSColorPanel::sharedColorPanel(mtm);
         if !panel.isVisible() {
-            return None;
+            let active = NSApplication::sharedApplication(mtm).isActive();
+            return if active { Panel::Closed } else { Panel::Away };
         }
-        let color = panel.color().colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
-        Some(Rgba {
-            r: color.redComponent() as f32,
-            g: color.greenComponent() as f32,
-            b: color.blueComponent() as f32,
-            a: color.alphaComponent() as f32,
-        })
+        match panel.color().colorUsingColorSpace(&NSColorSpace::sRGBColorSpace()) {
+            Some(color) => Panel::Open(Rgba {
+                r: color.redComponent() as f32,
+                g: color.greenComponent() as f32,
+                b: color.blueComponent() as f32,
+                a: color.alphaComponent() as f32,
+            }),
+            None => Panel::Away,
+        }
     }
 }

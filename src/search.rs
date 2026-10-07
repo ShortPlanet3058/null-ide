@@ -58,9 +58,12 @@ impl SearchQuery {
     /// Whether replacing keeps each match's case: a search that ignores case, for plain
     /// text, with the replacement written all in lower case. Written with capitals, the
     /// replacement goes in as it is.
+    /// A replacement that only changes the search's case (`Color` → `color`) is meant as
+    /// written: that's the change asked for.
     pub fn keeps_case(&self, replacement: &str) -> bool {
         !self.case_sensitive
             && !self.regex
+            && replacement.to_lowercase() != self.text.to_lowercase()
             && replacement.chars().any(char::is_alphabetic)
             && !replacement.chars().any(char::is_uppercase)
     }
@@ -121,6 +124,8 @@ mod tests {
         assert!(q.keeps_case("client"));
         assert!(!q.keeps_case("Client"), "written with capitals: as it is");
         assert!(!q.keeps_case("42"));
+        let to_lower = SearchQuery { text: "Color".into(), ..Default::default() };
+        assert!(!to_lower.keeps_case("color"), "changing only the case is what's asked");
         assert!(!SearchQuery { case_sensitive: true, ..q.clone() }.keeps_case("client"));
         assert!(!SearchQuery { regex: true, ..q.clone() }.keeps_case("client"));
         let re = q.build().unwrap();

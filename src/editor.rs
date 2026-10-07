@@ -2605,13 +2605,6 @@ impl Editor {
         if let Some(line) = self.fold_click(event.position) {
             return self.toggle_fold(line, cx);
         }
-        // A color's square: pick another in the Mac's color panel.
-        if event.click_count == 1
-            && !event.modifiers.modified()
-            && let Some((start, written, color)) = self.swatch_at(event.position)
-        {
-            return self.pick_color(start, written, color, cx);
-        }
         // A line pinned at the top: go to it.
         if let Some(&(_, line)) =
             self.layout.as_ref().and_then(|l| l.sticky.iter().find(|(b, _)| b.contains(&event.position)))
@@ -2619,6 +2612,13 @@ impl Editor {
             cx.emit(EditorEvent::Jumped { from: self.caret_point() });
             let indent = self.buffer.line_text(line).chars().take_while(|c| c.is_whitespace()).count();
             return self.set_caret_point((line, indent), cx);
+        }
+        // A color's square: pick another in the Mac's color panel.
+        if event.click_count == 1
+            && !event.modifiers.modified()
+            && let Some((start, written, color)) = self.swatch_at(event.position)
+        {
+            return self.pick_color(start, written, color, cx);
         }
         let offset = self.offset_at(event.position);
         // ⌥⇧-drag selects a box: the same columns on every line it crosses.

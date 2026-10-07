@@ -26,10 +26,33 @@ pub fn folder() -> Option<PathBuf> {
     crate::settings::Settings::path()?.parent().map(|dir| dir.join("snippets"))
 }
 
-/// The snippets for a file: its language's file in `folder`, then the `*.code-snippets`
+/// VS Code's id for a file's language, as Null knows it (`.zshrc` is Shell): what its
+/// snippets file is named after. By its extension when Null has no grammar for it.
+pub fn language_id(language: Option<&str>, path: &Path) -> &'static str {
+    let jsx = path.extension().is_some_and(|e| e == "jsx");
+    match language {
+        Some("Rust") => "rust",
+        Some("CSS") => "css",
+        Some("Go") => "go",
+        Some("C") => "c",
+        Some("C++") => "cpp",
+        Some("Python") => "python",
+        Some("JavaScript") if jsx => "javascriptreact",
+        Some("JavaScript") => "javascript",
+        Some("TypeScript") => "typescript",
+        Some("TSX") => "typescriptreact",
+        Some("TOML") => "toml",
+        Some("Markdown") => "markdown",
+        Some("HTML") => "html",
+        Some("YAML") => "yaml",
+        Some("Shell") => "shellscript",
+        _ => crate::servers::language_id(path),
+    }
+}
+
+/// The snippets for a file in `language`: its file in `folder`, then the `*.code-snippets`
 /// there and in the project's `.vscode` folder that are for its language or any.
-pub fn for_file(path: &Path, folder: Option<&Path>) -> Vec<Snippet> {
-    let language = crate::servers::language_id(path);
+pub fn for_file(path: &Path, language: &str, folder: Option<&Path>) -> Vec<Snippet> {
     let mut files: Vec<(PathBuf, bool)> = Vec::new();
     if let Some(folder) = folder {
         files.push((folder.join(format!("{language}.json")), false));
@@ -49,8 +72,8 @@ pub fn for_file(path: &Path, folder: Option<&Path>) -> Vec<Snippet> {
 }
 
 /// The suggestion a snippet makes, indented for a line indented `indent`, with its tabs
-/// as `unit` (the file's own indentation).
-pub fn completion_item(snippet: &Snippet, prefix: &str, indent: &str, unit: &str) -> CompletionItem {
+/// as `unit` (the file's own indentation) and its lines ending as the file's do.
+pub fn completion_item(snippet: &Snippet, prefix: &str, indent: &str, unit: &str, ending: &str) -> CompletionItem {
     let body = snippet
         .body
         .split('\n')
@@ -61,12 +84,13 @@ pub fn completion_item(snippet: &Snippet, prefix: &str, indent: &str, unit: &str
             if i == 0 { line } else { format!("{indent}{line}") }
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join(ending);
     CompletionItem {
         label: prefix.to_string(),
         kind: Some(CompletionItemKind::SNIPPET),
         detail: Some(snippet.description.clone().unwrap_or_else(|| snippet.name.clone())),
-        filter_text: Some(prefix.to_string()),
+        // Matched on its words: `#region` by what's typed after the `#`.
+        filter_text: Some(prefix.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '_').to_string()),
         sort_text: Some(prefix.to_string()),
         insert_text: Some(body),
         insert_text_format: Some(InsertTextFormat::SNIPPET),
@@ -123,6 +147,7 @@ fn read_cached(file: &Path) -> Vec<Snippet> {
 /// The snippets in a file's text: JSON with comments and trailing commas allowed, as VS
 /// Code allows them. Ones without a prefix or a body are left out.
 pub fn parse(text: &str) -> Vec<Snippet> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let Ok(serde_json::Value::Object(entries)) = serde_json::from_str(&without_comments(text)) else {
         return Vec::new();
     };
@@ -238,6 +263,10 @@ mod tests {
         assert_eq!(snippets[1].body, "https://example.com/* not a comment */");
         assert_eq!(snippets[1].scope.as_deref(), Some(&["javascript".to_string(), "typescript".into()][..]));
         assert!(parse("not json").is_empty());
+        assert_eq!(parse("\u{feff}{\"A\": {\"prefix\": \"a\", \"body\": \"b\"}}").len(), 1, "a byte-order mark");
+        let zshrc = std::path::Path::new(".zshrc");
+        assert_eq!(language_id(crate::languages::for_path(zshrc).map(|l| l.name), zshrc), "shellscript");
+        assert_eq!(language_id(None, std::path::Path::new("a.weird")), "plaintext");
         assert!(parse(&new_file("Rust")).is_empty(), "the new file's example is a comment");
     }
 
@@ -260,7 +289,9 @@ mod tests {
         std::fs::write(project.join(".vscode/team.code-snippets"), r#"{"Team": {"prefix": "team", "body": "t"}}"#)
             .unwrap();
         let names = |file: &str| -> Vec<String> {
-            for_file(&project.join(file), Some(&folder)).into_iter().map(|s| s.name).collect()
+            let path = project.join(file);
+            let language = crate::languages::for_path(&path).map(|l| l.name);
+            for_file(&path, language_id(language, &path), Some(&folder)).into_iter().map(|s| s.name).collect()
         };
         assert_eq!(names("src/main.rs"), ["Print", "Any", "Team"]);
         assert_eq!(names("app.js"), ["Any", "Js", "Team"]);
@@ -280,8 +311,10 @@ mod tests {
             description: None,
             scope: None,
         };
-        let item = completion_item(&snippet, "if", "    ", "    ");
+        let item = completion_item(&snippet, "if", "    ", "    ", "\n");
         assert_eq!(item.insert_text.as_deref(), Some("if $1 {\n        $0\n    }"));
+        let windows = completion_item(&snippet, "if", "", "\t", "\r\n");
+        assert_eq!(windows.insert_text.as_deref(), Some("if $1 {\r\n\t$0\r\n}"));
         assert_eq!(item.label, "if");
         assert_eq!(item.detail.as_deref(), Some("If"));
     }

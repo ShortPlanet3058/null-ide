@@ -364,7 +364,8 @@ impl Editor {
             Some("JavaScript" | "TSX") => true,
             _ => return false,
         };
-        if !self.selection.is_empty() {
+        // One place to fill in at a time: not with several cursors.
+        if !self.selection.is_empty() || self.multi_cursor() {
             return false;
         }
         let caret = self.selection.head;
@@ -376,22 +377,14 @@ impl Editor {
         else {
             return false;
         };
-        if jsx {
-            if !self.in_jsx_content(caret) {
-                return false;
-            }
-        } else {
-            // Inside <script> or <style>, it's code.
-            let html = self.buffer.rope().slice(..caret).to_string().to_lowercase();
-            let open = |tag: &str| {
-                html.rfind(&format!("<{tag}"))
-                    .is_some_and(|at| html.rfind(&format!("</{tag}")).is_none_or(|end| end < at))
-            };
-            if open("script") || open("style") {
-                return false;
-            }
-        }
         let start = caret - before[start_byte..].chars().count();
+        // In JSX, the abbreviation is in an element's content when what's just before it is
+        // (the abbreviation itself may not parse as JSX text: `{…}`, `>`).
+        let in_place = if jsx { self.in_jsx_content(start) } else { self.in_html_text(caret) };
+        if !in_place {
+            return false;
+        }
+        let snippet = snippet.replace('\n', self.style.line_ending.text());
         let parsed = super::snippet::parse(&snippet);
         self.edit(start..caret, &parsed.text.clone(), EditKind::Other, cx);
         self.start_snippet(start, parsed, cx);
@@ -404,12 +397,14 @@ impl Editor {
     /// tag on lines of its own, and go in a level. Returns whether it did.
     pub(super) fn wrap_in_tag(&mut self, c: char, cx: &mut Context<Self>) -> bool {
         let range = self.selection.range();
-        if c != '<' || range.is_empty() || !self.extra.is_empty() {
+        if c != '<' || range.is_empty() || self.multi_cursor() {
             return false;
         }
+        // In JSX, where the selection starts: in an element's content (a selected `<li>…`
+        // starts right after it).
         match self.language().map(|l| l.name) {
-            Some("HTML") => {}
-            Some("JavaScript" | "TSX") if self.in_jsx_content(range.start + 1) => {}
+            Some("HTML") if self.in_html_text(range.start) => {}
+            Some("JavaScript" | "TSX") if self.in_jsx_content(range.start) => {}
             _ => return false,
         }
         let (first, first_col) = self.buffer.point(range.start);
@@ -451,6 +446,14 @@ impl Editor {
         self.start_snippet(start, parsed, cx);
         cx.notify();
         true
+    }
+
+    /// Whether `at` is in an HTML page's text: not in a `<script>`, a `<style>` or a comment
+    /// still open there (that's code, or nothing to expand).
+    fn in_html_text(&self, at: usize) -> bool {
+        let html = self.buffer.rope().slice(..at).to_string().to_lowercase();
+        let open = |start: &str, end: &str| html.rfind(start).is_some_and(|at| html.rfind(end).is_none_or(|e| e < at));
+        !(open("<script", "</script") || open("<style", "</style") || open("<!--", "-->"))
     }
 
     /// Whether the text just before `at` is in a JSX element's content (between its tags, not
@@ -876,6 +879,8 @@ mod editor_tests {
             typed(cx, "<body>\n  <p>Hi</p>\n  <div>\n    <p>There</p>\n  </div>\n  ", "ul>li*2"),
             "<body>\n  <p>Hi</p>\n  <div>\n    <p>There</p>\n  </div>\n  <ul>\n    <li>One</li>\n    <li>Two</li>\n  </ul>"
         );
+        // Windows line breaks stay Windows ones.
+        assert_eq!(typed(cx, "<body>\r\n", "ul>li"), "<body>\r\n<ul>\r\n    <li>One</li>\r\n</ul>Two");
         // A word, or code in a script: ⇥ is a tab, no tags.
         assert_eq!(typed(cx, "", "hello"), "hello   One Two");
         assert_eq!(typed(cx, "<script>\n", "ul>li"), "<script>\nul>li   One Two");
@@ -913,8 +918,16 @@ mod editor_tests {
         );
         let jsx = "const P = () => <p>Hello there</p>;\n";
         assert_eq!(wrapped(cx, "P.jsx", jsx, 25..30), "const P = () => <p>Hello <strong>there</strong>!</p>;\n");
-        // In code, < is just typed over it.
+        // A whole element selected in JSX: wrapped too.
+        let list = "const L = () => (\n  <ul>\n    <li>a</li>\n  </ul>\n);\n";
+        assert_eq!(
+            wrapped(cx, "L.jsx", list, 29..39),
+            "const L = () => (\n  <ul>\n    <strong><li>a</li></strong>!\n  </ul>\n);\n"
+        );
+        // In code, and in a script, < is just typed over it.
         assert_eq!(wrapped(cx, "a.rs", "let a = b;\n", 8..9), "let a = <strong !;\n");
+        let script = wrapped(cx, "a.html", "<script>\na > b\n", 11..12);
+        assert!(script.starts_with("<script>\na <strong") && !script.contains("</strong>"), "{script}");
     }
 
     /// In JSX, ⇥ expands inside an element's content only: JSX's names there; plain code
@@ -949,6 +962,12 @@ mod editor_tests {
         assert!(!code.contains('<'), "{code}");
         let inside = typed(cx, "Page.jsx", "const P = () => <p>{", "a.b", "}</p>;\n");
         assert!(!inside.contains("<div"), "{inside}");
+        // Text in braces and children, as in HTML.
+        assert_eq!(typed(cx, "Page.jsx", page, "p{Hello}", close), format!("{page}<p>Hello</p>{close}"));
+        assert_eq!(
+            typed(cx, "Page.jsx", page, "ul>li", close),
+            format!("{page}<ul>\n      <li></li>\n    </ul>{close}")
+        );
     }
 
     /// Typed one key at a time, smart quotes and dashes on: curled in Markdown prose, left
