@@ -76,6 +76,9 @@ doesn't need Xcode's separate Metal Toolchain download.
 - Files no language server knows (YAML, shell, a language not installed yet) still get
   suggestions: the file's own words, nearest first. In Markdown and text, only on ⌃Space.
   A path being written (`./`, `src/`, `img/`) lists what's in that folder.
+- **Bookmarks**: ⌘F2 marks the caret's line (its number turns amber), F3 and ⇧F3 go round
+  them, and **Bookmarks…** (⌘K) lists them in every open file. They move with the code and
+  are kept with the project.
 - **Paste from History…** (⌘K) brings back the last 20 things copied or cut. `TODO`, `FIXME`
   and `HACK` stand out in comments; **Find TODOs** lists them all.
 - Pasted code takes the indentation of where it goes, its lines keeping theirs relative

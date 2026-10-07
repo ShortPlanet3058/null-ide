@@ -294,6 +294,8 @@ pub struct Prepaint {
     current_line: Option<Bounds<Pixels>>,
     /// The debugger's breakpoints: a dot each, in the gutter (a ring for one with a condition).
     breakpoint_dots: Vec<(Bounds<Pixels>, bool)>,
+    /// Bookmarked lines when line numbers are hidden (shown, the number takes the accent).
+    bookmark_dots: Vec<Bounds<Pixels>>,
     /// The line the debugger stopped on: a band across it, and a mark in the gutter.
     execution: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
     /// Faint lines down the indentation, one per level.
@@ -951,6 +953,20 @@ impl Element for EditorElement {
                     })
                 })
                 .collect();
+            let mark = px(6.);
+            let bookmark_dots: Vec<Bounds<Pixels>> = editor
+                .bookmarks
+                .iter()
+                .filter(|_| !numbered)
+                .filter(|&&line| lines_shown.contains(&line))
+                .filter_map(|&line| {
+                    let rows = rows_of(line..line + 1);
+                    (!rows.is_empty()).then(|| {
+                        let y = row_top(rows.start) + (line_height - mark) / 2.;
+                        Bounds::new(point(bounds.left() + px(6.), y), size(mark, mark))
+                    })
+                })
+                .collect();
             let execution = editor.execution_line.and_then(|line| {
                 let rows = rows_of(line..line + 1);
                 (!rows.is_empty()).then(|| {
@@ -1035,7 +1051,9 @@ impl Element for EditorElement {
                 .map(|(r, row)| {
                     let line = r.row.line;
                     let label = (line + 1).to_string();
-                    let color = flagged[line - lines_shown.start].unwrap_or(if line == caret_line {
+                    let color = flagged[line - lines_shown.start].unwrap_or(if editor.is_bookmarked(line) {
+                        theme.caret
+                    } else if line == caret_line {
                         theme.muted
                     } else {
                         theme.faint
@@ -1397,6 +1415,7 @@ impl Element for EditorElement {
                 line_height,
                 current_line,
                 breakpoint_dots,
+                bookmark_dots,
                 execution,
                 indent_guides,
                 line_guide,
@@ -1454,6 +1473,9 @@ impl Element for EditorElement {
         if let Some((band, mark)) = prepaint.execution {
             window.paint_quad(fill(band, theme.warning.opacity(0.14)));
             window.paint_quad(fill(mark, theme.warning));
+        }
+        for dot in &prepaint.bookmark_dots {
+            window.paint_quad(fill(*dot, theme.caret).corner_radii(px(3.)));
         }
         for (dot, conditional) in &prepaint.breakpoint_dots {
             let quad = if *conditional {
