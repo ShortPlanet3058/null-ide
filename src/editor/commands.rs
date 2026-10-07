@@ -359,6 +359,38 @@ impl Editor {
         before.rfind("<!--").is_some_and(|open| before.rfind("-->").is_none_or(|close| close < open))
     }
 
+    /// Enter in a comment: the next line carries it on. Doc comments (`///`, `//!`) and block
+    /// comments (` * `) always; a line comment (`//`, `#`) only when Enter splits it, text
+    /// after the caret (Enter at its end starts code). Returns whether it did.
+    pub(super) fn continue_comment(
+        &mut self,
+        range: Range<usize>,
+        line: usize,
+        col: usize,
+        line_text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(language) = self.language() else { return false };
+        let before: String = line_text.chars().take(col).collect();
+        let after: String = line_text.chars().skip(col).collect();
+        let Some(prefix) = comment_continuation(&before, &after, language.line_comment, language.block_comment) else {
+            return false;
+        };
+        // Only in a comment, as the syntax has it (`* b` can be code).
+        let byte = self.buffer.rope().char_to_byte(range.start);
+        let line_bytes =
+            self.buffer.line_to_byte(line)..self.buffer.line_to_byte((line + 1).min(self.buffer.len_lines()));
+        self.highlight_bytes(line_bytes);
+        if super::spelling::syntax_at(&self.spans, byte.saturating_sub(1)) != Some(crate::theme::Syntax::Comment) {
+            return false;
+        }
+        // Splitting a comment: the words after the caret start right after the new prefix.
+        let spaces = after.chars().take_while(|c| *c == ' ').count();
+        let nl = self.style.line_ending.text();
+        self.edit(range.start..range.end + spaces, &format!("{nl}{prefix}"), EditKind::Other, cx);
+        true
+    }
+
     /// ⇥ after an Emmet abbreviation (see `emmet`): its tags, as a snippet to fill in. In
     /// HTML, not in a script or a style sheet; in JSX, only in an element's content, where
     /// `a.b` can't be code. Returns whether it did.
@@ -529,6 +561,41 @@ impl Editor {
     }
 }
 
+/// What the next line starts with when Enter is pressed after `before` (with `after` left
+/// on the line), in a comment: the indentation and the comment's mark, or None.
+fn comment_continuation(
+    before: &str,
+    after: &str,
+    line_comment: Option<&str>,
+    block_comment: Option<(&str, &str)>,
+) -> Option<String> {
+    let indent: String = before.chars().take_while(|c| c.is_whitespace()).collect();
+    let text = &before[indent.len()..];
+    // A block comment's lines: `/**` or `/*` opening it, `*` going on, not closed before the caret.
+    if let Some((open, close)) = block_comment
+        && !text.contains(close)
+    {
+        if text.starts_with(open) {
+            return Some(format!("{indent} * "));
+        }
+        if text.starts_with('*') && !text.starts_with(close) {
+            return Some(format!("{indent}* "));
+        }
+    }
+    let mark = line_comment?;
+    if !text.starts_with(mark) {
+        return None;
+    }
+    // Rust's doc comments always go on; a plain comment only when split in two.
+    let doc = mark == "//" && (text.starts_with("///") && !text.starts_with("////") || text.starts_with("//!"));
+    let full = if doc { &text[..3] } else { mark };
+    let written_space = text[full.len()..].starts_with(' ');
+    if !doc && (after.trim().is_empty() || text[full.len()..].trim().is_empty()) {
+        return None;
+    }
+    Some(format!("{indent}{full}{}", if written_space || !doc { " " } else { "" }))
+}
+
 /// Adds or removes `marker` on each line. Returns the new lines and how to move a
 /// column on line `i` (relative to the first line) so the selection stays put.
 fn toggle_line_comments(lines: &[String], marker: &str) -> (Vec<String>, impl Fn(usize, usize) -> usize + use<>) {
@@ -598,6 +665,27 @@ fn toggle_block_comment(lines: &[String], open: &str, close: &str) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comments_carry_on_where_they_should() {
+        let rust = (Some("//"), Some(("/*", "*/")));
+        let next = |before: &str, after: &str| comment_continuation(before, after, rust.0, rust.1);
+        assert_eq!(next("    /// Adds", "").as_deref(), Some("    /// "));
+        assert_eq!(next("//! Crate", "").as_deref(), Some("//! "));
+        assert_eq!(next("///", "").as_deref(), Some("///"), "a bare doc line: as it was written");
+        assert_eq!(next("  /**", "").as_deref(), Some("   * "));
+        assert_eq!(next("   * more", "").as_deref(), Some("   * "));
+        assert_eq!(next("   */", ""), None, "the comment's end");
+        assert_eq!(next("/* done */ x", ""), None);
+        // A plain comment: only split in two.
+        assert_eq!(next("// see", ""), None);
+        assert_eq!(next("    // see the", " docs").as_deref(), Some("    // "));
+        assert_eq!(next("let a = 1; // x", " y"), None, "code before it: not a comment line");
+        assert_eq!(next("//// banner", " x").as_deref(), Some("// "));
+        let python = |before: &str, after: &str| comment_continuation(before, after, Some("#"), None);
+        assert_eq!(python("# note that", " this").as_deref(), Some("# "));
+        assert_eq!(python("# note", ""), None);
+    }
 
     #[test]
     fn two_comments_on_a_line_are_not_one() {
@@ -888,6 +976,42 @@ mod editor_tests {
         // A word, or code in a script: ⇥ is a tab, no tags.
         assert_eq!(typed(cx, "", "hello"), "hello   One Two");
         assert_eq!(typed(cx, "<script>\n", "ul>li"), "<script>\nul>li   One Two");
+    }
+
+    /// Enter in a doc comment carries it on, splitting a plain comment too; code that looks
+    /// like a comment line (`* c`) doesn't.
+    #[gpui::test]
+    fn enter_carries_comments_on(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let typed = |cx: &mut TestAppContext, text: &str, line: usize, col: usize, keys: &str| {
+            let text = text.to_string();
+            let (e, cx) =
+                cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(PathBuf::from("a.rs")), cx));
+            e.update_in(cx, |e, window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(e, cx));
+                e.selection = Selection::caret(e.buffer.offset(line, col));
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes("enter");
+            cx.simulate_input(keys);
+            e.read_with(cx, |e, _| e.buffer.to_string())
+        };
+        assert_eq!(typed(cx, "/// Adds one.\nfn f() {}\n", 0, 13, "More."), "/// Adds one.\n/// More.\nfn f() {}\n");
+        assert_eq!(
+            typed(cx, "fn f() {\n    // see the docs\n}\n", 1, 14, ""),
+            "fn f() {\n    // see the\n    // docs\n}\n"
+        );
+        assert_eq!(typed(cx, "// note\n", 0, 7, "x"), "// note\nx\n", "at its end: code goes on");
+        assert_eq!(
+            typed(cx, "fn f() {\n    let a = b\n        * c\n}\n", 2, 11, "d"),
+            "fn f() {\n    let a = b\n        * c\n        d\n}\n",
+            "code, not a comment"
+        );
     }
 
     /// Numbered lists count on after Enter in the middle, a line moved, a line deleted; one
