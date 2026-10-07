@@ -30,6 +30,12 @@ pub struct Parsed {
 /// (the first choice), and variables (`$TM_FILENAME`, `${NAME:default}`), which give
 /// their default or nothing.
 pub fn parse(snippet: &str) -> Parsed {
+    parse_with(snippet, &|_| None)
+}
+
+/// The same, with `variable` giving the variables' values (see `snippets::variable`); one
+/// it doesn't know gives its default or nothing.
+pub fn parse_with(snippet: &str, variable: &dyn Fn(&str) -> Option<String>) -> Parsed {
     let mut parser = Parser {
         chars: snippet.chars().collect(),
         at: 0,
@@ -37,6 +43,7 @@ pub fn parse(snippet: &str) -> Parsed {
         len: 0,
         stops: BTreeMap::new(),
         defaults: BTreeMap::new(),
+        variable,
     };
     parser.until(false);
     let mut stops: Vec<Vec<Range<usize>>> =
@@ -45,7 +52,8 @@ pub fn parse(snippet: &str) -> Parsed {
     Parsed { text: parser.text, stops }
 }
 
-struct Parser {
+struct Parser<'a> {
+    variable: &'a dyn Fn(&str) -> Option<String>,
     chars: Vec<char>,
     at: usize,
     text: String,
@@ -56,7 +64,7 @@ struct Parser {
     defaults: BTreeMap<u32, String>,
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> Option<char> {
         self.chars.get(self.at).copied()
     }
@@ -75,10 +83,17 @@ impl Parser {
         n
     }
 
-    fn name(&mut self) {
+    fn name(&mut self) -> String {
+        let start = self.at;
         while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
             self.at += 1;
         }
+        self.chars[start..self.at].iter().collect()
+    }
+
+    /// A variable's value, as text (nothing in it is snippet syntax).
+    fn value(&mut self, value: &str) {
+        value.chars().for_each(|c| self.push(c));
     }
 
     fn stop(&mut self, n: u32, range: Range<usize>) {
@@ -141,17 +156,32 @@ impl Parser {
                     self.defaults.insert(n, self.text[start_byte..].to_string());
                     self.stop(n, start..self.len);
                 } else {
-                    // A variable: its default, if it has one.
-                    self.name();
-                    if self.peek() == Some(':') {
-                        self.at += 1;
-                        self.until(true);
-                    } else {
-                        self.skip_past('}');
+                    // A variable: its value, else its default if it has one.
+                    let name = self.name();
+                    let value = (self.variable)(&name);
+                    match (value, self.peek() == Some(':')) {
+                        (Some(value), default) => {
+                            self.value(&value);
+                            if default {
+                                self.skip_nested();
+                            } else {
+                                self.skip_past('}');
+                            }
+                        }
+                        (None, true) => {
+                            self.at += 1;
+                            self.until(true);
+                        }
+                        (None, false) => self.skip_past('}'),
                     }
                 }
             }
-            Some(c) if c.is_alphabetic() || c == '_' => self.name(),
+            Some(c) if c.is_alphabetic() || c == '_' => {
+                let name = self.name();
+                if let Some(value) = (self.variable)(&name) {
+                    self.value(&value);
+                }
+            }
             _ => self.push('$'),
         }
     }
@@ -176,6 +206,25 @@ impl Parser {
                     }
                 }
                 c if first => self.push(c),
+                _ => {}
+            }
+        }
+    }
+
+    /// Past the `}` closing this `${…}`, over any nested in it.
+    fn skip_nested(&mut self) {
+        let mut depth = 1;
+        while let Some(c) = self.peek() {
+            self.at += 1;
+            match c {
+                '\\' => self.at += 1,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
                 _ => {}
             }
         }

@@ -87,7 +87,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 - **Your snippets**: a prefix typed offers its snippet among the suggestions, its places
   filled in with ⇥. **Edit Snippets…** (⌘K) opens the file for the current language; they're
   written as VS Code writes them, so its snippet files (and a project's
-  `.vscode/*.code-snippets`) work as they are.
+  `.vscode/*.code-snippets`) work as they are, variables too (`$TM_FILENAME`,
+  `$CURRENT_YEAR`, `$CLIPBOARD`, `$UUID`…).
 - **Paste from History…** (⌘K) brings back the last 20 things copied or cut. `TODO`, `FIXME`
   and `HACK` stand out in comments; **Find TODOs** lists them all.
 - Pasted code takes the indentation of where it goes, its lines keeping theirs relative

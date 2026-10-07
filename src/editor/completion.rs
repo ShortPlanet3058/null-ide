@@ -491,7 +491,31 @@ impl Editor {
         let start = suggestion.range.map_or(menu.word_start, |r| self.offset_from_lsp(r.start).min(caret));
         // Accepting in the middle of a word replaces the rest of it too (fo|obar → foobar).
         let end = suggestion.range.map_or(caret, |r| self.offset_from_lsp(r.end).max(caret));
-        let parsed = suggestion.snippet.then(|| super::snippet::parse(&suggestion.insert));
+        let parsed = suggestion.snippet.then(|| {
+            // VS Code's variables ($TM_FILENAME, $CURRENT_YEAR, $CLIPBOARD…) for where it goes.
+            let (line, _) = self.buffer.point(start);
+            let line_text = self.buffer.line_text(line);
+            let word = self.buffer.slice(start..end);
+            let clipboard = suggestion
+                .insert
+                .contains("CLIPBOARD")
+                .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+                .flatten();
+            let path = self.path.clone().unwrap_or_default();
+            let language = self.language();
+            let here = crate::snippets::Here {
+                path: &path,
+                line,
+                line_text: &line_text,
+                word: &word,
+                selected: "",
+                clipboard,
+                line_comment: language.and_then(|l| l.line_comment),
+                block_comment: language.and_then(|l| l.block_comment),
+                now: chrono::Local::now(),
+            };
+            super::snippet::parse_with(&suggestion.insert, &|name| crate::snippets::variable(name, &here))
+        });
         let text = parsed.as_ref().map_or_else(|| suggestion.insert.clone(), |p| p.text.clone());
         let mut edits: Vec<(Range<usize>, String)> = vec![(start..end, text.clone())];
         for edit in &suggestion.extra_edits {

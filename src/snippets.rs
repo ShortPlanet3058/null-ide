@@ -98,6 +98,74 @@ pub fn completion_item(snippet: &Snippet, prefix: &str, indent: &str, unit: &str
     }
 }
 
+/// What VS Code's snippet variables stand for where a snippet goes in.
+pub struct Here<'a> {
+    pub path: &'a Path,
+    /// The caret's line (from 0) and its text.
+    pub line: usize,
+    pub line_text: &'a str,
+    pub word: &'a str,
+    pub selected: &'a str,
+    pub clipboard: Option<String>,
+    pub line_comment: Option<&'a str>,
+    pub block_comment: Option<(&'a str, &'a str)>,
+    pub now: chrono::DateTime<chrono::Local>,
+}
+
+/// The value of variable `name` (`TM_FILENAME`, `CURRENT_YEAR`, `CLIPBOARD`, `UUID`…), as
+/// VS Code gives it; None for one it doesn't know.
+pub fn variable(name: &str, here: &Here) -> Option<String> {
+    let path = here.path;
+    let file = |p: Option<&std::ffi::OsStr>| p.map(|s| s.to_string_lossy().into_owned());
+    let random = || {
+        use std::hash::{BuildHasher, Hasher};
+        std::collections::hash_map::RandomState::new().build_hasher().finish()
+    };
+    Some(match name {
+        "TM_FILENAME" => file(path.file_name())?,
+        "TM_FILENAME_BASE" => file(path.file_stem())?,
+        "TM_DIRECTORY" => path.parent()?.to_string_lossy().into_owned(),
+        "TM_FILEPATH" => path.to_string_lossy().into_owned(),
+        "TM_LINE_INDEX" => here.line.to_string(),
+        "TM_LINE_NUMBER" => (here.line + 1).to_string(),
+        "TM_CURRENT_LINE" => here.line_text.to_string(),
+        "TM_CURRENT_WORD" => here.word.to_string(),
+        "TM_SELECTED_TEXT" => here.selected.to_string(),
+        "CLIPBOARD" => here.clipboard.clone()?,
+        "CURRENT_YEAR" => here.now.format("%Y").to_string(),
+        "CURRENT_YEAR_SHORT" => here.now.format("%y").to_string(),
+        "CURRENT_MONTH" => here.now.format("%m").to_string(),
+        "CURRENT_MONTH_NAME" => here.now.format("%B").to_string(),
+        "CURRENT_MONTH_NAME_SHORT" => here.now.format("%b").to_string(),
+        "CURRENT_DATE" => here.now.format("%d").to_string(),
+        "CURRENT_DAY_NAME" => here.now.format("%A").to_string(),
+        "CURRENT_DAY_NAME_SHORT" => here.now.format("%a").to_string(),
+        "CURRENT_HOUR" => here.now.format("%H").to_string(),
+        "CURRENT_MINUTE" => here.now.format("%M").to_string(),
+        "CURRENT_SECOND" => here.now.format("%S").to_string(),
+        "CURRENT_SECONDS_UNIX" => here.now.timestamp().to_string(),
+        "CURRENT_TIMEZONE_OFFSET" => here.now.format("%:z").to_string(),
+        "RANDOM" => format!("{:06}", random() % 1_000_000),
+        "RANDOM_HEX" => format!("{:06x}", random() & 0xff_ffff),
+        "UUID" => {
+            let (a, b) = (random(), random());
+            let b = (b & 0x3fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000;
+            format!(
+                "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+                a >> 32,
+                (a >> 16) & 0xffff,
+                a & 0xfff,
+                b >> 48,
+                b & 0xffff_ffff_ffff
+            )
+        }
+        "LINE_COMMENT" => here.line_comment.or(here.block_comment.map(|(open, _)| open))?.to_string(),
+        "BLOCK_COMMENT_START" => here.block_comment?.0.to_string(),
+        "BLOCK_COMMENT_END" => here.block_comment?.1.to_string(),
+        _ => return None,
+    })
+}
+
 /// The `.vscode` folder of the project a file is in: in its folder or one above, not past
 /// the top of its git repository.
 fn project_vscode(path: &Path) -> Option<PathBuf> {
@@ -300,6 +368,35 @@ mod tests {
         std::fs::write(folder.join("rust.json"), r#"{"Debug": {"prefix": "dbg", "body": "dbg!($1)"}}"#).unwrap();
         assert_eq!(names("src/main.rs")[0], "Debug");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn variables_say_where_and_when() {
+        use chrono::TimeZone;
+        let here = Here {
+            path: Path::new("/work/app/src/main.rs"),
+            line: 4,
+            line_text: "    let x = 1;",
+            word: "x",
+            selected: "",
+            clipboard: Some("copied".into()),
+            line_comment: Some("//"),
+            block_comment: Some(("/*", "*/")),
+            now: chrono::Local.with_ymd_and_hms(2026, 3, 7, 9, 5, 2).unwrap(),
+        };
+        let filled = crate::editor::fill_snippet(
+            "// ${TM_FILENAME_BASE} ${TM_LINE_NUMBER}: $CURRENT_YEAR-$CURRENT_MONTH-$CURRENT_DATE \
+             $CURRENT_HOUR:$CURRENT_MINUTE ${CLIPBOARD} ${UNKNOWN:else} ${TM_FILENAME:not this}$0",
+            &here,
+        );
+        assert_eq!(filled, "// main 5: 2026-03-07 09:05 copied else main.rs");
+        assert_eq!(variable("TM_DIRECTORY", &here).as_deref(), Some("/work/app/src"));
+        assert_eq!(variable("BLOCK_COMMENT_END", &here).as_deref(), Some("*/"));
+        assert_eq!(variable("CURRENT_MONTH_NAME", &here).as_deref(), Some("March"));
+        let uuid = variable("UUID", &here).unwrap();
+        assert_eq!((uuid.len(), uuid.as_bytes()[14]), (36, b'4'));
+        assert_eq!(variable("RANDOM", &here).unwrap().len(), 6);
+        assert_eq!(variable("NOT_ONE", &here), None);
     }
 
     #[test]

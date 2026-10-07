@@ -30,6 +30,13 @@ pub use assist::{Block, BlockKind};
 pub use bookmarks::{NextBookmark, PreviousBookmark, ToggleBookmark};
 pub use breakpoints::{Breakpoint, ToggleBreakpoint};
 pub use completion::CompletionMenu;
+
+/// A snippet's text with its variables filled in for `here` (placeholders dropped): for
+/// checking what a snippet becomes.
+#[cfg(test)]
+pub fn fill_snippet(snippet: &str, here: &crate::snippets::Here) -> String {
+    snippet::parse_with(snippet, &|name| crate::snippets::variable(name, here)).text
+}
 pub use conflicts::{Conflict, NextConflict, PreviousConflict};
 pub use cursors::Cursor;
 pub use fixes::QuickFix;

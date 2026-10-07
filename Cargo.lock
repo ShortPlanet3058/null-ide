@@ -3752,6 +3752,7 @@ name = "null-ide"
 version = "0.0.1"
 dependencies = [
  "alacritty_terminal",
+ "chrono",
  "futures",
  "gpui",
  "ignore",
