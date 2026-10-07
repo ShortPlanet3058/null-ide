@@ -5731,7 +5731,10 @@ fn position_label(editor: &Editor, line: usize, col: usize) -> String {
     if editor.is_prose() {
         let plural = |n: usize| if n == 1 { "1 word".to_string() } else { format!("{} words", thousands(n)) };
         return match (range.is_empty(), editor.word_count()) {
-            (true, Some(words)) => format!("{place} · {}", plural(words)),
+            (true, Some(words)) => match reading_time(words) {
+                Some(time) => format!("{place} · {} · {time}", plural(words)),
+                None => format!("{place} · {}", plural(words)),
+            },
             (true, None) => place,
             (false, _) => {
                 format!("{place} · {} selected", plural(crate::editor::words_in(&editor.buffer.slice(range))))
@@ -5750,6 +5753,12 @@ fn position_label(editor: &Editor, line: usize, col: usize) -> String {
     } else {
         format!("{place} · {} selected", range.len())
     }
+}
+
+/// About how long `words` take to read, at 230 a minute; nothing under half a minute.
+fn reading_time(words: usize) -> Option<String> {
+    let minutes = (words + 115) / 230;
+    (minutes > 0).then(|| format!("{minutes} min read"))
 }
 
 /// How much of the changes AI reads to write a commit message, in characters.
@@ -7980,6 +7989,15 @@ mod tests {
         };
         assert_eq!(label(cx, 0, 0), "Ln 1, Col 1 · 3 words");
         assert_eq!(label(cx, 10, 18), "Ln 1, Col 1 · 2 words selected");
+        // A long text says about how long it takes to read.
+        assert_eq!(reading_time(100), None);
+        assert_eq!(reading_time(115).as_deref(), Some("1 min read"));
+        assert_eq!(reading_time(1000).as_deref(), Some("4 min read"));
+        let long = "word ".repeat(700);
+        let (essay, cx) = cx
+            .add_window_view(|_, cx| Editor::new(crate::buffer::Buffer::from_text(&long), Some("essay.md".into()), cx));
+        let text = essay.update(cx, |e, _| position_label(e, 0, 0));
+        assert_eq!(text, "Ln 1, Col 1 · 700 words · 3 min read");
         assert_eq!(thousands(1234567), "1,234,567");
         assert_eq!(thousands(999), "999");
     }

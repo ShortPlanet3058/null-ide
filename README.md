@@ -127,6 +127,11 @@ names; `](#` completes from the headings. Cells copied from a spreadsheet paste 
 and **Insert Table of Contents** (⌘K) lists the headings, kept up to date when run again.
 **Export as HTML** (⌘K) writes the document as a page next to it and opens it in the browser.
 
+For long writing, the status bar counts the words and the minutes they take to read. In
+Settings, **typewriter scrolling** keeps the line being written in the middle of the window,
+**dim other paragraphs** leaves only the one being written in full, and line numbers can
+show everywhere, only in code, or nowhere.
+
 ## Git
 
 - **⌃⇧G** lists what changed since the last commit; each file opens with its changes to
