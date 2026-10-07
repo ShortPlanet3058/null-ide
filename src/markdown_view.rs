@@ -174,7 +174,7 @@ fn block_inlines(block: &mut Block, each: &mut dyn FnMut(&mut Vec<Inline>)) {
             items.iter_mut().flat_map(|i| i.blocks.iter_mut()).for_each(|b| block_inlines(b, each))
         }
         Block::Table { head, rows, .. } => {
-            head.iter_mut().chain(rows.iter_mut().flatten()).for_each(|cell| each(cell));
+            head.iter_mut().chain(rows.iter_mut().flatten()).for_each(&mut *each);
         }
         Block::Code { .. } | Block::Rule => {}
     }
