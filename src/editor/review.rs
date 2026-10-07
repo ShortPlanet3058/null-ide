@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn the_words_that_changed() {
         let (old, new) = changed_words("let total = price * count;", "let total = price * quantity;");
-        assert_eq!((old, new), (vec![20..25], vec![20..28]));
+        assert_eq!((old.as_slice(), new.as_slice()), (&[20..25][..], &[20..28][..]));
         // Rewritten: nothing singled out.
         assert_eq!(changed_words("fn a() {}", "struct Point { x: f32 }"), (vec![], vec![]));
         // Accented letters count as one column.
@@ -335,8 +335,8 @@ mod editor_tests {
         e.update(cx, |e, cx| e.start_review("let total = price * count;\nprint(total)\n".into(), cx));
         e.read_with(cx, |e, _| {
             let words = e.word_changes(0..10);
-            assert_eq!(words.added.get(&0), Some(&vec![20..28]));
-            assert_eq!(words.removed.values().collect::<Vec<_>>(), [&vec![20..25]]);
+            assert_eq!(words.added.get(&0).map(Vec::as_slice), Some(&[20..28][..]));
+            assert_eq!(words.removed.values().map(Vec::as_slice).collect::<Vec<_>>(), [&[20..25][..]]);
             assert!(!words.added.contains_key(&2), "an added line has no counterpart");
         });
     }
