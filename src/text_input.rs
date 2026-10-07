@@ -74,7 +74,6 @@ pub enum TextInputEvent {
 const PLACEHOLDER_GAP: gpui::Pixels = px(4.);
 
 /// A single-line text field, used by the command palette.
-
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: String,
