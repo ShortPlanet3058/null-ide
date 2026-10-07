@@ -3257,7 +3257,7 @@ impl EntityInputHandler for Editor {
                 };
                 let mut chars = text.chars();
                 if let (Some(c), None, None) = (chars.next(), chars.next(), &marked)
-                    && this.type_pair_char(c, cx)
+                    && (this.type_smart_char(c, cx) || this.type_pair_char(c, cx))
                 {
                     return;
                 }
@@ -3270,7 +3270,7 @@ impl EntityInputHandler for Editor {
         let mut chars = text.chars();
         if let (Some(c), None, None) = (chars.next(), chars.next(), &self.marked)
             && range == self.selection.range()
-            && self.type_pair_char(c, cx)
+            && (self.type_smart_char(c, cx) || self.type_pair_char(c, cx))
         {
             return;
         }

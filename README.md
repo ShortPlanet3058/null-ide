@@ -129,8 +129,9 @@ and **Insert Table of Contents** (⌘K) lists the headings, kept up to date when
 
 For long writing, the status bar counts the words and the minutes they take to read. In
 Settings, **typewriter scrolling** keeps the line being written in the middle of the window,
-**dim other paragraphs** leaves only the one being written in full, and line numbers can
-show everywhere, only in code, or nowhere.
+**dim other paragraphs** leaves only the one being written in full, **smart quotes and
+dashes** curl quotes in the Mac's style and make `--` a dash (never in code), and line
+numbers can show everywhere, only in code, or nowhere.
 
 ## Git
 

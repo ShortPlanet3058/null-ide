@@ -278,6 +278,48 @@ impl Editor {
         true
     }
 
+    /// Smart quotes and dashes in Markdown and text, when on (see `punctuation`). Returns
+    /// true when it wrote the character itself.
+    pub(super) fn type_smart_char(&mut self, c: char, cx: &mut Context<Self>) -> bool {
+        use crate::punctuation::{QUOTES, Smart, smart};
+        if !matches!(c, '"' | '\'' | '-')
+            || !cx.global::<crate::settings::Settings>().smart_punctuation
+            || !self.is_prose()
+            || self.marked.is_some()
+        {
+            return false;
+        }
+        let range = self.selection.range();
+        let (line, column) = self.buffer.point(range.start);
+        if self.in_fence(line) {
+            return false;
+        }
+        let before: String = self.buffer.line_text(line).chars().take(column).collect();
+        match smart(c, &before, *QUOTES) {
+            // Over a selection, a quote wraps it.
+            Some(Smart::Write(_)) if !range.is_empty() => {
+                let (open, close) = if c == '"' { QUOTES.double } else { QUOTES.single };
+                let inner = self.buffer.slice(range.clone());
+                self.edit(range.clone(), &format!("{open}{inner}{close}"), EditKind::Other, cx);
+                self.selection = Selection { anchor: range.start + 1, head: range.end + 1 };
+                self.touch(cx);
+            }
+            // A closing quote typed right before the same one steps over it.
+            Some(Smart::Write(w))
+                if self.buffer.char_at(range.start) == Some(w) && w != QUOTES.double.0 && w != QUOTES.single.0 =>
+            {
+                self.selection = Selection::caret(range.start + 1);
+                self.touch(cx);
+            }
+            Some(Smart::Write(w)) => self.edit(range, &w.to_string(), EditKind::Typing, cx),
+            Some(Smart::Join(w)) if range.is_empty() => {
+                self.edit(range.start - 1..range.start, &w.to_string(), EditKind::Typing, cx)
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// Backspace between an empty pair like `()` removes both.
     pub(super) fn empty_pair_around_caret(&self) -> bool {
         let caret = self.selection.head;
@@ -648,5 +690,51 @@ mod editor_tests {
         assert_eq!(e.read_with(cx, |e, _| e.matching_brackets()), Some((1, 11)));
         select(cx, &e, 8, 8);
         assert_eq!(e.read_with(cx, |e, _| e.matching_brackets()), Some((7, 5)));
+    }
+
+    /// Typed one key at a time, smart quotes and dashes on: curled in Markdown prose, left
+    /// alone in its code and in code files, and off by default.
+    #[gpui::test]
+    fn smart_quotes_and_dashes_when_writing(cx: &mut TestAppContext) {
+        use crate::punctuation::QUOTES;
+        use gpui::EntityInputHandler as _;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings { smart_punctuation: true, ..Default::default() });
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let typed = |cx: &mut TestAppContext, file: &str, start: &str, keys: &str| {
+            let start = start.to_string();
+            let file = PathBuf::from(file);
+            let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&start), Some(file), cx));
+            e.update_in(cx, |e, window, cx| {
+                e.selection = Selection::caret(e.buffer.len_chars());
+                for key in keys.chars() {
+                    e.replace_text_in_range(None, &key.to_string(), window, cx);
+                }
+                e.buffer.to_string()
+            })
+        };
+        let (open, close) = QUOTES.double;
+        let (_, apostrophe) = QUOTES.single;
+        assert_eq!(
+            typed(cx, "notes.md", "", "Say \"it's here\" -- now"),
+            format!("Say {open}it{apostrophe}s here{close} — now")
+        );
+        // Code stays as typed: in ticks, in a fence, in a code file.
+        assert_eq!(typed(cx, "notes.md", "", "`a--b \"c\"`"), "`a--b \"c\"`");
+        assert_eq!(typed(cx, "notes.md", "```\n", "x--\"y"), "```\nx--\"y\"");
+        assert_eq!(typed(cx, "main.rs", "", "a--b"), "a--b");
+        // Over a selection, a quote wraps it.
+        let (e, cx2) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("a word"), Some("x.txt".into()), cx));
+        e.update_in(cx2, |e, window, cx| {
+            e.selection = Selection { anchor: 2, head: 6 };
+            e.replace_text_in_range(None, "\"", window, cx);
+            assert_eq!(e.buffer.to_string(), format!("a {open}word{close}"));
+            assert_eq!(e.selection.range(), 3..7);
+        });
+        // Off, quotes are typed as they are.
+        cx.update(|cx| cx.set_global(crate::settings::Settings::default()));
+        assert_eq!(typed(cx, "notes.md", "", "\"x\""), "\"x\"");
     }
 }
