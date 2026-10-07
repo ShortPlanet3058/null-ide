@@ -44,6 +44,7 @@ actions!(
         SetChangesAside,
         BringBackChanges,
         OpenInBrowser,
+        FindTodos,
         PushBranch,
         PullBranch,
         FileHistory,
@@ -3039,6 +3040,7 @@ impl Workspace {
             (File, "Copy Link to Line".into(), Box::new(CopyLineLink)),
             (File, "Open Line on the Web".into(), Box::new(OpenLineOnWeb)),
             (File, "Fetch".into(), Box::new(FetchBranch)),
+            (Go, "Find TODOs".into(), Box::new(FindTodos)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
@@ -3529,6 +3531,15 @@ impl Workspace {
         selected.or_else(|| {
             (!self.project_search.read(cx).has_query(cx)).then(|| crate::find_bar::latest_search(cx)).flatten()
         })
+    }
+
+    /// Every TODO, FIXME, HACK and XXX in the project, in project search.
+    fn find_todos(&mut self, _: &FindTodos, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_search.set(true, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        let query = crate::project_search::todo_query();
+        self.project_search.update(cx, |search, cx| search.search_for(query, window, cx));
+        cx.notify();
     }
 
     fn search_project(&mut self, _: &SearchProject, window: &mut Window, cx: &mut Context<Self>) {
@@ -6283,6 +6294,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::revert_all_changes))
             .on_action(cx.listener(Self::undo_last_commit))
             .on_action(cx.listener(Self::set_changes_aside))
+            .on_action(cx.listener(Self::find_todos))
             .on_action(cx.listener(|this, _: &OpenInBrowser, _, cx| {
                 // Saved first: the browser reads the file.
                 if let Some(editor) = this.active_editor().cloned()

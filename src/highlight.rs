@@ -188,8 +188,52 @@ impl Highlighter {
                 _ => spans.push((at..at + 1, syntax)),
             }
         }
-        spans
+        notes_in_comments(rope, spans)
     }
+}
+
+/// The words that leave a note in a comment.
+const NOTES: &[&str] = &["TODO", "FIXME", "HACK", "XXX"];
+
+/// Comment spans split around the notes in them (TODO, FIXME…), which stand out.
+fn notes_in_comments(rope: &Rope, spans: Vec<Span>) -> Vec<Span> {
+    let mut out = Vec::with_capacity(spans.len());
+    for (range, syntax) in spans {
+        if syntax != Syntax::Comment {
+            out.push((range, syntax));
+            continue;
+        }
+        let text = rope.byte_slice(range.clone()).to_string();
+        let mut at = 0;
+        for (start, word) in note_words(&text) {
+            if start > at {
+                out.push((range.start + at..range.start + start, Syntax::Comment));
+            }
+            out.push((range.start + start..range.start + start + word.len(), Syntax::Note));
+            at = start + word.len();
+        }
+        if at < text.len() {
+            out.push((range.start + at..range.end, Syntax::Comment));
+        }
+    }
+    out
+}
+
+/// Where the note words are in `text`, whole words only (not TODOS, not XXXL).
+fn note_words(text: &str) -> Vec<(usize, &'static str)> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    for word in NOTES {
+        for (start, _) in text.match_indices(word) {
+            let end = start + word.len();
+            let alone = |b: Option<&u8>| b.is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_');
+            if alone(start.checked_sub(1).and_then(|i| bytes.get(i))) && alone(bytes.get(end)) {
+                found.push((start, *word));
+            }
+        }
+    }
+    found.sort_by_key(|(start, _)| *start);
+    found
 }
 
 impl Highlighter {
@@ -433,5 +477,17 @@ mod timing {
             folds / 20,
             blocks / 20
         );
+    }
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    #[test]
+    fn notes_are_whole_words() {
+        let text = "// TODO: fix, then FIXME(me) and TODOS, XXXL, HACK";
+        let words: Vec<&str> = note_words(text).into_iter().map(|(_, w)| w).collect();
+        assert_eq!(words, ["TODO", "FIXME", "HACK"]);
     }
 }
