@@ -67,7 +67,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 ## Writing
 
 - **⌘.** offers the language server's quick fixes at the caret (a missing import, match
-  arms…), and with AI on, Fix with AI for an error. **F8** goes from problem to problem.
+  arms…), and with AI on, Fix with AI for an error. **Organize Imports** (⌘K) has the server
+  sort the file's imports and drop the unused ones, where it can (TypeScript, Go, Python). **F8** goes from problem to problem.
 - Multiple cursors (⌘D, ⌘⇧-click), a box with ⌥⇧-drag, cursors at line ends (⌥⇧I);
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
 - In HTML and JSX, typing the `>` of a tag adds its closing tag, `</` finishes the one
