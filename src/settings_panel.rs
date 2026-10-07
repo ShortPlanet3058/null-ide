@@ -662,6 +662,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Dim other paragraphs",
+                Some("In Markdown and text, the paragraph you're writing stands out"),
+                Self::toggle("dim-paragraphs", s.dim_paragraphs, &theme, cx, |s| s.dim_paragraphs = !s.dim_paragraphs),
+                &theme,
+            ),
+            Self::row(
                 "Spelling",
                 Some("Marks misspelled words in Markdown, text and comments; ⌘. on one offers corrections"),
                 Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),

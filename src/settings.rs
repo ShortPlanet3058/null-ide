@@ -55,6 +55,8 @@ pub struct Settings {
     pub caret_blink: bool,
     /// The line being written stays in the middle of the window (typewriter scrolling).
     pub typewriter: bool,
+    /// In Markdown and text, the paragraph being written stands out, the others fade.
+    pub dim_paragraphs: bool,
     /// Misspelled words in Markdown, text and comments get a faint wavy line.
     pub spell_check: bool,
     /// A faint line at the length the project keeps lines to, when it sets one.
@@ -99,6 +101,7 @@ impl Default for Settings {
             indent_guides: true,
             caret_blink: true,
             typewriter: false,
+            dim_paragraphs: false,
             spell_check: true,
             line_guide: true,
             sticky_scroll: true,
