@@ -304,9 +304,14 @@ pub struct FileTree {
     /// Files and folders aren't renamed straight away: the workspace is asked first (see
     /// [`FileTreeEvent::RenameRequested`]).
     pub ask_before_renaming: bool,
+    /// What's been typed to go to a file by its name (as in the Finder), and when.
+    typed: (String, Instant),
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
+
+/// A pause this long starts a new name.
+const TYPING_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl FileTree {
     pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
@@ -325,6 +330,7 @@ impl FileTree {
             scroll: UniformListScrollHandle::new(),
             git: HashMap::new(),
             git_folders: HashSet::new(),
+            typed: (String::new(), Instant::now()),
         };
         tree.rebuild();
         tree
@@ -524,6 +530,42 @@ impl FileTree {
     }
 
     // ---------- keyboard ----------
+
+    /// Letters typed with the files focused go to the first one shown whose name starts with
+    /// them (from the one selected on), as in the Finder; a pause starts over.
+    fn type_to_select(&mut self, event: &gpui::KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let keys = &event.keystroke;
+        if self.edit.is_some() || self.menu.is_some() || keys.modifiers.control || keys.modifiers.platform {
+            return;
+        }
+        let Some(typed) = keys.key_char.as_deref().filter(|t| t.chars().all(|c| !c.is_control()) && *t != " ") else {
+            return;
+        };
+        let (so_far, at) = &mut self.typed;
+        if at.elapsed() > TYPING_PAUSE {
+            so_far.clear();
+        }
+        so_far.push_str(&typed.to_lowercase());
+        *at = Instant::now();
+        let wanted = so_far.clone();
+        // The same letter again goes on to the next name with it (as in the Finder).
+        let again = wanted.len() > 1 && wanted.chars().all(|c| Some(c) == wanted.chars().next());
+        let prefix = if again { &wanted[..wanted.chars().next().map_or(1, char::len_utf8)] } else { &wanted[..] };
+        let current = self.selected_ix().unwrap_or(0);
+        let start = if again { current + 1 } else { current };
+        let rows = self.rows.len();
+        let found = (0..rows).map(|i| (start + i) % rows.max(1)).find(|&ix| {
+            self.entry_at(ix).is_some_and(|e| {
+                e.path.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().starts_with(prefix))
+            })
+        });
+        if let Some(ix) = found {
+            self.selected = self.entry_at(ix).map(|e| e.path.clone());
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
 
     fn select_offset(&mut self, delta: isize, cx: &mut Context<Self>) {
         let entries: Vec<usize> = (0..self.rows.len()).filter(|&i| self.entry_at(i).is_some()).collect();
@@ -1222,6 +1264,7 @@ impl Render for FileTree {
         div()
             .key_context(key_context)
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::type_to_select))
             .on_action(cx.listener(Self::new_file))
             .on_action(cx.listener(Self::new_folder))
             .on_action(cx.listener(Self::rename))
@@ -1328,6 +1371,44 @@ impl Render for FileTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Typing with the files focused goes to a name starting with what's typed; the same
+    /// letter again, to the next one with it.
+    #[gpui::test]
+    fn typing_goes_to_a_name(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-tree-typing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        for f in ["alpha.rs", "beta.md", "Build.txt"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            bind_keys(cx);
+        });
+        let root = dir.clone();
+        let (tree, cx) = cx.add_window_view(|_, cx| FileTree::new(root, cx));
+        tree.update_in(cx, |t, window, _| window.focus(&t.focus_handle));
+        let selected = |cx: &mut gpui::VisualTestContext| {
+            tree.read_with(cx, |t, _| {
+                t.selected.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned())
+            })
+        };
+        cx.simulate_keystrokes("b e");
+        assert_eq!(selected(cx).as_deref(), Some("beta.md"));
+        // Typing on after a pause: a new name.
+        tree.update(cx, |t, _| t.typed.1 -= TYPING_PAUSE * 2);
+        cx.simulate_keystrokes("a");
+        assert_eq!(selected(cx).as_deref(), Some("alpha.rs"));
+        tree.update(cx, |t, _| t.typed.1 -= TYPING_PAUSE * 2);
+        cx.simulate_keystrokes("b b");
+        let second = selected(cx);
+        cx.simulate_keystrokes("b");
+        assert_ne!(selected(cx), second, "the same letter goes on to the next");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Which app is the browser, asked of macOS (run by hand: nothing is opened).
     #[test]
