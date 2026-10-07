@@ -31,7 +31,16 @@ impl Editor {
     /// The blocks around `line` (start above it, end below it), innermost first. Cheap:
     /// a walk up the syntax tree from the line.
     pub fn blocks_around(&mut self, line: usize) -> Vec<Range<usize>> {
-        let Some(highlighter) = &mut self.highlighter else { return Vec::new() };
+        let Some(highlighter) = &mut self.highlighter else {
+            // Without a grammar: the indentation's blocks, innermost first.
+            if self.basic_syntax().is_none() {
+                return Vec::new();
+            }
+            let mut around: Vec<Range<usize>> =
+                self.foldable().iter().filter(|b| b.start < line && line < b.end).cloned().collect();
+            around.reverse();
+            return around;
+        };
         highlighter.sync(&self.buffer);
         highlighter.blocks_around(line)
     }
@@ -40,10 +49,17 @@ impl Editor {
     pub fn foldable(&mut self) -> &[Range<usize>] {
         let revision = self.buffer.revision();
         if self.folds.foldable.as_ref().is_none_or(|(r, _)| *r != revision) {
+            // A language without a grammar (Swift, Ruby…): its blocks by indentation.
+            let basic =
+                self.basic_syntax().is_some() && self.buffer.rope().len_bytes() <= crate::basic_syntax::MAX_BYTES;
             let ranges = match &mut self.highlighter {
                 Some(highlighter) => {
                     highlighter.sync(&self.buffer);
                     highlighter.fold_ranges()
+                }
+                None if basic => {
+                    let lines: Vec<String> = (0..self.buffer.len_lines()).map(|l| self.buffer.line_text(l)).collect();
+                    crate::basic_syntax::indent_blocks(lines.iter().map(String::as_str))
                 }
                 None => Vec::new(),
             };

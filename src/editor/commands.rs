@@ -1427,6 +1427,23 @@ mod basic_colouring_tests {
         });
     }
 
+    /// A Swift file folds by its blocks, and knows the blocks around a line (sticky scroll).
+    #[gpui::test]
+    fn languages_without_a_grammar_fold(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+        });
+        let text = "struct A {\n    func f() {\n        g()\n        h()\n    }\n}\n";
+        let e = cx.new(|cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("a.swift")), cx));
+        e.update(cx, |e, cx| {
+            assert_eq!(e.foldable(), [0..5, 1..4]);
+            assert_eq!(e.blocks_around(2), [1..4, 0..5], "innermost first");
+            e.toggle_fold(1, cx);
+            assert!(e.is_folded(1));
+        });
+    }
+
     /// The editing helpers of code files, in one without a grammar: a doc comment carried on,
     /// a `}` back out, comments spell-checked.
     #[gpui::test]
