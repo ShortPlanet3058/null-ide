@@ -108,12 +108,13 @@ fn expand_tabs(text: &str, runs: &[TextRun]) -> (String, Vec<TextRun>, Vec<(usiz
 }
 
 /// Puts hints into a row's text, each before the byte it belongs to: the text as
-/// shown, runs to match (the hints in `hint_run`'s style), and each hint's (byte, length).
+/// shown, runs to match (each hint in `hint_run(its index, its length)`'s style), and each
+/// hint's (byte, length).
 fn insert_hints(
     text: &str,
     runs: &[TextRun],
     hints: &[(usize, String)],
-    hint_run: impl Fn(usize) -> TextRun,
+    hint_run: impl Fn(usize, usize) -> TextRun,
 ) -> (String, Vec<TextRun>, Vec<(usize, usize)>) {
     if hints.is_empty() {
         return (text.to_string(), runs.to_vec(), Vec::new());
@@ -133,7 +134,7 @@ fn insert_hints(
                 out.push(TextRun { len: byte - from, ..run.clone() });
                 shown.push_str(&text[from..byte]);
             }
-            out.push(hint_run(hint.len()));
+            out.push(hint_run(placed.len(), hint.len()));
             shown.push_str(hint);
             placed.push((byte, hint.len()));
             from = byte;
@@ -146,7 +147,7 @@ fn insert_hints(
     }
     // Hints past the end of the text (or a row without runs) go at the end.
     for (_, hint) in hints {
-        out.push(hint_run(hint.len()));
+        out.push(hint_run(placed.len(), hint.len()));
         shown.push_str(hint);
         placed.push((text.len(), hint.len()));
     }
@@ -237,6 +238,10 @@ fn sticky_lines(
 pub const FOLDED: &str = " ⋯";
 /// Space between a line's end and who last changed it.
 const BLAME_GAP: &str = "      ";
+/// Shown before a color written in the code, in that color.
+const SWATCH: &str = "■ ";
+/// Shown instead for a color that would hardly show on the background.
+const OUTLINE_SWATCH: &str = "□ ";
 /// A problem's message at the end of its line is cut to this many characters.
 const PROBLEM_NOTE_CHARS: usize = 100;
 
@@ -445,16 +450,22 @@ impl Element for EditorElement {
                 let (shown, runs, tabs) = expand_tabs(text, runs);
                 (shape(shown, &runs), gaps_of(&[], &tabs))
             };
-            // Type hints: faint, on a soft background, in the code's own font.
-            let hint_style =
-                |len: usize| TextRun { background_color: Some(theme.hairline), ..run(len, &font, theme.faint) };
-            // A row with its hints in, then `suffix` (a fold's ⋯, who changed the line).
+            // Type hints: faint, on a soft background, in the code's own font. A color's
+            // swatch: a square in that color.
+            let hint_style = |len: usize, swatch: Option<Hsla>| match swatch {
+                Some(color) => run(len, &font, color),
+                None => TextRun { background_color: Some(theme.hairline), ..run(len, &font, theme.faint) },
+            };
+            // A row with its hints in (swatches among them, by index), then `suffix` (a
+            // fold's ⋯, who changed the line).
             let shape_hinted = |text: &str,
                                 runs: &[TextRun],
                                 hints: &[(usize, String)],
+                                swatches: &[Option<Hsla>],
                                 suffix: Option<TextRun>,
                                 suffix_text: &str| {
-                let (mut shown, mut runs, placed) = insert_hints(text, runs, hints, hint_style);
+                let (mut shown, mut runs, placed) =
+                    insert_hints(text, runs, hints, |i, len| hint_style(len, swatches.get(i).copied().flatten()));
                 if let Some(run) = suffix {
                     shown.push_str(suffix_text);
                     runs.push(run);
@@ -463,6 +474,7 @@ impl Element for EditorElement {
                 (shape(shown, &runs), gaps_of(&placed, &tabs))
             };
             let show_hints = cx.global::<Settings>().inlay_hints;
+            let shows_colors = editor.language().is_some_and(|l| crate::colors::written_in(l.name));
             if show_hints {
                 editor.ensure_hints(cx);
             }
@@ -706,17 +718,32 @@ impl Element for EditorElement {
                     }
                     let runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
                     // The row's type hints, at their bytes in its text.
-                    let hints: Vec<(usize, String)> = if show_hints {
+                    let mut hints: Vec<(usize, String, Option<Hsla>)> = if show_hints {
                         editor
                             .hints_on_line(row.line)
                             .filter(|(col, _)| {
                                 (row.cols.start..row.cols.end).contains(col) || (row.last && *col == row.cols.end)
                             })
-                            .map(|(col, label)| (byte_of_column(&text, col - row.cols.start), label.to_string()))
+                            .map(|(col, label)| (byte_of_column(&text, col - row.cols.start), label.to_string(), None))
                             .collect()
                     } else {
                         Vec::new()
                     };
+                    // Colors written in the code: a square of each, just before it.
+                    if shows_colors {
+                        let swatches = crate::colors::colors_in(&text);
+                        hints.extend(swatches.into_iter().map(|(byte, color)| {
+                            // One that would hardly show on the background: an outline instead.
+                            if crate::colors::blends_into(color, theme.background) {
+                                (byte, OUTLINE_SWATCH.to_string(), Some(theme.muted))
+                            } else {
+                                (byte, SWATCH.to_string(), Some(color))
+                            }
+                        }));
+                        hints.sort_by_key(|(byte, _, swatch)| (*byte, swatch.is_none()));
+                    }
+                    let (hints, swatches): (Vec<(usize, String)>, Vec<Option<Hsla>>) =
+                        hints.into_iter().map(|(byte, text, swatch)| ((byte, text), swatch)).unzip();
                     // A folded line ends in "⋯", standing in for the lines it hides; the
                     // caret's line can end in who last changed it, faintly.
                     let blame = (row.last && show_blame && !editor.is_folded(row.line))
@@ -750,7 +777,7 @@ impl Element for EditorElement {
                     } else {
                         (None, String::new())
                     };
-                    let (shaped, gaps) = shape_hinted(&text, &runs, &hints, suffix, &suffix_text);
+                    let (shaped, gaps) = shape_hinted(&text, &runs, &hints, &swatches, suffix, &suffix_text);
                     RowLayout { x: char_width * row.indent as f32, row, text, shaped, gaps }
                 })
                 .collect();
@@ -1537,7 +1564,7 @@ mod tests {
         let runs = [run(text.len(), &font, gpui::white())];
         // `x: i32` and `f(n: 1)`: hints at bytes 5 and 10.
         let hints = [(5, ": i32".to_string()), (10, "n: ".to_string())];
-        let (shown, runs, placed) = insert_hints(text, &runs, &hints, |len| run(len, &font, gpui::black()));
+        let (shown, runs, placed) = insert_hints(text, &runs, &hints, |_, len| run(len, &font, gpui::black()));
         assert_eq!(shown, "let x: i32 = f(n: 1);");
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), shown.len());
         let row = RowLayout {
