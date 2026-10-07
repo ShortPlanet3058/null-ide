@@ -22,6 +22,13 @@ pub struct Hunk {
     pub old_lines: Vec<String>,
 }
 
+/// What [`Editor::word_changes`] finds: char columns on each side.
+#[derive(Default)]
+pub struct WordChanges {
+    pub added: std::collections::HashMap<usize, Vec<Range<usize>>>,
+    pub removed: std::collections::HashMap<(usize, usize), Vec<Range<usize>>>,
+}
+
 pub(super) struct Review {
     /// The text as it was before the task, with the changes kept so far applied.
     base: String,
@@ -54,6 +61,72 @@ pub fn hunks(before: &str, after: &str) -> Vec<Hunk> {
             Some(Hunk { old: old_range, new: new_range, old_lines })
         })
         .collect()
+}
+
+/// A line in pieces to compare: words (letters, digits, `_`), runs of spaces, and each
+/// other character alone (so `count;` and `quantity;` differ by the word, not the `;`).
+fn tokens(line: &str) -> Vec<&str> {
+    let kind = |c: char| {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    let mut found = Vec::new();
+    let mut start = 0;
+    let mut last: Option<u8> = None;
+    for (i, c) in line.char_indices() {
+        let k = kind(c);
+        if last.is_some_and(|l| l != k || k == 2) {
+            found.push(&line[start..i]);
+            start = i;
+        }
+        last = Some(k);
+    }
+    if start < line.len() {
+        found.push(&line[start..]);
+    }
+    found
+}
+
+/// The words that changed between a line before and after (char columns, on each side),
+/// to stand out in a changed line. Nothing for a line rewritten past recognition (most of
+/// it changed): its tint says so already.
+pub fn changed_words(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    let (old_tokens, new_tokens) = (tokens(old), tokens(new));
+    let diff = similar::TextDiff::from_slices(&old_tokens, &new_tokens);
+    let (mut old_at, mut new_at) = (0, 0);
+    let (mut removed, mut added): (Vec<Range<usize>>, Vec<Range<usize>>) = (Vec::new(), Vec::new());
+    let push = |ranges: &mut Vec<Range<usize>>, range: Range<usize>| match ranges.last_mut() {
+        Some(last) if last.end == range.start => last.end = range.end,
+        _ => ranges.push(range),
+    };
+    for change in diff.iter_all_changes() {
+        let len = change.value().chars().count();
+        match change.tag() {
+            similar::ChangeTag::Equal => {
+                old_at += len;
+                new_at += len;
+            }
+            similar::ChangeTag::Delete => {
+                push(&mut removed, old_at..old_at + len);
+                old_at += len;
+            }
+            similar::ChangeTag::Insert => {
+                push(&mut added, new_at..new_at + len);
+                new_at += len;
+            }
+        }
+    }
+    let changed = |ranges: &[Range<usize>]| ranges.iter().map(|r| r.len()).sum::<usize>();
+    let mostly = |ranges: &[Range<usize>], total: usize| total > 0 && changed(ranges) * 10 > total * 6;
+    if mostly(&removed, old.chars().count()) || mostly(&added, new.chars().count()) {
+        return (Vec::new(), Vec::new());
+    }
+    (removed, added)
 }
 
 /// Byte range of lines `lines` in `text`, line breaks included.
@@ -124,6 +197,33 @@ impl Editor {
             .iter()
             .position(|h| line < h.new.end.max(h.new.start + 1))
             .or_else(|| review.hunks.len().checked_sub(1))
+    }
+
+    /// In the changes shown (a review, ⌘I's), the words that changed in each changed line,
+    /// on lines `lines`: by buffer line for the new text, by (block, row) for the old. Only
+    /// where a change replaced lines one for one.
+    pub fn word_changes(&self, lines: Range<usize>) -> WordChanges {
+        let mut changes = WordChanges::default();
+        let added = self.ai_added_lines();
+        for (b, block) in self.blocks.iter().enumerate() {
+            let super::BlockKind::Removed(old) = &block.kind else { continue };
+            let start = block.before_line;
+            let one_for_one = added.iter().any(|r| r.start == start && r.len() == old.len());
+            if !one_for_one || start + old.len() < lines.start || start > lines.end {
+                continue;
+            }
+            for (i, old_line) in old.iter().enumerate() {
+                let new_line = self.buffer.line_text(start + i);
+                let (removed, added) = changed_words(old_line, new_line.trim_end_matches(['\n', '\r']));
+                if !removed.is_empty() {
+                    changes.removed.insert((b, i), removed);
+                }
+                if !added.is_empty() {
+                    changes.added.insert(start + i, added);
+                }
+            }
+        }
+        changes
     }
 
     /// The lines changes added, tinted like ⌘I's.
@@ -197,6 +297,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_words_that_changed() {
+        let (old, new) = changed_words("let total = price * count;", "let total = price * quantity;");
+        let ends = |v: &[Range<usize>]| v.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>();
+        assert_eq!((ends(&old), ends(&new)), (vec![(20, 25)], vec![(20, 28)]));
+        // Rewritten: nothing singled out.
+        assert_eq!(changed_words("fn a() {}", "struct Point { x: f32 }"), (vec![], vec![]));
+        // Accented letters count as one column.
+        let (_, new) = changed_words("café noir", "café crème");
+        assert_eq!(ends(&new), [(5, 10)]);
+    }
+
+    #[test]
     fn changes_are_found_by_lines() {
         let found = hunks("a\nb\nc\nd\n", "a\nB\nc\nd\ne\n");
         assert_eq!(
@@ -218,6 +330,26 @@ mod editor_tests {
     use crate::buffer::Buffer;
     use gpui::TestAppContext;
     use std::path::PathBuf;
+
+    /// A line changed by one word: that word, on both sides; a line added outright, none.
+    #[gpui::test]
+    fn a_changed_line_shows_its_changed_word(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let now = "let total = price * quantity;\nprint(total)\nnew line\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(now), Some(PathBuf::from("x.py")), cx));
+        e.update(cx, |e, cx| e.start_review("let total = price * count;\nprint(total)\n".into(), cx));
+        e.read_with(cx, |e, _| {
+            let words = e.word_changes(0..10);
+            let ends = |v: &[Range<usize>]| v.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>();
+            assert_eq!(words.added.get(&0).map(|v| ends(v)), Some(vec![(20, 28)]));
+            assert_eq!(words.removed.values().map(|v| ends(v)).collect::<Vec<_>>(), [vec![(20, 25)]]);
+            assert!(!words.added.contains_key(&2), "an added line has no counterpart");
+        });
+    }
 
     #[gpui::test]
     fn changes_are_kept_or_undone_one_by_one(cx: &mut TestAppContext) {
