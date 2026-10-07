@@ -1962,6 +1962,121 @@ pub fn continuation(before_caret: &str) -> Option<(String, bool)> {
     Some((format!("{indent}{quotes}{next}"), rest.trim().is_empty()))
 }
 
+/// An ordered item's number: its indentation (in columns), the number, its `.` or `)`, and
+/// where the digits are in the line (bytes).
+fn numbered_item(line: &str) -> Option<(usize, u64, char, std::ops::Range<usize>)> {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let rest = &line[indent..];
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    let delimiter = rest[digits..].chars().next()?;
+    let after = rest[digits + 1..].chars().next();
+    ((1..=9).contains(&digits) && matches!(delimiter, '.' | ')') && after.is_none_or(|c| c == ' ' || c == '\t'))
+        .then(|| rest[..digits].parse().ok())
+        .flatten()
+        .map(|n| (indent, n, delimiter, indent..indent + digits))
+}
+
+/// A list's numbered items: each one's line and number.
+type Items = Vec<(usize, u64)>;
+
+/// The numbered list around line `at` brought back in order, each list (and sublist)
+/// counting on from its first item: the lines to change, and their new text. A list
+/// numbered all the same (`1.` `1.` `1.`, on purpose) is left as it is.
+pub fn renumbered(lines: &[String], at: usize) -> Vec<(usize, String)> {
+    let is_item =
+        |l: &str| numbered_item(l).is_some() || continuation(l).is_some_and(|(next, _)| !next.trim().starts_with('>'));
+    let inside = |i: usize| {
+        let l = &lines[i];
+        is_item(l) || l.starts_with([' ', '\t']) && !l.trim().is_empty()
+    };
+    // A blank line stays in the list when the list goes on after it.
+    let within = |i: usize| inside(i) || (lines[i].trim().is_empty() && i + 1 < lines.len() && inside(i + 1));
+    if at >= lines.len() || !within(at) {
+        return Vec::new();
+    }
+    let (mut first, mut last) = (at, at);
+    while first > 0 && within(first - 1) {
+        first -= 1;
+    }
+    while last + 1 < lines.len() && within(last + 1) {
+        last += 1;
+    }
+    // Lists open at each depth: their indentation, delimiter and items.
+    let mut open: Vec<(usize, char, Items)> = Vec::new();
+    let mut lists: Vec<Items> = Vec::new();
+    for (i, line) in lines.iter().enumerate().take(last + 1).skip(first) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let numbered = numbered_item(line);
+        // Lists deeper than this line, or (for an item) at its depth but of another kind, end.
+        while let Some((depth, delimiter, _)) = open.last() {
+            let ends =
+                *depth > indent || (*depth == indent && numbered.as_ref().is_none_or(|(_, _, d, _)| d != delimiter));
+            if !ends {
+                break;
+            }
+            lists.push(open.pop().expect("one is open").2);
+        }
+        if let Some((_, number, delimiter, _)) = numbered {
+            match open.last_mut() {
+                Some((depth, _, items)) if *depth == indent => items.push((i, number)),
+                _ => open.push((indent, delimiter, vec![(i, number)])),
+            }
+        }
+    }
+    lists.extend(open.into_iter().map(|(_, _, items)| items));
+    let mut changes = Vec::new();
+    for items in lists {
+        let start = items[0].1;
+        if items.len() < 2 || items.iter().all(|(_, n)| *n == start) {
+            continue;
+        }
+        for (k, &(line, number)) in items.iter().enumerate() {
+            let wanted = start + k as u64;
+            if number != wanted {
+                let (_, _, _, digits) = numbered_item(&lines[line]).expect("an item");
+                let text = &lines[line];
+                changes.push((line, format!("{}{wanted}{}", &text[..digits.start], &text[digits.end..])));
+            }
+        }
+    }
+    changes.sort();
+    changes
+}
+
+#[cfg(test)]
+mod renumber_tests {
+    use super::renumbered;
+
+    fn lines(text: &str) -> Vec<String> {
+        text.lines().map(String::from).collect()
+    }
+
+    #[test]
+    fn numbered_lists_count_on() {
+        // An item added after the first: the rest count on.
+        let list = lines("Intro\n\n1. one\n2. new\n2. two\n3. three\n\nAfter");
+        assert_eq!(renumbered(&list, 3), [(4, "3. two".to_string()), (5, "4. three".to_string())]);
+        // Sublists count on their own; a bullet list in between isn't touched.
+        let nested = lines("1. a\n   1. x\n   1. y\n   3. z\n2. b\n   - p\n   - q\n5. c");
+        assert_eq!(
+            renumbered(&nested, 0),
+            [(2, "   2. y".to_string()), (7, "3. c".to_string())],
+            "`1.` `1.` `3.`: not all the same, so counted"
+        );
+        // Starting at 3 stays at 3; ")" lists too; a loose list across blank lines.
+        assert_eq!(renumbered(&lines("3) a\n\n9) b"), 0), [(2, "4) b".to_string())]);
+        // All the same on purpose: left alone. Not in a list: nothing.
+        assert!(renumbered(&lines("1. a\n1. b\n1. c"), 1).is_empty());
+        assert!(renumbered(&lines("Just text\n2. alone"), 0).is_empty());
+        // A paragraph ends the list: the next one counts by itself.
+        assert!(renumbered(&lines("1. a\n2. b\nText\n1. c"), 0).is_empty());
+        assert!(renumbered(&lines("2025. A year\nGood"), 0).is_empty(), "a year, alone: nothing to count");
+    }
+}
+
 #[cfg(test)]
 mod continuation_tests {
     use super::continuation;

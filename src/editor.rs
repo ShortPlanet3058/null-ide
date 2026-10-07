@@ -1901,7 +1901,41 @@ impl Editor {
         }
         let nl = self.style.line_ending.text();
         self.edit(range, &format!("{nl}{next}"), EditKind::Other, cx);
+        // A numbered item added in the middle: the ones after it count on.
+        self.renumber_list(line + 1, cx);
         true
+    }
+
+    /// Numbered Markdown lists around `line` brought back in order (see
+    /// `markdown_view::renumbered`), as part of the edit just made: one undo takes back both.
+    pub(super) fn renumber_list(&mut self, line: usize, cx: &mut Context<Self>) {
+        if !self.is_markdown() || self.in_fence(line) {
+            return;
+        }
+        // The lines near it: a list isn't thousands of lines long.
+        let window = line.saturating_sub(2000)..(line + 2000).min(self.buffer.len_lines());
+        let lines: Vec<String> = window.clone().map(|l| self.buffer.line_text(l)).collect();
+        let changes = crate::markdown_view::renumbered(&lines, line - window.start);
+        if changes.is_empty() {
+            return;
+        }
+        let (caret_line, caret_col) = self.caret_point();
+        let mut caret_col = caret_col as isize;
+        for (i, text) in changes.iter().rev() {
+            let l = window.start + i;
+            let old_len = self.buffer.line_len(l);
+            let start = self.buffer.line_to_char(l);
+            self.buffer.replace(start..start + old_len, text);
+            let grew = text.chars().count() as isize - old_len as isize;
+            // The caret after the number moves with the line's text.
+            if l == caret_line && caret_col > 0 {
+                caret_col = (caret_col + grew).max(0);
+            }
+        }
+        self.selection = Selection::caret(self.buffer.offset(caret_line, caret_col as usize));
+        self.text_changed(cx);
+        cx.emit(EditorEvent::Edited);
+        cx.notify();
     }
 
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
