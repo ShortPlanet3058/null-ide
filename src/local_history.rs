@@ -103,9 +103,11 @@ fn saved(file: PathBuf) -> Option<Saved> {
     let name = file.file_name()?.to_str()?.to_string();
     let (kept, time) = match name.split_once('-') {
         Some((kept, time)) => (kept.parse().ok()?, time.parse().ok()?),
+        // Named before versions said when they were kept: kept when the copy was written.
         None => {
             let time = name.parse().ok()?;
-            (time, time)
+            let kept = std::fs::metadata(&file).and_then(|m| m.modified()).map(millis).unwrap_or(time);
+            (kept, time)
         }
     };
     Some(Saved { time, kept, file })

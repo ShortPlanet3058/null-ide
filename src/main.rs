@@ -250,6 +250,10 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::
     });
     if let Err(error) = opened {
         eprintln!("null: couldn't open a window: {error}");
+        // Nothing open, nothing would ever close: don't stay running out of sight.
+        if cx.windows().is_empty() {
+            cx.quit();
+        }
     }
 }
 

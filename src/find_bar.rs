@@ -716,6 +716,15 @@ mod tests {
         e.read_with(cx, |e, _| {
             assert_eq!(e.buffer.to_string(), "x = 1\ncount = count + 1\nprint(count)\nx\n");
         });
+        // Undone, in the text: the same lines again, not more (the scope comes back too).
+        e.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
+        cx.simulate_keystrokes("cmd-z");
+        e.read_with(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), text);
+            assert!(e.find_in_selection());
+            assert_eq!(e.search.as_ref().unwrap().matches.len(), 3, "line 4's x stays outside");
+        });
+        cx.simulate_keystrokes("cmd-shift-z");
         // The whole file again: the two x left outside.
         e.update(cx, |e, cx| e.find_in_whole_file(cx));
         e.read_with(cx, |e, _| assert_eq!(e.search.as_ref().unwrap().matches.len(), 2));

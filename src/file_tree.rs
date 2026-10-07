@@ -201,11 +201,27 @@ pub fn opens_in_browser(path: &Path) -> bool {
     matches!(ext.as_str(), "html" | "htm" | "xhtml" | "svg")
 }
 
-/// Opens the file in the default browser.
+/// Opens the file in the default browser: the app web addresses open in, not the one for
+/// the file's kind (an SVG's is Preview; an HTML file's can be an editor, Null itself).
 pub fn open_in_browser(path: &Path, cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    if let Some(browser) = default_browser() {
+        std::process::Command::new("open").arg("-a").arg(browser).arg(path).spawn().ok();
+        return;
+    }
     if let Ok(url) = url::Url::from_file_path(path) {
         cx.open_url(url.as_str());
     }
+}
+
+/// The app that opens web addresses.
+#[cfg(target_os = "macos")]
+fn default_browser() -> Option<std::path::PathBuf> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+    let web = NSURL::URLWithString(&NSString::from_str("https://example.com"))?;
+    let app = NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&web)?;
+    Some(std::path::PathBuf::from(app.path()?.to_string()))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1312,6 +1328,16 @@ impl Render for FileTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which app is the browser, asked of macOS (run by hand: nothing is opened).
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "macos")]
+    fn finds_the_default_browser() {
+        let browser = default_browser().expect("a browser");
+        println!("browser: {}", browser.display());
+        assert!(browser.extension().is_some_and(|e| e == "app"));
+    }
 
     #[test]
     fn pages_and_pictures_open_in_the_browser() {
