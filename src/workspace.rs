@@ -5446,7 +5446,9 @@ impl Workspace {
                     } else {
                         "Hold Alt over code for info · Ctrl+click to jump"
                     };
-                    return Some(div().text_color(theme.muted).whitespace_nowrap().child(tip).into_any_element());
+                    return Some(
+                        div().text_color(theme.muted).whitespace_nowrap().child(spaced(tip)).into_any_element(),
+                    );
                 }
                 // On a problem: say how to fix it.
                 if self.active_editor().is_some_and(|e| e.read(cx).caret_on_problem(cx)) {
@@ -5901,6 +5903,12 @@ fn organize_action(actions: Vec<lsp_types::CodeActionOrCommand>) -> Option<lsp_t
     Some(actions.swap_remove(at))
 }
 
+/// A status bar text with room around its `·`: the interface font's spaces are narrow, and
+/// "Col 1 · 3 words" read as "Col 1·3 words". En spaces instead.
+fn spaced(text: &str) -> String {
+    text.replace(" · ", "\u{2002}·\u{2002}")
+}
+
 /// How much of the changes AI reads to write a commit message, in characters.
 const COMMIT_DIFF_CHARS: usize = 24_000;
 
@@ -6292,7 +6300,7 @@ impl Render for Workspace {
             .opacity(opacity)
             .child(div().w(px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
 
-        let mut items = status_items.into_iter();
+        let mut items = status_items.into_iter().map(|item| spaced(&item));
         let status = div()
             .h(px(28.))
             .flex_none()
@@ -8259,6 +8267,7 @@ mod tests {
             .add_window_view(|_, cx| Editor::new(crate::buffer::Buffer::from_text(&long), Some("essay.md".into()), cx));
         let text = essay.update(cx, |e, _| position_label(e, 0, 0));
         assert_eq!(text, "Ln 1, Col 1 · 700 words · 3 min read");
+        assert_eq!(spaced(&text), "Ln 1, Col 1\u{2002}·\u{2002}700 words\u{2002}·\u{2002}3 min read");
         assert_eq!(thousands(1234567), "1,234,567");
         assert_eq!(thousands(999), "999");
     }
