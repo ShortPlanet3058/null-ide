@@ -352,6 +352,51 @@ mod tests {
         });
     }
 
+    /// A whole frame (layout, colouring, hints, marks, painting) after each keystroke in
+    /// the middle of a big Rust file, as the window draws it.
+    /// `cargo test timing_whole_frame -- --ignored --nocapture` (and with `--release`).
+    #[gpui::test]
+    #[ignore]
+    fn timing_whole_frame(cx: &mut gpui::TestAppContext) {
+        use crate::fonts::Fonts;
+        use crate::settings::Settings;
+        use crate::theme::Theme;
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let source = std::fs::read_to_string("src/workspace.rs").unwrap();
+        let (editor, cx) = cx
+            .add_window_view(|_, cx| Editor::new(crate::buffer::Buffer::from_text(&source), Some("big.rs".into()), cx));
+        editor.update(cx, |e, cx| {
+            let middle = e.buffer.len_lines() / 2;
+            e.go_to_line(middle, cx);
+        });
+        cx.run_until_parked();
+        let mut frames = Vec::new();
+        for i in 0..40 {
+            let start = Instant::now();
+            editor.update(cx, |e, cx| {
+                let at = e.selection.head;
+                if i % 2 == 0 {
+                    e.edit(at..at, "x", super::super::EditKind::Typing, cx);
+                } else {
+                    e.edit(at - 1..at, "", super::super::EditKind::Typing, cx);
+                }
+            });
+            cx.run_until_parked();
+            frames.push(start.elapsed());
+        }
+        frames.sort();
+        println!(
+            "whole frame after a keystroke, {} lines: median {:?}, slowest {:?}",
+            source.lines().count(),
+            frames[frames.len() / 2],
+            frames[frames.len() - 1]
+        );
+    }
+
     #[test]
     fn nearest_names_first() {
         let names = vec!["setup.md".to_string(), "install.md".to_string(), "README.md".to_string()];
