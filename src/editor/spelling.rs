@@ -48,7 +48,7 @@ pub(super) fn fenced_lines_for_timing(rope: &ropey::Rope) -> Vec<bool> {
 }
 
 /// What colours the byte at `at`, if anything does.
-fn syntax_at(spans: &[crate::highlight::Span], at: usize) -> Option<Syntax> {
+pub(super) fn syntax_at(spans: &[crate::highlight::Span], at: usize) -> Option<Syntax> {
     let i = spans.partition_point(|(r, _)| r.end <= at);
     spans.get(i).filter(|(r, _)| r.start <= at).map(|(_, s)| *s)
 }

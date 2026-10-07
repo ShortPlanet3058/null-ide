@@ -1850,7 +1850,9 @@ impl Editor {
             let mut range = this.selection.range();
             let (line, col) = this.buffer.point(range.start);
             let line_text = this.buffer.line_text(line);
-            if this.continue_markdown(range.clone(), line, col, &line_text, cx) {
+            if this.continue_markdown(range.clone(), line, col, &line_text, cx)
+                || this.continue_comment(range.clone(), line, col, &line_text, cx)
+            {
                 return;
             }
             // The indentation up to the caret only: Enter inside it doesn't double it.

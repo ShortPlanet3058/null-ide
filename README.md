@@ -94,6 +94,8 @@ doesn't need Xcode's separate Metal Toolchain download.
   and `HACK` stand out in comments; **Find TODOs** lists them all.
 - Pasted code takes the indentation of where it goes, its lines keeping theirs relative
   to each other; ⌥⇧⌘V pastes it as it was.
+- Enter in a doc comment (`///`, `//!`, ` * ` in `/** */`) starts the next line with it; in a
+  plain comment, only when it splits the comment in two.
 - **Rewrap** (⌘K) refills a comment or a paragraph to the project's line length, keeping
   its `//`, `>` or list indent. The ⌃ keys of macOS text fields work too: ⌃A ⌃E, ⌃K and
   ⌃Y, ⌃T, ⌃O, ⌃L to center the caret's line, and ⌘J to bring the selection back into view.
