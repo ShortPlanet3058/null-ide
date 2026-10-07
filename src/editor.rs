@@ -3571,6 +3571,29 @@ impl Editor {
         cx.global::<Settings>().ligatures && !self.is_prose()
     }
 
+    /// The lines of the paragraph the caret is in, when the others fade (Settings, prose
+    /// only): up to the blank lines around it.
+    pub fn focused_paragraph(&self, cx: &App) -> Option<Range<usize>> {
+        const FURTHEST: usize = 500;
+        if !cx.global::<Settings>().dim_paragraphs || !self.is_prose() {
+            return None;
+        }
+        let blank = |line: usize| self.buffer.line_text(line).trim().is_empty();
+        let caret = self.caret_point().0;
+        if blank(caret) {
+            return Some(caret..caret + 1);
+        }
+        let mut start = caret;
+        while start > 0 && caret - start < FURTHEST && !blank(start - 1) {
+            start -= 1;
+        }
+        let mut end = caret + 1;
+        while end < self.buffer.len_lines() && end - caret < FURTHEST && !blank(end) {
+            end += 1;
+        }
+        Some(start..end)
+    }
+
     /// Whether the gutter shows line numbers here, as Settings say.
     pub fn shows_line_numbers(&self, cx: &App) -> bool {
         match cx.global::<Settings>().line_numbers {
@@ -4268,6 +4291,27 @@ mod tests {
         });
         cx.simulate_keystrokes("alt-shift-cmd-v");
         editor.read_with(cx, |e, _| assert!(e.buffer.to_string().ends_with("| Tea  | 2   |\nItem\tQty\nTea\t2\n")));
+    }
+
+    /// Dimming the other paragraphs: the caret's paragraph is up to the blank lines around
+    /// it; only in prose, only when asked.
+    #[gpui::test]
+    fn the_paragraph_being_written(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings { dim_paragraphs: true, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let text = "one\ntwo\n\nthree\nfour\n\nfive\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some("notes.md".into()), cx));
+        e.update(cx, |e, cx| {
+            e.set_caret_point((4, 1), cx);
+            assert_eq!(e.focused_paragraph(cx), Some(3..5));
+            e.set_caret_point((2, 0), cx);
+            assert_eq!(e.focused_paragraph(cx), Some(2..3), "a blank line alone");
+        });
+        let (code, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some("a.rs".into()), cx));
+        code.read_with(cx, |e, cx| assert_eq!(e.focused_paragraph(cx), None, "not in code"));
     }
 
     /// Typewriter scrolling: after moving by keyboard, the caret's line sits mid-window.

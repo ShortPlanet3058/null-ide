@@ -317,6 +317,8 @@ pub struct Prepaint {
     git_marks: Vec<(Bounds<Pixels>, Hsla)>,
     assist_band: Option<Bounds<Pixels>>,
     ai_tints: Vec<(Bounds<Pixels>, Hsla)>,
+    /// Over the rows outside the paragraph being written, when the others fade.
+    veils: Vec<Bounds<Pixels>>,
     scroll_thumb: Option<(Bounds<Pixels>, f32)>,
     scroll_marks: Vec<(Bounds<Pixels>, Hsla)>,
     bracket_boxes: Vec<Bounds<Pixels>>,
@@ -873,6 +875,18 @@ impl Element for EditorElement {
                     ai_tints.push((rect, tint));
                 }
             }
+            // Writing with the other paragraphs faded: a veil over each row outside this one.
+            let veils: Vec<Bounds<Pixels>> = match editor.focused_paragraph(cx) {
+                Some(paragraph) => row_layouts
+                    .iter()
+                    .zip(visible.clone())
+                    .filter(|(r, _)| !paragraph.contains(&r.row.line))
+                    .map(|(_, row)| {
+                        Bounds::new(point(text_bounds.left(), row_top(row)), size(text_bounds.size.width, line_height))
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
             // In a changed line, the words that changed: a little stronger, on each side.
             let words = editor.word_changes(lines_shown.clone());
             for (r, row) in row_layouts.iter().zip(visible.clone()) {
@@ -1397,6 +1411,7 @@ impl Element for EditorElement {
                 git_marks,
                 assist_band,
                 ai_tints,
+                veils,
                 scroll_thumb: scrollbar.map(|b| (b.thumb, thumb_emphasis)),
                 scroll_marks,
                 bracket_boxes,
@@ -1493,6 +1508,9 @@ impl Element for EditorElement {
             }
             for (line, origin) in &prepaint.lines {
                 line.paint(*origin, line_height, window, cx).ok();
+            }
+            for rect in &prepaint.veils {
+                window.paint_quad(fill(*rect, theme.background.opacity(0.65)));
             }
             for rect in &prepaint.bracket_boxes {
                 window.paint_quad(
