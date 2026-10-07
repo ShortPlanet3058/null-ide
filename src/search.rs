@@ -55,11 +55,25 @@ impl SearchQuery {
         regex.find_iter(text).filter(|m| !m.is_empty()).map(|m| m.range()).collect()
     }
 
+    /// Whether replacing keeps each match's case: a search that ignores case, for plain
+    /// text, with the replacement written all in lower case. Written with capitals, the
+    /// replacement goes in as it is.
+    pub fn keeps_case(&self, replacement: &str) -> bool {
+        !self.case_sensitive
+            && !self.regex
+            && replacement.chars().any(char::is_alphabetic)
+            && !replacement.chars().any(char::is_uppercase)
+    }
+
     /// The text that replaces the match at `range`. In regex mode `$1`, `${name}`
-    /// and `$0` refer to the match's groups; otherwise the replacement is literal.
+    /// and `$0` refer to the match's groups; otherwise the replacement is literal, in the
+    /// match's case when it [keeps case](Self::keeps_case).
     pub fn replacement_for(&self, regex: &Regex, text: &str, range: Range<usize>, replacement: &str) -> String {
         if !self.regex {
-            return replacement.to_string();
+            return match text.get(range) {
+                Some(matched) if self.keeps_case(replacement) => in_case_of(matched, replacement),
+                _ => replacement.to_string(),
+            };
         }
         match regex.captures_at(text, range.start).filter(|c| c.get(0).map(|m| m.range()) == Some(range)) {
             Some(caps) => {
@@ -73,9 +87,48 @@ impl SearchQuery {
     }
 }
 
+/// `replacement` (all lower case) in the case of `matched`: "FOO" makes it all capitals,
+/// "Foo" capitalised, anything else ("foo", "fooBar") as it is.
+pub fn in_case_of(matched: &str, replacement: &str) -> String {
+    let letters: Vec<char> = matched.chars().filter(|c| c.is_alphabetic()).collect();
+    let Some(first) = letters.first() else { return replacement.to_string() };
+    let upper = |c: &char| c.is_uppercase();
+    if letters.len() > 1 && letters.iter().all(upper) {
+        replacement.to_uppercase()
+    } else if first.is_uppercase() && !letters[1..].iter().any(upper) {
+        let mut chars = replacement.chars();
+        chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+    } else {
+        replacement.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_keeps_the_case_of_each_match() {
+        assert_eq!(in_case_of("user", "client"), "client");
+        assert_eq!(in_case_of("User", "client"), "Client");
+        assert_eq!(in_case_of("USER", "client"), "CLIENT");
+        assert_eq!(in_case_of("U", "client"), "Client");
+        assert_eq!(in_case_of("userId", "client"), "client", "mixed case: left as written");
+        assert_eq!(in_case_of("été", "hiver"), "hiver");
+        assert_eq!(in_case_of("Été", "hiver"), "Hiver");
+        assert_eq!(in_case_of("42", "x"), "x");
+        let q = SearchQuery { text: "user".into(), ..Default::default() };
+        assert!(q.keeps_case("client"));
+        assert!(!q.keeps_case("Client"), "written with capitals: as it is");
+        assert!(!q.keeps_case("42"));
+        assert!(!SearchQuery { case_sensitive: true, ..q.clone() }.keeps_case("client"));
+        assert!(!SearchQuery { regex: true, ..q.clone() }.keeps_case("client"));
+        let re = q.build().unwrap();
+        let text = "User user USER";
+        let all: Vec<String> =
+            q.find_all(&re, text).into_iter().map(|r| q.replacement_for(&re, text, r, "client")).collect();
+        assert_eq!(all, ["Client", "client", "CLIENT"]);
+    }
 
     /// Matches in a scope count from it: thousands before it don't use up the limit.
     #[test]

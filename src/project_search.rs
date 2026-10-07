@@ -424,6 +424,7 @@ impl ProjectSearch {
                         &line_match.highlights,
                         &replacement,
                         self.compiled.as_ref().filter(|_| self.query.regex),
+                        self.query.keeps_case(&replacement),
                     );
                     let old = HighlightStyle {
                         color: Some(theme.faint),
@@ -635,14 +636,16 @@ fn file_filter(root: &Path, written: &str) -> Option<ignore::overrides::Override
     any.then(|| only.build().ok()).flatten()
 }
 
-/// A match's replacement: `$1`-style groups filled in for a regex search.
-pub fn expand(regex: Option<&regex::Regex>, matched: &str, replacement: &str) -> String {
+/// A match's replacement: `$1`-style groups filled in for a regex search, in the match's
+/// case when `keep_case` (see `SearchQuery::keeps_case`).
+pub fn expand(regex: Option<&regex::Regex>, matched: &str, replacement: &str, keep_case: bool) -> String {
     match regex.and_then(|r| r.captures(matched)) {
         Some(caps) => {
             let mut out = String::new();
             caps.expand(replacement, &mut out);
             out
         }
+        None if keep_case => crate::search::in_case_of(matched, replacement),
         None => replacement.to_string(),
     }
 }
@@ -675,6 +678,8 @@ pub fn replacements(
                 let mut out = String::new();
                 caps.expand(replacement, &mut out);
                 out
+            } else if query.keeps_case(replacement) {
+                crate::search::in_case_of(m.as_str(), replacement)
             } else {
                 replacement.to_string()
             };
@@ -690,6 +695,7 @@ fn replace_preview(
     matches: &[Range<usize>],
     replacement: &str,
     regex: Option<&regex::Regex>,
+    keep_case: bool,
 ) -> (SharedString, Vec<(Range<usize>, bool)>) {
     let mut shown = String::new();
     let mut marks = Vec::new();
@@ -699,7 +705,7 @@ fn replace_preview(
         let old = &preview[m.clone()];
         marks.push((shown.len()..shown.len() + old.len(), false));
         shown.push_str(old);
-        let new = expand(regex, old, replacement);
+        let new = expand(regex, old, replacement, keep_case);
         if !new.is_empty() {
             marks.push((shown.len()..shown.len() + new.len(), true));
             shown.push_str(&new);
@@ -916,6 +922,15 @@ mod tests {
         let plain = SearchQuery { text: "old".into(), ..Default::default() };
         assert_eq!(replacements(text, &plain, "new", None).len(), 2);
         assert_eq!(replacements(text, &plain, "new", Some(1)), vec![(24..27, "new".into())]);
+        // In every file too, a lower-case replacement takes each match's case.
+        let names: Vec<String> =
+            replacements("User user USER", &SearchQuery { text: "user".into(), ..Default::default() }, "client", None)
+                .into_iter()
+                .map(|(_, new)| new)
+                .collect();
+        assert_eq!(names, ["Client", "client", "CLIENT"]);
+        let (shown, _) = replace_preview("User", &[0..4], "client", None, true);
+        assert_eq!(shown.as_ref(), "UserClient");
         let regex = SearchQuery { text: r"old\((\d)\)".into(), regex: true, ..Default::default() };
         let found = replacements(text, &regex, "new($1, 0)", None);
         assert_eq!(found[1].1, "new(2, 0)");
@@ -955,7 +970,7 @@ mod tests {
 
     #[test]
     fn the_preview_shows_old_and_new_side_by_side() {
-        let (shown, marks) = replace_preview("a(old)", &[2..5], "new", None);
+        let (shown, marks) = replace_preview("a(old)", &[2..5], "new", None, false);
         assert_eq!(shown.as_ref(), "a(oldnew)");
         assert_eq!(marks, vec![(2..5, false), (5..8, true)]);
     }
