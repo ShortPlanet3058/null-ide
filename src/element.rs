@@ -1180,10 +1180,13 @@ impl Element for EditorElement {
                     size(px(2.), caret_height),
                 )
             };
+            // Other cursors, and where dragged text would land.
             let extra_carets: Vec<Bounds<Pixels>> = editor
                 .extra
                 .iter()
-                .map(|c| editor.buffer.point(c.selection.head))
+                .map(|c| c.selection.head)
+                .chain(editor.drop_at)
+                .map(|head| editor.buffer.point(head))
                 .map(|(line, col)| pos(line, col))
                 .filter(|(row, _)| visible.contains(row))
                 .map(|(row, x)| caret_rect(row, x))

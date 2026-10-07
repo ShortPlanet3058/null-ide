@@ -306,6 +306,52 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The same for code: a big Rust file's colouring (TODO notes split out) and comment
+    /// spelling for the lines in view, right after a keystroke.
+    /// `cargo test timing_code -- --ignored --nocapture`
+    #[gpui::test]
+    #[ignore]
+    fn timing_code_frame(cx: &mut gpui::TestAppContext) {
+        use crate::fonts::Fonts;
+        use crate::settings::Settings;
+        use crate::theme::Theme;
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let source = std::fs::read_to_string("src/workspace.rs").unwrap();
+        let (editor, cx) = cx
+            .add_window_view(|_, cx| Editor::new(crate::buffer::Buffer::from_text(&source), Some("big.rs".into()), cx));
+        editor.update(cx, |e, cx| {
+            let middle = e.buffer.len_lines() / 2;
+            let frame = |e: &mut Editor, cx: &App| {
+                let bytes = e.buffer.line_to_byte(middle)..e.buffer.line_to_byte(middle + 60);
+                e.highlight_bytes(bytes);
+                for line in middle..middle + 60 {
+                    let text = e.buffer.line_text(line);
+                    e.misspellings_on_line(line, &text, cx);
+                }
+            };
+            frame(e, cx);
+            let at = e.buffer.line_to_char(middle);
+            let start = Instant::now();
+            for i in 0..10 {
+                if i % 2 == 0 {
+                    e.edit(at..at, "x", super::super::EditKind::Typing, cx);
+                } else {
+                    e.edit(at..at + 1, "", super::super::EditKind::Typing, cx);
+                }
+                frame(e, cx);
+            }
+            println!(
+                "code: a frame after a keystroke, 60 lines of {}: {:?}",
+                e.buffer.len_lines(),
+                start.elapsed() / 10
+            );
+        });
+    }
+
     #[test]
     fn nearest_names_first() {
         let names = vec!["setup.md".to_string(), "install.md".to_string(), "README.md".to_string()];
