@@ -2364,7 +2364,27 @@ impl Editor {
             .text_size(px(ui::T_MD))
             .line_height(px(19.))
             .children(diagnostics)
-            .children(blocks);
+            .children(blocks)
+            .children(card.image.clone().map(|path| {
+                // The image, at most this big, then its name and size, faintly.
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let about = crate::preview::of(&path, &Err(std::io::ErrorKind::InvalidData))
+                    .filter(|p| matches!(p, crate::preview::Preview::Image { .. }))
+                    .map(|p| format!("{name} · {}", p.summary()))
+                    .unwrap_or(name.clone());
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        gpui::img(path)
+                            .max_w(px(320.))
+                            .max_h(px(220.))
+                            .object_fit(gpui::ObjectFit::ScaleDown)
+                            .with_fallback(move || div().child(format!("Couldn't show {name}")).into_any_element()),
+                    )
+                    .child(div().text_size(px(ui::T_SM)).text_color(theme.faint).child(about))
+            }));
         Some(
             deferred(
                 anchored()

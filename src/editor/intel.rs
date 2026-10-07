@@ -24,6 +24,8 @@ pub struct HoverCard {
     pub range: Range<usize>,
     pub diagnostics: Vec<(DiagnosticSeverity, String)>,
     pub blocks: Vec<HoverBlock>,
+    /// An image whose path is written here (`![](shot.png)`, `src="logo.svg"`), shown.
+    pub image: Option<std::path::PathBuf>,
 }
 
 pub struct HoverBlock {
@@ -280,6 +282,7 @@ impl Editor {
             range: word.clone(),
             diagnostics: Vec::new(),
             blocks: vec![HoverBlock { code: false, text: message }],
+            image: None,
         });
         self.hover_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(3)).await;
@@ -402,6 +405,9 @@ impl Editor {
     }
 
     fn request_hover(&mut self, offset: usize, delay: Duration, cx: &mut Context<Self>) {
+        if self.request_image_hover(offset, delay, cx) {
+            return;
+        }
         let word = self.word_at(offset);
         if self.hover_word.as_ref() == Some(&word) {
             return;
@@ -453,12 +459,37 @@ impl Editor {
                     }
                     return;
                 }
-                this.hover = Some(HoverCard { range: word, diagnostics, blocks });
+                this.hover = Some(HoverCard { range: word, diagnostics, blocks, image: None });
                 this.hover_close_task = None;
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Over the path of an image that exists: the card shows the image. True when it is one.
+    fn request_image_hover(&mut self, offset: usize, delay: Duration, cx: &mut Context<Self>) -> bool {
+        let Some((range, super::links::Target::File { path, .. })) = self.link_under(offset) else { return false };
+        if !crate::preview::is_image(&path) {
+            return false;
+        }
+        if self.hover_word.as_ref() == Some(&range) {
+            return true;
+        }
+        self.hover_word = Some(range.clone());
+        self.hover_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| {
+                if this.hover_word.as_ref() != Some(&range) {
+                    return;
+                }
+                this.hover = Some(HoverCard { range, diagnostics: Vec::new(), blocks: Vec::new(), image: Some(path) });
+                this.hover_close_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        true
     }
 
     /// The char under the mouse, if the mouse is over text (not blank space).
@@ -686,6 +717,46 @@ mod tests {
             let card = e.hover.as_ref().expect("a card");
             assert_eq!(card.blocks[0].text, "word = \"null\"");
         });
+    }
+
+    /// ⌥ over an image's path (Markdown, HTML, an import) shows the image; over a word that
+    /// isn't one, the usual card.
+    #[gpui::test]
+    fn an_image_s_path_shows_the_image(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = std::env::temp_dir().join(format!("null-image-hover-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("img")).unwrap();
+        for f in ["shot.png", "img/logo.svg", "img/hero.jpg"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let text = "See ![a shot](shot.png) and <img src=\"img/logo.svg\">.\nimport hero from './img/hero.jpg';\nmissing.png\n";
+        let file = dir.join("notes.md");
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(file), cx));
+        let shown = |at: &str, cx: &mut gpui::VisualTestContext| {
+            let offset = text[..text.find(at).unwrap()].chars().count() + 1;
+            e.update(cx, |e, cx| {
+                e.close_hover(cx);
+                e.request_hover(offset, Duration::ZERO, cx);
+            });
+            cx.run_until_parked();
+            e.read_with(cx, |e, _| {
+                e.hover
+                    .as_ref()
+                    .and_then(|h| h.image.as_ref())
+                    .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            })
+        };
+        assert_eq!(shown("shot.png", cx).as_deref(), Some("shot.png"));
+        assert_eq!(shown("img/logo", cx).as_deref(), Some("logo.svg"));
+        assert_eq!(shown("./img/hero", cx).as_deref(), Some("hero.jpg"));
+        assert_eq!(shown("missing", cx), None, "no such file");
+        assert_eq!(shown("See", cx), None, "not a path");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// With the mouse while debugging: ⌥ held over a name shows its value.
