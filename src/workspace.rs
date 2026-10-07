@@ -49,6 +49,7 @@ actions!(
         PasteFromHistory,
         ExportHtml,
         ShowBookmarks,
+        EditSnippets,
         PushBranch,
         PullBranch,
         FileHistory,
@@ -3101,6 +3102,7 @@ impl Workspace {
             (Go, "Next Bookmark".into(), Box::new(crate::editor::NextBookmark)),
             (Go, "Previous Bookmark".into(), Box::new(crate::editor::PreviousBookmark)),
             (Go, "Bookmarks…".into(), Box::new(ShowBookmarks)),
+            (App, "Edit Snippets…".into(), Box::new(EditSnippets)),
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
@@ -3647,6 +3649,26 @@ impl Workspace {
             return;
         }
         self.open_locations("Bookmarks".into(), rows, window, cx);
+    }
+
+    /// Edit Snippets…: the snippets file for the current file's language, made with a short
+    /// how-to the first time.
+    fn edit_snippets(&mut self, _: &EditSnippets, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.active_editor().map(|e| e.read(cx));
+        let (id, name) = match editor.and_then(|e| e.path().map(|p| (p, e.language()))) {
+            Some((path, language)) => (crate::servers::language_id(path), language.map_or("plain text", |l| l.name)),
+            None => ("plaintext", "plain text"),
+        };
+        let Some(folder) = crate::snippets::folder() else { return };
+        let file = folder.join(format!("{id}.json"));
+        if !file.exists() {
+            let made =
+                std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&file, crate::snippets::new_file(name)));
+            if let Err(error) = made {
+                return self.show_notice(format!("Couldn't make {}: {error}", file.display()), cx);
+            }
+        }
+        self.open_file(file, window, cx);
     }
 
     /// Project search, in folder `dir` only (from the files' menu).
@@ -6516,6 +6538,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::set_changes_aside))
             .on_action(cx.listener(Self::find_todos))
             .on_action(cx.listener(Self::show_bookmarks))
+            .on_action(cx.listener(Self::edit_snippets))
             .on_action(cx.listener(Self::run_selection_in_terminal))
             .on_action(cx.listener(Self::paste_from_history))
             .on_action(cx.listener(Self::export_html))
@@ -6865,6 +6888,34 @@ mod tests {
             String::from_utf8_lossy(&committed.stdout).split_whitespace().collect::<Vec<_>>(),
             ["only", "b", "b.txt"]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Edit Snippets… opens the snippets file for the file's language, made with a how-to.
+    #[gpui::test]
+    fn edit_snippets_opens_the_languages_file(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("edit-snippets");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.go"), "package main\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let file = dir.join("main.go");
+        workspace.update_in(cx, |w, window, cx| w.open_file(file, window, cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |w, window, cx| w.edit_snippets(&EditSnippets, window, cx));
+        cx.run_until_parked();
+        let (name, text) = workspace.read_with(cx, |w, cx| {
+            let e = w.active_editor().unwrap().read(cx);
+            (e.file_name(), e.buffer.to_string())
+        });
+        assert_eq!(name, "go.json");
+        assert!(text.starts_with("// Your snippets for Go files."), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

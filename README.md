@@ -80,6 +80,10 @@ doesn't need Xcode's separate Metal Toolchain download.
 - **Bookmarks**: ⌘F2 marks the caret's line (its number turns amber), F3 and ⇧F3 go round
   them, and **Bookmarks…** (⌘K) lists them in every open file. They move with the code and
   are kept with the project.
+- **Your snippets**: a prefix typed offers its snippet among the suggestions, its places
+  filled in with ⇥. **Edit Snippets…** (⌘K) opens the file for the current language; they're
+  written as VS Code writes them, so its snippet files (and a project's
+  `.vscode/*.code-snippets`) work as they are.
 - **Paste from History…** (⌘K) brings back the last 20 things copied or cut. `TODO`, `FIXME`
   and `HACK` stand out in comments; **Find TODOs** lists them all.
 - Pasted code takes the indentation of where it goes, its lines keeping theirs relative

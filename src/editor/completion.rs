@@ -361,8 +361,11 @@ impl Editor {
         delay: Duration,
         cx: &mut Context<Self>,
     ) {
+        // Your own snippets, by their prefix (not after a `.`: that's a member).
+        let snippets = if trigger.is_none() { self.user_snippets() } else { Vec::new() };
         if !self.served(cx) {
-            let words = self.words_near(word_start);
+            let mut words = self.words_near(word_start);
+            words.extend(snippets);
             return self.show_suggestions(words, word_start, cx);
         }
         let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else { return };
@@ -372,9 +375,23 @@ impl Editor {
             let Ok(request) = this.update(cx, |_, cx| lsp.read(cx).completion(&path, position, trigger)) else {
                 return;
             };
-            let items = request.await;
+            let mut items = request.await;
+            items.extend(snippets);
             this.update(cx, |this, cx| this.show_suggestions(items, word_start, cx)).ok();
         }));
+    }
+
+    /// The snippets for this file (see `snippets`), as suggestions fitted to the caret's line.
+    fn user_snippets(&self) -> Vec<CompletionItem> {
+        let Some(path) = &self.path else { return Vec::new() };
+        let line = self.buffer.line_text(self.caret_point().0);
+        let indent = &line[..line.len() - line.trim_start().len()];
+        let unit = self.style.indent.unit();
+        crate::snippets::for_file(path, crate::snippets::folder().as_deref())
+            .iter()
+            .flat_map(|s| s.prefixes.iter().map(move |p| (s, p)))
+            .map(|(s, prefix)| crate::snippets::completion_item(s, prefix, indent, &unit))
+            .collect()
     }
 
     /// Shows `items` as the list for the word starting at `word_start`, keeping the selected
@@ -681,6 +698,39 @@ mod tests {
         cx.simulate_input("l");
         cx.simulate_keystrokes("enter");
         e.update(cx, |e, _| assert!(e.buffer.to_string().ends_with("release_name: y\nrelease_name")));
+    }
+
+    /// A project's own snippet (`.vscode/*.code-snippets`): offered by its prefix, picked
+    /// with ↵, indented as the line is, its places filled in with ⇥.
+    #[gpui::test]
+    fn your_snippets_are_suggested_by_their_prefix(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("snippets-typing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".vscode")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".vscode/team.code-snippets"),
+            r#"{"If": {"prefix": "iff", "body": ["if ${1:ready} {", "\t$0", "}"], "scope": "rust"}}"#,
+        )
+        .unwrap();
+        let file = dir.join("main.rs");
+        let (e, cx) = editor(cx, file.to_str().unwrap(), "fn main() {\n    i");
+        cx.simulate_input("ff");
+        cx.run_until_parked();
+        assert!(shown(cx, &e).contains(&"iff".to_string()), "{:?}", shown(cx, &e));
+        let at = shown(cx, &e).iter().position(|s| s == "iff").unwrap();
+        e.update(cx, |e, cx| e.accept_completion(at, cx));
+        e.update(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "fn main() {\n    if ready {\n        \n    }");
+            assert_eq!(e.buffer.slice(e.selection.range()), "ready", "the first place to fill in");
+        });
+        cx.simulate_input("go");
+        cx.simulate_keystrokes("tab");
+        e.update(cx, |e, _| {
+            assert_eq!(e.caret_point(), (2, 8), "⇥: where the body says the caret ends");
+            assert!(e.buffer.to_string().contains("if go {"));
+        });
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A link's #section lists the headings' anchors: this file's, or the file named's.
