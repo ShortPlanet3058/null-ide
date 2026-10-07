@@ -113,6 +113,19 @@ fn path_at_end(before: &str) -> Option<(&str, &str)> {
     Some((dir, name))
 }
 
+/// A Markdown link's `#section` being written at the end of `before` (`](#ge`,
+/// `](guide.md#ge`): the file as written (empty for this one) and what's typed after `#`.
+fn anchor_at_end(before: &str) -> Option<(&str, &str)> {
+    let hash = before.rfind('#')?;
+    let typed = &before[hash + 1..];
+    if !typed.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return None;
+    }
+    let open = before[..hash].rfind("](")?;
+    let file = &before[open + 2..hash];
+    (!file.contains([' ', '(', ')']) && !file.contains("://")).then_some((file, typed))
+}
+
 /// The folder `written` names, from the file in `dir`: there, or in a folder above it up to
 /// the project's top (`.git`). Outside a repository, only from the file's own folder: the
 /// list opens by itself, so not from any folder that happens to be above.
@@ -161,7 +174,9 @@ impl Editor {
             return self.close_completion(cx);
         }
         // A path being written (`./`, `src/`, `img/`): what's in that folder.
-        if (self.completion.is_some() || cx.global::<Settings>().autocomplete) && self.complete_path(cx) {
+        if (self.completion.is_some() || cx.global::<Settings>().autocomplete)
+            && (self.complete_anchor(cx) || self.complete_path(cx))
+        {
             return;
         }
         let Some(last) = text.chars().last() else { return };
@@ -218,6 +233,48 @@ impl Editor {
         self.completion.is_some()
     }
 
+    /// In Markdown, when the caret ends a link's `#section` (this file's or another's): its
+    /// headings, by their anchors. True when it listed them.
+    fn complete_anchor(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.is_markdown() {
+            return false;
+        }
+        let caret = self.selection.head;
+        let (line, column) = self.buffer.point(caret);
+        let text = self.buffer.line_text(line);
+        let before: String = text.chars().take(column).collect();
+        let Some((file, typed)) = anchor_at_end(&before) else { return false };
+        let source = if file.is_empty() {
+            self.buffer.to_string()
+        } else {
+            let Some(dir) = self.path.as_deref().and_then(std::path::Path::parent) else { return false };
+            let path = crate::markdown_links::tidy(&dir.join(file.replace("%20", " ")));
+            let markdown = path.extension().is_some_and(|x| x == "md" || x == "markdown" || x == "mdx");
+            match std::fs::read_to_string(&path) {
+                Ok(text) if markdown => text,
+                _ => return false,
+            }
+        };
+        let items: Vec<CompletionItem> = crate::markdown_view::headings(&source)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_, heading, anchor))| CompletionItem {
+                sort_text: Some(format!("{i:05}")),
+                filter_text: Some(anchor.clone()),
+                kind: Some(CompletionItemKind::REFERENCE),
+                detail: Some(heading),
+                label: anchor,
+                ..Default::default()
+            })
+            .collect();
+        if items.is_empty() {
+            return false;
+        }
+        self.completion_task = None;
+        self.show_suggestions(items, caret - typed.chars().count(), cx);
+        self.completion.is_some()
+    }
+
     /// The words of the file around the caret, nearest first, but the one being typed.
     fn words_near(&self, word_start: usize) -> Vec<CompletionItem> {
         let caret = self.selection.head;
@@ -263,8 +320,8 @@ impl Editor {
         let word_start = menu.word_start;
         let caret = self.selection.head;
         // Close once the word is gone, unless the caret sits right after a `.` or `::`.
-        // Still in a path: what's in its folder, for what's left of the name.
-        if self.complete_path(cx) {
+        // Still in a path (or a link's #section): what's there, for what's left of the name.
+        if self.complete_anchor(cx) || self.complete_path(cx) {
             return;
         }
         if caret < word_start || caret == word_start && !self.after_trigger(word_start) {
@@ -288,7 +345,7 @@ impl Editor {
 
     /// Ctrl+Space: ask for suggestions now, even with autocomplete off.
     pub(super) fn show_completions_now(&mut self, cx: &mut Context<Self>) {
-        if self.complete_path(cx) {
+        if self.complete_anchor(cx) || self.complete_path(cx) {
             return;
         }
         let caret = self.selection.head;
@@ -505,6 +562,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sections_are_told_from_links() {
+        assert_eq!(anchor_at_end("See [a](#ge"), Some(("", "ge")));
+        assert_eq!(anchor_at_end("[a](guide.md#"), Some(("guide.md", "")));
+        assert_eq!(anchor_at_end("# heading"), None);
+        assert_eq!(anchor_at_end("[a](https://x.dev/#top"), None);
+    }
+
+    #[test]
     fn paths_are_told_from_code() {
         assert_eq!(path_at_end("![shot](img/sh"), Some(("img/", "sh")));
         assert_eq!(path_at_end("<img src=\"./assets/"), Some(("./assets/", "")));
@@ -614,6 +679,28 @@ mod tests {
         cx.simulate_input("l");
         cx.simulate_keystrokes("enter");
         e.update(cx, |e, _| assert!(e.buffer.to_string().ends_with("release_name: y\nrelease_name")));
+    }
+
+    /// A link's #section lists the headings' anchors: this file's, or the file named's.
+    #[gpui::test]
+    fn sections_are_completed_from_headings(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-anchor-completion-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("other.md"), "# Other\n## Install it\n").unwrap();
+        let notes = dir.join("notes.md");
+        let (e, cx) = editor(cx, notes.to_str().unwrap(), "# Guide\n## Get started\n## Keys\nSee [s](");
+        cx.simulate_input("#");
+        cx.run_until_parked();
+        assert_eq!(shown(cx, &e), ["guide", "get-started", "keys"]);
+        cx.simulate_input("ke");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        e.update(cx, |e, _| assert!(e.buffer.to_string().ends_with("See [s](#keys")));
+        cx.simulate_input(") and [o](other.md#");
+        cx.run_until_parked();
+        assert_eq!(shown(cx, &e), ["other", "install-it"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Writing a path lists what's in its folder: a folder picked goes on into it, a file
