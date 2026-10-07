@@ -102,7 +102,8 @@ doesn't need Xcode's separate Metal Toolchain download.
   plain comment, only when it splits the comment in two.
 - **Rewrap** (⌘K) refills a comment or a paragraph to the project's line length, keeping
   its `//`, `>` or list indent. The ⌃ keys of macOS text fields work too: ⌃A ⌃E, ⌃K and
-  ⌃Y, ⌃T, ⌃O, ⌃L to center the caret's line, and ⌘J to bring the selection back into view.
+  ⌃Y, ⌃T, ⌃O, ⌃L to center the caret's line, and ⌘J to bring the selection back into view;
+  ⌃⌥← → go by the parts of a name (`parse` `Http` `Request`), ⌃⌥⇧ selecting, ⌃⌥⌫ deleting.
 - Misspelled words in Markdown, text and comments get a faint wavy line, checked by the
   Mac's own speller in the languages set in System Settings (each line in the one it reads
   best in, so French and English mix); code is never marked. **⌘.** on one offers corrections.
