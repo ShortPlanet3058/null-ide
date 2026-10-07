@@ -493,6 +493,8 @@ pub struct Editor {
     /// click near an edge doesn't scroll the text under the pointer.
     pub reveal_only: bool,
     dragging: Option<DragUnit>,
+    /// Where dragged text would land, shown as a caret while it's dragged.
+    pub drop_at: Option<usize>,
     pub font_size: Pixels,
     /// A line's height as a multiple of the font size (the "Line spacing" setting).
     line_spacing: f32,
@@ -685,6 +687,7 @@ impl Editor {
             autoscroll: false,
             reveal_only: false,
             dragging: None,
+            drop_at: None,
             font_size: px(cx.global::<Settings>().font_size),
             line_spacing: cx.global::<Settings>().line_spacing.factor(),
             words: Default::default(),
@@ -2594,6 +2597,15 @@ impl Editor {
             self.dragging = Some(DragUnit::Column(line, column));
             return self.touch(cx);
         }
+        // Pressed inside the selection: it may be dragged elsewhere (to move it, or with ⌥
+        // to copy it). Nothing changes until it is.
+        let plain = !(event.modifiers.shift || event.modifiers.secondary() || event.modifiers.control);
+        let range = self.selection.range();
+        if event.click_count == 1 && plain && self.extra.is_empty() && range.start < offset && offset < range.end {
+            self.dragging = Some(DragUnit::Move { range, pressed: offset });
+            self.drop_at = None;
+            return cx.notify();
+        }
         // Cmd+Shift+click (Ctrl+Shift elsewhere) adds a cursor, or removes the one clicked.
         // Not Alt+click: holding Alt opens the info card.
         let add_cursor = event.modifiers.secondary() && event.modifiers.shift;
@@ -2613,7 +2625,7 @@ impl Editor {
             DragUnit::Char if event.modifiers.shift => self.selection.head = offset,
             DragUnit::Char => self.selection = Selection::caret(offset),
             // Started above, before this match.
-            DragUnit::Column(..) => {}
+            DragUnit::Column(..) | DragUnit::Move { .. } => {}
         }
         if !(add_cursor || event.modifiers.shift) {
             self.single_cursor();
@@ -2721,6 +2733,12 @@ impl Editor {
         let offset = self.offset_at(position);
         let (origin, target) = match &self.dragging {
             None => return,
+            Some(DragUnit::Move { range, .. }) => {
+                // Over the text itself, it wouldn't go anywhere.
+                let within = range.start <= offset && offset <= range.end;
+                self.drop_at = (!within).then_some(offset);
+                return cx.notify();
+            }
             Some(DragUnit::Char) => {
                 self.selection.head = offset;
                 self.touch(cx);
@@ -2748,6 +2766,31 @@ impl Editor {
         self.reveal_only = true;
     }
 
+    /// Dragged text dropped at `at`: moved there (or copied, with ⌥), selected, as one step.
+    fn drop_text(&mut self, range: Range<usize>, at: usize, copy: bool, cx: &mut Context<Self>) {
+        let text = self.buffer.slice(range.clone());
+        let len = text.chars().count();
+        self.record_undo(EditKind::Other);
+        let start = if copy {
+            self.buffer.replace(at..at, &text);
+            at
+        } else if at > range.end {
+            // Put down first, then taken from where it was (which is before it).
+            self.buffer.replace(at..at, &text);
+            self.buffer.replace(range.clone(), "");
+            at - len
+        } else {
+            self.buffer.replace(range.clone(), "");
+            self.buffer.replace(at..at, &text);
+            at
+        };
+        self.single_cursor();
+        self.selection = Selection { anchor: start, head: start + len };
+        self.text_changed(cx);
+        cx.emit(EditorEvent::Edited);
+        self.touch(cx);
+    }
+
     /// While dragging past an edge without moving, keeps scrolling.
     pub fn continue_drag(&mut self, cx: &mut Context<Self>) -> bool {
         let (Some(position), Some(layout)) = (self.mouse_position, &self.layout) else { return false };
@@ -2759,7 +2802,18 @@ impl Editor {
         false
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(DragUnit::Move { range, pressed }) = self.dragging.take() {
+            match self.drop_at.take() {
+                Some(at) => self.drop_text(range, at, event.modifiers.alt, cx),
+                // A click in the selection without a drag: the caret goes there.
+                None => {
+                    self.selection = Selection::caret(pressed);
+                    self.touch(cx);
+                }
+            }
+            return;
+        }
         self.dragging = None;
         if self.scrollbar_drag.take().is_some() {
             cx.notify();
@@ -3062,6 +3116,12 @@ impl Editor {
 /// What a mouse drag selects by, set by the click that started it.
 enum DragUnit {
     Char,
+    /// The selection itself, pressed to be dragged elsewhere: its chars, and where it was
+    /// pressed (a click that doesn't drag puts the caret there).
+    Move {
+        range: Range<usize>,
+        pressed: usize,
+    },
     /// ⌥⇧-drag: a box from this (line, column), a cursor on each line.
     Column(usize, usize),
     Word(Range<usize>),
@@ -4175,6 +4235,73 @@ mod tests {
         });
         cx.simulate_keystrokes("alt-shift-cmd-v");
         editor.read_with(cx, |e, _| assert!(e.buffer.to_string().ends_with("| Tea  | 2   |\nItem\tQty\nTea\t2\n")));
+    }
+
+    /// Dragging the selection moves it where it's dropped; with ⌥, copies it. A click in it
+    /// without a drag just puts the caret there.
+    #[gpui::test]
+    fn the_selection_drags_elsewhere(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("one two three\n"), Some("x.txt".into()), cx));
+        e.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
+        let drag = |cx: &mut gpui::VisualTestContext, from: usize, to: usize, alt: bool| {
+            let at = |cx: &mut gpui::VisualTestContext, offset| {
+                e.read_with(cx, |e, _| e.caret_bounds(offset).expect("drawn").center())
+            };
+            let modifiers = gpui::Modifiers { alt, ..Default::default() };
+            let (from, to) = (at(cx, from), at(cx, to));
+            cx.simulate_event(gpui::MouseDownEvent {
+                position: from,
+                button: gpui::MouseButton::Left,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            });
+            if from != to {
+                cx.simulate_event(gpui::MouseMoveEvent {
+                    position: to,
+                    pressed_button: Some(gpui::MouseButton::Left),
+                    modifiers,
+                });
+            }
+            cx.simulate_event(gpui::MouseUpEvent {
+                position: to,
+                button: gpui::MouseButton::Left,
+                modifiers,
+                click_count: 1,
+            });
+            cx.run_until_parked();
+        };
+        let select = |cx: &mut gpui::VisualTestContext, range: Range<usize>| {
+            e.update(cx, |e, cx| {
+                e.selection = Selection { anchor: range.start, head: range.end };
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        // "two" dragged to the end.
+        select(cx, 4..7);
+        drag(cx, 5, 13, false);
+        e.read_with(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "one  threetwo\n");
+            assert_eq!(e.selection.range(), 10..13);
+        });
+        // ⌥: "one" copied to the start of "three".
+        select(cx, 0..3);
+        drag(cx, 1, 5, true);
+        e.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "one  onethreetwo\n"));
+        // A click inside without dragging: just the caret.
+        select(cx, 0..3);
+        drag(cx, 2, 2, false);
+        e.read_with(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "one  onethreetwo\n");
+            assert_eq!(e.selection.range(), 2..2);
+        });
     }
 
     /// Markdown: * _ ~ over a selection wrap it, and it stays selected to wrap again
