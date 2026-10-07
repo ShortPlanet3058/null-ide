@@ -35,6 +35,8 @@ pub enum Block {
         rows: Vec<Vec<Vec<Inline>>>,
     },
     Rule,
+    /// A footnote's text (`[^label]: …`). Gathered at the end once the document is read.
+    Note(String, Vec<Inline>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -58,9 +60,17 @@ pub enum Inline {
     Strong(Vec<Inline>),
     Emphasis(Vec<Inline>),
     Strike(Vec<Inline>),
-    Link { text: Vec<Inline>, url: String },
-    Image { alt: String, url: String },
+    Link {
+        text: Vec<Inline>,
+        url: String,
+    },
+    Image {
+        alt: String,
+        url: String,
+    },
     Break,
+    /// A footnote reference (`[^label]`): its number once the document is read.
+    NoteRef(String),
 }
 
 // ---------- blocks ----------
@@ -109,7 +119,118 @@ pub fn parse_located(source: &str) -> Vec<(usize, Block)> {
     }
     let start = start.min(lines.len());
     let (blocks, starts) = parse_lines_at(&lines[start..]);
-    starts.into_iter().map(|line| line + start).zip(blocks).collect()
+    with_footnotes(starts.into_iter().map(|line| line + start).zip(blocks).collect())
+}
+
+/// Footnotes as they read: each reference a small number (in the order first referred
+/// to), the notes themselves gathered at the end, under a line, numbered alike. A
+/// reference to no note stays as written.
+fn with_footnotes(blocks: Vec<(usize, Block)>) -> Vec<(usize, Block)> {
+    let mut notes: Vec<(usize, String, Vec<Inline>)> = Vec::new();
+    let mut kept = Vec::new();
+    for (line, block) in blocks {
+        match block {
+            Block::Note(label, content) => notes.push((line, label, content)),
+            block => kept.push((line, block)),
+        }
+    }
+    if notes.is_empty() && !kept.iter().any(|(_, b)| has_note_ref(b)) {
+        return kept;
+    }
+    // Numbered by first reference; notes no one refers to come after.
+    let mut order: Vec<String> = Vec::new();
+    for (_, block) in &kept {
+        note_refs(block, &mut order);
+    }
+    order.retain(|label| notes.iter().any(|(_, l, _)| l == label));
+    for (_, label, _) in &notes {
+        if !order.contains(label) {
+            order.push(label.clone());
+        }
+    }
+    let number = |label: &str| order.iter().position(|l| l == label).map(|i| i + 1);
+    for (_, block) in &mut kept {
+        number_refs(block, &number);
+    }
+    if !notes.is_empty() {
+        let first = notes.iter().map(|(line, ..)| *line).min().unwrap_or(0);
+        notes.sort_by_key(|(_, label, _)| number(label));
+        let items = notes
+            .into_iter()
+            .map(|(_, _, content)| Item { task: None, blocks: vec![Block::Paragraph(content)] })
+            .collect();
+        kept.push((first, Block::Rule));
+        kept.push((first, Block::List { start: Some(1), items }));
+    }
+    kept
+}
+
+/// The inlines a block holds, at any depth.
+fn block_inlines(block: &mut Block, each: &mut dyn FnMut(&mut Vec<Inline>)) {
+    match block {
+        Block::Heading(_, content) | Block::Paragraph(content) | Block::Note(_, content) => each(content),
+        Block::Quote(blocks) => blocks.iter_mut().for_each(|b| block_inlines(b, each)),
+        Block::List { items, .. } => {
+            items.iter_mut().flat_map(|i| i.blocks.iter_mut()).for_each(|b| block_inlines(b, each))
+        }
+        Block::Table { head, rows, .. } => {
+            head.iter_mut().chain(rows.iter_mut().flatten()).for_each(|cell| each(cell));
+        }
+        Block::Code { .. } | Block::Rule => {}
+    }
+}
+
+/// Each inline of `content`, at any depth (inside emphasis, links...).
+fn walk_inlines(content: &mut [Inline], each: &mut dyn FnMut(&mut Inline)) {
+    for inline in content {
+        if let Inline::Strong(inner)
+        | Inline::Emphasis(inner)
+        | Inline::Strike(inner)
+        | Inline::Link { text: inner, .. } = inline
+        {
+            walk_inlines(inner, each);
+        }
+        each(inline);
+    }
+}
+
+fn has_note_ref(block: &Block) -> bool {
+    let mut found = Vec::new();
+    note_refs(block, &mut found);
+    !found.is_empty()
+}
+
+/// The labels referred to in `block`, added to `order` the first time each is seen.
+fn note_refs(block: &Block, order: &mut Vec<String>) {
+    let mut block = block.clone();
+    block_inlines(&mut block, &mut |content| {
+        walk_inlines(content, &mut |inline| {
+            if let Inline::NoteRef(label) = inline
+                && !order.contains(label)
+            {
+                order.push(label.clone());
+            }
+        })
+    });
+}
+
+/// References become their note's number, small and raised (¹ ²); one with no note stays
+/// as written.
+fn number_refs(block: &mut Block, number: &dyn Fn(&str) -> Option<usize>) {
+    block_inlines(block, &mut |content| {
+        walk_inlines(content, &mut |inline| {
+            if let Inline::NoteRef(label) = inline {
+                *inline = Inline::Text(match number(label) {
+                    Some(n) => superscript(n),
+                    None => format!("[^{label}]"),
+                });
+            }
+        })
+    });
+}
+
+fn superscript(n: usize) -> String {
+    n.to_string().chars().map(|d| "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(d.to_digit(10).unwrap_or(0) as usize).unwrap_or(d)).collect()
 }
 
 fn parse_lines(lines: &[&str]) -> Vec<Block> {
@@ -163,6 +284,17 @@ fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
                 code.pop();
             }
             blocks.push(code_block(String::new(), code.join("\n")));
+            continue;
+        }
+        // A footnote: `[^label]: text`, and the lines after it up to a blank one.
+        if let Some((label, first)) = note_definition(trimmed) {
+            let mut text = vec![first.trim()];
+            i += 1;
+            while i < lines.len() && !lines[i].trim().is_empty() && note_definition(lines[i].trim_start()).is_none() {
+                text.push(lines[i].trim());
+                i += 1;
+            }
+            blocks.push(Block::Note(label, inlines(&text.join(" "))));
             continue;
         }
         if let Some((level, text)) = heading(trimmed) {
@@ -247,6 +379,14 @@ fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
     }
     starts.resize(blocks.len(), begin);
     (blocks, starts)
+}
+
+/// `[^label]: text` → the label and the text.
+fn note_definition(trimmed: &str) -> Option<(String, &str)> {
+    let rest = trimmed.strip_prefix("[^")?;
+    let close = rest.find("]:")?;
+    let label = &rest[..close];
+    (!label.is_empty() && !label.contains(char::is_whitespace)).then(|| (label.to_string(), &rest[close + 2..]))
 }
 
 fn lines_break(lines: &[&str], trimmed: &str) -> bool {
@@ -690,6 +830,15 @@ pub fn inlines(text: &str) -> Vec<Inline> {
                     continue;
                 }
             }
+            '[' if rest.starts_with("[^") => {
+                let label: String = chars[i + 2..].iter().take_while(|c| **c != ']' && !c.is_whitespace()).collect();
+                if !label.is_empty() && chars.get(i + 2 + label.chars().count()) == Some(&']') {
+                    flush(&mut plain, &mut out);
+                    i += 3 + label.chars().count();
+                    out.push(Inline::NoteRef(label));
+                    continue;
+                }
+            }
             '!' if rest.starts_with("![") => {
                 if let Some((alt, url, len)) = bracketed(&chars, i + 1) {
                     flush(&mut plain, &mut out);
@@ -901,6 +1050,7 @@ pub fn plain_text(content: &[Inline]) -> String {
             Inline::Link { text, .. } => plain_text(text),
             Inline::Image { alt, .. } => alt.clone(),
             Inline::Break => " ".into(),
+            Inline::NoteRef(label) => format!("[^{label}]"),
         })
         .collect()
 }
@@ -1163,6 +1313,8 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
                 .into_any_element()
         }
         Block::Rule => div().h(px(1.)).my(px(6.)).bg(theme.hairline).into_any_element(),
+        // Gathered at the end as a list before drawing: never drawn where it was written.
+        Block::Note(..) => div().into_any_element(),
     }
 }
 
@@ -1258,6 +1410,7 @@ fn flatten(
                 }
             }
             Inline::Break => text.push('\n'),
+            Inline::NoteRef(label) => text.push_str(&format!("[^{label}]")),
             Inline::Code(snippet) => {
                 // A little room either side, as the tint would otherwise touch the letters.
                 text.push_str(&format!("\u{2009}{snippet}\u{2009}"));
@@ -1307,6 +1460,27 @@ fn flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Footnotes: references numbered by first use, notes gathered at the end in that
+    /// order (after a line), a reference to no note left as written.
+    #[test]
+    fn footnotes_are_numbered_and_gathered() {
+        let source = "Text[^b] and *more*[^a].\n\n[^a]: First, *said*.\n[^b]: Second\ngoes on.\n\nNo note[^none].\n";
+        let blocks = parse(source);
+        let text = |b: &Block| match b {
+            Block::Paragraph(content) => plain_text(content),
+            _ => String::new(),
+        };
+        assert_eq!(text(&blocks[0]), "Text¹ and more².");
+        assert_eq!(text(&blocks[1]), "No note[^none].");
+        assert_eq!(blocks[2], Block::Rule);
+        let Block::List { start: Some(1), items } = &blocks[3] else { panic!("{:?}", blocks[3]) };
+        let notes: Vec<String> = items.iter().map(|i| text(&i.blocks[0])).collect();
+        assert_eq!(notes, ["Second goes on.", "First, said."]);
+        assert_eq!(blocks.len(), 4);
+        // No footnotes: nothing added.
+        assert_eq!(parse("Just [a link](x).\n").len(), 1);
+    }
 
     #[test]
     fn links_in_angle_brackets_keep_their_spaces() {
