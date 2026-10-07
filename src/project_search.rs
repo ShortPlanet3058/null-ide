@@ -222,9 +222,13 @@ impl ProjectSearch {
         self.case_sensitive = query.case_sensitive;
         self.whole_word = query.whole_word;
         self.regex = query.regex;
+        // New text searches by itself (the field says it changed); the same text, here.
+        let same = self.input.read(cx).text() == query.text;
         self.input.update(cx, |input, cx| input.set_text(&query.text, cx));
         window.focus(&self.input.focus_handle(cx));
-        self.search(cx);
+        if same {
+            self.search(cx);
+        }
     }
 
     fn search(&mut self, cx: &mut Context<Self>) {

@@ -17,30 +17,67 @@ pub struct Target<'a> {
     pub text: &'a str,
 }
 
+/// The byte ranges of a line's inline code spans (`` `like this` ``): links there are text.
+pub fn code_spans(line: &str) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(open) = line[from..].find('`') {
+        let open = from + open;
+        let ticks = line[open..].chars().take_while(|c| *c == '`').count();
+        let fence = "`".repeat(ticks);
+        match line[open + ticks..].find(&fence) {
+            Some(close) => {
+                let end = open + ticks + close + ticks;
+                spans.push(open..end);
+                from = end;
+            }
+            None => break,
+        }
+    }
+    spans
+}
+
 /// The local targets of a Markdown text's links and images (`[a](b)`, `![a](b)`,
-/// `[a]: b`, `src="b"`), not addresses nor `#headings`.
+/// `[a](<b c>)`, `[a]: b`, `src="b"`), not addresses nor `#headings`, nor what's in code
+/// (fences, `inline code`) or a footnote. Lines as the editor counts them (a lone \r ends
+/// one too), so line numbers are the editor's.
 pub fn targets(text: &str) -> Vec<Target<'_>> {
     let mut found = Vec::new();
-    for (line, l) in text.split('\n').enumerate() {
-        let l = l.strip_suffix('\r').unwrap_or(l);
+    let mut fence: Option<&str> = None;
+    for (line, l) in crate::markdown_view::buffer_lines(text).into_iter().enumerate() {
+        if let Some(open) = crate::markdown_view::fence_of(l.trim_start()) {
+            fence = if fence == Some(open) { None } else { fence.or(Some(open)) };
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        let code = code_spans(l);
         let mut add = |start: usize, end: usize| {
             let text = &l[start..end];
             let local = !text.is_empty() && !text.starts_with('#') && !text.contains("://") && !text.contains(':');
-            if local {
+            if local && !code.iter().any(|c| c.contains(&start)) {
                 found.push(Target { line, start, text });
             }
         };
-        // [text](target "title") and ![alt](target)
+        // [text](target "title"), ![alt](target), [text](<target with spaces>)
         let mut from = 0;
         while let Some(at) = l[from..].find("](") {
             let start = from + at + 2;
-            let end = l[start..].find([')', ' ', '\t']).map_or(l.len(), |e| start + e);
-            add(start, end);
+            if l[start..].starts_with('<') {
+                if let Some(close) = l[start + 1..].find('>') {
+                    add(start + 1, start + 1 + close);
+                }
+            } else {
+                let end = l[start..].find([')', ' ', '\t']).map_or(l.len(), |e| start + e);
+                add(start, end);
+            }
             from = start;
         }
-        // [label]: target
+        // [label]: target (not a footnote's [^label]: text)
         let trimmed = l.trim_start();
         if trimmed.starts_with('[')
+            && !trimmed.starts_with("[^")
             && let Some(close) = trimmed.find("]:")
         {
             let rest = &trimmed[close + 2..];
@@ -61,6 +98,28 @@ pub fn targets(text: &str) -> Vec<Target<'_>> {
         }
     }
     found
+}
+
+/// A link's path as a file name: `%20` and other `%XX` read as what they stand for, a
+/// `?query` or `#section` left off.
+pub fn decoded(path: &str) -> String {
+    let path = path.split(['#', '?']).next().unwrap_or("");
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(a), Some(b)) = (bytes.get(i + 1).and_then(|b| hex(*b)), bytes.get(i + 2).and_then(|b| hex(*b)))
+        {
+            out.push((a * 16 + b) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| path.to_string())
 }
 
 /// `path` with `.` and `..` worked out, without asking the disk (the file may be gone).
@@ -96,12 +155,10 @@ fn moved(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
 /// The new target for a link written `written` in the Markdown file `file`, once `from`
 /// moves to `to`; None when it stays as it is.
 fn new_target(written: &str, file: &Path, from: &Path, to: &Path) -> Option<String> {
-    let (path_part, fragment) = match written.find('#') {
-        Some(at) => (&written[..at], &written[at..]),
-        None => (written, ""),
-    };
+    // `?query` and `#section` kept as they are, after the path.
+    let (path_part, fragment) = written.split_at(written.find(['?', '#']).unwrap_or(written.len()));
     let encoded = path_part.contains("%20");
-    let decoded = path_part.replace("%20", " ");
+    let decoded = decoded(path_part);
     let dir = file.parent()?;
     let target = if decoded.starts_with('/') { PathBuf::from(&decoded) } else { tidy(&dir.join(&decoded)) };
     // The file itself may be what moved (or be in what moved): it's read from its new place.
@@ -150,12 +207,15 @@ pub fn edits_for_move(
     for entry in markdown {
         let file = entry.path();
         let Some(text) = open.get(file).cloned().or_else(|| std::fs::read_to_string(file).ok()) else { continue };
-        let lines: Vec<&str> = text.split('\n').collect();
+        let lines: Vec<&str> = crate::markdown_view::buffer_lines(&text);
         let edits: Vec<lsp_types::TextEdit> = targets(&text)
             .into_iter()
             .filter_map(|t| {
-                let new = new_target(t.text, file, from, to)?;
                 let line = lines[t.line];
+                let new = new_target(t.text, file, from, to)?;
+                // A space reads as the end of a link unless it's in <…>.
+                let bracketed = line[..t.start].ends_with('<');
+                let new = if bracketed { new } else { new.replace(' ', "%20") };
                 let column = |byte: usize| line[..byte].encode_utf16().count() as u32;
                 let start = lsp_types::Position { line: t.line as u32, character: column(t.start) };
                 let end = lsp_types::Position { line: t.line as u32, character: column(t.start + t.text.len()) };
@@ -177,6 +237,16 @@ mod tests {
 
     fn written(text: &str) -> Vec<&str> {
         targets(text).into_iter().map(|t| t.text).collect()
+    }
+
+    #[test]
+    fn targets_are_read_as_written() {
+        // <…> around a path with spaces (as Null writes it), a footnote, code, a fence, and
+        // a lone \r ending a line: only the links count, on the editor's lines.
+        let text = "![a](<My Shot.png>) `[x](no.md)` [^1]: Some note\r[b](b.md)\n```\n[c](c.md)\n```\n";
+        let found: Vec<(usize, &str)> = targets(text).into_iter().map(|t| (t.line, t.text)).collect();
+        assert_eq!(found, [(0, "My Shot.png"), (1, "b.md")]);
+        assert_eq!(decoded("caf%C3%A9.png?raw=1#top"), "café.png");
     }
 
     #[test]

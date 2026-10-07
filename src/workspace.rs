@@ -1953,7 +1953,19 @@ impl Workspace {
             .iter()
             .filter_map(|t| {
                 let editor = t.editor.read(cx);
-                Some((editor.path()?.to_path_buf(), editor.buffer.to_string())).filter(|_| editor.is_markdown())
+                if !editor.is_markdown() {
+                    return None;
+                }
+                Some((editor.path()?.to_path_buf(), editor.buffer.to_string()))
+            })
+            .collect();
+        // Their versions now: one typed in while this waits isn't edited from the text read.
+        let versions: std::collections::HashMap<PathBuf, u64> = self
+            .tabs
+            .iter()
+            .filter_map(|t| {
+                let editor = t.editor.read(cx);
+                Some((editor.path()?.to_path_buf(), editor.buffer.version()))
             })
             .collect();
         let links = cx
@@ -1965,8 +1977,21 @@ impl Workspace {
                 edits = futures::FutureExt::fuse(request) => edits,
                 _ = futures::FutureExt::fuse(timeout) => Vec::new(),
             };
-            edits.extend(links.await);
+            let links = links.await;
             this.update(cx, |this, cx| {
+                let unchanged = |path: &Path| {
+                    versions.get(path).is_none_or(|v| {
+                        this.tabs
+                            .iter()
+                            .any(|t| t.editor.read(cx).path() == Some(path) && t.editor.read(cx).buffer.version() == *v)
+                    })
+                };
+                edits.extend(links.map(|mut edit| {
+                    if let Some(changes) = &mut edit.changes {
+                        changes.retain(|uri, _| crate::lsp::path_for(uri).is_none_or(|p| unchanged(&p)));
+                    }
+                    edit
+                }));
                 // What every server asked for, as one: the files changed and those that couldn't be.
                 let changed = (!edits.is_empty()).then(|| {
                     edits.into_iter().map(|edit| this.apply_edit_to_files(edit, cx)).fold(
