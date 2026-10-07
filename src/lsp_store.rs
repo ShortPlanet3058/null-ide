@@ -914,6 +914,15 @@ impl LspStore {
         self.diagnostics_version += 1;
     }
 
+    /// The files the servers report an error in (each looked at once, however many).
+    pub fn files_with_errors(&self) -> std::collections::HashSet<PathBuf> {
+        self.diagnostics
+            .iter()
+            .filter(|(_, list)| list.iter().any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     /// Every problem the servers have reported, by file.
     pub fn all_diagnostics(&self) -> impl Iterator<Item = (&PathBuf, &Diagnostic)> {
         self.diagnostics.iter().flat_map(|(path, list)| list.iter().map(move |d| (path, d)))

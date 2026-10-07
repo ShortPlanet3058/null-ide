@@ -1143,7 +1143,13 @@ pub fn headings(source: &str) -> Vec<(u8, String, String)> {
     // A line of `===` or `---` (not a rule after a blank line) makes the paragraph line above
     // it a heading. Only lines with one under them are looked at closely: this runs as text
     // is typed, over the whole file.
-    let lines = buffer_lines(source);
+    let mut lines = buffer_lines(source);
+    // Front matter (`---` … `---` at the very top) is settings, not text.
+    if lines.first().is_some_and(|l| l.trim() == "---")
+        && let Some(end) = lines.iter().skip(1).position(|l| l.trim() == "---")
+    {
+        lines.drain(..end + 2);
+    }
     let underline = |line: &str| {
         let t = line.trim();
         let all = |c: char| !t.is_empty() && t.chars().all(|x| x == c);
@@ -1168,15 +1174,15 @@ pub fn headings(source: &str) -> Vec<(u8, String, String)> {
         if fence.is_some() {
             continue;
         }
-        if t.starts_with('#') {
-            if let Some((level, text)) = heading(t) {
-                add(level, text, &mut found);
-            }
+        if let Some((level, text)) = heading(t) {
+            add(level, text, &mut found);
             continue;
         }
+        // Not a quote, a list item, a rule or a table row (`---` under one isn't a heading).
         if let Some(level) = lines.get(i + 1).and_then(|next| underline(next))
             && !t.is_empty()
             && !t.starts_with('>')
+            && !t.contains('|')
             && list_marker(line).is_none()
             && !is_rule(t)
         {
@@ -1688,6 +1694,10 @@ mod tests {
         let anchors: Vec<String> =
             headings("Title\n=====\n\nPart one\n---\n\n---\n").into_iter().map(|(_, _, a)| a).collect();
         assert_eq!(anchors, ["title", "part-one"]);
+        // Front matter, a table row and a #hashtag line: only the last is a heading.
+        let anchors: Vec<String> =
+            headings("---\ntitle: x\n---\n| a | b |\n---\n#1 priority\n===\n").into_iter().map(|(_, _, a)| a).collect();
+        assert_eq!(anchors, ["1-priority"]);
     }
 
     /// Spreadsheet cells become a lined-up table; code indented with tabs, one row, or rows

@@ -188,13 +188,48 @@ impl Settings {
 
     fn load() -> Self {
         let Some(path) = Self::path() else { return Self::default() };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text).unwrap_or_else(|err| {
+        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
+        match Self::parse_lenient(&text) {
+            Ok((settings, skipped)) => {
+                if !skipped.is_empty() {
+                    eprintln!("null: {}: kept the defaults for {}", path.display(), skipped.join(", "));
+                }
+                settings
+            }
+            // Not JSON at all: a copy is kept before anything is saved over it.
+            Err(err) => {
                 eprintln!("null: ignoring {}: {err}", path.display());
+                let copy = path.with_extension("unreadable.json");
+                if !copy.exists() {
+                    std::fs::copy(&path, &copy).ok();
+                }
                 Self::default()
-            }),
-            Err(_) => Self::default(),
+            }
         }
+    }
+
+    /// The settings as written, each one that can't be read (a typo in a theme's name)
+    /// falling back to its default alone: one mistake doesn't cost the others. The keys
+    /// left at their defaults are returned too.
+    fn parse_lenient(text: &str) -> serde_json::Result<(Self, Vec<String>)> {
+        if let Ok(settings) = Self::parse(text) {
+            return Ok((settings, Vec::new()));
+        }
+        let written: serde_json::Value = serde_json::from_str(text)?;
+        let mut merged = serde_json::to_value(Self::default())?;
+        let mut skipped = Vec::new();
+        for (key, value) in written.as_object().into_iter().flatten() {
+            let mut attempt = merged.clone();
+            attempt[key] = value.clone();
+            if serde_json::from_value::<Self>(attempt.clone()).is_ok() {
+                merged = attempt;
+            } else {
+                skipped.push(key.clone());
+            }
+        }
+        let mut settings: Self = serde_json::from_value(merged)?;
+        settings.font_size = settings.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        Ok((settings, skipped))
     }
 
     fn parse(text: &str) -> serde_json::Result<Self> {
@@ -321,6 +356,16 @@ mod tests {
         assert_eq!(Settings::default().line_spacing, LineSpacing::Normal);
         let settings = Settings::parse(r#"{ "line_spacing": "relaxed" }"#).unwrap();
         assert_eq!(settings.line_spacing.factor(), 2.0);
+    }
+
+    #[test]
+    fn one_bad_setting_costs_only_itself() {
+        let (s, skipped) =
+            Settings::parse_lenient(r#"{ "font_size": 17, "light_theme": "solarized", "caret_blink": false }"#)
+                .unwrap();
+        assert_eq!((s.font_size, s.caret_blink, s.light_theme), (17., false, ThemeName::Paper));
+        assert_eq!(skipped, ["light_theme"]);
+        assert!(Settings::parse_lenient("{ not json").is_err());
     }
 
     #[test]
