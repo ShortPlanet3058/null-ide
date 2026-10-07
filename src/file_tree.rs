@@ -148,6 +148,8 @@ pub enum FileTreeEvent {
     Trashed(PathBuf),
     /// A new terminal, started in this folder.
     OpenTerminal(PathBuf),
+    /// Find in Folder…: project search, in this folder only.
+    FindInFolder(PathBuf),
     /// Back to the last commit, this file (after asking).
     DiscardChanges(PathBuf, crate::git::FileStatus),
     /// Something to tell the person, like a failed operation.
@@ -243,6 +245,7 @@ enum MenuItem {
     CopyRelativePath,
     Reveal,
     OpenInTerminal,
+    FindInFolder,
     DiscardChanges,
     CollapseAll,
     Trash,
@@ -261,6 +264,7 @@ impl MenuItem {
             MenuItem::CopyRelativePath => "Copy Relative Path",
             MenuItem::Reveal => REVEAL_LABEL,
             MenuItem::OpenInTerminal => "Open in Terminal",
+            MenuItem::FindInFolder => "Find in Folder…",
             MenuItem::DiscardChanges => "Discard Changes…",
             MenuItem::CollapseAll => "Collapse All Folders",
             MenuItem::Trash => "Move to Trash",
@@ -911,7 +915,18 @@ impl FileTree {
         use MenuItem::*;
         let items = match &target {
             Some(e) if e.is_dir => {
-                vec![NewFile, NewFolder, Rename, Duplicate, CopyPath, CopyRelativePath, Reveal, OpenInTerminal, Trash]
+                vec![
+                    NewFile,
+                    NewFolder,
+                    Rename,
+                    Duplicate,
+                    CopyPath,
+                    CopyRelativePath,
+                    Reveal,
+                    OpenInTerminal,
+                    FindInFolder,
+                    Trash,
+                ]
             }
             Some(e) => {
                 let mut items = vec![Open];
@@ -975,6 +990,11 @@ impl FileTree {
                     && let Some(&status) = self.git.get(&entry.path)
                 {
                     cx.emit(FileTreeEvent::DiscardChanges(entry.path, status));
+                }
+            }
+            MenuItem::FindInFolder => {
+                if let Some(entry) = target {
+                    cx.emit(FileTreeEvent::FindInFolder(entry.path));
                 }
             }
             MenuItem::OpenInTerminal => {

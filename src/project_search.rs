@@ -170,6 +170,15 @@ impl ProjectSearch {
         cx.notify();
     }
 
+    /// Searches only in `folder` (as written from the project's root): the files field opens
+    /// with it, the search field focused.
+    pub fn search_in_folder(&mut self, folder: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_replace = true;
+        self.files_input.update(cx, |input, cx| input.set_text(&format!("{folder}/"), cx));
+        self.focus(None, window, cx);
+        cx.notify();
+    }
+
     /// Runs the search again (after a replace changed the files).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.search(cx);
@@ -967,6 +976,30 @@ mod tests {
             s.step(false, cx);
             assert_eq!(s.selected, Some(2));
         });
+    }
+
+    /// Find in Folder: only that folder's files are searched.
+    #[gpui::test]
+    fn finds_in_one_folder(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-find-in-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "needle\n").unwrap();
+        std::fs::write(dir.join("b.rs"), "needle\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (search, cx) = cx.add_window_view(|_, cx| ProjectSearch::new(root, cx));
+        search.update_in(cx, |s, window, cx| s.search_in_folder("src", window, cx));
+        cx.simulate_input("needle");
+        cx.executor().advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        let found: Vec<String> = search.read_with(cx, |s, _| s.results.iter().map(|r| r.relative.clone()).collect());
+        assert_eq!(found, ["src/a.rs"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
