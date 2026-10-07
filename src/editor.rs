@@ -352,7 +352,7 @@ pub enum EditorEvent {
         from: (usize, usize),
     },
     /// A quick fix was picked: the workspace works out its edits and applies them.
-    CodeAction(lsp_types::CodeActionOrCommand),
+    CodeAction(Box<lsp_types::CodeActionOrCommand>),
     /// Show where the symbol at `position` is used.
     FindReferences {
         position: lsp_types::Position,
@@ -456,6 +456,7 @@ pub struct Editor {
     /// Markdown shown as it reads (⌘⇧V) instead of its source.
     pub reading: bool,
     /// The parsed document for the preview, and the revision it's of.
+    #[allow(clippy::type_complexity)]
     markdown: Option<(u64, Rc<Vec<(usize, crate::markdown_view::Block)>>)>,
     /// The source line the preview last scrolled to, following the other side.
     followed_line: Option<usize>,
@@ -465,6 +466,7 @@ pub struct Editor {
     /// The buffer revision and byte range `spans` cover.
     spans_for: Option<(u64, Range<usize>)>,
     /// `problems()` for a (diagnostics version, buffer revision).
+    #[allow(clippy::type_complexity)]
     problems_cache: std::cell::RefCell<Option<((u64, u64), std::rc::Rc<Vec<intel::Problem>>)>>,
     pinned: std::cell::RefCell<intel::Pinned>,
     /// The main cursor: the one the view follows. Any others are in `extra`.
@@ -1082,7 +1084,7 @@ impl Editor {
         let version = self.buffer.version();
         if revision != revision_now {
             let moved = match self.buffer.edits_since(revision) {
-                Some(edits) => edits.fold(Some(range), |r, e| r.and_then(|r| intel::map_range(r, e))),
+                Some(mut edits) => edits.try_fold(range, intel::map_range),
                 // After an undo: where it was at that version; not known, the whole file.
                 None => self.find_scope_at.iter().rev().find(|(v, _)| *v == version).map(|(_, r)| r.clone()),
             };
@@ -4106,7 +4108,7 @@ mod tests {
     /// An image pasted in Markdown is saved next to the file and linked where it goes.
     #[gpui::test]
     fn an_image_pasted_in_markdown_is_saved_and_linked(cx: &mut TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-paste-image-{}", std::process::id()));
+        let dir = crate::tools::test_dir("paste-image");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         cx.update(|cx| {
@@ -4178,7 +4180,7 @@ mod tests {
             cx.set_global(Theme::oled());
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });
-        let dir = std::env::temp_dir().join(format!("null-missing-{}", std::process::id()));
+        let dir = crate::tools::test_dir("missing");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sub/a.rs");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -4207,7 +4209,7 @@ mod tests {
             cx.set_global(Theme::oled());
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });
-        let dir = std::env::temp_dir().join(format!("null-own-save-{}", std::process::id()));
+        let dir = crate::tools::test_dir("own-save");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.txt");
         std::fs::write(&path, "one\n").unwrap();
@@ -4235,7 +4237,7 @@ mod tests {
             cx.set_global(Theme::oled());
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });
-        let dir = std::env::temp_dir().join(format!("null-toc-{}", std::process::id()));
+        let dir = crate::tools::test_dir("toc");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("guide.md");
         std::fs::write(&path, "# Guide\n\n\n## Install\n## Use\n").unwrap();
@@ -4471,7 +4473,7 @@ mod tests {
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
             crate::keymap::register(crate::keymap::Keymap::Null, cx);
         });
-        let dir = std::env::temp_dir().join(format!("null-markdown-marks-{}", std::process::id()));
+        let dir = crate::tools::test_dir("markdown-marks");
         std::fs::create_dir_all(&dir).unwrap();
         let notes = dir.join("notes.md");
         std::fs::write(&notes, "a big word\n").unwrap();
@@ -4514,7 +4516,7 @@ mod tests {
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
             crate::keymap::register(crate::keymap::Keymap::Null, cx);
         });
-        let dir = std::env::temp_dir().join(format!("null-spelling-{}", std::process::id()));
+        let dir = crate::tools::test_dir("spelling");
         std::fs::create_dir_all(&dir).unwrap();
         let notes = dir.join("notes.md");
         std::fs::write(&notes, "I saw teh cat `teh` there.\n```\nteh\n```\n").unwrap();

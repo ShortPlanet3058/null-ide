@@ -600,7 +600,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn finds_the_committed_text_through_a_link() {
-        let dir = std::env::temp_dir().join(format!("null-git-{}", std::process::id()));
+        let dir = crate::tools::test_dir("git");
         let _ = std::fs::remove_dir_all(&dir);
         let repo = dir.join("repo");
         std::fs::create_dir_all(repo.join("src")).unwrap();
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_rename_is_a_new_file_and_a_deleted_one() {
-        let repo = std::env::temp_dir().join(format!("null-git-rename-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-rename");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
         let run = |args: &[&str]| git(&repo, args);
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn changes_come_along_to_another_branch() {
-        let repo = std::env::temp_dir().join(format!("null-git-carry-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-carry");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
         if run(&repo, &["init", "-q", "-b", "main"]).is_err() {
@@ -698,7 +698,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_link_to_lines_names_the_commit() {
-        let repo = std::env::temp_dir().join(format!("null-git-link-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-link");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(repo.join("src")).unwrap();
         if run(&repo, &["init", "-q"]).is_err() {
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_file_s_history_follows_renames() {
-        let repo = std::env::temp_dir().join(format!("null-git-history-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-history");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(repo.join("src")).unwrap();
         if run(&repo, &["init", "-q"]).is_err() {
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn pulls_and_counts_what_to_push_and_pull() {
-        let dir = std::env::temp_dir().join(format!("null-git-pull-{}", std::process::id()));
+        let dir = crate::tools::test_dir("git-pull");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         if run(&dir, &["init", "-q", "--bare", "-b", "main", "origin.git"]).is_err() {
@@ -790,7 +790,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn commits_all_but_the_files_left_out() {
-        let repo = std::env::temp_dir().join(format!("null-git-partial-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-partial");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
         if run(&repo, &["init", "-q"]).is_err() {
@@ -823,7 +823,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn reverting_touches_only_what_it_names() {
-        let repo = std::env::temp_dir().join(format!("null-git-literal-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-literal");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(repo.join("app/[id]")).unwrap();
         std::fs::create_dir_all(repo.join("app/d")).unwrap();
@@ -868,7 +868,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn changes_set_aside_come_back() {
-        let repo = std::env::temp_dir().join(format!("null-git-set-aside-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-set-aside");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
         if run(&repo, &["init", "-q"]).is_err() {
@@ -896,7 +896,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn the_last_commit_comes_undone() {
-        let repo = std::env::temp_dir().join(format!("null-git-undo-commit-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-undo-commit");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
         if run(&repo, &["init", "-q"]).is_err() {
@@ -924,7 +924,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn status_commit_and_revert() {
-        let repo = std::env::temp_dir().join(format!("null-git-status-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-status");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(repo.join("src")).unwrap();
         if run(&repo, &["init", "-q"]).is_err() {
@@ -960,7 +960,7 @@ mod tests {
 
     #[test]
     fn lists_switches_and_creates_branches() {
-        let repo = std::env::temp_dir().join(format!("null-git-branches-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-branches");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
         if run(&repo, &["init", "-q", "-b", "main"]).is_err() {
@@ -989,7 +989,7 @@ mod tests {
 
     #[test]
     fn says_who_changed_a_line_and_when() {
-        let repo = std::env::temp_dir().join(format!("null-git-blame-{}", std::process::id()));
+        let repo = crate::tools::test_dir("git-blame");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
         if run(&repo, &["init", "-q"]).is_err() {

@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn finds_what_changed_and_puts_it_back() {
-        let root = std::env::temp_dir().join(format!("null-task-{}", std::process::id()));
+        let root = crate::tools::test_dir("task");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.rs"), "one\ntwo\n").unwrap();

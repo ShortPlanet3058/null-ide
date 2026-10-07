@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn tells_text_from_the_rest() {
-        let dir = std::env::temp_dir().join(format!("null-preview-{}", std::process::id()));
+        let dir = crate::tools::test_dir("preview");
         std::fs::create_dir_all(&dir).unwrap();
         let open = |name: &str, bytes: &[u8]| {
             let path = dir.join(name);

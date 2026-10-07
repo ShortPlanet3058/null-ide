@@ -841,7 +841,7 @@ mod tests {
             cx.set_global(crate::theme::Theme::oled());
             cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });
-        let dir = std::env::temp_dir().join(format!("null-image-hover-{}", std::process::id()));
+        let dir = crate::tools::test_dir("image-hover");
         std::fs::create_dir_all(dir.join("img")).unwrap();
         for f in ["shot.png", "img/logo.svg", "img/hero.jpg"] {
             std::fs::write(dir.join(f), "x").unwrap();

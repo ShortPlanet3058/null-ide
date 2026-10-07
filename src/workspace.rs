@@ -969,7 +969,7 @@ impl Workspace {
         self.reindex(&visible, cx);
         for tab in &self.tabs {
             let Some(path) = tab.editor.read(cx).path().map(Path::to_path_buf) else { continue };
-            if visible.iter().any(|v| *v == path) {
+            if visible.contains(&path) {
                 tab.editor.update(cx, |editor, cx| editor.reload_from_disk(cx));
             } else if visible.iter().any(|v| path.starts_with(v)) {
                 // Its folder changed (deleted, renamed): only whether the file is still there.
@@ -2303,7 +2303,7 @@ impl Workspace {
                 }
                 EditorEvent::CodeAction(fix) => {
                     let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
-                    this.run_fix(path, fix.clone(), cx);
+                    this.run_fix(path, (**fix).clone(), cx);
                 }
                 EditorEvent::FindReferences { position, name } => {
                     let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
@@ -5804,7 +5804,7 @@ fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, d) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(d);
@@ -6693,7 +6693,7 @@ mod tests {
 
     #[test]
     fn a_moved_file_is_found_by_its_text() {
-        let dir = std::env::temp_dir().join(format!("null-moves-{}", std::process::id()));
+        let dir = crate::tools::test_dir("moves");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("new")).unwrap();
         let print = crate::editor::fingerprint("fn a() {}\n");
@@ -6716,7 +6716,7 @@ mod tests {
 
     #[gpui::test]
     fn replacing_across_files_keeps_each_file_s_encoding(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-replace-enc-{}", std::process::id()));
+        let dir = crate::tools::test_dir("replace-enc");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("latin.txt"), b"caf\xe9 noir\n").unwrap();
@@ -6747,7 +6747,7 @@ mod tests {
     #[gpui::test]
     #[cfg(unix)]
     fn git_lists_do_what_their_rows_say(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-git-lists-{}", std::process::id()));
+        let dir = crate::tools::test_dir("git-lists");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -6827,7 +6827,7 @@ mod tests {
     /// a command. Each row does what it says.
     #[gpui::test]
     fn palette_rows_go_where_they_say(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-palette-flows-{}", std::process::id()));
+        let dir = crate::tools::test_dir("palette-flows");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/lib.rs"), "fn alpha() {}\n\nfn beta() {\n    alpha();\n}\n").unwrap();
@@ -6905,7 +6905,7 @@ mod tests {
     /// project search's result, ⌘W and ⌘⇧T close and bring back a tab.
     #[gpui::test]
     fn find_search_and_tabs_by_keystroke(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-find-flows-{}", std::process::id()));
+        let dir = crate::tools::test_dir("find-flows");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/a.rs"), "let alpha = 1;\nlet beta = alpha + alpha;\n").unwrap();
@@ -6976,7 +6976,7 @@ mod tests {
     /// there, and its tab follows.
     #[gpui::test]
     fn dragging_a_file_onto_a_folder_moves_it(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-tree-drag-{}", std::process::id()));
+        let dir = crate::tools::test_dir("tree-drag");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("notes.txt"), "hello\n").unwrap();
@@ -7024,7 +7024,7 @@ mod tests {
     /// Escape still closes it.
     #[gpui::test]
     fn clicks_in_the_palette_and_settings_keep_the_keyboard(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-overlay-clicks-{}", std::process::id()));
+        let dir = crate::tools::test_dir("overlay-clicks");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         cx.update(|cx| {
@@ -7100,7 +7100,7 @@ mod tests {
     /// Compare with Clipboard, how the file differs from the clipboard.
     #[gpui::test]
     fn comparing_with_saved_and_with_the_clipboard(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-compare-{}", std::process::id()));
+        let dir = crate::tools::test_dir("compare");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
@@ -7142,7 +7142,7 @@ mod tests {
     /// Markdown wraps while code doesn't; ⌥Z in each switches its own kind.
     #[gpui::test]
     fn prose_wraps_on_its_own_setting(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-prose-wrap-{}", std::process::id()));
+        let dir = crate::tools::test_dir("prose-wrap");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let long = "word ".repeat(200);
@@ -7185,7 +7185,7 @@ mod tests {
     #[test]
     fn tests_use_folders_of_their_own() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let pattern = regex::Regex::new(r#"temp_dir\(\)\.join\(format!\("(null-[A-Za-z0-9-]+)"#).unwrap();
+        let pattern = regex::Regex::new(r#"test_dir\(&?(?:format!\()?"([A-Za-z0-9{}-]+)""#).unwrap();
         let mut names: Vec<String> = Vec::new();
         for entry in
             ignore::Walk::new(&src).filter_map(Result::ok).filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
@@ -7203,7 +7203,7 @@ mod tests {
     /// editor's, so typing goes on where it was.
     #[gpui::test]
     fn after_a_tab_s_menu_typing_goes_on_in_the_editor(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-tab-menu-typing-{}", std::process::id()));
+        let dir = crate::tools::test_dir("tab-menu-typing");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "a\n").unwrap();
@@ -7243,7 +7243,7 @@ mod tests {
     #[gpui::test]
     #[cfg(unix)]
     fn a_files_changes_are_discarded(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-discard-file-{}", std::process::id()));
+        let dir = crate::tools::test_dir("discard-file");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
@@ -7284,7 +7284,7 @@ mod tests {
     #[gpui::test]
     #[cfg(unix)]
     fn an_undone_commit_s_message_waits_in_commit(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-undo-commit-flow-{}", std::process::id()));
+        let dir = crate::tools::test_dir("undo-commit-flow");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -7331,7 +7331,7 @@ mod tests {
     /// No git: a file's history is what Null wrote over. ↵ on it compares, change by change.
     #[gpui::test]
     fn history_without_git_keeps_what_saves_replaced(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-history-no-git-{}", std::process::id()));
+        let dir = crate::tools::test_dir("history-no-git");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("notes.txt");
@@ -7368,7 +7368,7 @@ mod tests {
     /// Copy two things, then Paste from History and ↵ on the older: pasted, as it was copied.
     #[gpui::test]
     fn an_older_copy_pastes_from_the_history(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-clipboard-history-{}", std::process::id()));
+        let dir = crate::tools::test_dir("clipboard-history");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.txt");
@@ -7397,7 +7397,7 @@ mod tests {
     /// auto-save leaves it be, and Cancel writes nothing.
     #[gpui::test]
     fn saving_over_a_file_changed_on_disk_asks(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-save-conflict-{}", std::process::id()));
+        let dir = crate::tools::test_dir("save-conflict");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("f.txt");
@@ -7443,7 +7443,7 @@ mod tests {
     #[gpui::test]
     #[cfg(unix)]
     fn switching_offers_to_bring_changes_along(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-carry-changes-{}", std::process::id()));
+        let dir = crate::tools::test_dir("carry-changes");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -7494,7 +7494,7 @@ mod tests {
     #[gpui::test]
     #[cfg(unix)]
     fn branches_switch_and_start_from_the_list(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-branch-list-{}", std::process::id()));
+        let dir = crate::tools::test_dir("branch-list");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -7540,7 +7540,7 @@ mod tests {
 
     #[gpui::test]
     fn two_sides_open_move_and_close_back_to_one(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-split-{}", std::process::id()));
+        let dir = crate::tools::test_dir("split");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for name in ["a.txt", "b.txt", "c.txt"] {
@@ -7599,7 +7599,7 @@ mod tests {
 
     #[test]
     fn the_shell_command_is_valid_and_hands_over_absolute_paths() {
-        let dir = std::env::temp_dir().join(format!("null-cmd-{}", std::process::id()));
+        let dir = crate::tools::test_dir("cmd");
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("log");
         // A stand-in for Null that writes down what it was given.
@@ -7618,7 +7618,7 @@ mod tests {
 
     #[gpui::test]
     fn back_and_forward_retrace_the_jumps(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-back-{}", std::process::id()));
+        let dir = crate::tools::test_dir("back");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let lines: String = (1..=40).map(|i| format!("line {i}\n")).collect();
@@ -7670,7 +7670,7 @@ mod tests {
 
     #[gpui::test]
     fn files_save_by_themselves_when_asked(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-autosave-{}", std::process::id()));
+        let dir = crate::tools::test_dir("autosave");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "a\n").unwrap();
@@ -7709,7 +7709,7 @@ mod tests {
 
     #[gpui::test]
     fn focus_mode_comes_and_goes_with_its_key(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-focus-{}", std::process::id()));
+        let dir = crate::tools::test_dir("focus");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "a\n").unwrap();
@@ -7736,7 +7736,7 @@ mod tests {
 
     #[gpui::test]
     fn f8_walks_the_problems_then_the_next_file(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-f8-{}", std::process::id()));
+        let dir = crate::tools::test_dir("f8");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let lines: String = (1..=10).map(|i| format!("line {i}\n")).collect();
@@ -7788,7 +7788,7 @@ mod tests {
     /// project copied next to it first.
     #[gpui::test]
     fn files_dropped_on_markdown_become_links(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-md-drop-{}", std::process::id()));
+        let dir = crate::tools::test_dir("md-drop");
         let _ = std::fs::remove_dir_all(&dir);
         let (project, outside) = (dir.join("project"), dir.join("outside"));
         std::fs::create_dir_all(project.join("docs")).unwrap();
@@ -7818,7 +7818,7 @@ mod tests {
     /// Line spacing from the settings reaches the open files.
     #[gpui::test]
     fn line_spacing_applies_to_open_files(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-line-spacing-{}", std::process::id()));
+        let dir = crate::tools::test_dir("line-spacing");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
@@ -7859,7 +7859,7 @@ mod tests {
     /// ⌘⇧F with nothing selected starts from the latest search made in a file.
     #[gpui::test]
     fn project_search_starts_from_the_latest_search(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-search-shared-{}", std::process::id()));
+        let dir = crate::tools::test_dir("search-shared");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "alpha beta\n").unwrap();
@@ -7883,7 +7883,7 @@ mod tests {
     /// Go to Last Edit opens the file last edited, at the edit; Back comes back.
     #[gpui::test]
     fn go_to_last_edit_goes_back_to_the_typing(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-last-edit-{}", std::process::id()));
+        let dir = crate::tools::test_dir("last-edit");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
@@ -7923,7 +7923,7 @@ mod tests {
     /// Compare with File…: the files' list, a file picked, the open one against it.
     #[gpui::test]
     fn a_file_is_compared_with_another(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-compare-file-{}", std::process::id()));
+        let dir = crate::tools::test_dir("compare-file");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("new.txt"), "one\nTWO\nthree\n").unwrap();
@@ -8038,7 +8038,7 @@ mod tests {
 
     #[gpui::test]
     fn a_tab_s_menu_closes_to_the_right_and_copies_its_path(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-tab-menu-{}", std::process::id()));
+        let dir = crate::tools::test_dir("tab-menu");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         for name in ["a.txt", "b.txt", "src/c.txt"] {
@@ -8084,7 +8084,7 @@ mod tests {
 
     #[gpui::test]
     fn renaming_a_file_without_a_server_just_renames_it(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-rename-{}", std::process::id()));
+        let dir = crate::tools::test_dir("rename");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.txt"), "hello\n").unwrap();
@@ -8132,7 +8132,7 @@ mod tests {
 
     #[gpui::test]
     fn unsaved_work_comes_back_after_a_crash(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-backup-{}", std::process::id()));
+        let dir = crate::tools::test_dir("backup");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
@@ -8189,7 +8189,7 @@ mod tests {
     /// doesn't, and once fixed the mark goes.
     #[gpui::test]
     fn files_with_errors_stand_out(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-tree-errors-{}", std::process::id()));
+        let dir = crate::tools::test_dir("tree-errors");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
@@ -8227,7 +8227,7 @@ mod tests {
     /// A file dragged from the files into a Markdown file: linked where it's dropped.
     #[gpui::test]
     fn a_file_dragged_from_the_files_is_linked(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-tree-drop-link-{}", std::process::id()));
+        let dir = crate::tools::test_dir("tree-drop-link");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("shot.png"), "x").unwrap();
@@ -8277,7 +8277,7 @@ mod tests {
     /// them, and the guide's own, still point where they should; the open README too.
     #[gpui::test]
     fn markdown_links_follow_renames(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-markdown-links-{}", std::process::id()));
+        let dir = crate::tools::test_dir("markdown-links");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("img")).unwrap();
         std::fs::create_dir_all(dir.join("docs")).unwrap();
@@ -8313,7 +8313,7 @@ mod tests {
 
     #[gpui::test]
     fn a_file_moved_to_a_folder_keeps_its_tab(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-move-tab-{}", std::process::id()));
+        let dir = crate::tools::test_dir("move-tab");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::write(dir.join("notes.md"), "hello\n").unwrap();
@@ -8340,7 +8340,7 @@ mod tests {
     #[gpui::test]
     fn quitting_asks_every_window_with_unsaved_changes(cx: &mut gpui::TestAppContext) {
         let make = |name: &str| {
-            let dir = std::env::temp_dir().join(format!("null-quit-{name}-{}", std::process::id()));
+            let dir = crate::tools::test_dir(&format!("quit-{name}"));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("a.txt"), "a\n").unwrap();
@@ -8384,7 +8384,7 @@ mod tests {
 
     #[gpui::test]
     fn a_file_open_on_both_sides_stays_the_same_on_both(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-twins-{}", std::process::id()));
+        let dir = crate::tools::test_dir("twins");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();

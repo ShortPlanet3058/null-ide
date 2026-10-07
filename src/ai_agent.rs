@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn the_loop_runs_tools_until_the_model_answers() {
-        let root = std::env::temp_dir().join(format!("null-agent-loop-{}", std::process::id()));
+        let root = crate::tools::test_dir("agent-loop");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.rs"), "fn total() {}\n").unwrap();
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn tools_work_inside_the_project_and_nowhere_else() {
-        let root = std::env::temp_dir().join(format!("null-agent-{}", std::process::id()));
+        let root = crate::tools::test_dir("agent");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.rs"), "fn total() {}\nfn other() {}\n").unwrap();

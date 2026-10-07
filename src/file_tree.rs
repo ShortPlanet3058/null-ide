@@ -1433,7 +1433,7 @@ mod tests {
     /// letter again, to the next one with it.
     #[gpui::test]
     fn typing_goes_to_a_name(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-tree-typing-{}", std::process::id()));
+        let dir = crate::tools::test_dir("tree-typing");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         for f in ["alpha.rs", "beta.md", "Build.txt"] {
@@ -1495,7 +1495,7 @@ mod tests {
 
     #[test]
     fn lists_folders_first_and_dims_ignored_files() {
-        let dir = std::env::temp_dir().join(format!("null-tree-test-{}", std::process::id()));
+        let dir = crate::tools::test_dir("tree-test");
         let _ = std::fs::remove_dir_all(&dir);
         for sub in [".git", "src", "target"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();

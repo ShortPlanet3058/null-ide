@@ -385,6 +385,7 @@ impl Editor {
 
     /// Everything the AI gets: the file around the caret, what the project defines, the
     /// files this one includes or imports, and the other open tabs.
+    #[allow(clippy::too_many_arguments)]
     fn suggestion_request(
         &self,
         ai_settings: ai::AiSettings,

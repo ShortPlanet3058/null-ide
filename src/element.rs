@@ -302,6 +302,7 @@ pub struct Prepaint {
     line_guide: Option<Bounds<Pixels>>,
     /// The first lines of the blocks the view is inside, pinned at the top: the band
     /// behind them, and each one's text and line number.
+    #[allow(clippy::type_complexity)]
     sticky: Option<(Bounds<Pixels>, Vec<(ShapedLine, Point<Pixels>, ShapedLine, Point<Pixels>)>)>,
     numbers: Vec<(ShapedLine, Point<Pixels>)>,
     /// Fold chevrons: where, and whether folded (pointing right) or open (down).

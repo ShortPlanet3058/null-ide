@@ -925,7 +925,7 @@ mod tests {
 
     #[test]
     fn the_files_field_picks_which_files_are_searched() {
-        let root = std::env::temp_dir().join(format!("null-search-files-{}", std::process::id()));
+        let root = crate::tools::test_dir("search-files");
         for file in ["src/main.rs", "src/ui/view.rs", "src/notes.md", "tests/it.rs", "docs/main.rs"] {
             let path = root.join(file);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -988,7 +988,7 @@ mod tests {
     /// Find in Folder: only that folder's files are searched.
     #[gpui::test]
     fn finds_in_one_folder(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-find-in-folder-{}", std::process::id()));
+        let dir = crate::tools::test_dir("find-in-folder");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("lib/src")).unwrap();
@@ -1021,7 +1021,7 @@ mod tests {
 
     #[test]
     fn finds_the_notes_left_in_code() {
-        let dir = std::env::temp_dir().join(format!("null-search-todos-{}", std::process::id()));
+        let dir = crate::tools::test_dir("search-todos");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.rs"), "// TODO: split\nfn a() {} // FIXME later\n// TODOS, todo, XXXL\n").unwrap();
@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn searches_files_in_other_encodings() {
-        let dir = std::env::temp_dir().join(format!("null-search-latin-{}", std::process::id()));
+        let dir = crate::tools::test_dir("search-latin");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("old.txt"), b"caf\xe9 cr\xe8me\n").unwrap();
@@ -1056,7 +1056,7 @@ mod tests {
 
     #[test]
     fn finds_matches_across_files_and_skips_ignored_ones() {
-        let dir = std::env::temp_dir().join(format!("null-search-test-{}", std::process::id()));
+        let dir = crate::tools::test_dir("search-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::create_dir_all(dir.join("src")).unwrap();

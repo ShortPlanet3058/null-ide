@@ -5,6 +5,28 @@
 use std::path::PathBuf;
 
 /// Where Null keeps what it installs itself (language servers), never on the system:
+/// A folder for tests, `name` inside one of this test run's own. All runs
+/// share one parent, where the folders of runs over an hour old are swept away, so a test
+/// that fails before cleaning up leaves nothing behind for long.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn test_dir(name: &str) -> PathBuf {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    let runs = std::env::temp_dir().join("null-tests");
+    let this_run = runs.join(std::process::id().to_string());
+    SWEPT.call_once(|| {
+        // An old run's folder with this run's number holds nothing of this run's.
+        let _ = std::fs::remove_dir_all(&this_run);
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for entry in std::fs::read_dir(&runs).into_iter().flatten().flatten() {
+            let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < hour_ago);
+            if old {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    });
+    this_run.join(name)
+}
+
 /// `~/Library/Application Support/Null` on macOS, `$XDG_DATA_HOME/null` (or
 /// `~/.local/share/null`) on Linux, `%LOCALAPPDATA%\Null` on Windows.
 pub fn data_dir() -> Option<PathBuf> {
@@ -14,7 +36,7 @@ pub fn data_dir() -> Option<PathBuf> {
     }
     // Tests never touch the real folder (sessions, installed servers).
     if cfg!(test) {
-        return Some(std::env::temp_dir().join(format!("null-test-data-{}", std::process::id())));
+        return Some(crate::tools::test_dir("test-data"));
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos") {
