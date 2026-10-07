@@ -839,6 +839,9 @@ impl Element for EditorElement {
                     RowLayout { x: char_width * row.indent as f32, row, text, shaped, gaps }
                 })
                 .collect();
+            // A tag's name with the caret in it, and its pair's (asked for before the rows
+            // are borrowed below).
+            let tag_pair = editor.tag_pair_at_caret();
             let wrap = &editor.wrap;
             let pos = |line: usize, col: usize| {
                 position(&row_layouts, visible.start, wrap, &editor.buffer, char_width, line, col)
@@ -1193,14 +1196,18 @@ impl Element for EditorElement {
                     }
                 }
             }
-            // The bracket next to the caret and its partner get a thin outline.
-            let bracket_boxes: Vec<Bounds<Pixels>> = editor
+            // The bracket next to the caret and its partner get a thin outline; so do a tag's
+            // name with the caret in it and its pair's (HTML, JSX).
+            let mut bracket_boxes: Vec<Bounds<Pixels>> = editor
                 .matching_brackets()
                 .map(|(a, b)| [a, b])
                 .into_iter()
                 .flatten()
                 .flat_map(|offset| range_rects(offset..offset + 1))
                 .collect();
+            if let Some(names) = tag_pair {
+                bracket_boxes.extend(names.into_iter().flat_map(&range_rects));
+            }
             // A thin line under a range of text.
             let underline = |range: Range<usize>, at: f32| -> Vec<Bounds<Pixels>> {
                 range_rects(range)
