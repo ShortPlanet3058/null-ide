@@ -70,6 +70,9 @@ pub enum TextInputEvent {
     Changed,
 }
 
+/// Room between the caret and the hint shown in an empty field.
+const PLACEHOLDER_GAP: gpui::Pixels = px(4.);
+
 /// A single-line text field, used by the command palette.
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -565,7 +568,10 @@ impl Element for TextInputElement {
         if let Some(selection) = prepaint.selection.take() {
             window.paint_quad(selection);
         }
-        prepaint.line.paint(bounds.origin, window.line_height(), window, cx).ok();
+        // The hint stands clear of the caret before it, not under it.
+        let hint = self.input.read(cx).content.is_empty();
+        let origin = if hint { bounds.origin + point(PLACEHOLDER_GAP, px(0.)) } else { bounds.origin };
+        prepaint.line.paint(origin, window.line_height(), window, cx).ok();
         if focus_handle.is_focused(window)
             && let Some(caret) = prepaint.caret.take()
         {
