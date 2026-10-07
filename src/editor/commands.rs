@@ -1083,6 +1083,22 @@ mod editor_tests {
         // Already out: left as it is.
         let (text, _) = typed(cx, "a.py", "if a:\n    g()\nelse", &[":"]);
         assert_eq!(text, "if a:\n    g()\nelse:");
+        // Enter between a tag and its closing one opens it up, as between braces.
+        let at = |cx: &mut TestAppContext, file: &str, text: &str, col: usize| {
+            let (text, file) = (text.to_string(), PathBuf::from(file));
+            let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(file), cx));
+            e.update_in(cx, |e, window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(e, cx));
+                e.selection = Selection::caret(col);
+            });
+            cx.simulate_keystrokes("enter");
+            cx.simulate_input("x");
+            e.read_with(cx, |e, _| e.buffer.to_string())
+        };
+        assert_eq!(at(cx, "a.html", "  <div class=\"a\"></div>", 17), "  <div class=\"a\">\n    x\n  </div>");
+        assert_eq!(at(cx, "a.jsx", "<ul></ul>", 4), "<ul>\n    x\n</ul>");
+        // Not after a closing or self-closing tag.
+        assert_eq!(at(cx, "a.html", "<p></p></div>", 7), "<p></p>\nx</div>");
     }
 
     /// Enter in a doc comment carries it on, splitting a plain comment too; code that looks

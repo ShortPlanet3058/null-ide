@@ -1865,7 +1865,15 @@ impl Editor {
             let after = this.buffer.char_at(range.end);
             // Python blocks open with a colon.
             let python_block = before == Some(':') && this.language_name() == "Python";
-            let opens = matches!(before, Some('{' | '(' | '[')) || python_block;
+            // Between a tag and its closing one (`<div>|</div>`), as between braces.
+            let between_tags = matches!(this.language_name(), "HTML" | "JavaScript" | "TSX")
+                && before == Some('>')
+                && line_text.chars().skip(col).collect::<String>().trim_start().starts_with("</")
+                && {
+                    let head: String = line_text.chars().take(col).collect();
+                    head.rfind('<').is_some_and(|lt| !head[lt..].starts_with("</") && !head.ends_with("/>"))
+                };
+            let opens = matches!(before, Some('{' | '(' | '[')) || python_block || between_tags;
             // Python: after `return`, `pass`, `break`, `continue` or `raise`, the block is over.
             let ends_block = this.language_name() == "Python" && {
                 let word =
@@ -1882,7 +1890,11 @@ impl Editor {
             // The file's own line break: "\r\n" in a Windows file.
             let nl = this.style.line_ending.text();
             if opens
-                && matches!((before, after), (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']')))
+                && (between_tags
+                    || matches!(
+                        (before, after),
+                        (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']'))
+                    ))
             {
                 let text = format!("{nl}{inner}{nl}{indent}");
                 let caret = range.start + nl.chars().count() + inner.chars().count();

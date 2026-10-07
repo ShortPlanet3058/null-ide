@@ -72,7 +72,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 - Multiple cursors (⌘D, ⌘⇧-click), a box with ⌥⇧-drag, cursors at line ends (⌥⇧I);
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
 - In HTML and JSX, typing the `>` of a tag adds its closing tag, `</` finishes the one
-  still open, and renaming a tag renames its pair. ⇥ after an Emmet abbreviation writes its
+  still open, renaming a tag renames its pair, and Enter between a tag and its closing one
+  opens it onto lines of their own. ⇥ after an Emmet abbreviation writes its
   tags out: `ul>li.item*3`, `.card>h2{Title}+p`, `a`, `input[type=email]`; in HTML, and in
   JSX inside an element (with `className`, `htmlFor`, `<img />`). `<` typed over selected
   text wraps it in a tag, its name typed in both ends at once (whole lines get it on lines
