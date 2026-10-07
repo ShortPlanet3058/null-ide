@@ -572,9 +572,7 @@ impl Editor {
             this.update(cx, |this, cx| {
                 let (none, many) = match target {
                     Target::Implementation => ("No implementation found here.", "implementations"),
-                    Target::ParentModule => {
-                        ("No parent module: this is the crate's root.", "modules declaring this file")
-                    }
+                    Target::ParentModule => ("No parent module found here.", "modules declaring this file"),
                     Target::CargoToml => ("No Cargo.toml found for this file.", "Cargo.toml files"),
                     _ => ("No type definition found here.", "types"),
                 };
@@ -661,8 +659,6 @@ impl Editor {
         }));
     }
 
-    /// The definition of the name at `offset`, shown in the info card where the caret is:
-    /// its file and line, then its first lines. Nothing moves.
     /// Open Documentation (Rust): the web page of what's at `offset`, in the browser.
     pub fn open_docs_at(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.language_name() != "Rust" {
@@ -720,6 +716,8 @@ impl Editor {
         }));
     }
 
+    /// The definition of the name at `offset`, shown in the info card where the caret is:
+    /// its file and line, then its first lines. Nothing moves.
     pub fn peek_definition_at(&mut self, offset: usize, cx: &mut Context<Self>) {
         if let Some(message) = self.not_ready_message(cx) {
             self.show_notice(offset, message, cx);

@@ -15,10 +15,12 @@ pub struct Basic {
     file_names: &'static [&'static str],
     pub line_comment: &'static [&'static str],
     pub block_comment: Option<(&'static str, &'static str)>,
-    /// Quotes that open a string ending on the same line, and a quote run that opens one
-    /// that can span lines (`"""`).
+    /// Quotes that open a string ending on the same line, and the marks of one that can
+    /// span lines (`"""`, Lua's `[[ ]]`).
     quotes: &'static [u8],
-    long_string: Option<&'static str>,
+    long_string: Option<(&'static str, &'static str)>,
+    /// A backslash escapes the next character in a string (not in SQL).
+    escapes: bool,
     keywords: &'static [&'static str],
     /// SQL and Dockerfiles: keywords in any case.
     any_case: bool,
@@ -561,7 +563,8 @@ static BASICS: &[Basic] = &[
         line_comment: C_COMMENTS,
         block_comment: Some(("/*", "*/")),
         quotes: b"\"",
-        long_string: Some("\"\"\""),
+        long_string: Some(("\"\"\"", "\"\"\"")),
+        escapes: true,
         keywords: SWIFT,
         any_case: false,
         capital_types: true,
@@ -573,7 +576,8 @@ static BASICS: &[Basic] = &[
         line_comment: C_COMMENTS,
         block_comment: Some(("/*", "*/")),
         quotes: b"\"'",
-        long_string: Some("\"\"\""),
+        long_string: Some(("\"\"\"", "\"\"\"")),
+        escapes: true,
         keywords: KOTLIN,
         any_case: false,
         capital_types: true,
@@ -585,7 +589,8 @@ static BASICS: &[Basic] = &[
         line_comment: C_COMMENTS,
         block_comment: Some(("/*", "*/")),
         quotes: b"\"'",
-        long_string: Some("\"\"\""),
+        long_string: Some(("\"\"\"", "\"\"\"")),
+        escapes: true,
         keywords: JAVA,
         any_case: false,
         capital_types: true,
@@ -597,7 +602,8 @@ static BASICS: &[Basic] = &[
         line_comment: C_COMMENTS,
         block_comment: Some(("/*", "*/")),
         quotes: b"\"'",
-        long_string: Some("\"\"\""),
+        long_string: Some(("\"\"\"", "\"\"\"")),
+        escapes: true,
         keywords: CSHARP,
         any_case: false,
         capital_types: true,
@@ -609,7 +615,8 @@ static BASICS: &[Basic] = &[
         line_comment: C_COMMENTS,
         block_comment: Some(("/*", "*/")),
         quotes: b"\"'",
-        long_string: Some("'''"),
+        long_string: Some(("'''", "'''")),
+        escapes: true,
         keywords: DART,
         any_case: false,
         capital_types: true,
@@ -622,6 +629,7 @@ static BASICS: &[Basic] = &[
         block_comment: Some(("=begin", "=end")),
         quotes: b"\"'",
         long_string: None,
+        escapes: true,
         keywords: RUBY,
         any_case: false,
         capital_types: true,
@@ -634,6 +642,7 @@ static BASICS: &[Basic] = &[
         block_comment: Some(("/*", "*/")),
         quotes: b"\"'",
         long_string: None,
+        escapes: true,
         keywords: PHP,
         any_case: false,
         capital_types: true,
@@ -645,7 +654,8 @@ static BASICS: &[Basic] = &[
         line_comment: &["--"],
         block_comment: Some(("--[[", "]]")),
         quotes: b"\"'",
-        long_string: None,
+        long_string: Some(("[[", "]]")),
+        escapes: true,
         keywords: LUA,
         any_case: false,
         capital_types: false,
@@ -658,6 +668,7 @@ static BASICS: &[Basic] = &[
         block_comment: Some(("/*", "*/")),
         quotes: b"'\"",
         long_string: None,
+        escapes: false,
         keywords: SQL,
         any_case: true,
         capital_types: false,
@@ -670,6 +681,7 @@ static BASICS: &[Basic] = &[
         block_comment: None,
         quotes: b"\"'",
         long_string: None,
+        escapes: true,
         keywords: DOCKERFILE,
         any_case: true,
         capital_types: false,
@@ -682,6 +694,7 @@ static BASICS: &[Basic] = &[
         block_comment: None,
         quotes: b"\"'",
         long_string: None,
+        escapes: true,
         keywords: &["ifeq", "ifneq", "ifdef", "ifndef", "else", "endif", "include", "define", "endef", "export"],
         any_case: false,
         capital_types: false,
@@ -692,8 +705,9 @@ static BASICS: &[Basic] = &[
         file_names: &[],
         line_comment: &[],
         block_comment: Some(("<!--", "-->")),
-        quotes: b"\"'",
+        quotes: b"\"",
         long_string: None,
+        escapes: true,
         keywords: &[],
         any_case: false,
         capital_types: false,
@@ -727,8 +741,11 @@ pub fn spans(text: &[u8], wanted: Range<usize>, basic: &Basic) -> Vec<Span> {
     // The bytes a comment or a string can start with: above the part asked for, the others
     // are passed over at once.
     let mut opens = [false; 256];
-    let markers =
-        basic.line_comment.iter().chain(basic.block_comment.iter().map(|(open, _)| open)).chain(&basic.long_string);
+    let markers = basic
+        .line_comment
+        .iter()
+        .chain(basic.block_comment.iter().map(|(open, _)| open))
+        .chain(basic.long_string.iter().map(|(open, _)| open));
     for marker in markers {
         opens[marker.as_bytes()[0] as usize] = true;
     }
@@ -751,8 +768,10 @@ pub fn spans(text: &[u8], wanted: Range<usize>, basic: &Basic) -> Vec<Span> {
             continue;
         }
         // Comments.
+        // Ruby's `=begin` counts only at a line's start (`x=begin` is code).
         if let Some((open, close)) = basic.block_comment
             && starts(i, open)
+            && (!open.starts_with('=') || i == 0 || text[i - 1] == b'\n')
         {
             let to = find(text, i + open.len(), close).map_or(text.len(), |at| at + close.len());
             push(i..to, Syntax::Comment);
@@ -766,18 +785,20 @@ pub fn spans(text: &[u8], wanted: Range<usize>, basic: &Basic) -> Vec<Span> {
             continue;
         }
         // Strings.
-        if let Some(long) = basic.long_string
-            && starts(i, long)
+        if let Some((open, close)) = basic.long_string
+            && starts(i, open)
         {
-            let to = find(text, i + long.len(), long).map_or(text.len(), |at| at + long.len());
+            let to = find(text, i + open.len(), close).map_or(text.len(), |at| at + close.len());
             push(i..to, Syntax::String);
             i = to;
             continue;
         }
         if basic.quotes.contains(&b) {
+            // C#'s `@"C:\Temp\"` takes backslashes as they are, as SQL does.
+            let escapes = basic.escapes && !(i > 0 && text[i - 1] == b'@');
             let mut j = i + 1;
             while j < text.len() && text[j] != b && text[j] != b'\n' {
-                j += if text[j] == b'\\' { 2 } else { 1 };
+                j += if escapes && text[j] == b'\\' { 2 } else { 1 };
             }
             // Its closing quote, or (left open) up to the line's end.
             let to = if text.get(j) == Some(&b) { j + 1 } else { j.min(text.len()) };
@@ -806,6 +827,11 @@ pub fn spans(text: &[u8], wanted: Range<usize>, basic: &Basic) -> Vec<Span> {
                 i = j;
                 continue;
             }
+            // PHP's `$list` is a variable, whatever its name.
+            if i > 0 && text[i - 1] == b'$' {
+                i = j;
+                continue;
+            }
             let word = &text[i..j];
             let is = |k: &&str| {
                 if basic.any_case { word.eq_ignore_ascii_case(k.as_bytes()) } else { word == k.as_bytes() }
@@ -830,12 +856,31 @@ pub fn spans(text: &[u8], wanted: Range<usize>, basic: &Basic) -> Vec<Span> {
 /// in, down to the next one no further in (its closing `}` or `end`, which stays shown).
 /// As (first line, closing line), sorted.
 pub fn indent_blocks<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Range<usize>> {
+    let lines: Vec<&str> = lines.collect();
+    // Lines that say nothing of the blocks: blank, and the ones written at the left edge
+    // whatever the block (C#'s `#if`, Ruby's `=begin` … `=end` and what's between).
+    let mut in_pod = false;
     let indents: Vec<Option<usize>> = lines
+        .iter()
         .map(|l| {
-            (!l.trim().is_empty())
+            let pod = l.starts_with("=begin") || in_pod;
+            in_pod = pod && !l.starts_with("=end");
+            let edge = l.starts_with('#') || pod;
+            (!l.trim().is_empty() && !edge)
                 .then(|| l.chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum())
         })
         .collect();
+    // A block's first line: the line before a `{` written on its own (C#'s style), so it's
+    // `class A` that folds and stays pinned, not the brace.
+    let opener = |line: usize| -> usize {
+        if lines[line].trim() == "{"
+            && let Some(before) = (0..line).rev().find(|&l| indents[l].is_some())
+            && indents[before] == indents[line]
+        {
+            return before;
+        }
+        line
+    };
     let mut blocks = Vec::new();
     // The lines still open, outermost first: (line, indentation).
     let mut open: Vec<(usize, usize)> = Vec::new();
@@ -847,8 +892,9 @@ pub fn indent_blocks<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Range<usiz
                 break;
             }
             open.pop();
-            if i > start + 1 {
-                blocks.push(start..i);
+            let first = opener(start);
+            if i > first + 1 {
+                blocks.push(first..i);
             }
         }
         if let Some((prev, prev_indent)) = last
@@ -863,8 +909,9 @@ pub fn indent_blocks<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Range<usiz
     }
     // Blocks open to the end of the file.
     for (start, _) in open {
-        if indents.len() > start + 1 {
-            blocks.push(start..indents.len());
+        let first = opener(start);
+        if indents.len() > first + 1 {
+            blocks.push(first..indents.len());
         }
     }
     blocks.sort_by_key(|b| (b.start, b.end));
@@ -935,6 +982,12 @@ mod tests {
         assert_eq!(indent_blocks("if a\n  b\n  c".lines()), [0..3]);
         assert_eq!(indent_blocks("a\n  b\nc".lines()), [0..2]);
         assert!(indent_blocks("a\nb\n".lines()).is_empty());
+        // Braces on their own lines (C#): the line before the brace opens the block.
+        let csharp = "class A\n{\n    void F()\n    {\n        x();\n    }\n}\n";
+        assert_eq!(indent_blocks(csharp.lines()), [0..6, 2..5]);
+        // Lines at the left edge whatever the block: a `#if`, Ruby's =begin … =end.
+        let ruby = "class A\n  def f\n=begin\nnote\n=end\n    1\n  end\nend\n";
+        assert_eq!(indent_blocks(ruby.lines()), [0..7, 1..6]);
     }
 
     #[test]
@@ -959,5 +1012,13 @@ mod tests {
         assert_eq!(tail[1].1, Syntax::Keyword);
         // A number inside a name isn't one; a quote left open ends at the line's end.
         assert_eq!(coloured("a.lua", "x2 = 'open\n"), [("'open".to_string(), Syntax::String)]);
+        // Lua's [[ ]] strings, SQL's and C#'s backslashes as they are, PHP's variables,
+        // XML's apostrophes, Ruby's `=begin` only at a line's start.
+        assert_eq!(coloured("a.lua", "s = [[a -- b]]\n"), [("[[a -- b]]".to_string(), Syntax::String)]);
+        assert_eq!(coloured("q.sql", "SELECT 'C:\\' x\n")[1], ("'C:\\'".to_string(), Syntax::String));
+        assert_eq!(coloured("a.cs", "var p = @\"C:\\Temp\\\";\n")[1], ("\"C:\\Temp\\\"".to_string(), Syntax::String));
+        assert!(coloured("a.php", "$list = [];\n").is_empty());
+        assert!(coloured("a.xml", "<s>Don't save</s>\n").is_empty());
+        assert!(!coloured("a.rb", "x=begin\ny\n").iter().any(|(_, s)| *s == Syntax::Comment));
     }
 }
