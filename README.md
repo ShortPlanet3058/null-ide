@@ -99,7 +99,10 @@ doesn't need Xcode's separate Metal Toolchain download.
   not at all, and keep the file's permissions and tags.
 - **Local history**: what each save replaced is kept for a month, git or not, and listed in
   **Show File History** with the commits, to compare with and take back.
-- In the files, typing a name goes to it, as in the Finder.
+- In the files, typing a name goes to it, as in the Finder; a file with an error in it shows
+  red, its folders a red dot. **Find in Folder…** searches one folder from its menu.
+- Selected text drags to where it's dropped (⌥ copies it); a file dragged from the files
+  onto Markdown becomes a link, onto other code it opens.
 - Images open as images; other files that aren't text are never saved over. Minified
   files with very long lines stay quick. Holding ⌥ over an image's path written in the text
   (`![](shot.png)`, `src="logo.svg"`) shows the image. HTML and SVG files open in the browser
@@ -122,6 +125,7 @@ Links stay right: renaming or moving a file in Null rewrites the Markdown links 
 to a file or `#section` that isn't there gets a wavy line, and **⌘.** offers the nearest
 names; `](#` completes from the headings. Cells copied from a spreadsheet paste as a table,
 and **Insert Table of Contents** (⌘K) lists the headings, kept up to date when run again.
+**Export as HTML** (⌘K) writes the document as a page next to it and opens it in the browser.
 
 ## Git
 
@@ -158,8 +162,9 @@ and **Insert Table of Contents** (⌘K) lists the headings, kept up to date when
 - **AI on demand, never in charge.** Summon it inline when you want it, dismiss it with
   `Esc`. It never edits your code without showing you a diff first.
 - **Speed is a feature.** Near-instant startup, no dropped frames, minimal input latency.
-- **Crafted details.** Motion, typography and themes (including a true-black OLED theme)
-  are treated as core features, not polish for later.
+- **Crafted details.** Motion, typography and themes (including a true-black OLED theme,
+  and light ones that can follow the Mac's light and dark) are treated as core features,
+  not polish for later.
 - **Bring your own model.** Local models or your own API key — your choice.
 
 ## Built with
