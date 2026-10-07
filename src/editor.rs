@@ -4270,6 +4270,32 @@ mod tests {
         editor.read_with(cx, |e, _| assert!(e.buffer.to_string().ends_with("| Tea  | 2   |\nItem\tQty\nTea\t2\n")));
     }
 
+    /// Typewriter scrolling: after moving by keyboard, the caret's line sits mid-window.
+    #[gpui::test]
+    fn typewriter_keeps_the_line_in_the_middle(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings { typewriter: true, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some("notes.txt".into()), cx));
+        cx.run_until_parked();
+        e.update(cx, |e, cx| e.go_to_line(100, cx));
+        // Let the scroll glide to where it's going.
+        for _ in 0..60 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(16));
+            cx.run_until_parked();
+            e.update(cx, |_, cx| cx.notify());
+        }
+        e.read_with(cx, |e, _| {
+            let l = e.layout.as_ref().expect("drawn");
+            let caret = e.caret_bounds(e.selection.head).expect("on screen").center().y;
+            let middle = l.text_bounds.center().y;
+            assert!((caret - middle).abs() < l.line_height, "caret {caret:?}, middle {middle:?}");
+        });
+    }
+
     /// Line numbers: in code only leaves them out of Markdown; hidden, out of code too.
     #[gpui::test]
     fn line_numbers_show_where_settings_say(cx: &mut TestAppContext) {

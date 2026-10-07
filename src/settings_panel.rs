@@ -656,6 +656,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Typewriter scrolling",
+                Some("Keeps the line you're writing in the middle of the window"),
+                Self::toggle("typewriter", s.typewriter, &theme, cx, |s| s.typewriter = !s.typewriter),
+                &theme,
+            ),
+            Self::row(
                 "Spelling",
                 Some("Marks misspelled words in Markdown, text and comments; ⌘. on one offers corrections"),
                 Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),

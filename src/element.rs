@@ -512,7 +512,13 @@ impl Element for EditorElement {
                     editor.scroll.target_y = editor.scroll.y;
                 }
             }
-            if editor.autoscroll {
+            let typewriter = cx.global::<Settings>().typewriter;
+            if editor.autoscroll && typewriter && !editor.reveal_only {
+                // Typewriter: the caret's line in the middle, from the keyboard (a click doesn't
+                // pull the text about).
+                let y = caret_row as f32 * lh + TOP_PADDING;
+                editor.scroll.target_y = (y + lh / 2. - viewport_height / 2.).max(0.);
+            } else if editor.autoscroll {
                 // From the keyboard, keep a few lines of room; from the mouse, just reveal.
                 let margin = if editor.reveal_only { 0. } else { (3. * lh).min(viewport_height / 3.) };
                 let y = caret_row as f32 * lh + TOP_PADDING;
