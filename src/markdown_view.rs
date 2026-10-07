@@ -1333,6 +1333,31 @@ pub fn toggle_task(line: &str) -> Option<String> {
     Some(format!("{}[{mark}]{}", &line[..at], &line[at + 3..]))
 }
 
+/// Where a task's box (`[ ]`, `[x]`) is in its line (bytes), if the line is a task.
+pub fn task_box(line: &str) -> Option<std::ops::Range<usize>> {
+    let ticked = toggle_task(line)?;
+    let at = line.bytes().zip(ticked.bytes()).position(|(a, b)| a != b)?;
+    Some(at - 1..at + 2)
+}
+
+/// Toggle Task, for a line: a task ticked or unticked, a list item made a task, any other
+/// line made a task item (`- [ ] `) at its indentation. None for a blank line.
+pub fn task_toggled(line: &str) -> Option<String> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    if let Some(toggled) = toggle_task(line) {
+        return Some(toggled);
+    }
+    match list_marker(line) {
+        Some(marker) => Some(format!("{}[ ] {}", &line[..marker.content], &line[marker.content..])),
+        None => {
+            let indent = line.len() - line.trim_start().len();
+            Some(format!("{}- [ ] {}", &line[..indent], &line[indent..]))
+        }
+    }
+}
+
 /// Each block drawn, in order (the preview scrolls to them one by one).
 pub fn render_blocks(blocks: &[(usize, Block)], style: &Style) -> Vec<AnyElement> {
     let mut counter = 0;
@@ -2044,6 +2069,24 @@ pub fn renumbered(lines: &[String], at: usize) -> Vec<(usize, String)> {
     }
     changes.sort();
     changes
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::{task_box, task_toggled};
+
+    #[test]
+    fn toggling_tasks_in_the_text() {
+        assert_eq!(task_toggled("- [ ] milk").as_deref(), Some("- [x] milk"));
+        assert_eq!(task_toggled("  - [x] eggs").as_deref(), Some("  - [ ] eggs"));
+        assert_eq!(task_toggled("- bread").as_deref(), Some("- [ ] bread"));
+        assert_eq!(task_toggled("3. call").as_deref(), Some("3. [ ] call"));
+        assert_eq!(task_toggled("  Buy tea").as_deref(), Some("  - [ ] Buy tea"));
+        assert_eq!(task_toggled("   "), None);
+        assert_eq!(task_box("- [ ] milk"), Some(2..5));
+        assert_eq!(task_box("> 1. [x] quoted"), Some(5..8));
+        assert_eq!(task_box("- milk"), None);
+    }
 }
 
 #[cfg(test)]

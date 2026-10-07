@@ -145,6 +145,7 @@ actions!(
         Cut,
         Paste,
         PasteAsIs,
+        ToggleTask,
         Undo,
         Redo,
         Save,
@@ -234,6 +235,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-x", Cut, ctx),
         KeyBinding::new("secondary-v", Paste, ctx),
         KeyBinding::new("alt-shift-secondary-v", PasteAsIs, ctx),
+        KeyBinding::new("secondary-shift-x", ToggleTask, ctx),
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-shift-z", Redo, ctx),
         KeyBinding::new("secondary-s", Save, ctx),
@@ -2294,6 +2296,54 @@ impl Editor {
         self.edit(self.selection.range(), &link, EditKind::Other, cx);
     }
 
+    /// Toggle Task (⇧⌘X) in Markdown, on the caret's line or every selected one: a task
+    /// ticked or unticked, a list item or a line made a task. Selected lines all tick, or all
+    /// untick, as the first one goes.
+    fn toggle_task(&mut self, _: &ToggleTask, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_markdown() {
+            return;
+        }
+        let range = self.selection.range();
+        let (first, _) = self.buffer.point(range.start);
+        let (mut last, last_col) = self.buffer.point(range.end);
+        if last > first && last_col == 0 {
+            last -= 1;
+        }
+        let mut edits = Vec::new();
+        let mut tick: Option<bool> = None;
+        for line in first..=last {
+            let text = self.buffer.line_text(line);
+            let Some(mut new) = crate::markdown_view::task_toggled(&text) else { continue };
+            // The first line says which way they all go.
+            let ticked = |t: &str| crate::markdown_view::task_box(t).is_some_and(|b| t[b].contains(['x', 'X']));
+            let wanted = *tick.get_or_insert(ticked(&new));
+            if ticked(&new) != wanted
+                && let Some(again) = crate::markdown_view::task_toggled(&new)
+            {
+                new = again;
+            }
+            if new != text {
+                let start = self.buffer.line_to_char(line);
+                edits.push((start..start + self.buffer.line_len(line), new));
+            }
+        }
+        let selection = self.selection;
+        let (line, col) = self.caret_point();
+        let before = self.buffer.line_len(line);
+        self.apply_char_edits(edits, cx);
+        // The caret stays by its text; a selection stays on its lines.
+        if selection.is_empty() {
+            let grew = self.buffer.line_len(line) as isize - before as isize;
+            let col = if col == 0 { 0 } else { (col as isize + grew).max(0) as usize };
+            self.selection = Selection::caret(self.buffer.offset(line, col));
+        } else {
+            let start = self.buffer.line_to_char(first);
+            let end = self.buffer.line_to_char(last) + self.buffer.line_len(last);
+            self.selection = Selection { anchor: start, head: end };
+        }
+        cx.notify();
+    }
+
     /// A box clicked in the preview: the `task`th of the `drawn` ones, ticked or unticked in
     /// the text. Left alone if the text doesn't show as many (it changed, or reads differently).
     fn tick_task(&mut self, task: usize, drawn: usize, cx: &mut Context<Self>) {
@@ -2755,6 +2805,20 @@ impl Editor {
         self.reveal_only = true;
         if event.modifiers.secondary() && !add_cursor && event.click_count == 1 {
             self.dragging = None;
+            // ⌘-click on a task's box in Markdown ticks it.
+            let (line, col) = self.buffer.point(offset);
+            let text = self.buffer.line_text(line);
+            let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
+            if self.is_markdown()
+                && crate::markdown_view::task_box(&text).is_some_and(|b| b.contains(&byte) || b.end == byte)
+                && let Some(ticked) = crate::markdown_view::toggle_task(&text)
+            {
+                let start = self.buffer.line_to_char(line);
+                let caret = self.selection;
+                self.edit(start..start + self.buffer.line_len(line), &ticked, EditKind::Other, cx);
+                self.selection = caret;
+                return;
+            }
             match self.link_under(offset) {
                 Some((_, target)) => self.follow_link(target, cx),
                 None => self.go_to_definition_at(offset, cx),
@@ -3545,6 +3609,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::paste_as_is))
+            .on_action(cx.listener(Self::toggle_task))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::save))
@@ -4019,6 +4084,43 @@ mod tests {
         let bounds = cx.debug_bounds("task 1").expect("the second box is drawn");
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "# Shop\n\n- [ ] milk\n- [x] eggs\n"));
+    }
+
+    /// ⇧⌘X ticks the caret's task, makes selected lines tasks (all one way), and ⌘-click on
+    /// a box in the text ticks it.
+    #[gpui::test]
+    fn ticking_tasks_in_the_text(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let text = "# Shop\n\n- [ ] milk\n- eggs\nTea\n";
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("todo.md")), cx));
+        e.update_in(cx, |e, window, _| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection::caret(e.buffer.offset(2, 8));
+        });
+        cx.simulate_keystrokes("cmd-shift-x");
+        let now = |cx: &mut gpui::VisualTestContext| e.read_with(cx, |e, _| e.buffer.to_string());
+        assert_eq!(now(cx), "# Shop\n\n- [x] milk\n- eggs\nTea\n");
+        e.update(cx, |e, _| assert_eq!(e.caret_point(), (2, 8), "the caret stays by its text"));
+        // The three lines: the first was ticked, so it unticks and the others become tasks.
+        e.update(cx, |e, _| e.selection = Selection { anchor: e.buffer.offset(2, 0), head: e.buffer.offset(5, 0) });
+        cx.simulate_keystrokes("cmd-shift-x");
+        assert_eq!(now(cx), "# Shop\n\n- [ ] milk\n- [ ] eggs\n- [ ] Tea\n");
+        // ⌘-click on the second box.
+        cx.run_until_parked();
+        let at = e.read_with(cx, |e, _| {
+            let layout = e.layout.as_ref().unwrap();
+            let r = layout.rows.iter().find(|r| r.row.line == 3).unwrap();
+            let x = layout.text_origin.x + r.x + r.shaped.x_for_index(r.shown_byte(3)) + gpui::px(2.);
+            gpui::point(x, layout.text_origin.y + layout.line_height * 3.5)
+        });
+        cx.simulate_click(at, gpui::Modifiers::command());
+        assert_eq!(now(cx), "# Shop\n\n- [ ] milk\n- [x] eggs\n- [ ] Tea\n");
     }
 
     /// ⌥⇧F in Markdown (no server for it) lines the tables up, as one undo step.
