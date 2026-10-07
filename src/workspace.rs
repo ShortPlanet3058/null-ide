@@ -48,6 +48,7 @@ actions!(
         RunSelectionInTerminal,
         PasteFromHistory,
         ExportHtml,
+        ShowBookmarks,
         PushBranch,
         PullBranch,
         FileHistory,
@@ -752,6 +753,7 @@ impl Workspace {
                     folds: editor.folded_regions(),
                     breakpoints: editor.breakpoints.clone(),
                     conditions: editor.breakpoint_conditions.clone(),
+                    bookmarks: editor.bookmarks.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -804,6 +806,7 @@ impl Workspace {
                     editor.breakpoints = tab.breakpoints.iter().copied().filter(|&l| l < lines).collect();
                     editor.breakpoint_conditions =
                         tab.conditions.iter().filter(|(l, _)| editor.breakpoints.contains(l)).cloned().collect();
+                    editor.bookmarks = tab.bookmarks.iter().copied().filter(|&l| l < lines).collect();
                     editor.restore_view(tab.line, tab.column, tab.top_line, cx)
                 });
             }
@@ -2335,6 +2338,7 @@ impl Workspace {
                     }
                     this.schedule_session_save(cx);
                 }
+                EditorEvent::BookmarksChanged => this.schedule_session_save(cx),
                 EditorEvent::GoTo { path, range } => {
                     let range = *range;
                     this.go_to(path.clone(), range, window, cx);
@@ -3081,6 +3085,10 @@ impl Workspace {
             (File, "Open Line on the Web".into(), Box::new(OpenLineOnWeb)),
             (File, "Fetch".into(), Box::new(FetchBranch)),
             (Go, "Find TODOs".into(), Box::new(FindTodos)),
+            (Edit, "Toggle Bookmark".into(), Box::new(crate::editor::ToggleBookmark)),
+            (Go, "Next Bookmark".into(), Box::new(crate::editor::NextBookmark)),
+            (Go, "Previous Bookmark".into(), Box::new(crate::editor::PreviousBookmark)),
+            (Go, "Bookmarks…".into(), Box::new(ShowBookmarks)),
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
@@ -3602,6 +3610,31 @@ impl Workspace {
         let query = crate::project_search::todo_query();
         self.project_search.update(cx, |search, cx| search.search_for(query, window, cx));
         cx.notify();
+    }
+
+    /// Bookmarks…: the lines bookmarked in every open file, to go to.
+    fn show_bookmarks(&mut self, _: &ShowBookmarks, window: &mut Window, cx: &mut Context<Self>) {
+        let mut rows: Vec<crate::palette::Location> = Vec::new();
+        for tab in &self.tabs {
+            let editor = tab.editor.read(cx);
+            let Some(path) = editor.path() else { continue };
+            // A file open on both sides is listed once.
+            if rows.iter().any(|r| r.path == path) {
+                continue;
+            }
+            rows.extend(editor.bookmarks.iter().map(|&line| crate::palette::Location {
+                path: path.to_path_buf(),
+                position: lsp_types::Position::new(line as u32, 0),
+                text: editor.buffer.line_text(line).trim().to_string(),
+                kind: crate::palette::LocationKind::Reference,
+            }));
+        }
+        rows.sort_by(|a, b| (&a.path, a.position.line).cmp(&(&b.path, b.position.line)));
+        if rows.is_empty() {
+            self.show_notice("No bookmarks yet: ⌘F2 marks the caret's line".into(), cx);
+            return;
+        }
+        self.open_locations("Bookmarks".into(), rows, window, cx);
     }
 
     /// Project search, in folder `dir` only (from the files' menu).
@@ -6471,6 +6504,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::undo_last_commit))
             .on_action(cx.listener(Self::set_changes_aside))
             .on_action(cx.listener(Self::find_todos))
+            .on_action(cx.listener(Self::show_bookmarks))
             .on_action(cx.listener(Self::run_selection_in_terminal))
             .on_action(cx.listener(Self::paste_from_history))
             .on_action(cx.listener(Self::export_html))
@@ -6820,6 +6854,66 @@ mod tests {
             String::from_utf8_lossy(&committed.stdout).split_whitespace().collect::<Vec<_>>(),
             ["only", "b", "b.txt"]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Bookmarks by keystroke: ⌘F2 in two files, then Bookmarks… lists both and goes to
+    /// one; the session keeps them, and a reopened project has them back.
+    #[gpui::test]
+    fn bookmarks_are_listed_and_kept(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("bookmarks");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "alpha\nbeta\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+        };
+        let mark = |cx: &mut gpui::VisualTestContext, file: &str, line: usize| {
+            let path = dir.join(file);
+            workspace.update_in(cx, |w, window, cx| w.open_file_on(path, Some(0), window, cx));
+            settle(cx);
+            workspace.update_in(cx, |w, window, cx| {
+                let editor = w.active_editor().unwrap();
+                editor.update(cx, |e, cx| e.go_to_line(line + 1, cx));
+                window.focus(&editor.focus_handle(cx));
+            });
+            cx.simulate_keystrokes("cmd-f2");
+        };
+        mark(cx, "a.txt", 2);
+        mark(cx, "b.txt", 1);
+        let place = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |w, cx| {
+                let e = w.active_editor().unwrap().read(cx);
+                (e.file_name(), e.caret_point().0)
+            })
+        };
+        // Bookmarks…: a.txt's first, as the files sort; Enter goes there.
+        workspace.update_in(cx, |w, window, cx| w.show_bookmarks(&ShowBookmarks, window, cx));
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(place(cx), ("a.txt".into(), 2));
+        // Kept with the session, and back in a reopened project.
+        let session = workspace.read_with(cx, |w, cx| w.session(cx));
+        let kept: Vec<Vec<usize>> = session.tabs.iter().map(|t| t.bookmarks.clone()).collect();
+        assert_eq!(kept, vec![vec![2], vec![1]]);
+        let root = dir.clone();
+        let reopened = cx.new_window_entity(|window, cx| Workspace::new(root, window, cx));
+        reopened.update_in(cx, |w, window, cx| w.restore_session(session, window, cx));
+        settle(cx);
+        let marks = reopened
+            .read_with(cx, |w, cx| w.tabs.iter().map(|t| t.editor.read(cx).bookmarks.clone()).collect::<Vec<_>>());
+        assert_eq!(marks, vec![vec![2], vec![1]]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

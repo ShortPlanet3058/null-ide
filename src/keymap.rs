@@ -91,6 +91,9 @@ impl Keymap {
                 KeyBinding::new("ctrl-secondary-g", SelectAllOccurrences, editor),
                 KeyBinding::new("ctrl-shift-up", AddCursorAbove, editor),
                 KeyBinding::new("ctrl-shift-down", AddCursorBelow, editor),
+                // Sublime goes round its bookmarks with F2 (renaming has no key there).
+                KeyBinding::new("f2", crate::editor::NextBookmark, editor),
+                KeyBinding::new("shift-f2", crate::editor::PreviousBookmark, editor),
             ],
             Keymap::Zed => vec![
                 KeyBinding::new("secondary-shift-d", DuplicateLineDown, editor),

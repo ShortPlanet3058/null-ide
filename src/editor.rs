@@ -1,4 +1,5 @@
 mod assist;
+mod bookmarks;
 mod breakpoints;
 mod broken_links;
 mod changes;
@@ -25,6 +26,7 @@ mod structure;
 mod tags;
 
 pub use assist::{Block, BlockKind};
+pub use bookmarks::{NextBookmark, PreviousBookmark, ToggleBookmark};
 pub use breakpoints::{Breakpoint, ToggleBreakpoint};
 pub use completion::CompletionMenu;
 pub use conflicts::{Conflict, NextConflict, PreviousConflict};
@@ -157,6 +159,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     fixes::bind_keys(cx);
     conflicts::bind_keys(cx);
     breakpoints::bind_keys(cx);
+    bookmarks::bind_keys(cx);
     structure::bind_keys(cx);
     snippet::bind_keys(cx);
     mac_keys::bind_keys(cx);
@@ -342,6 +345,8 @@ pub enum EditorEvent {
     },
     /// The breakpoints changed (set, removed, or moved by an edit).
     BreakpointsChanged,
+    /// The bookmarks changed (set, removed, or moved by an edit).
+    BookmarksChanged,
     /// Several places to choose from (implementations): the workspace lists them.
     ShowLocations {
         title: String,
@@ -566,6 +571,9 @@ pub struct Editor {
     /// Breakpoints that only stop when something holds: (line, condition).
     pub breakpoint_conditions: Vec<(usize, String)>,
     breakpoints_revision: u64,
+    /// Lines (from 0) marked to come back to; they move with edits.
+    pub bookmarks: Vec<usize>,
+    bookmarks_revision: u64,
     /// The field a breakpoint's condition is being typed in.
     editing_condition: Option<breakpoints::ConditionEdit>,
     /// The line the debugger stopped on, while it's stopped in this file.
@@ -731,6 +739,8 @@ impl Editor {
             breakpoints: Vec::new(),
             breakpoint_conditions: Vec::new(),
             breakpoints_revision: 0,
+            bookmarks: Vec::new(),
+            bookmarks_revision: 0,
             editing_condition: None,
             execution_line: None,
             inline_values: Vec::new(),
@@ -942,6 +952,7 @@ impl Editor {
         self.text_changed_for_git(cx);
         self.hints_after_edit();
         self.breakpoints_after_edit(cx);
+        self.bookmarks_after_edit(cx);
         // Cursors from before an edit aren't somewhere to go back to.
         self.cursor_history.clear();
         self.close_hover(cx);
@@ -3471,6 +3482,9 @@ impl Render for Editor {
             .on_action(cx.listener(Self::rename_symbol))
             .on_action(cx.listener(Self::quick_fix))
             .on_action(cx.listener(Self::toggle_breakpoint))
+            .on_action(cx.listener(Self::toggle_bookmark))
+            .on_action(cx.listener(Self::next_bookmark))
+            .on_action(cx.listener(Self::previous_bookmark))
             .on_action(cx.listener(Self::expand_selection))
             .on_action(cx.listener(Self::next_placeholder))
             .on_action(cx.listener(Self::previous_placeholder))

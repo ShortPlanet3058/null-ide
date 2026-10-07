@@ -37,7 +37,7 @@ pub(super) struct ConditionEdit {
 /// Where a breakpoint on line `line` goes after an edit from `start` to `old_end` (lines)
 /// that now ends at `new_end`: along with lines below it; on the edit's first line if
 /// its own line was edited away.
-fn move_line(line: usize, start: usize, old_end: usize, new_end: usize) -> usize {
+pub(super) fn move_line(line: usize, start: usize, old_end: usize, new_end: usize) -> usize {
     if line < start {
         line
     } else if line > old_end {
