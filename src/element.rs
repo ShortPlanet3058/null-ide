@@ -299,7 +299,8 @@ pub struct Prepaint {
     /// The line the debugger stopped on: a band across it, and a mark in the gutter.
     execution: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
     /// Faint lines down the indentation, one per level.
-    indent_guides: Vec<Bounds<Pixels>>,
+    /// Each guide, and whether it's the one of the block the caret is in (a little brighter).
+    indent_guides: Vec<(Bounds<Pixels>, bool)>,
     /// The line at the project's line length.
     line_guide: Option<Bounds<Pixels>>,
     /// The first lines of the blocks the view is inside, pinned at the top: the band
@@ -1031,7 +1032,7 @@ impl Element for EditorElement {
             });
             // Indent guides: a faint line at each level a line is indented past. Blank lines
             // take the smaller indentation of the lines around them, so guides run through.
-            let indent_guides: Vec<Bounds<Pixels>> = if cx.global::<Settings>().indent_guides {
+            let indent_guides: Vec<(Bounds<Pixels>, bool)> = if cx.global::<Settings>().indent_guides {
                 let unit = editor.style.indent.width().max(1);
                 let indent_of = |text: &str| -> Option<usize> {
                     if text.trim().is_empty() {
@@ -1054,15 +1055,29 @@ impl Element for EditorElement {
                         cols / unit
                     })
                     .collect();
+                // The caret's block: the guide just left of its line's text, over the lines
+                // around it at least that far in.
+                let active = caret_line.checked_sub(lines_shown.start).and_then(|at| {
+                    let level = *levels.get(at)?;
+                    let guide = level.checked_sub(1)?;
+                    let inside = |i: usize| levels.get(i).is_some_and(|l| *l > guide);
+                    let first = (0..=at).rev().take_while(|&i| inside(i)).last()?;
+                    let last = (at..levels.len()).take_while(|&i| inside(i)).last()?;
+                    Some((guide, lines_shown.start + first..lines_shown.start + last + 1))
+                });
                 row_layouts
                     .iter()
                     .zip(visible.clone())
                     .filter(|(r, _)| r.row.block.is_none())
                     .flat_map(|(r, row)| {
-                        let level = levels.get(r.row.line - lines_shown.start).copied().unwrap_or(0);
+                        let line = r.row.line;
+                        let level = levels.get(line - lines_shown.start).copied().unwrap_or(0);
+                        let active = active.clone();
                         (0..level).map(move |k| {
                             let x = origin.x + char_width * (k * unit) as f32;
-                            Bounds::new(point(x.round(), row_top(row)), size(px(1.), line_height))
+                            let lit =
+                                active.as_ref().is_some_and(|(guide, lines)| *guide == k && lines.contains(&line));
+                            (Bounds::new(point(x.round(), row_top(row)), size(px(1.), line_height)), lit)
                         })
                     })
                     .collect()
@@ -1557,8 +1572,8 @@ impl Element for EditorElement {
             window.paint_svg(*bounds, "icons/chevron-right.svg".into(), turn, color, cx).ok();
         }
         window.with_content_mask(Some(ContentMask { bounds: prepaint.text_bounds }), |window| {
-            for rect in &prepaint.indent_guides {
-                window.paint_quad(fill(*rect, theme.hairline));
+            for (rect, active) in &prepaint.indent_guides {
+                window.paint_quad(fill(*rect, if *active { theme.faint } else { theme.hairline }));
             }
             if let Some(rect) = prepaint.line_guide {
                 window.paint_quad(fill(rect, theme.hairline));

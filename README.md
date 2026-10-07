@@ -112,7 +112,7 @@ doesn't need Xcode's separate Metal Toolchain download.
   colour picked there is written back the way the first was (one undo takes it back).
 - Code the language server says is unused (an import, a variable) is drawn faded, and a
   deprecated name struck through.
-- Faint indent guides, sticky scroll (the enclosing lines stay at the top), the other uses
+- Faint indent guides (the caret's block's a little brighter), sticky scroll (the enclosing lines stay at the top), the other uses
   of a name tinted, and a line at the length the project keeps to (from `.editorconfig`,
   rustfmt, Prettier, Black or Ruff). Each can be turned off.
 - Files keep their own style: indentation, line endings, and encoding (UTF-8 with or
