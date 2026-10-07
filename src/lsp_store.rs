@@ -88,6 +88,10 @@ pub enum Target {
     Definition,
     TypeDefinition,
     Implementation,
+    /// Rust: the `mod` line that brings this file in (rust-analyzer).
+    ParentModule,
+    /// Rust: the crate's Cargo.toml (rust-analyzer).
+    CargoToml,
 }
 
 pub enum LspEvent {
@@ -99,6 +103,30 @@ pub enum LspEvent {
 }
 
 /// The language servers for one project, and what they've reported.
+/// rust-analyzer's own request for where a file's module is declared.
+pub enum ParentModule {}
+
+impl lsp_types::request::Request for ParentModule {
+    type Params = TextDocumentPositionParams;
+    type Result = Option<GotoDefinitionResponse>;
+    const METHOD: &'static str = "experimental/parentModule";
+}
+
+/// rust-analyzer's own request for the crate's Cargo.toml.
+pub enum OpenCargoToml {}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCargoTomlParams {
+    pub text_document: TextDocumentIdentifier,
+}
+
+impl lsp_types::request::Request for OpenCargoToml {
+    type Params = OpenCargoTomlParams;
+    type Result = Option<lsp_types::Location>;
+    const METHOD: &'static str = "experimental/openCargoToml";
+}
+
 /// rust-analyzer's own request for a macro's expansion.
 pub enum ExpandMacro {}
 
@@ -618,6 +646,15 @@ impl LspStore {
                 Target::Implementation => {
                     server.request::<lsp_types::request::GotoImplementation>(params).boxed_local()
                 }
+                Target::ParentModule => {
+                    server.request::<ParentModule>(params.text_document_position_params).boxed_local()
+                }
+                Target::CargoToml => {
+                    let params =
+                        OpenCargoTomlParams { text_document: params.text_document_position_params.text_document };
+                    let request = server.request::<OpenCargoToml>(params);
+                    async move { request.await.map(|found| found.map(GotoDefinitionResponse::Scalar)) }.boxed_local()
+                }
             }
         });
         async move {
@@ -998,5 +1035,14 @@ mod tests {
         let none: Option<ExpandedMacro> = serde_json::from_value(serde_json::Value::Null).unwrap();
         assert_eq!(none, None);
         assert_eq!(<ExpandMacro as lsp_types::request::Request>::METHOD, "rust-analyzer/expandMacro");
+        // Cargo.toml and the parent module, asked as rust-analyzer reads them.
+        let params = OpenCargoTomlParams {
+            text_document: TextDocumentIdentifier { uri: "file:///a/src/main.rs".parse().unwrap() },
+        };
+        assert_eq!(
+            serde_json::to_value(params).unwrap(),
+            serde_json::json!({ "textDocument": { "uri": "file:///a/src/main.rs" } })
+        );
+        assert_eq!(<ParentModule as lsp_types::request::Request>::METHOD, "experimental/parentModule");
     }
 }

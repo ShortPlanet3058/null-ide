@@ -570,10 +570,13 @@ impl Editor {
         self.definition_task = Some(cx.spawn(async move |this, cx| {
             let found = request.await;
             this.update(cx, |this, cx| {
-                let (none, many) = if target == Target::Implementation {
-                    ("No implementation found here.", "implementations")
-                } else {
-                    ("No type definition found here.", "types")
+                let (none, many) = match target {
+                    Target::Implementation => ("No implementation found here.", "implementations"),
+                    Target::ParentModule => {
+                        ("No parent module: this is the crate's root.", "modules declaring this file")
+                    }
+                    Target::CargoToml => ("No Cargo.toml found for this file.", "Cargo.toml files"),
+                    _ => ("No type definition found here.", "types"),
                 };
                 this.go_or_list(found, offset, none, &format!("{many} of {word}"), cx);
             })
