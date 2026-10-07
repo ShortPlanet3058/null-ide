@@ -663,6 +663,26 @@ impl Editor {
 
     /// The definition of the name at `offset`, shown in the info card where the caret is:
     /// its file and line, then its first lines. Nothing moves.
+    /// Open Documentation (Rust): the web page of what's at `offset`, in the browser.
+    pub fn open_docs_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if self.language_name() != "Rust" {
+            return self.show_notice(offset, "Open Documentation is for Rust (rust-analyzer).".into(), cx);
+        }
+        if let Some(message) = self.not_ready_message(cx) {
+            return self.show_notice(offset, message, cx);
+        }
+        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return };
+        let request = lsp.read(cx).docs_link(path, self.lsp_position(offset));
+        self.definition_task = Some(cx.spawn(async move |this, cx| {
+            let link = request.await;
+            this.update(cx, |this, cx| match link.filter(|l| l.starts_with("https://") || l.starts_with("http://")) {
+                Some(link) => cx.open_url(&link),
+                None => this.show_notice(offset, "No documentation page for this.".into(), cx),
+            })
+            .ok();
+        }));
+    }
+
     /// Expand Macro (Rust): what the macro at `offset` turns into, in the card.
     pub fn expand_macro_at(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.language_name() != "Rust" {

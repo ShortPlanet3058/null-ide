@@ -3357,6 +3357,7 @@ impl Workspace {
         // Rust: what a macro expands to (rust-analyzer).
         if self.active_editor().is_some_and(|e| e.read(cx).language_name() == "Rust") {
             commands.push((Go, "Expand Macro".into(), Box::new(crate::editor::ExpandMacro)));
+            commands.push((Go, "Open Documentation".into(), Box::new(crate::editor::OpenDocumentation)));
             commands.push((Go, "Go to Parent Module".into(), Box::new(crate::editor::GoToParentModule)));
             commands.push((Go, "Open Cargo.toml".into(), Box::new(crate::editor::OpenCargoToml)));
         }
