@@ -26,7 +26,8 @@ pub fn clipboard_html() -> Option<String> {
 
 /// The Markdown for `html`, or None when there's nothing in it.
 pub fn markdown(html: &str) -> Option<String> {
-    let nodes = parse(html);
+    let html = html.replace("\r\n", "\n");
+    let nodes = parse(&html);
     let mut out = Writer::default();
     out.blocks(&nodes);
     out.flush();
@@ -94,6 +95,7 @@ fn parse(html: &str) -> Vec<Node> {
             }
         }
     };
+    let lower = html.to_ascii_lowercase();
     let mut rest = html;
     while !rest.is_empty() {
         let Some(open) = rest.find('<') else {
@@ -129,7 +131,9 @@ fn parse(html: &str) -> Vec<Node> {
         // Inside skipped elements, skip to their end tag.
         if SKIPPED.contains(&name.as_str()) {
             let end_tag = format!("</{name}");
-            let found = rest.to_ascii_lowercase().find(&end_tag);
+            // Looked for in the page lowered once (the same bytes: only ASCII changes).
+            let from = html.len() - rest.len();
+            let found = lower[from..].find(&end_tag);
             rest = found.map_or("", |at| rest[at..].find('>').map_or("", |e| &rest[at + e + 1..]));
             continue;
         }
@@ -251,6 +255,14 @@ struct Writer {
     line: String,
 }
 
+/// Whether `node` is a block, or holds one somewhere inside.
+fn holds_blocks(node: &Node) -> bool {
+    match node {
+        Node::Element { name, children, .. } => is_block(name) || children.iter().any(holds_blocks),
+        Node::Text(_) => false,
+    }
+}
+
 /// Elements that make blocks of their own.
 fn is_block(name: &str) -> bool {
     matches!(
@@ -306,6 +318,13 @@ impl Writer {
                     self.block(node, name, children);
                 }
                 Node::Element { name, .. } if name == "br" => self.line.push('\n'),
+                // An inline element around blocks (Google Docs wraps a whole document in a
+                // <b>): its blocks, each on its own.
+                Node::Element { children, .. } if children.iter().any(holds_blocks) => {
+                    self.flush();
+                    self.blocks(children);
+                    self.flush();
+                }
                 node => {
                     let text = inline(node);
                     self.line.push_str(&text);
@@ -371,16 +390,25 @@ impl Writer {
 
 /// A list's items as Markdown lines, nested lists indented under their item.
 fn list(children: &[Node], numbered: bool, start: Option<&str>) -> Option<String> {
-    let mut n = start.and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(1);
+    let mut n = start.and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(1).min(999_999_999);
     let mut lines = Vec::new();
+    // How far in the last item's text is: a list placed right in the list (not in an item,
+    // as Google Docs writes them) goes under it.
+    let mut pad = String::new();
     for child in children {
         let Node::Element { name, children: item, .. } = child else { continue };
+        if matches!(name.as_str(), "ul" | "ol") {
+            if let Some(nested) = list(item, name == "ol", child.attribute("start")) {
+                lines.extend(nested.lines().map(|l| if l.is_empty() { String::new() } else { format!("{pad}{l}") }));
+            }
+            continue;
+        }
         if name != "li" {
             continue;
         }
         let marker = if numbered { format!("{n}.") } else { "-".to_string() };
-        n += 1;
-        let pad = " ".repeat(marker.len() + 1);
+        n = n.saturating_add(1);
+        pad = " ".repeat(marker.len() + 1);
         let mut inner = Writer::default();
         inner.blocks(item);
         inner.flush();
@@ -472,7 +500,7 @@ fn marked(inner: &str, mark: &str) -> String {
 fn escaped(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if matches!(c, '*' | '`' | '[' | ']' | '\\') {
+        if matches!(c, '*' | '`' | '[' | ']' | '\\' | '<') {
             out.push('\\');
         }
         out.push(c);
@@ -483,7 +511,21 @@ fn escaped(text: &str) -> String {
 fn inline(node: &Node) -> String {
     let Node::Element { name, children, .. } = node else {
         let Node::Text(text) = node else { unreachable!() };
-        return escaped(text);
+        // Line breaks in the page's source are spaces: only <br> breaks a line.
+        let mut collapsed = String::with_capacity(text.len());
+        let mut space = false;
+        for c in text.chars() {
+            if c.is_whitespace() && c != '\u{a0}' {
+                if !space {
+                    collapsed.push(' ');
+                }
+                space = true;
+            } else {
+                collapsed.push(c);
+                space = false;
+            }
+        }
+        return escaped(&collapsed);
     };
     let inner = || inline_all(children);
     let style = node.attribute("style").unwrap_or("").to_ascii_lowercase().replace(' ', "");
@@ -499,12 +541,15 @@ fn inline(node: &Node) -> String {
         "i" | "em" => marked(&inner(), "*"),
         "del" | "s" | "strike" => marked(&inner(), "~~"),
         "code" | "kbd" | "samp" => {
-            let code = raw_text(children);
+            let code = raw_text(children).replace('\n', " ");
             if code.is_empty() {
                 String::new()
             } else {
-                let ticks = if code.contains('`') { "``" } else { "`" };
-                format!("{ticks}{code}{ticks}")
+                // One more tick than the longest run inside, spaced when it starts or ends with one.
+                let longest = code.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+                let ticks = "`".repeat(longest + 1);
+                let pad = if code.starts_with('`') || code.ends_with('`') { " " } else { "" };
+                format!("{ticks}{pad}{code}{pad}{ticks}")
             }
         }
         "a" => {
@@ -570,6 +615,22 @@ mod tests {
         assert_eq!(markdown(html).as_deref(), Some("**Bold** and *italic* text"));
         assert_eq!(markdown("<p><b> spaced </b>out</p>").as_deref(), Some("**spaced** out"));
         assert_eq!(markdown("<p></p>  "), None);
+    }
+
+    #[test]
+    fn what_documents_and_pages_really_send() {
+        // Google Docs: one <b> around everything, lists placed right in their lists.
+        let docs = r#"<b style="font-weight:normal"><h1>T</h1><p>A</p><ul><li>x</li><ul><li>under x</li></ul><li>y</li></ul></b>"#;
+        assert_eq!(markdown(docs).as_deref(), Some("# T\n\nA\n\n- x\n  - under x\n- y"));
+        // The source's line breaks are spaces; code with ticks; a tag written as text.
+        assert_eq!(markdown("<p>Some long\ntext</p>").as_deref(), Some("Some long text"));
+        assert_eq!(
+            markdown("<p>Use <code>`x`</code> or <code>a``b</code></p>").as_deref(),
+            Some("Use `` `x` `` or ```a``b```")
+        );
+        assert_eq!(markdown("<p>the &lt;br&gt; tag</p>").as_deref(), Some("the \\<br> tag"));
+        assert_eq!(markdown("<pre>a\r\nb</pre>").as_deref(), Some("```\na\nb\n```"));
+        assert_eq!(markdown(r#"<ol start="18446744073709551615"><li>a<li>b</ol>"#).as_deref(), Some("1. a\n2. b"));
     }
 
     #[test]

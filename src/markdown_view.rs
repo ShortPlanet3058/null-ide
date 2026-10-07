@@ -1361,13 +1361,29 @@ pub fn task_toggled(line: &str) -> Option<String> {
     if let Some(toggled) = toggle_task(line) {
         return Some(toggled);
     }
-    match list_marker(line) {
-        Some(marker) => Some(format!("{}[ ] {}", &line[..marker.content], &line[marker.content..])),
-        None => {
-            let indent = line.len() - line.trim_start().len();
-            Some(format!("{}- [ ] {}", &line[..indent], &line[indent..]))
-        }
+    // In a quote, the task goes inside it: `> - [ ] note`.
+    let mut quote = 0;
+    let mut text = line;
+    while let Some(rest) = text.trim_start().strip_prefix('>') {
+        let rest = rest.strip_prefix(' ').unwrap_or(rest);
+        quote += text.len() - rest.len();
+        text = rest;
     }
+    let (prefix, text) = line.split_at(quote);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(match list_marker(text) {
+        // A bare marker (`-`) has nothing after it, not even its space.
+        Some(marker) => match (text.get(..marker.content), text.get(marker.content..)) {
+            (Some(head), Some(rest)) => format!("{prefix}{head}[ ] {rest}"),
+            _ => format!("{prefix}{} [ ] ", text.trim_end()),
+        },
+        None => {
+            let indent = text.len() - text.trim_start().len();
+            format!("{prefix}{}- [ ] {}", &text[..indent], &text[indent..])
+        }
+    })
 }
 
 /// Each block drawn, in order (the preview scrolls to them one by one).
@@ -2006,8 +2022,13 @@ fn numbered_item(line: &str) -> Option<(usize, u64, char, std::ops::Range<usize>
     let rest = &line[indent..];
     let digits = rest.chars().take_while(char::is_ascii_digit).count();
     let delimiter = rest[digits..].chars().next()?;
+    // The delimiter first: what follows the digits may be any character (`Été`, `→`).
+    if !(1..=9).contains(&digits) || !matches!(delimiter, '.' | ')') {
+        return None;
+    }
     let after = rest[digits + 1..].chars().next();
-    ((1..=9).contains(&digits) && matches!(delimiter, '.' | ')') && after.is_none_or(|c| c == ' ' || c == '\t'))
+    after
+        .is_none_or(|c| c == ' ' || c == '\t')
         .then(|| rest[..digits].parse().ok())
         .flatten()
         .map(|n| (indent, n, delimiter, indent..indent + digits))
@@ -2016,10 +2037,9 @@ fn numbered_item(line: &str) -> Option<(usize, u64, char, std::ops::Range<usize>
 /// A list's numbered items: each one's line and number.
 type Items = Vec<(usize, u64)>;
 
-/// The numbered list around line `at` brought back in order, each list (and sublist)
-/// counting on from its first item: the lines to change, and their new text. A list
-/// numbered all the same (`1.` `1.` `1.`, on purpose) is left as it is.
-pub fn renumbered(lines: &[String], at: usize) -> Vec<(usize, String)> {
+/// The numbered lists (and sublists) in the list around line `at`: each one's items. Items
+/// in a code fence inside it aren't items.
+fn lists_around(lines: &[String], at: usize) -> Vec<Items> {
     let is_item =
         |l: &str| numbered_item(l).is_some() || continuation(l).is_some_and(|(next, _)| !next.trim().starts_with('>'));
     let inside = |i: usize| {
@@ -2041,8 +2061,16 @@ pub fn renumbered(lines: &[String], at: usize) -> Vec<(usize, String)> {
     // Lists open at each depth: their indentation, delimiter and items.
     let mut open: Vec<(usize, char, Items)> = Vec::new();
     let mut lists: Vec<Items> = Vec::new();
+    let mut fence: Option<&str> = None;
     for (i, line) in lines.iter().enumerate().take(last + 1).skip(first) {
         if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(mark) = fence_of(line.trim_start()) {
+            fence = if fence == Some(mark) { None } else { fence.or(Some(mark)) };
+            continue;
+        }
+        if fence.is_some() {
             continue;
         }
         let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
@@ -2064,9 +2092,18 @@ pub fn renumbered(lines: &[String], at: usize) -> Vec<(usize, String)> {
         }
     }
     lists.extend(open.into_iter().map(|(_, _, items)| items));
+    lists
+}
+
+/// The numbered list around line `at` brought back in order, each list (and sublist)
+/// counting on from its lowest number: the lines to change, and their new text. A list
+/// numbered all the same (`1.` `1.` `1.`, on purpose) is left as it is.
+pub fn renumbered(lines: &[String], at: usize) -> Vec<(usize, String)> {
+    let lists = lists_around(lines, at);
     let mut changes = Vec::new();
     for items in lists {
-        let start = items[0].1;
+        // From its lowest number: where it started, even when its first item moved down.
+        let start = items.iter().map(|(_, n)| *n).min().unwrap_or(1);
         if items.len() < 2 || items.iter().all(|(_, n)| *n == start) {
             continue;
         }
@@ -2083,6 +2120,15 @@ pub fn renumbered(lines: &[String], at: usize) -> Vec<(usize, String)> {
     changes
 }
 
+/// The number every item of the list around line `at` has, when they all have the same
+/// one (`1.` `1.` `1.`, written that way on purpose): Enter carries it on as it is.
+pub fn same_number(lines: &[String], at: usize) -> Option<u64> {
+    let lists = lists_around(lines, at);
+    let list = lists.iter().find(|items| items.iter().any(|(l, _)| *l == at))?;
+    let first = list.first()?.1;
+    (list.len() >= 2 && list.iter().all(|(_, n)| *n == first)).then_some(first)
+}
+
 #[cfg(test)]
 mod task_tests {
     use super::{task_box, task_toggled};
@@ -2095,6 +2141,10 @@ mod task_tests {
         assert_eq!(task_toggled("3. call").as_deref(), Some("3. [ ] call"));
         assert_eq!(task_toggled("  Buy tea").as_deref(), Some("  - [ ] Buy tea"));
         assert_eq!(task_toggled("   "), None);
+        assert_eq!(task_toggled("-").as_deref(), Some("- [ ] "), "a bare marker");
+        assert_eq!(task_toggled("> - x").as_deref(), Some("> - [ ] x"));
+        assert_eq!(task_toggled("> note").as_deref(), Some("> - [ ] note"));
+        assert_eq!(task_toggled("> - [ ] x").as_deref(), Some("> - [x] x"));
         assert_eq!(task_box("- [ ] milk"), Some(2..5));
         assert_eq!(task_box("> 1. [x] quoted"), Some(5..8));
         assert_eq!(task_box("- milk"), None);
@@ -2129,6 +2179,15 @@ mod renumber_tests {
         // A paragraph ends the list: the next one counts by itself.
         assert!(renumbered(&lines("1. a\n2. b\nText\n1. c"), 0).is_empty());
         assert!(renumbered(&lines("2025. A year\nGood"), 0).is_empty(), "a year, alone: nothing to count");
+        // Lines starting with any character: no crash, no list.
+        for line in ["Été", "“quote”", "→ x", "3€ café", "9.é", "🙂"] {
+            assert!(renumbered(&lines(&format!("- a\n{line}\n- b")), 1).is_empty(), "{line}");
+        }
+        // Numbered lines in a code block inside the list are code.
+        let fenced = lines("1. Run:\n   ```\n   1. foo\n   3. bar\n   ```\n3. Done");
+        assert_eq!(renumbered(&fenced, 0), [(5, "2. Done".to_string())]);
+        assert_eq!(super::same_number(&lines("1. a\n1. b\n1. c"), 1), Some(1));
+        assert_eq!(super::same_number(&lines("1. a\n2. b"), 1), None);
     }
 }
 

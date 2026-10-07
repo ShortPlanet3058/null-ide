@@ -920,6 +920,20 @@ mod editor_tests {
         // One undo: the line back, numbers and all.
         e.update(cx, |e, cx| e.step_history(true, cx));
         assert_eq!(now(cx), "# Steps\n\n1. one\n2. two\n3. new\n4. three\n");
+        // Two lines selected and moved: still selected, ready to move again.
+        e.update(cx, |e, _| e.selection = Selection { anchor: e.buffer.offset(2, 0), head: e.buffer.offset(3, 6) });
+        e.update(cx, |e, cx| e.move_lines(true, cx));
+        assert_eq!(now(cx), "# Steps\n\n1. new\n2. one\n3. two\n4. three\n");
+        e.update(cx, |e, _| assert_eq!(e.buffer.slice(e.selection.range()), "2. one\n3. two"));
+        // A list numbered all the same goes on that way.
+        let (lazy, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("1. a\n1. b"), Some("l.md".into()), cx));
+        lazy.update_in(cx, |e, window, cx| {
+            window.focus(&gpui::Focusable::focus_handle(e, cx));
+            e.selection = Selection::caret(e.buffer.len_chars());
+        });
+        cx.simulate_keystrokes("enter");
+        assert_eq!(lazy.read_with(cx, |e, _| e.buffer.to_string()), "1. a\n1. b\n1. ");
     }
 
     /// `<` over selected text wraps it in a tag: the name goes in both ends as it's typed;

@@ -242,10 +242,13 @@ impl Editor {
         // is past it.
         let mark_at = at.min(content_end);
         let from = self.caret_point();
-        self.apply_char_edits(
-            vec![(mark_at..mark_at, label.clone()), (content_end..self.buffer.len_chars(), format!("{note}{after}"))],
-            cx,
-        );
+        // At the very end, the mark and the note are one edit (two at one place would overwrite).
+        let edits = if mark_at == content_end {
+            vec![(content_end..self.buffer.len_chars(), format!("{label}{note}{after}"))]
+        } else {
+            vec![(mark_at..mark_at, label.clone()), (content_end..self.buffer.len_chars(), format!("{note}{after}"))]
+        };
+        self.apply_char_edits(edits, cx);
         let caret = content_end + label.chars().count() + note.chars().count();
         self.selection = super::Selection::caret(caret);
         cx.emit(EditorEvent::Jumped { from });

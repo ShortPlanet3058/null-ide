@@ -113,8 +113,13 @@ pub struct Here<'a> {
 }
 
 /// The value of variable `name` (`TM_FILENAME`, `CURRENT_YEAR`, `CLIPBOARD`, `UUID`…), as
-/// VS Code gives it; None for one it doesn't know.
+/// VS Code gives it; None for one it doesn't know, or that's empty (nothing selected): its
+/// default goes in then.
 pub fn variable(name: &str, here: &Here) -> Option<String> {
+    known(name, here).filter(|value| !value.is_empty())
+}
+
+fn known(name: &str, here: &Here) -> Option<String> {
     let path = here.path;
     let file = |p: Option<&std::ffi::OsStr>| p.map(|s| s.to_string_lossy().into_owned());
     let random = || {
@@ -397,6 +402,12 @@ mod tests {
         assert_eq!((uuid.len(), uuid.as_bytes()[14]), (36, b'4'));
         assert_eq!(variable("RANDOM", &here).unwrap().len(), 6);
         assert_eq!(variable("NOT_ONE", &here), None);
+        // Nothing selected: the default, and the places in it.
+        let wrap = crate::editor::fill_snippet("try {${TM_SELECTED_TEXT:${1:body}}}", &here);
+        assert_eq!(wrap, "try {body}");
+        // A transform isn't applied, but leaves nothing behind; a `{` in a default is text.
+        assert_eq!(crate::editor::fill_snippet("${TM_FILENAME_BASE/(.*)/${1:/upcase}/}!", &here), "main!");
+        assert_eq!(crate::editor::fill_snippet("${NOPE:{x\\}} after", &here), "{x} after");
     }
 
     #[test]
