@@ -104,7 +104,11 @@ impl Editor {
     pub(super) fn comment_marks(&self) -> Option<(Option<&'static str>, Option<(&'static str, &'static str)>)> {
         match (self.language(), self.basic_syntax()) {
             (Some(language), _) => Some((language.line_comment, language.block_comment)),
-            (None, Some(basic)) => Some((basic.line_comment.first().copied(), basic.block_comment)),
+            // Ruby's `=begin`/`=end` only work at a line's very start: not one to wrap with.
+            (None, Some(basic)) => Some((
+                basic.line_comment.first().copied(),
+                basic.block_comment.filter(|(open, _)| !open.starts_with('=')),
+            )),
             (None, None) => None,
         }
     }
@@ -763,7 +767,9 @@ fn toggle_block_comment(lines: &[String], open: &str, close: &str) -> Vec<String
     // to start and end there, `/* a */ f(); /* b */`).
     let all = lines.join("\n");
     let all = all.trim();
-    let one = all.len() >= open.len() + close.len() && !all[open.len()..all.len() - close.len()].contains(close);
+    let one = all.starts_with(open)
+        && all.ends_with(close)
+        && all.get(open.len()..all.len().saturating_sub(close.len())).is_some_and(|inside| !inside.contains(close));
     if first.starts_with(open) && last.ends_with(close) && one {
         let f = &mut lines[0];
         let at = f.find(open).unwrap_or(0);
@@ -1424,6 +1430,15 @@ mod basic_colouring_tests {
             e.selection = Selection::caret(0);
             e.toggle_comment(cx);
             assert_eq!(e.buffer.to_string(), "// let n = 42\n");
+        });
+        // XML has only block comments: ⌘/ wraps, and accented text doesn't trip it.
+        let xml = cx.new(|cx| Editor::new(Buffer::from_text("Été déjà\n"), Some(PathBuf::from("a.xml")), cx));
+        xml.update(cx, |e, cx| {
+            e.selection = Selection::caret(0);
+            e.toggle_comment(cx);
+            assert_eq!(e.buffer.to_string(), "<!-- Été déjà -->\n");
+            e.toggle_comment(cx);
+            assert_eq!(e.buffer.to_string(), "Été déjà\n");
         });
     }
 

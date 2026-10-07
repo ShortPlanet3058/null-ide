@@ -102,7 +102,6 @@ pub enum LspEvent {
     Installed(Result<&'static str, String>),
 }
 
-/// The language servers for one project, and what they've reported.
 /// rust-analyzer's own request for the web page documenting what's at a position.
 pub enum ExternalDocs {}
 
@@ -169,6 +168,7 @@ pub struct ExpandedMacro {
     pub expansion: String,
 }
 
+/// The language servers for one project, and what they've reported.
 pub struct LspStore {
     root: PathBuf,
     servers: HashMap<&'static str, ServerState>,

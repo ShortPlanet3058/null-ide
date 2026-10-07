@@ -49,10 +49,10 @@ static DEFINITION: LazyLock<Regex> = LazyLock::new(|| {
           | \#\s*define\s+\w | typedef\s | (?:struct|enum|union)\s+\w+\s*\{                                       # C
           | (?:static\s+|inline\s+|extern\s+|const\s+|unsigned\s+|signed\s+)*[A-Za-z_][\w]*[\s\*]+\**\w+\s*\([^;{}]*\)\s*[;{]?\s*$  # C functions
           | (?:(?:public|private|protected|internal|open|abstract|final|sealed|data|inner|enum|annotation|static|override|suspend|inline|partial|readonly|export|default)\s+)*
-            (?:class|interface|object|protocol|extension|actor|struct|enum|record|module|namespace|fun|func|trait)\s+[\w`]   # Swift, Kotlin, Java, C#, Ruby
+            (?:class|interface|object|protocol|extension|actor|struct|enum|record|module|namespace|fun|func|trait)\s+[\w`<]   # Swift, Kotlin, Java, C#, Ruby
           | (?:local\s+)?function\s+[\w.:]+                                                                          # Lua, PHP
-          | (?:(?:public|private|protected|internal|static|final|abstract|override|virtual|async|synchronized|sealed|partial|extern|unsafe)\s+)+
-            [\w<>\[\],.?]+\s+[A-Za-z_]\w*\s*\(                                                                    # Java, C#: a method with modifiers
+          | (?:(?:public|private|protected|internal|static|final|abstract|override|virtual|synchronized|sealed|partial|extern|unsafe)\s+)+
+            (?:async\s+)?[\w<>\[\],.?]+\s+[A-Za-z_]\w*\s*\(                                                                    # Java, C#: a method with modifiers
           | [A-Z][\w<>\[\],.?]*\s+[a-z_]\w*\s*\([^;=]*\)\s*(?:\{|=>|async)?\s*$                                        # Java, Dart: a method returning a type
         )",
     )
@@ -75,14 +75,19 @@ static NAMES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
         (r"\btypedef\b.*?([A-Za-z_]\w*)\s*;", "type"),
         (r"\bfunc\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)", "func"),
         // Java, C#: a method with modifiers (before Rust's `static NAME`).
-        (
-            r"^\s*(?:(?:public|private|protected|internal|static|final|abstract|override|virtual|async|synchronized|sealed|partial|extern|unsafe)\s+)+[\w<>\[\],.?]+\s+([A-Za-z_]\w*)\s*\(",
-            "fn",
-        ),
         (r"\bfunction\s+([A-Za-z_]\w*[.:][\w.:]+)", "function"),
+        // Kotlin: an extension (`fun String.slug()`) or generic (`fun <T> f()`) function.
+        (r"^\s*(?:\w+\s+)*fun\s+(?:<[^>]*>\s*)?(?:[\w<>?, ]+\.)?([A-Za-z_]\w*)\s*\(", "fun"),
+        // The word that defines it, at the start (after modifiers): not one in the arguments
+        // (`void OnClick(object sender)`).
         (
-            r"\b(fn|fun|def|class|function\s*\*?|struct|enum|trait|interface|type|mod|union|protocol|extension|actor|object|module|namespace|record)\s+([A-Za-z_$][\w$]*)",
+            r"^\s*(?:(?:pub(?:\([^)]*\))?|public|private|protected|internal|open|abstract|final|sealed|data|inner|annotation|static|override|suspend|inline|partial|readonly|export|default|async|unsafe|extern|local)\s+)*(fn|fun|def|class|function\s*\*?|struct|enum|trait|interface|type|mod|union|protocol|extension|actor|object|module|namespace|record)\s+([A-Za-z_$][\w$]*)",
             "",
+        ),
+        // Java, C#: a method with modifiers (before Rust's `static NAME`).
+        (
+            r"^\s*(?:(?:public|private|protected|internal|static|final|abstract|override|virtual|synchronized|sealed|partial|extern|unsafe)\s+)+(?:async\s+)?[\w<>\[\],.?]+\s+([A-Za-z_]\w*)\s*\(",
+            "fn",
         ),
         (r"\b(const|static|let)\s+(?:mut\s+)?([A-Za-z_$][\w$]*)", ""),
         (r"([A-Za-z_]\w*)\s*\(", "fn"),
@@ -94,7 +99,7 @@ static NAMES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 
 /// The name a definition line defines, and its kind.
 fn name_and_kind(line: &str) -> Option<(String, &'static str)> {
-    NAMES.iter().find_map(|(regex, kind)| {
+    let (name, kind) = NAMES.iter().find_map(|(regex, kind)| {
         let caps = regex.captures(line)?;
         if kind.is_empty() {
             let keyword = caps.get(1)?.as_str().split_whitespace().next()?.trim_end_matches('*');
@@ -128,7 +133,9 @@ fn name_and_kind(line: &str) -> Option<(String, &'static str)> {
         } else {
             Some((caps.get(1)?.as_str().to_string(), *kind))
         }
-    })
+    })?;
+    // `export default class extends Base`: no name of its own.
+    (!matches!(name.as_str(), "extends" | "implements" | "where")).then_some((name, kind))
 }
 
 /// The definitions in one file's text.
@@ -291,6 +298,19 @@ mod tests {
         assert_eq!(names("a.rb", ruby), pairs(&[("Shop", "module"), ("Cart", "class"), ("total", "def")]));
         let lua = "local function add(a, b)\n  return a + b\nend\nfunction M.run()\nend\n";
         assert_eq!(names("a.lua", lua), pairs(&[("add", "function"), ("M.run", "function")]));
+        // Each keeps its own word; nothing from the arguments; not a block statement.
+        assert_eq!(
+            names("a.py", "async def f(x):\n    async with timeout(5):\n        pass\n"),
+            pairs(&[("f", "def")])
+        );
+        assert_eq!(names("a.js", "async function load(id) {\n}\n"), pairs(&[("load", "function")]));
+        assert_eq!(names("a.php", "public function name() {\n}\n"), pairs(&[("name", "function")]));
+        assert_eq!(
+            names("a.kt", "private fun f() {\n}\nfun String.toSlug(): String {\n}\nfun <T> wrap(x: T) {\n}\n"),
+            pairs(&[("f", "fun"), ("toSlug", "fun"), ("wrap", "fun")])
+        );
+        assert_eq!(names("a.cs", "    void OnClick(object sender, EventArgs e)\n    {\n"), pairs(&[("OnClick", "fn")]));
+        assert_eq!(names("a.ts", "export default class extends Base {\n}\n"), pairs(&[]));
         let dart = "class Card extends StatelessWidget {\n  Widget build(BuildContext context) {\n    return Text('hi');\n  }\n}\n";
         assert_eq!(names("a.dart", dart), pairs(&[("Card", "class"), ("build", "fn")]));
     }

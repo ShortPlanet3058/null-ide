@@ -543,6 +543,8 @@ pub struct Editor {
     pub reveal_only: bool,
     /// The next scroll to the caret puts its line in the middle (⌃L).
     pub center_once: bool,
+    /// Lines pinned at the top, coloured without a grammar: for a (revision, line).
+    pinned_spans: Vec<((u64, usize), Vec<Span>)>,
     /// The tag pair outlined, for a (revision, caret).
     #[allow(clippy::type_complexity)]
     tag_pair_seen: Option<((u64, usize), Option<[Range<usize>; 2]>)>,
@@ -748,6 +750,7 @@ impl Editor {
             reveal_only: false,
             center_once: false,
             tag_pair_seen: None,
+            pinned_spans: Vec::new(),
             dragging: None,
             drop_at: None,
             font_size: px(cx.global::<Settings>().font_size),
@@ -1102,7 +1105,10 @@ impl Editor {
     fn basic_highlight(&mut self, wanted: Range<usize>, room: usize) {
         let Some(basic) = self.basic_syntax() else { return };
         let rope = self.buffer.rope();
+        // Too big to colour this way (it may have just grown past it): no colours, not old ones.
         if rope.len_bytes() > crate::basic_syntax::MAX_BYTES {
+            self.spans.clear();
+            self.spans_for = None;
             return;
         }
         let revision = self.buffer.revision();
@@ -1147,8 +1153,16 @@ impl Editor {
             if rope.len_bytes() > crate::basic_syntax::MAX_BYTES {
                 return Vec::new();
             }
+            // Pinned lines are drawn every frame: each kept until the text changes.
+            let key = (self.buffer.revision(), line);
+            if let Some((_, spans)) = self.pinned_spans.iter().find(|(k, _)| *k == key) {
+                return spans.clone();
+            }
             let text: Vec<u8> = rope.bytes().take(end).collect();
-            return crate::basic_syntax::spans(&text, start..end, basic);
+            let spans = crate::basic_syntax::spans(&text, start..end, basic);
+            self.pinned_spans.retain(|((revision, _), _)| *revision == key.0);
+            self.pinned_spans.push((key, spans.clone()));
+            return spans;
         }
         let Some(highlighter) = &mut self.highlighter else { return Vec::new() };
         highlighter.sync(&self.buffer);
