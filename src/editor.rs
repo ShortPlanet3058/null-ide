@@ -500,6 +500,9 @@ pub struct Editor {
     /// Which lines are in Markdown fences, as of a version of the text (for spelling).
     fences: std::cell::RefCell<Option<(u64, Vec<bool>)>>,
     pub search: Option<SearchState>,
+    /// Find looks only here (bytes, as of a revision of the text): the lines selected when
+    /// the find bar opened. It follows edits, Replace All's own included.
+    find_scope: Option<(Range<usize>, u64)>,
     find_bar: Option<Entity<FindBar>>,
     /// Reused by Find Next when the find bar is closed, and to prefill it.
     last_query: SearchQuery,
@@ -674,6 +677,7 @@ impl Editor {
             words: Default::default(),
             fences: Default::default(),
             search: None,
+            find_scope: None,
             find_bar: None,
             last_query: SearchQuery::default(),
             lsp: None,
@@ -1050,7 +1054,38 @@ impl Editor {
         cx.notify();
     }
 
+    /// Where find looks, brought up to the current text: None for the whole file.
+    fn find_scope_bytes(&mut self) -> Option<Range<usize>> {
+        let (range, revision) = self.find_scope.clone()?;
+        let revision_now = self.buffer.revision();
+        if revision != revision_now {
+            let moved = match self.buffer.edits_since(revision) {
+                Some(edits) => edits.fold(Some(range), |r, e| r.and_then(|r| intel::map_range(r, e))),
+                // After an undo: where it was, within the text.
+                None => {
+                    Some(range.start.min(self.buffer.rope().len_bytes())..range.end.min(self.buffer.rope().len_bytes()))
+                }
+            };
+            self.find_scope = moved.clone().map(|r| (r, revision_now));
+            return moved;
+        }
+        Some(range)
+    }
+
+    /// Whether find looks only in the lines selected when it opened.
+    pub fn find_in_selection(&self) -> bool {
+        self.find_scope.is_some()
+    }
+
+    /// Find looks in the whole file again.
+    pub fn find_in_whole_file(&mut self, cx: &mut Context<Self>) {
+        self.find_scope = None;
+        self.refresh_search();
+        cx.notify();
+    }
+
     fn refresh_search(&mut self) {
+        let scope = self.find_scope_bytes();
         let Some(search) = &mut self.search else { return };
         let Some(regex) = &search.regex else {
             search.matches.clear();
@@ -1063,9 +1098,13 @@ impl Editor {
             .query
             .find_all(regex, &text)
             .into_iter()
+            .filter(|r| scope.as_ref().is_none_or(|s| s.start <= r.start && r.end <= s.end))
             .map(|r| rope.byte_to_char(r.start)..rope.byte_to_char(r.end))
             .collect();
-        let from = self.selection.range().start;
+        let from = match &scope {
+            Some(s) => rope.byte_to_char(s.start),
+            None => self.selection.range().start,
+        };
         search.current =
             search.matches.iter().position(|m| m.start >= from).or((!search.matches.is_empty()).then_some(0));
     }
@@ -1141,6 +1180,7 @@ impl Editor {
 
     /// Replaces every match as a single undo step.
     pub fn replace_all_matches(&mut self, replacement: &str, cx: &mut Context<Self>) {
+        let scope = self.find_scope_bytes();
         let Some(search) = &self.search else { return };
         let Some(regex) = &search.regex else { return };
         if search.matches.is_empty() {
@@ -1153,11 +1193,15 @@ impl Editor {
             .query
             .find_every(regex, &text)
             .into_iter()
+            .filter(|r| scope.as_ref().is_none_or(|s| s.start <= r.start && r.end <= s.end))
             .map(|bytes| {
                 let chars = rope.byte_to_char(bytes.start)..rope.byte_to_char(bytes.end);
                 (chars, search.query.replacement_for(regex, &text, bytes, replacement))
             })
             .collect();
+        if edits.is_empty() {
+            return;
+        }
         self.record_undo(EditKind::Other);
         for (range, new_text) in edits.iter().rev() {
             self.buffer.replace(range.clone(), new_text);
@@ -1172,9 +1216,17 @@ impl Editor {
 
     fn deploy_find_bar(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.buffer.slice(self.selection.range());
-        let prefill = (!selected.is_empty() && !selected.contains('\n')).then_some(selected);
+        let prefill = (!selected.is_empty() && !selected.contains('\n')).then_some(selected.clone());
+        // Lines selected: find looks only there (a word or none: the whole file).
+        self.find_scope = selected.contains('\n').then(|| {
+            let range = self.selection.range();
+            let rope = self.buffer.rope();
+            (rope.char_to_byte(range.start)..rope.char_to_byte(range.end), self.buffer.revision())
+        });
         if let Some(bar) = self.find_bar.clone() {
             bar.update(cx, |bar, cx| bar.show(prefill, replace, window, cx));
+            self.refresh_search();
+            cx.notify();
             return;
         }
         let known = self.known_query(cx);
@@ -1203,6 +1255,7 @@ impl Editor {
     pub fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.find_bar = None;
         self.search = None;
+        self.find_scope = None;
         window.focus(&self.focus_handle);
         cx.notify();
     }

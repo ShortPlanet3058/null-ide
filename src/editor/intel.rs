@@ -74,7 +74,7 @@ pub(super) struct Pinned {
 }
 
 /// Where a byte range ends up after `edit`, or None once the text it covered is replaced.
-fn map_range(range: Range<usize>, edit: &crate::buffer::Edit) -> Option<Range<usize>> {
+pub(super) fn map_range(range: Range<usize>, edit: &crate::buffer::Edit) -> Option<Range<usize>> {
     let (start, old_end, new_end) = (edit.start_byte, edit.old_end_byte, edit.new_end_byte);
     if start < old_end && start <= range.start && range.end <= old_end {
         return None;

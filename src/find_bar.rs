@@ -352,6 +352,7 @@ impl FindBar {
             "case" => ("Match case", Some(Box::new(ToggleCaseSensitive))),
             "word" => ("Whole word", Some(Box::new(ToggleWholeWord))),
             "regex" => ("Regular expression", Some(Box::new(ToggleRegex))),
+            "selection" => ("Only in the lines selected: click for the whole file", None),
             "previous" => ("Previous match", Some(Box::new(FindPrevious))),
             "next" => ("Next match", Some(Box::new(FindNext))),
             "close" => ("Close", Some(Box::new(CloseFind))),
@@ -441,6 +442,7 @@ impl Render for FindBar {
                 })
             })
             .unwrap_or((false, "".into()));
+        let in_selection = self.editor.upgrade().is_some_and(|e| e.read(cx).find_in_selection());
 
         let this = cx.entity().downgrade();
         let act = move |f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
@@ -479,6 +481,20 @@ impl Render for FindBar {
                         .into_any_element()
                 }),
             ))
+            // Opened on lines selected: looking only there, until clicked.
+            .when(in_selection, |row| {
+                row.child(Self::toggle(
+                    "selection",
+                    "In selection",
+                    true,
+                    &theme,
+                    cx.global::<Fonts>().ui.clone(),
+                    act(|this, _, cx| {
+                        this.editor.update(cx, |editor, cx| editor.find_in_whole_file(cx)).ok();
+                        cx.notify();
+                    }),
+                ))
+            })
             .child(Self::toggle(
                 "case",
                 "Aa",
@@ -667,6 +683,42 @@ mod tests {
         e.update(cx, |e, _| assert_eq!(e.extra.len(), 2, "three cursors"));
         cx.simulate_input("total");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "let total = b + total;\nprint(total)\n"));
+    }
+
+    /// ⌘F on lines selected: matches and Replace All only there; clicking "In selection"
+    /// looks in the whole file again.
+    #[gpui::test]
+    fn find_stays_in_the_lines_selected(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let text = "x = 1\nx = x + 1\nprint(x)\nx\n";
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(crate::buffer::Buffer::from_text(text), Some("x.py".into()), cx));
+        // Lines 2 and 3 selected.
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            e.selection = Selection { anchor: 6, head: 25 };
+        });
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("x");
+        e.read_with(cx, |e, _| {
+            assert!(e.find_in_selection());
+            assert_eq!(e.search.as_ref().unwrap().matches.len(), 3, "the three x in lines 2 and 3");
+        });
+        cx.simulate_keystrokes("alt-cmd-f");
+        cx.simulate_input("count");
+        cx.simulate_keystrokes("cmd-enter");
+        e.read_with(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "x = 1\ncount = count + 1\nprint(count)\nx\n");
+        });
+        // The whole file again: the two x left outside.
+        e.update(cx, |e, cx| e.find_in_whole_file(cx));
+        e.read_with(cx, |e, _| assert_eq!(e.search.as_ref().unwrap().matches.len(), 2));
     }
 
     /// Esc on a match, then ⌘G: on to the next match, not staying on that one.
