@@ -478,7 +478,9 @@ impl Element for EditorElement {
 
             let char_width = shape("0".repeat(10), &[run(10, &font, theme.foreground)]).width / 10.;
             let total_lines = editor.buffer.len_lines();
-            let digits = total_lines.to_string().len().max(3);
+            // Without line numbers the gutter keeps only its marks: changes, folds, breakpoints.
+            let numbered = editor.shows_line_numbers(cx);
+            let digits = if numbered { total_lines.to_string().len().max(3) } else { 0 };
             let gutter_width = char_width * digits as f32 + px(GUTTER_PADDING * 2. + FOLD_SPACE);
             let text_bounds =
                 Bounds::from_corners(point(bounds.left() + gutter_width, bounds.top()), bounds.bottom_right());
@@ -1007,6 +1009,7 @@ impl Element for EditorElement {
             let numbers = row_layouts
                 .iter()
                 .zip(visible.clone())
+                .filter(|_| numbered)
                 .filter(|(r, row)| editor.wrap.first_row(r.row.line) == *row && r.row.block.is_none())
                 .map(|(r, row)| {
                     let line = r.row.line;
