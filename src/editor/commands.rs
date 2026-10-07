@@ -180,6 +180,8 @@ impl Editor {
         }
         let (first, last) = (span.start, span.end - 1);
         self.rewrite_lines(span.clone(), texts, |(l, c)| (if down { l + 1 } else { l - 1 }, c), cx);
+        // A numbered item moved: the list counts in its new order.
+        self.renumber_list(if down { first + 1 } else { first }, cx);
         // Bookmarks and breakpoints go with their lines; the neighbour's to the other end.
         self.marks_moved(
             span,
@@ -216,6 +218,8 @@ impl Editor {
         self.selection = Selection::caret(self.buffer.offset(line, column));
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
+        // A numbered item deleted: the ones after it count down.
+        self.renumber_list(line, cx);
         self.touch(cx);
     }
 
@@ -884,6 +888,38 @@ mod editor_tests {
         // A word, or code in a script: ⇥ is a tab, no tags.
         assert_eq!(typed(cx, "", "hello"), "hello   One Two");
         assert_eq!(typed(cx, "<script>\n", "ul>li"), "<script>\nul>li   One Two");
+    }
+
+    /// Numbered lists count on after Enter in the middle, a line moved, a line deleted; one
+    /// undo takes back the edit and the numbers together.
+    #[gpui::test]
+    fn numbered_lists_stay_in_order(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let text = "# Steps\n\n1. one\n2. two\n3. three\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("a.md")), cx));
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&gpui::Focusable::focus_handle(e, cx));
+            e.selection = Selection::caret(e.buffer.offset(2, 6));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("new");
+        let now = |cx: &mut gpui::VisualTestContext| e.read_with(cx, |e, _| e.buffer.to_string());
+        assert_eq!(now(cx), "# Steps\n\n1. one\n2. new\n3. two\n4. three\n");
+        e.update(cx, |e, _| assert_eq!(e.caret_point(), (3, 6)));
+        // Moved down past "two": each keeps its place in the count.
+        e.update(cx, |e, cx| e.move_lines(true, cx));
+        assert_eq!(now(cx), "# Steps\n\n1. one\n2. two\n3. new\n4. three\n");
+        // Deleted: the rest count down.
+        e.update(cx, |e, cx| e.delete_lines(cx));
+        assert_eq!(now(cx), "# Steps\n\n1. one\n2. two\n3. three\n");
+        // One undo: the line back, numbers and all.
+        e.update(cx, |e, cx| e.step_history(true, cx));
+        assert_eq!(now(cx), "# Steps\n\n1. one\n2. two\n3. new\n4. three\n");
     }
 
     /// `<` over selected text wraps it in a tag: the name goes in both ends as it's typed;
