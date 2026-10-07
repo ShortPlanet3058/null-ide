@@ -19,6 +19,21 @@ const HOVER_SWITCH_DELAY: Duration = Duration::from_millis(350);
 const HOVER_GRACE: Duration = Duration::from_millis(450);
 /// Cards show the signature and the start of the docs, not whole READMEs.
 const MAX_HOVER_LINES: usize = 14;
+/// The lines of `text`, ended by \n, \r\n or a lone \r (as language servers count them).
+fn text_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut rest = text;
+    while let Some(end) = rest.find(['\n', '\r']) {
+        lines.push(&rest[..end]);
+        let skip = if rest[end..].starts_with("\r\n") { 2 } else { 1 };
+        rest = &rest[end + skip..];
+    }
+    if !rest.is_empty() {
+        lines.push(rest);
+    }
+    lines
+}
+
 /// Peek Definition shows this many lines from the definition on.
 const PEEK_LINES: usize = 14;
 
@@ -27,13 +42,23 @@ const PEEK_LINES: usize = 14;
 /// that indentation taken off, and no blank lines at the end.
 fn peek_lines(text: &str, line: usize) -> String {
     let indent = |l: &str| l.len() - l.trim_start().len();
-    let mut lines = text.lines().skip(line).map(str::trim_end);
+    // Lines as language servers count them: a lone \r ends one too.
+    let mut lines = text_lines(text).into_iter().skip(line).map(str::trim_end);
     let Some(first) = lines.next() else { return String::new() };
     let base = indent(first);
-    let mut shown: Vec<&str> = std::iter::once(first)
-        .chain(lines.take_while(|l| l.is_empty() || indent(l) >= base))
-        .take(PEEK_LINES)
-        .collect();
+    // Deeper lines are its body; one as deep is its end when it closes (`}`, `)`, `end`),
+    // the next definition otherwise.
+    let mut shown: Vec<&str> = vec![first];
+    for l in lines.take(PEEK_LINES - 1) {
+        if l.is_empty() || indent(l) > base {
+            shown.push(l);
+            continue;
+        }
+        if indent(l) == base && (l.trim_start().starts_with(['}', ')', ']']) || l.trim() == "end") {
+            shown.push(l);
+        }
+        break;
+    }
     while shown.last().is_some_and(|l| l.is_empty()) {
         shown.pop();
     }
@@ -44,8 +69,9 @@ pub struct HoverCard {
     pub range: Range<usize>,
     pub diagnostics: Vec<(DiagnosticSeverity, String)>,
     pub blocks: Vec<HoverBlock>,
-    /// An image whose path is written here (`![](shot.png)`, `src="logo.svg"`), shown.
-    pub image: Option<std::path::PathBuf>,
+    /// An image whose path is written here (`![](shot.png)`, `src="logo.svg"`), shown, and
+    /// what's said under it (its name and size), read once.
+    pub image: Option<(std::path::PathBuf, String)>,
 }
 
 pub struct HoverBlock {
@@ -503,7 +529,12 @@ impl Editor {
                 if this.hover_word.as_ref() != Some(&range) {
                     return;
                 }
-                this.hover = Some(HoverCard { range, diagnostics: Vec::new(), blocks: Vec::new(), image: Some(path) });
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let about = crate::preview::of(&path, &Err(std::io::ErrorKind::InvalidData))
+                    .filter(|p| matches!(p, crate::preview::Preview::Image { .. }))
+                    .map_or(name.clone(), |p| format!("{name} · {}", p.summary()));
+                this.hover =
+                    Some(HoverCard { range, diagnostics: Vec::new(), blocks: Vec::new(), image: Some((path, about)) });
                 this.hover_close_task = None;
                 cx.notify();
             })
@@ -755,9 +786,15 @@ mod tests {
         // The function, not the module's closing brace after it.
         assert_eq!(peek_lines(text, 2), "pub fn f(x: u32) -> u32 {\n    x + 1\n}");
         // No more than PEEK_LINES, no blank lines left at the end.
-        let long: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        let long: String =
+            "fn long() {\n".to_string() + &(0..40).map(|i| format!("    line {i}\n")).collect::<String>();
         assert_eq!(peek_lines(&long, 0).lines().count(), PEEK_LINES);
         assert_eq!(peek_lines("a\n\n\n", 0), "a");
+        // At the top level: the function and its closing brace, not what follows; a
+        // one-line definition alone; a lone \r ends a line.
+        assert_eq!(peek_lines("fn f() {\n    1\n}\n\nfn g() {}\n", 0), "fn f() {\n    1\n}");
+        assert_eq!(peek_lines("const X: u32 = 1;\nconst Y: u32 = 2;\n", 0), "const X: u32 = 1;");
+        assert_eq!(peek_lines("a\rdef f():\r    pass\rb = 1\r", 1), "def f():\n    pass");
     }
 
     #[test]
@@ -823,7 +860,7 @@ mod tests {
                 e.hover
                     .as_ref()
                     .and_then(|h| h.image.as_ref())
-                    .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                    .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
             })
         };
         assert_eq!(shown("shot.png", cx).as_deref(), Some("shot.png"));

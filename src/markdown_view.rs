@@ -166,13 +166,13 @@ pub fn parse_located(source: &str) -> Vec<(usize, Block)> {
     }
     let start = start.min(lines.len());
     let (blocks, starts) = parse_lines_at(&lines[start..]);
-    with_footnotes(starts.into_iter().map(|line| line + start).zip(blocks).collect())
+    with_footnotes(starts.into_iter().map(|line| line + start).zip(blocks).collect(), lines.len())
 }
 
 /// Footnotes as they read: each reference a small number (in the order first referred
 /// to), the notes themselves gathered at the end, under a line, numbered alike. A
 /// reference to no note stays as written.
-fn with_footnotes(blocks: Vec<(usize, Block)>) -> Vec<(usize, Block)> {
+fn with_footnotes(blocks: Vec<(usize, Block)>, end: usize) -> Vec<(usize, Block)> {
     let mut notes: Vec<(usize, String, Vec<Inline>)> = Vec::new();
     let mut kept = Vec::new();
     for (line, block) in blocks {
@@ -200,7 +200,8 @@ fn with_footnotes(blocks: Vec<(usize, Block)>) -> Vec<(usize, Block)> {
         number_refs(block, &number);
     }
     if !notes.is_empty() {
-        let first = notes.iter().map(|(line, ..)| *line).min().unwrap_or(0);
+        // Placed after the last line: the preview follows the source by these lines, in order.
+        let first = end;
         notes.sort_by_key(|(_, label, _)| number(label));
         let items = notes
             .into_iter()
@@ -337,7 +338,12 @@ fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
         if let Some((label, first)) = note_definition(trimmed) {
             let mut text = vec![first.trim()];
             i += 1;
-            while i < lines.len() && !lines[i].trim().is_empty() && note_definition(lines[i].trim_start()).is_none() {
+            // Up to a blank line, another note, or a line that starts something else.
+            while i < lines.len()
+                && !lines[i].trim().is_empty()
+                && note_definition(lines[i].trim_start()).is_none()
+                && (lines[i].starts_with([' ', '\t']) || !starts_block(lines[i]))
+            {
                 text.push(lines[i].trim());
                 i += 1;
             }
@@ -429,6 +435,23 @@ fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
     }
     starts.resize(blocks.len(), begin);
     (blocks, starts)
+}
+
+/// Whether a line (not indented) starts a block of its own: a heading, a fence, a quote,
+/// a list item, a rule.
+fn starts_block(line: &str) -> bool {
+    let t = line.trim_start();
+    heading(t).is_some() || fence_of(t).is_some() || t.starts_with('>') || list_marker(line).is_some() || is_rule(t)
+}
+
+/// `[^label]` at `i`: the label and how many chars it takes.
+fn note_ref_at(chars: &[char], i: usize) -> Option<(String, usize)> {
+    if chars.get(i) != Some(&'[') || chars.get(i + 1) != Some(&'^') {
+        return None;
+    }
+    let label: String = chars[i + 2..].iter().take_while(|c| **c != ']' && !c.is_whitespace()).collect();
+    let len = label.chars().count();
+    (len > 0 && chars.get(i + 2 + len) == Some(&']')).then_some((label, len + 3))
 }
 
 /// `[^label]: text` → the label and the text.
@@ -880,14 +903,12 @@ pub fn inlines(text: &str) -> Vec<Inline> {
                     continue;
                 }
             }
-            '[' if rest.starts_with("[^") => {
-                let label: String = chars[i + 2..].iter().take_while(|c| **c != ']' && !c.is_whitespace()).collect();
-                if !label.is_empty() && chars.get(i + 2 + label.chars().count()) == Some(&']') {
-                    flush(&mut plain, &mut out);
-                    i += 3 + label.chars().count();
-                    out.push(Inline::NoteRef(label));
-                    continue;
-                }
+            '[' if note_ref_at(&chars, i).is_some() => {
+                let (label, len) = note_ref_at(&chars, i).unwrap_or_default();
+                flush(&mut plain, &mut out);
+                i += len;
+                out.push(Inline::NoteRef(label));
+                continue;
             }
             '!' if rest.starts_with("![") => {
                 if let Some((alt, url, len)) = bracketed(&chars, i + 1) {
@@ -1376,8 +1397,13 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
                 .into_any_element()
         }
         Block::Rule => div().h(px(1.)).my(px(6.)).bg(theme.hairline).into_any_element(),
-        // Gathered at the end as a list before drawing: never drawn where it was written.
-        Block::Note(..) => div().into_any_element(),
+        // Gathered at the end before drawing, unless inside a quote or a list: then read
+        // where it's written.
+        Block::Note(label, content) => {
+            let mut content = content.clone();
+            content.insert(0, Inline::Text(format!("[^{label}]: ")));
+            render_block(&Block::Paragraph(content), style, counter, color)
+        }
     }
 }
 
@@ -1555,6 +1581,14 @@ mod tests {
         assert_eq!(blocks.len(), 4);
         // No footnotes: nothing added.
         assert_eq!(parse("Just [a link](x).\n").len(), 1);
+        // The notes come last for the source's lines too (the preview follows by them), a
+        // note stops where a list starts, and `[^ x](url)` is still a link.
+        let located = parse_located("a[^1]\n\n[^1]: Note.\n- item\n\nend\n");
+        let lines: Vec<usize> = located.iter().map(|(l, _)| *l).collect();
+        assert!(lines.windows(2).all(|w| w[0] <= w[1]), "{lines:?}");
+        assert!(matches!(&located[1].1, Block::List { start: None, .. }), "the list after the note");
+        let link = inlines("[^ x](u)");
+        assert!(matches!(&link[0], Inline::Link { .. }), "{link:?}");
     }
 
     #[test]

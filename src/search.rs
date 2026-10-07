@@ -25,11 +25,26 @@ impl SearchQuery {
     }
 
     /// Byte ranges of every non-empty match in `text`, up to [`MAX_MATCHES`].
+    #[cfg(test)]
     pub fn find_all(&self, regex: &Regex, text: &str) -> Vec<Range<usize>> {
+        self.find_within(regex, text, None)
+    }
+
+    /// Byte ranges of the non-empty matches inside `within` (all of `text` when None), up
+    /// to [`MAX_MATCHES`] of those: matches before it don't use up the count.
+    pub fn find_within(&self, regex: &Regex, text: &str, within: Option<Range<usize>>) -> Vec<Range<usize>> {
         if self.text.is_empty() {
             return Vec::new();
         }
-        regex.find_iter(text).filter(|m| !m.is_empty()).take(MAX_MATCHES).map(|m| m.range()).collect()
+        let within = within.unwrap_or(0..text.len());
+        regex
+            .find_iter(text)
+            .map(|m| m.range())
+            .skip_while(|r| r.start < within.start)
+            .take_while(|r| r.end <= within.end)
+            .filter(|r| !r.is_empty())
+            .take(MAX_MATCHES)
+            .collect()
     }
 
     /// Byte ranges of every non-empty match, however many: for replacing them all.
@@ -61,6 +76,16 @@ impl SearchQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Matches in a scope count from it: thousands before it don't use up the limit.
+    #[test]
+    fn matches_within_a_range_count_from_there() {
+        let q = SearchQuery { text: ",".into(), ..Default::default() };
+        let re = q.build().unwrap();
+        let text = ",".repeat(MAX_MATCHES + 5) + "\na, b, c\n";
+        let start = MAX_MATCHES + 6;
+        assert_eq!(q.find_within(&re, &text, Some(start..text.len())), [start + 1..start + 2, start + 4..start + 5]);
+    }
 
     #[test]
     fn whole_words_can_be_punctuation() {

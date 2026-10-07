@@ -503,6 +503,9 @@ pub struct Editor {
     /// Find looks only here (bytes, as of a revision of the text): the lines selected when
     /// the find bar opened. It follows edits, Replace All's own included.
     find_scope: Option<(Range<usize>, u64)>,
+    /// Where the scope was at each version of the text, so an undo (which brings an
+    /// earlier version back whole) brings its scope back too.
+    find_scope_at: Vec<(u64, Range<usize>)>,
     find_bar: Option<Entity<FindBar>>,
     /// Reused by Find Next when the find bar is closed, and to prefill it.
     last_query: SearchQuery,
@@ -678,6 +681,7 @@ impl Editor {
             fences: Default::default(),
             search: None,
             find_scope: None,
+            find_scope_at: Vec::new(),
             find_bar: None,
             last_query: SearchQuery::default(),
             lsp: None,
@@ -791,8 +795,9 @@ impl Editor {
         }
         let Ok((text, encoding)) = read else { return };
         // What Null itself last wrote (the watcher saw a save, typing has gone on since):
-        // nothing changed on disk.
+        // nothing changed on disk, unless another app wrote it in another encoding.
         if !discard_edits && self.on_disk == Some(fingerprint(&text)) {
+            self.encoding = encoding;
             return;
         }
         self.on_disk = Some(fingerprint(&text));
@@ -1058,18 +1063,30 @@ impl Editor {
     fn find_scope_bytes(&mut self) -> Option<Range<usize>> {
         let (range, revision) = self.find_scope.clone()?;
         let revision_now = self.buffer.revision();
+        let version = self.buffer.version();
         if revision != revision_now {
             let moved = match self.buffer.edits_since(revision) {
                 Some(edits) => edits.fold(Some(range), |r, e| r.and_then(|r| intel::map_range(r, e))),
-                // After an undo: where it was, within the text.
-                None => {
-                    Some(range.start.min(self.buffer.rope().len_bytes())..range.end.min(self.buffer.rope().len_bytes()))
-                }
+                // After an undo: where it was at that version; not known, the whole file.
+                None => self.find_scope_at.iter().rev().find(|(v, _)| *v == version).map(|(_, r)| r.clone()),
             };
             self.find_scope = moved.clone().map(|r| (r, revision_now));
+            if let Some(range) = &moved {
+                self.remember_find_scope(version, range.clone());
+            }
             return moved;
         }
         Some(range)
+    }
+
+    fn remember_find_scope(&mut self, version: u64, range: Range<usize>) {
+        if self.find_scope_at.last().is_some_and(|(v, _)| *v == version) {
+            self.find_scope_at.pop();
+        }
+        self.find_scope_at.push((version, range));
+        if self.find_scope_at.len() > 64 {
+            self.find_scope_at.remove(0);
+        }
     }
 
     /// Whether find looks only in the lines selected when it opened.
@@ -1096,9 +1113,8 @@ impl Editor {
         let rope = self.buffer.rope();
         search.matches = search
             .query
-            .find_all(regex, &text)
+            .find_within(regex, &text, scope.clone())
             .into_iter()
-            .filter(|r| scope.as_ref().is_none_or(|s| s.start <= r.start && r.end <= s.end))
             .map(|r| rope.byte_to_char(r.start)..rope.byte_to_char(r.end))
             .collect();
         let from = match &scope {
@@ -1223,6 +1239,10 @@ impl Editor {
             let rope = self.buffer.rope();
             (rope.char_to_byte(range.start)..rope.char_to_byte(range.end), self.buffer.revision())
         });
+        self.find_scope_at.clear();
+        if let Some((range, _)) = self.find_scope.clone() {
+            self.remember_find_scope(self.buffer.version(), range);
+        }
         if let Some(bar) = self.find_bar.clone() {
             bar.update(cx, |bar, cx| bar.show(prefill, replace, window, cx));
             self.refresh_search();
@@ -2425,13 +2445,9 @@ impl Editor {
             .line_height(px(19.))
             .children(diagnostics)
             .children(blocks)
-            .children(card.image.clone().map(|path| {
+            .children(card.image.clone().map(|(path, about)| {
                 // The image, at most this big, then its name and size, faintly.
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let about = crate::preview::of(&path, &Err(std::io::ErrorKind::InvalidData))
-                    .filter(|p| matches!(p, crate::preview::Preview::Image { .. }))
-                    .map(|p| format!("{name} · {}", p.summary()))
-                    .unwrap_or(name.clone());
                 div()
                     .flex()
                     .flex_col()
