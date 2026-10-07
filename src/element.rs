@@ -616,8 +616,12 @@ impl Element for EditorElement {
                     }
                 }
             }
-            // Misspelled words: faintly, after the problems, so a problem's colour wins.
+            // Links to nothing (Markdown), then misspelled words faintly: after the problems,
+            // so a problem's colour wins.
             for (i, line) in lines_shown.clone().enumerate() {
+                for link in editor.broken_links_on_line(line, &texts[i]) {
+                    underlines[i].push((link, theme.warning));
+                }
                 for word in editor.misspellings_on_line(line, &texts[i], cx) {
                     underlines[i].push((word, theme.muted));
                 }

@@ -1,5 +1,6 @@
 mod assist;
 mod breakpoints;
+mod broken_links;
 mod changes;
 mod commands;
 mod completion;
@@ -499,6 +500,10 @@ pub struct Editor {
     words: std::cell::Cell<Option<(u64, usize)>>,
     /// Which lines are in Markdown fences, as of a version of the text (for spelling).
     fences: std::cell::RefCell<Option<(u64, Vec<bool>)>>,
+    /// Whether linked files exist, and since when that's known (for broken links).
+    link_targets: std::cell::RefCell<std::collections::HashMap<PathBuf, (bool, Instant)>>,
+    /// The `#anchors` the headings make, as of a version of the text.
+    anchors: std::cell::RefCell<Option<(u64, Vec<String>)>>,
     pub search: Option<SearchState>,
     /// Find looks only here (bytes, as of a revision of the text): the lines selected when
     /// the find bar opened. It follows edits, Replace All's own included.
@@ -679,6 +684,8 @@ impl Editor {
             line_spacing: cx.global::<Settings>().line_spacing.factor(),
             words: Default::default(),
             fences: Default::default(),
+            link_targets: Default::default(),
+            anchors: Default::default(),
             search: None,
             find_scope: None,
             find_scope_at: Vec::new(),

@@ -11,15 +11,15 @@ const MAX_FILES: usize = 5_000;
 const MAX_BYTES: u64 = 1024 * 1024;
 
 /// A link's target as written, where it sits in its line (bytes), and the line.
-struct Target<'a> {
-    line: usize,
-    start: usize,
-    text: &'a str,
+pub struct Target<'a> {
+    pub line: usize,
+    pub start: usize,
+    pub text: &'a str,
 }
 
 /// The local targets of a Markdown text's links and images (`[a](b)`, `![a](b)`,
 /// `[a]: b`, `src="b"`), not addresses nor `#headings`.
-fn targets(text: &str) -> Vec<Target<'_>> {
+pub fn targets(text: &str) -> Vec<Target<'_>> {
     let mut found = Vec::new();
     for (line, l) in text.split('\n').enumerate() {
         let l = l.strip_suffix('\r').unwrap_or(l);
@@ -64,7 +64,7 @@ fn targets(text: &str) -> Vec<Target<'_>> {
 }
 
 /// `path` with `.` and `..` worked out, without asking the disk (the file may be gone).
-fn tidy(path: &Path) -> PathBuf {
+pub fn tidy(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {
