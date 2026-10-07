@@ -58,7 +58,7 @@ fn abbreviation_start(before: &str) -> Option<usize> {
     (depth == 0 && (first.is_alphabetic() || matches!(first, '.' | '#' | '['))).then_some(start)
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Node {
     tag: String,
     id: Option<String>,
@@ -72,18 +72,20 @@ struct Node {
 fn parse(abbreviation: &str) -> Option<Vec<Node>> {
     let chars: Vec<char> = abbreviation.chars().collect();
     let mut at = 0;
-    // The open parents, outermost first: each holds the nodes being added to it.
-    let mut levels: Vec<Vec<Node>> = vec![Vec::new()];
+    // The open parents, outermost first: each holds the nodes being added to it, and how
+    // many copies its last element was made in (the children go in each).
+    let mut levels: Vec<(Vec<Node>, usize)> = vec![(Vec::new(), 1)];
     loop {
         let (element, count) = element(&chars, &mut at)?;
-        let parent = levels.last_mut()?;
+        let (parent, copies) = levels.last_mut()?;
         for n in 1..=count {
             parent.push(numbered(&element, n, count));
         }
+        *copies = count;
         match chars.get(at) {
             None => break,
             Some('+') => {}
-            Some('>') => levels.push(Vec::new()),
+            Some('>') => levels.push((Vec::new(), 1)),
             Some('^') => {
                 let mut ups = 0;
                 while chars.get(at) == Some(&'^') {
@@ -102,21 +104,56 @@ fn parse(abbreviation: &str) -> Option<Vec<Node>> {
     while levels.len() > 1 {
         close(&mut levels)?;
     }
-    levels.pop()
+    levels.pop().map(|(nodes, _)| nodes)
 }
 
-/// The innermost open level goes inside the last node of the one around it (each copy of
-/// a repeated one).
-fn close(levels: &mut Vec<Vec<Node>>) -> Option<()> {
+/// The innermost open level goes inside the last element of the one around it: in each
+/// copy of it when it was repeated (`ul*2>li`: an item in each list).
+fn close(levels: &mut Vec<(Vec<Node>, usize)>) -> Option<()> {
     if levels.len() < 2 {
         // Climbing past the top stays at the top.
         return Some(());
     }
-    let children = levels.pop()?;
-    let parent = levels.last_mut()?;
-    let last = parent.last_mut()?;
-    last.children = children;
+    let (children, _) = levels.pop()?;
+    let (parent, copies) = levels.last_mut()?;
+    let from = parent.len().checked_sub(*copies)?;
+    for node in &mut parent[from..] {
+        node.children = children.iter().map(Node::clone).collect();
+    }
     Some(())
+}
+
+/// `[key=value other="with spaces" flag]`: each attribute, its value unquoted.
+fn attributes(inside: &str) -> Vec<(String, Option<String>)> {
+    let mut found = Vec::new();
+    let mut chars = inside.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        let mut key = String::new();
+        while let Some(c) = chars.next_if(|c| !c.is_whitespace() && *c != '=') {
+            key.push(c);
+        }
+        if key.is_empty() {
+            return found;
+        }
+        if chars.next_if_eq(&'=').is_none() {
+            found.push((key, None));
+            continue;
+        }
+        let mut value = String::new();
+        match chars.peek().copied() {
+            Some(quote @ ('"' | '\'')) => {
+                chars.next();
+                value.extend(chars.by_ref().take_while(|&c| c != quote));
+            }
+            _ => {
+                while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+                    value.push(c);
+                }
+            }
+        }
+        found.push((key, Some(value)));
+    }
 }
 
 /// One element and how many times it repeats, read from `at`.
@@ -144,10 +181,7 @@ fn element(chars: &[char], at: &mut usize) -> Option<(Node, usize)> {
                 *at += 1;
                 let close = chars[*at..].iter().position(|&c| c == ']')? + *at;
                 let inside: String = chars[*at..close].iter().collect();
-                node.attributes.extend(inside.split_whitespace().map(|pair| match pair.split_once('=') {
-                    Some((key, value)) => (key.to_string(), Some(value.trim_matches(['"', '\'']).to_string())),
-                    None => (pair.to_string(), None),
-                }));
+                node.attributes.extend(attributes(&inside));
                 *at = close + 1;
             }
             Some('{') => {
@@ -430,6 +464,19 @@ mod tests {
         assert_eq!(
             expand("header>h1+nav^main").as_deref(),
             Some("<header>\n  <h1>$1</h1>\n  <nav>$2</nav>\n</header>\n<main>$3</main>$0")
+        );
+    }
+
+    #[test]
+    fn repeats_and_quoted_values() {
+        assert_eq!(
+            expand("ul*2>li").as_deref(),
+            Some("<ul>\n  <li>$1</li>\n</ul>\n<ul>\n  <li>$2</li>\n</ul>$0"),
+            "an item in each list"
+        );
+        assert_eq!(
+            expand(r#"a[title="Hello world" data-x='a b' hidden]"#).as_deref(),
+            Some("<a title=\"Hello world\" data-x=\"a b\" hidden=\"$1\">$2</a>$0")
         );
     }
 

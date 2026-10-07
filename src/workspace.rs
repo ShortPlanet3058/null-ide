@@ -3656,7 +3656,10 @@ impl Workspace {
     fn edit_snippets(&mut self, _: &EditSnippets, window: &mut Window, cx: &mut Context<Self>) {
         let editor = self.active_editor().map(|e| e.read(cx));
         let (id, name) = match editor.and_then(|e| e.path().map(|p| (p, e.language()))) {
-            Some((path, language)) => (crate::servers::language_id(path), language.map_or("plain text", |l| l.name)),
+            Some((path, language)) => {
+                let name = language.map(|l| l.name);
+                (crate::snippets::language_id(name, path), name.unwrap_or("plain text"))
+            }
             None => ("plaintext", "plain text"),
         };
         let Some(folder) = crate::snippets::folder() else { return };

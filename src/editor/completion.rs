@@ -361,8 +361,10 @@ impl Editor {
         delay: Duration,
         cx: &mut Context<Self>,
     ) {
-        // Your own snippets, by their prefix (not after a `.`: that's a member).
-        let snippets = if trigger.is_none() { self.user_snippets() } else { Vec::new() };
+        // Your own snippets, by their prefix; not after a `.` or `::` (that's a member).
+        let before = word_start.checked_sub(1).and_then(|i| self.buffer.char_at(i));
+        let member = trigger.is_some() || matches!(before, Some('.' | ':'));
+        let snippets = if member { Vec::new() } else { self.user_snippets(word_start) };
         if !self.served(cx) {
             let mut words = self.words_near(word_start);
             words.extend(snippets);
@@ -382,15 +384,31 @@ impl Editor {
     }
 
     /// The snippets for this file (see `snippets`), as suggestions fitted to the caret's line.
-    fn user_snippets(&self) -> Vec<CompletionItem> {
+    /// A prefix starting with marks (`#region`, `@media`) takes the marks already typed
+    /// before the word too, so they aren't written twice.
+    fn user_snippets(&self, word_start: usize) -> Vec<CompletionItem> {
         let Some(path) = &self.path else { return Vec::new() };
-        let line = self.buffer.line_text(self.caret_point().0);
+        let (line_ix, column) = self.buffer.point(word_start);
+        let line = self.buffer.line_text(line_ix);
         let indent = &line[..line.len() - line.trim_start().len()];
+        let typed_before: String = line.chars().take(column).collect();
         let unit = self.style.indent.unit();
-        crate::snippets::for_file(path, crate::snippets::folder().as_deref())
+        let ending = self.style.line_ending.text();
+        let language = crate::snippets::language_id(self.language().map(|l| l.name), path);
+        crate::snippets::for_file(path, language, crate::snippets::folder().as_deref())
             .iter()
             .flat_map(|s| s.prefixes.iter().map(move |p| (s, p)))
-            .map(|(s, prefix)| crate::snippets::completion_item(s, prefix, indent, &unit))
+            .map(|(s, prefix)| {
+                let mut item = crate::snippets::completion_item(s, prefix, indent, &unit, ending);
+                let marks = &prefix[..prefix.len() - item.filter_text.as_deref().map_or(0, str::len)];
+                if !marks.is_empty() && typed_before.ends_with(marks) {
+                    let from = word_start - marks.chars().count();
+                    let range = lsp_types::Range::new(self.lsp_position(from), self.lsp_position(word_start));
+                    let text = item.insert_text.take().unwrap_or_default();
+                    item.text_edit = Some(CompletionTextEdit::Edit(lsp_types::TextEdit::new(range, text)));
+                }
+                item
+            })
             .collect()
     }
 
@@ -710,7 +728,8 @@ mod tests {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(
             dir.join(".vscode/team.code-snippets"),
-            r#"{"If": {"prefix": "iff", "body": ["if ${1:ready} {", "\t$0", "}"], "scope": "rust"}}"#,
+            r##"{"If": {"prefix": "iff", "body": ["if ${1:ready} {", "\t$0", "}"], "scope": "rust"},
+                "Region": {"prefix": "#region", "body": "#region $1"}, "Log": {"prefix": "log", "body": "log!($1)"}}"##,
         )
         .unwrap();
         let file = dir.join("main.rs");
@@ -724,12 +743,39 @@ mod tests {
             assert_eq!(e.buffer.to_string(), "fn main() {\n    if ready {\n        \n    }");
             assert_eq!(e.buffer.slice(e.selection.range()), "ready", "the first place to fill in");
         });
-        cx.simulate_input("go");
+        cx.simulate_input("ok");
         cx.simulate_keystrokes("tab");
         e.update(cx, |e, _| {
             assert_eq!(e.caret_point(), (2, 8), "⇥: where the body says the caret ends");
-            assert!(e.buffer.to_string().contains("if go {"));
+            assert!(e.buffer.to_string().contains("if ok {"));
         });
+        // Not after a `.` (a member), and `#` typed before `region` isn't written twice.
+        let (member, cx) = editor(cx, file.to_str().unwrap(), "fn main() {\n    x.l");
+        cx.simulate_input("og");
+        cx.run_until_parked();
+        assert!(!shown(cx, &member).contains(&"log".to_string()), "{:?}", shown(cx, &member));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A prefix starting with a mark: the mark already typed is taken, not doubled.
+    #[gpui::test]
+    fn a_prefixs_marks_are_not_written_twice(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("snippets-marks");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".vscode")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".vscode/a.code-snippets"),
+            r##"{"Region": {"prefix": "#region", "body": "#region $1"}}"##,
+        )
+        .unwrap();
+        let file = dir.join("a.rs");
+        let (e, cx) = editor(cx, file.to_str().unwrap(), "// x\n#r");
+        cx.simulate_input("eg");
+        cx.run_until_parked();
+        let at = shown(cx, &e).iter().position(|s| s == "#region").expect("offered");
+        e.update(cx, |e, cx| e.accept_completion(at, cx));
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "// x\n#region "));
         std::fs::remove_dir_all(&dir).ok();
     }
 

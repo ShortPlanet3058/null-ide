@@ -386,12 +386,17 @@ fn runs_for(
             let mut run = run(b - a, font, theme.syntax(syntax));
             let marks = underlines.iter().filter(|(r, _)| r.start <= a && b <= r.end).map(|(_, mark)| *mark);
             let mut wavy = None;
+            let mut faded = false;
             for mark in marks {
                 match mark {
                     Mark::Wavy(color) => wavy = wavy.or(Some(color)),
-                    Mark::Faded => run.color = run.color.opacity(0.45),
+                    // Once, however many problems say so.
+                    Mark::Faded => faded = true,
                     Mark::Struck => {}
                 }
+            }
+            if faded {
+                run.color = run.color.opacity(0.45);
             }
             if let Some(color) = wavy {
                 run.underline = Some(UnderlineStyle { color: Some(color), thickness: px(1.), wavy: true });
@@ -1772,8 +1777,13 @@ mod problem_notes {
         let theme = Theme::oled();
         let font = gpui::font("Menlo");
         let text = "let unused = old();";
-        let marks =
-            [(4..10, Mark::Faded), (13..16, Mark::Struck), (4..10, Mark::Wavy(theme.warning)), (0..3, Mark::Faded)];
+        let marks = [
+            (4..10, Mark::Faded),
+            (13..16, Mark::Struck),
+            (4..10, Mark::Wavy(theme.warning)),
+            (0..3, Mark::Faded),
+            (4..10, Mark::Faded),
+        ];
         let runs = runs_for(text, 0, &[], &marks, &theme, &font);
         let at = |byte: usize| {
             let mut start = 0;
