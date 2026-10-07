@@ -8,8 +8,11 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{LazyLock, Mutex};
 
-/// Lines asked about, and the byte ranges in them the checker found wrong.
-static KNOWN: LazyLock<Mutex<HashMap<String, Vec<Range<usize>>>>> = LazyLock::new(Default::default);
+/// Lines asked about (by a hash of their text), and the byte ranges in them the checker
+/// found wrong.
+static KNOWN: LazyLock<Mutex<HashMap<u64, Vec<Range<usize>>>>> = LazyLock::new(Default::default);
+/// Longer lines aren't checked (a minified file, a data line): they'd be read every frame.
+const LONGEST: usize = 2_000;
 /// Past this many lines remembered, they're forgotten and asked about again.
 const REMEMBERED: usize = 20_000;
 
@@ -57,7 +60,13 @@ fn is_word(part: &str) -> bool {
 /// What the checker finds wrong in `line`, by byte range (code included: callers keep
 /// only the ranges over `words`).
 pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
-    if let Some(wrong) = KNOWN.lock().ok().and_then(|known| known.get(line).cloned()) {
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        line.hash(&mut hasher);
+        hasher.finish()
+    };
+    if let Some(wrong) = KNOWN.lock().ok().and_then(|known| known.get(&key).cloned()) {
         return wrong;
     }
     let wrong = checker::wrong_in(line);
@@ -65,7 +74,7 @@ pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
         if known.len() > REMEMBERED {
             known.clear();
         }
-        known.insert(line.to_string(), wrong.clone());
+        known.insert(key, wrong.clone());
     }
     wrong
 }
@@ -73,6 +82,9 @@ pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
 /// The misspelled words of `line`: its `words` (those `keep` says are checked) that the
 /// checker finds wrong.
 pub fn misspelled_words(line: &str, keep: impl Fn(&Range<usize>) -> bool) -> Vec<Range<usize>> {
+    if line.len() > LONGEST {
+        return Vec::new();
+    }
     let checked: Vec<Range<usize>> = words(line).into_iter().filter(|r| keep(r)).collect();
     if checked.is_empty() {
         return Vec::new();
