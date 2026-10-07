@@ -6,7 +6,7 @@ use crate::markdown_view::{Align, Block, Callout, Inline};
 /// The whole page for `source`, titled `title`.
 pub fn page(source: &str, title: &str) -> String {
     let blocks: Vec<Block> = crate::markdown_view::parse_located(source).into_iter().map(|(_, b)| b).collect();
-    let mut anchors = crate::markdown_view::headings(source).into_iter().map(|(_, _, anchor)| anchor);
+    let mut anchors = Anchors::default();
     let mut body = String::new();
     for block in &blocks {
         write_block(block, &mut body, &mut anchors);
@@ -15,6 +15,38 @@ pub fn page(source: &str, title: &str) -> String {
         "<!doctype html>\n{MARK}\n<html>\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n<main>\n{body}</main>\n</body>\n</html>\n",
         escape(title)
     )
+}
+
+/// The page's title: its first heading, if it has one.
+pub fn title(source: &str) -> Option<String> {
+    crate::markdown_view::parse_located(source).into_iter().find_map(|(_, block)| match block {
+        Block::Heading(_, content) => Some(crate::markdown_view::plain_text(&content)),
+        _ => None,
+    })
+}
+
+/// Each heading's id, as GitHub makes them: its words as a slug, `-1`, `-2`… on repeats.
+/// Taken from the headings as the page shows them, so they're in step with it.
+#[derive(Default)]
+struct Anchors(std::collections::HashMap<String, usize>);
+
+impl Anchors {
+    fn next(&mut self, content: &[Inline]) -> String {
+        let base = crate::markdown_view::slug(&crate::markdown_view::plain_text(content));
+        let n = self.0.entry(base.clone()).or_insert(0);
+        let anchor = if *n == 0 { base } else { format!("{base}-{n}") };
+        *n += 1;
+        anchor
+    }
+}
+
+/// Links and images that would run a script when clicked aren't kept: a page opened from
+/// the disk runs them as the reader.
+fn safe_url(url: &str, image: bool) -> &str {
+    let scheme = url.trim_start().to_ascii_lowercase();
+    let script = ["javascript:", "vbscript:"].iter().any(|s| scheme.starts_with(s));
+    let data = scheme.starts_with("data:") && !(image && scheme.starts_with("data:image/"));
+    if script || data { "#" } else { url }
 }
 
 /// Written at the top of every page Null exports: one found there is Null's to write over.
@@ -47,10 +79,10 @@ fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-fn write_block(block: &Block, out: &mut String, anchors: &mut impl Iterator<Item = String>) {
+fn write_block(block: &Block, out: &mut String, anchors: &mut Anchors) {
     match block {
         Block::Heading(level, content) => {
-            let id = anchors.next().unwrap_or_default();
+            let id = anchors.next(content);
             out.push_str(&format!("<h{level} id=\"{}\">{}</h{level}>\n", escape(&id), inlines(content)));
         }
         Block::Paragraph(content) => out.push_str(&format!("<p>{}</p>\n", inlines(content))),
@@ -135,8 +167,10 @@ fn inlines(content: &[Inline]) -> String {
             Inline::Strong(inner) => format!("<strong>{}</strong>", inlines(inner)),
             Inline::Emphasis(inner) => format!("<em>{}</em>", inlines(inner)),
             Inline::Strike(inner) => format!("<del>{}</del>", inlines(inner)),
-            Inline::Link { text, url } => format!("<a href=\"{}\">{}</a>", escape(url), inlines(text)),
-            Inline::Image { alt, url } => format!("<img src=\"{}\" alt=\"{}\">", escape(url), escape(alt)),
+            Inline::Link { text, url } => format!("<a href=\"{}\">{}</a>", escape(safe_url(url, false)), inlines(text)),
+            Inline::Image { alt, url } => {
+                format!("<img src=\"{}\" alt=\"{}\">", escape(safe_url(url, true)), escape(alt))
+            }
             Inline::Break => "<br>\n".to_string(),
             Inline::NoteRef(label) => format!("[^{}]", escape(label)),
         })
@@ -174,5 +208,29 @@ mod tests {
         ] {
             assert!(html.contains(expected), "missing {expected}\n{html}");
         }
+    }
+
+    /// Ids follow the headings the page shows: one in a quote counts, a `#` line in a
+    /// comment doesn't, and a repeat gets a number.
+    #[test]
+    fn heading_ids_stay_in_step() {
+        let source = "# Setup\n\n<!--\n# not a heading\n-->\n\n> ## Aside\n\n## Usage\n\n## Usage\n";
+        let html = page(source, "x");
+        for expected in ["<h1 id=\"setup\">", "<h2 id=\"aside\">Aside</h2>", "<h2 id=\"usage\">", "<h2 id=\"usage-1\">"]
+        {
+            assert!(html.contains(expected), "missing {expected}\n{html}");
+        }
+        assert_eq!(title("<!--\n# no\n-->\n\nText\n\n# Yes\n").as_deref(), Some("Yes"));
+    }
+
+    #[test]
+    fn script_links_are_not_kept() {
+        let html = page(
+            "[a](javascript:alert(1)) [b]( JavaScript:x) ![c](data:image/png;base64,AA) [d](data:text/html,x)",
+            "x",
+        );
+        assert!(!html.to_lowercase().contains("javascript:"), "{html}");
+        assert!(html.contains("src=\"data:image/png;base64,AA\""), "{html}");
+        assert!(!html.contains("data:text/html"), "{html}");
     }
 }

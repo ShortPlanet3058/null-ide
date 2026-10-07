@@ -34,11 +34,14 @@ pub(super) struct ConditionEdit {
     _subscription: Subscription,
 }
 
-/// Where a breakpoint on line `line` goes after an edit from `start` to `old_end` (lines)
-/// that now ends at `new_end`: along with lines below it; on the edit's first line if
-/// its own line was edited away.
-pub(super) fn move_line(line: usize, start: usize, old_end: usize, new_end: usize) -> usize {
-    if line < start {
+/// Where a mark on line `line` (a breakpoint, a bookmark) goes after `edit`: along with
+/// lines below it, and with its own line when the edit ends right at its start (Enter there,
+/// lines above taken away); on the edit's first line if its own line was edited away.
+pub(super) fn move_line(line: usize, edit: &crate::buffer::Edit) -> usize {
+    let (start, old_end, new_end) = (edit.start.0, edit.old_end.0, edit.new_end.0);
+    if edit.old_end == (line, 0) {
+        line - old_end + new_end
+    } else if line < start {
         line
     } else if line > old_end {
         line - old_end + new_end
@@ -92,12 +95,11 @@ impl Editor {
         };
         let before = self.breakpoints.clone();
         for edit in edits {
-            let (start, old_end, new_end) = (edit.start.0, edit.old_end.0, edit.new_end.0);
             for line in &mut self.breakpoints {
-                *line = move_line(*line, start, old_end, new_end);
+                *line = move_line(*line, edit);
             }
             for (line, _) in &mut self.breakpoint_conditions {
-                *line = move_line(*line, start, old_end, new_end);
+                *line = move_line(*line, edit);
             }
         }
         self.breakpoints.dedup();
@@ -268,13 +270,28 @@ mod tests {
 
     #[test]
     fn breakpoints_move_with_their_lines() {
+        let edit = |start: (usize, usize), old_end: (usize, usize), new_end: (usize, usize)| crate::buffer::Edit {
+            start_byte: 0,
+            old_end_byte: 0,
+            new_end_byte: 0,
+            start,
+            old_end,
+            new_end,
+            lsp_range: None,
+            text: String::new(),
+        };
         // Two lines added above line 5 (an edit on line 1 now ending on line 3).
-        assert_eq!(move_line(5, 1, 1, 3), 7);
+        assert_eq!(move_line(5, &edit((1, 4), (1, 4), (3, 0))), 7);
         // Lines below an edit after them don't move.
-        assert_eq!(move_line(5, 8, 8, 9), 5);
+        assert_eq!(move_line(5, &edit((8, 0), (8, 2), (9, 1))), 5);
         // Its own line joined into the one above: it goes there.
-        assert_eq!(move_line(5, 4, 5, 4), 4);
+        assert_eq!(move_line(5, &edit((4, 6), (5, 0), (4, 6))), 4);
+        assert_eq!(move_line(5, &edit((4, 6), (5, 3), (4, 6))), 4);
         // Typing on its line keeps it there.
-        assert_eq!(move_line(5, 5, 5, 5), 5);
+        assert_eq!(move_line(5, &edit((5, 2), (5, 2), (5, 3))), 5);
+        // Enter at the very start of its line: it goes down with its text.
+        assert_eq!(move_line(5, &edit((5, 0), (5, 0), (6, 0))), 6);
+        // The lines above it, up to its start, taken away: it comes up with its text.
+        assert_eq!(move_line(5, &edit((2, 0), (5, 0), (2, 0))), 2);
     }
 }

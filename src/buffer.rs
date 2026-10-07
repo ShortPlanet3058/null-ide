@@ -161,13 +161,24 @@ impl Buffer {
     }
 
     /// Restores an undo snapshot along with the version it had, so undoing back to the
-    /// saved text counts as saved again.
+    /// saved text counts as saved again. It's made as the one edit between the two texts
+    /// (what's the same at both ends left as it is), so what follows the text (folds,
+    /// bookmarks, breakpoints, the language server) follows an undo like any other edit.
     pub fn restore_version(&mut self, text: Rope, version: u64) {
-        self.text = text;
+        let (old, new) = (&self.text, &text);
+        let same_start = old.chars().zip(new.chars()).take_while(|(a, b)| a == b).count();
+        let room = old.len_chars().min(new.len_chars()) - same_start;
+        let same_end = old
+            .chars_at(old.len_chars())
+            .reversed()
+            .zip(new.chars_at(new.len_chars()).reversed())
+            .take(room)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let middle = new.slice(same_start..new.len_chars() - same_end).to_string();
+        let old_end = old.len_chars() - same_end;
+        self.replace(same_start..old_end, &middle);
         self.version = version;
-        // A whole new text: followers start over from it.
-        self.revision += 1;
-        self.edits.clear();
     }
 
     pub fn slice(&self, range: Range<usize>) -> String {
@@ -290,9 +301,37 @@ mod tests {
         assert_eq!((e.start, e.old_end, e.new_end), ((1, 1), (1, 2), (2, 0)));
         assert_eq!(e.lsp_range, Some(((1, 1), (1, 2))));
         assert_eq!(buf.edits_since(buf.revision()).unwrap().count(), 0);
-        // An undo replaces the whole text: the edits before it can't be followed.
+        // An undo is the one edit back: "xyz\n" turned into "b" again, and the version it had.
+        let before_undo = buf.revision();
         buf.restore_version(Rope::from_str("é\nab"), 0);
-        assert!(buf.edits_since(start).is_none());
+        assert_eq!(buf.to_string(), "é\nab");
+        assert_eq!(buf.version(), 0);
+        let undo: Vec<Edit> = buf.edits_since(before_undo).unwrap().cloned().collect();
+        assert_eq!(undo.len(), 1);
+        assert_eq!((undo[0].start, undo[0].old_end, undo[0].new_end), ((1, 1), (2, 0), (1, 2)));
+        assert_eq!(undo[0].text, "b");
+        assert_eq!(buf.edits_since(start).unwrap().count(), 2);
+        // Texts that share nothing, or are the same: still right.
+        buf.restore_version(Rope::from_str("other"), 7);
+        assert_eq!(buf.to_string(), "other");
+        buf.restore_version(Rope::from_str("other"), 8);
+        assert_eq!((buf.to_string().as_str(), buf.version()), ("other", 8));
+        buf.restore_version(Rope::from_str("other other"), 9);
+        assert_eq!(buf.to_string(), "other other");
+    }
+
+    /// How long an undo takes in a big file, now it's found as one edit (run by hand).
+    #[test]
+    #[ignore]
+    fn timing_undo() {
+        let text = "let value = compute(index, \"text\");\n".repeat(150_000);
+        let mut buf = Buffer::from_text(&text);
+        let middle = buf.len_chars() / 2;
+        let before = buf.rope().clone();
+        buf.replace(middle..middle, "x");
+        let started = std::time::Instant::now();
+        buf.restore_version(before, 0);
+        println!("undo in {} chars: {:?}", buf.len_chars(), started.elapsed());
     }
 
     #[test]

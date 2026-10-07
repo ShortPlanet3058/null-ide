@@ -151,7 +151,10 @@ impl Editor {
     fn apply_folds(&mut self, cx: &mut Context<Self>) {
         self.folds.revision = self.buffer.revision();
         self.wrap.set_hidden(hidden_lines(&self.folds.folded));
+        // Folding only keeps the caret in view; it doesn't pull the text about (typewriter
+        // scrolling). A caret moved by the keyboard says otherwise right after, in `touch`.
         self.autoscroll = true;
+        self.reveal_only = true;
         cx.notify();
     }
 

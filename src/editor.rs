@@ -400,6 +400,7 @@ pub struct TwinSource {
     style: crate::file_style::FileStyle,
     encoding: crate::encoding::Encoding,
     view: (usize, usize, usize),
+    bookmarks: Vec<usize>,
 }
 
 pub struct Scroll {
@@ -1356,6 +1357,9 @@ impl Editor {
         self.refresh_blame(cx);
         self.last_activity = Instant::now();
         self.autoscroll = true;
+        // The caret moved by the keyboard (or an edit): the view follows it all the way, as
+        // typewriter scrolling has it. A click sets `reveal_only` after this.
+        self.reveal_only = false;
         cx.notify();
     }
 
@@ -2092,6 +2096,7 @@ impl Editor {
         editor.reload_git_base(cx);
         let (line, column, top) = source.view;
         editor.restore_view(line, column, top, cx);
+        editor.set_bookmarks(source.bookmarks, cx);
         editor
     }
 
@@ -2104,6 +2109,7 @@ impl Editor {
             style: self.style.clone(),
             encoding: self.encoding,
             view: self.view_state(),
+            bookmarks: self.bookmarks.clone(),
         })
     }
 
@@ -2833,6 +2839,7 @@ impl Editor {
                 None if !moved => {
                     self.selection = Selection::caret(pressed);
                     self.touch(cx);
+                    self.reveal_only = true;
                 }
                 None => cx.notify(),
             }
