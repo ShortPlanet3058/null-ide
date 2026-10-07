@@ -19,6 +19,26 @@ const HOVER_SWITCH_DELAY: Duration = Duration::from_millis(350);
 const HOVER_GRACE: Duration = Duration::from_millis(450);
 /// Cards show the signature and the start of the docs, not whole READMEs.
 const MAX_HOVER_LINES: usize = 14;
+/// Peek Definition shows this many lines from the definition on.
+const PEEK_LINES: usize = 14;
+
+/// The lines of `text` from `line` on that Peek Definition shows: the definition, up to
+/// `PEEK_LINES` and until a line less indented than its first (the end of what holds it),
+/// that indentation taken off, and no blank lines at the end.
+fn peek_lines(text: &str, line: usize) -> String {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut lines = text.lines().skip(line).map(str::trim_end);
+    let Some(first) = lines.next() else { return String::new() };
+    let base = indent(first);
+    let mut shown: Vec<&str> = std::iter::once(first)
+        .chain(lines.take_while(|l| l.is_empty() || indent(l) >= base))
+        .take(PEEK_LINES)
+        .collect();
+    while shown.last().is_some_and(|l| l.is_empty()) {
+        shown.pop();
+    }
+    shown.iter().map(|l| l.get(base..).unwrap_or("")).collect::<Vec<_>>().join("\n")
+}
 
 pub struct HoverCard {
     pub range: Range<usize>,
@@ -607,6 +627,50 @@ impl Editor {
         }));
     }
 
+    /// The definition of the name at `offset`, shown in the info card where the caret is:
+    /// its file and line, then its first lines. Nothing moves.
+    pub fn peek_definition_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if let Some(message) = self.not_ready_message(cx) {
+            self.show_notice(offset, message, cx);
+            return;
+        }
+        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else {
+            return self.show_notice(offset, "Definitions come from a language server, and none runs here.".into(), cx);
+        };
+        let request = lsp.read(cx).definition(path, self.lsp_position(offset));
+        self.definition_task = Some(cx.spawn(async move |this, cx| {
+            let Some(location) = request.await.into_iter().next() else {
+                this.update(cx, |this, cx| this.show_notice(offset, "No definition found here.".into(), cx)).ok();
+                return;
+            };
+            let Some(target) = path_for(&location.uri) else { return };
+            this.update(cx, |this, cx| {
+                let line = location.range.start.line as usize;
+                let text = if this.path.as_deref() == Some(target.as_path()) {
+                    Some(this.buffer.to_string())
+                } else {
+                    crate::encoding::read(&target).ok().map(|(text, _)| text)
+                };
+                let Some(text) = text else { return this.show_notice(offset, "Couldn't read it.".into(), cx) };
+                let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let word = this.word_at(offset);
+                this.hover_word = Some(word.clone());
+                this.hover_from_keyboard = true;
+                this.hover = Some(HoverCard {
+                    range: word,
+                    diagnostics: Vec::new(),
+                    blocks: vec![
+                        HoverBlock { code: false, text: format!("{name}:{}", line + 1) },
+                        HoverBlock { code: true, text: peek_lines(&text, line) },
+                    ],
+                    image: None,
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     pub fn select_lsp_range(&mut self, range: lsp_types::Range, cx: &mut Context<Self>) {
         let start = self.offset_from_lsp(range.start);
         let end = self.offset_from_lsp(range.end);
@@ -683,6 +747,17 @@ mod tests {
         assert_eq!(map_range(10..15, &edit(8, 16, 9)), None);
         // Part of it deleted: what's left.
         assert_eq!(map_range(10..15, &edit(12, 20, 12)), Some(10..12));
+    }
+
+    #[test]
+    fn peeks_at_the_definition_s_first_lines() {
+        let text = "mod a {\n    /// Doc.\n    pub fn f(x: u32) -> u32 {\n        x + 1\n    }\n\n\n}\n";
+        // The function, not the module's closing brace after it.
+        assert_eq!(peek_lines(text, 2), "pub fn f(x: u32) -> u32 {\n    x + 1\n}");
+        // No more than PEEK_LINES, no blank lines left at the end.
+        let long: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        assert_eq!(peek_lines(&long, 0).lines().count(), PEEK_LINES);
+        assert_eq!(peek_lines("a\n\n\n", 0), "a");
     }
 
     #[test]
