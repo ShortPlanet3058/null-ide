@@ -218,6 +218,12 @@ pub fn pull(root: &Path) -> Result<Pulled, String> {
     Ok(if count == 0 { Pulled::UpToDate } else { Pulled::Commits(count) })
 }
 
+/// Asks the remotes what's new, so the counts to push and pull are current. Only when
+/// asked: Null never goes to the network on its own.
+pub fn fetch(root: &Path) -> Result<(), String> {
+    run(root, &["fetch", "-q", "--prune"]).map(|_| ())
+}
+
 /// Pushes the branch to where it's tracked (or sets that up on `origin`). Never asks
 /// for a password in a terminal that isn't there: it fails with git's message instead.
 pub fn push(root: &Path) -> Result<String, String> {
@@ -764,7 +770,9 @@ mod tests {
         commit_all(&a, "second").unwrap();
         assert_eq!(ahead_behind(&a), Some((1, 0)));
         run(&a, &["push", "-q"]).unwrap();
-        run(&b, &["fetch", "-q"]).unwrap();
+        // Not known until fetched.
+        assert_eq!(ahead_behind(&b), Some((0, 0)));
+        fetch(&b).unwrap();
         assert_eq!(ahead_behind(&b), Some((0, 1)));
         assert_eq!(pull(&b), Ok(Pulled::Commits(1)));
         assert_eq!(pull(&b), Ok(Pulled::UpToDate));
