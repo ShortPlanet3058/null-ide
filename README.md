@@ -48,7 +48,7 @@ Getting around:
 | ⌃G | go to a line |
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
 | ⌘P `file:42:7` | open a file at a place, as compilers print it |
-| ⌘F | find in the file; ↑ ↓ bring back earlier searches, ⌥↵ puts a cursor on every match; ⌘E searches for the selection, ⌘G the next |
+| ⌘F | find in the file (with lines selected, only in them); ↑ ↓ bring back earlier searches, ⌥↵ puts a cursor on every match; ⌘E searches for the selection, ⌘G the next |
 | ⌘⇧F / ⌘⇧H | search / replace across the project (the chevron also picks which files: `*.rs, src/, !tests`) |
 | ⌃- / ⌃⇧- | back / forward to where you were; ⇧⌘⌫ to the last edit |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
@@ -80,15 +80,26 @@ doesn't need Xcode's separate Metal Toolchain download.
 - **Rewrap** (⌘K) refills a comment or a paragraph to the project's line length, keeping
   its `//`, `>` or list indent. The ⌃ keys of macOS text fields work too: ⌃A ⌃E, ⌃K and
   ⌃Y, ⌃T, ⌃O…
+- Misspelled words in Markdown, text and comments get a faint wavy line, checked by the
+  Mac's own speller in the languages set in System Settings (each line in the one it reads
+  best in, so French and English mix); code is never marked. **⌘.** on one offers corrections.
+- Colours written in CSS, HTML, scripts and theme files (`#f80`, `rgb()`, `hsl()`) show a
+  small square of themselves just before.
 - Faint indent guides, sticky scroll (the enclosing lines stay at the top), the other uses
   of a name tinted, and a line at the length the project keeps to (from `.editorconfig`,
   rustfmt, Prettier, Black or Ruff). Each can be turned off.
 - Files keep their own style: indentation, line endings, and encoding (UTF-8 with or
   without BOM, UTF-16, Windows-1252), shown in the status bar when not the usual.
 - Unsaved work survives a crash. A file renamed or moved outside Null is followed; one
-  deleted shows struck through, and saving puts it back.
+  deleted shows struck through, and saving puts it back. A file changed on disk under
+  unsaved edits (a pull, an AI agent) asks before a save writes over it. Saves are whole or
+  not at all, and keep the file's permissions and tags.
+- **Local history**: what each save replaced is kept for a month, git or not, and listed in
+  **Show File History** with the commits, to compare with and take back.
 - Images open as images; other files that aren't text are never saved over. Minified
-  files with very long lines stay quick.
+  files with very long lines stay quick. Holding ⌥ over an image's path written in the text
+  (`![](shot.png)`, `src="logo.svg"`) shows the image. HTML and SVG files open in the browser
+  from ⌘K or their right-click menu.
 
 ## Markdown
 
@@ -99,18 +110,23 @@ those files); Enter carries lists and quotes on, Tab nests an item. Images and f
 from the Finder become links where they land (copied next to the file when from outside
 the project); an image pasted (a screenshot) is saved next to the file and linked; a web address
 pasted over some words links them; ⌥⇧F lines the tables up, and in a table ⇥ ⇧⇥ go from cell to cell
-(⇥ in the last one adds a row).
+(⇥ in the last one adds a row). `*`, `_` or `~` typed over selected words wrap them (twice
+for **bold**). The preview shows footnotes (`[^1]`, gathered at the end) and GitHub's
+callouts (`> [!NOTE]`, `[!TIP]`, `[!WARNING]`…).
 
 ## Git
 
 - **⌃⇧G** lists what changed since the last commit; each file opens with its changes to
   keep or take back one by one.
 - **Commit** lists the files under the message: ⇥ leaves one out; with AI on, ⌘I writes the
-  message from the changes. **Push** and **Pull**;
+  message from the changes. **Undo Last Commit** takes it back (not once pushed), its
+  message waiting for the next. **Set Changes Aside** and **Bring Back Changes** stash and
+  return them. **Push** and **Pull**;
   ↑ and ↓ beside the branch count what's to push and pull (as last fetched: Null never
   goes to the network on its own). Switch or start a branch from the status bar.
 - A click on a changed line's mark in the gutter shows the change, to keep (⇥) or take
-  back (Esc).
+  back (Esc). **Discard Changes…** in a file's right-click menu takes a whole file back
+  (a new one goes to the Trash, never deleted).
 - Who last changed the caret's line, faintly at its end. **Show File History**, and any
   commit's version compared with the file now. Compare with Saved, the Clipboard, or another
   File, each difference kept or taken back.
@@ -184,7 +200,7 @@ bar or Settings → Languages, into its own folder rather than the system.
 
 With a server running: ⌘R (or F2) renames a symbol everywhere, right where it's written;
 ⇧F12 lists where it's used (⌘-clicking a definition does too), ⌃⌥H where a function is
-called from; ⌥⇧F formats the file, and
+called from, ⌥F12 shows a definition where you are without going there; ⌥⇧F formats the file, and
 "Format on save" does it on ⌘S; ⌘⇧M, or the error count in the status bar, lists every
 problem found.
 
@@ -246,7 +262,9 @@ more code fonts so every platform has the same choice:
 [Source Code Pro](https://github.com/adobe-fonts/source-code-pro). Instrument Sans comes with its
 italics, for emphasis in the Markdown preview. All are under the SIL Open
 Font License 1.1 (see `assets/fonts/*/OFL.txt`). Any installed font can be used instead: pick
-one in Settings → Appearance, or set `code_font` and `ui_font` in the JSON.
+one in Settings → Appearance, or set `code_font` and `ui_font` in the JSON. Ligatures (`->`
+as an arrow) show with fonts that keep them in their columns, such as JetBrains Mono, Fira
+Code or Cascadia Code; Geist Mono's would shift the code, so Null leaves them off.
 
 ## License
 
