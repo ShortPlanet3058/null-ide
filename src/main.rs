@@ -23,6 +23,7 @@ mod fs_ops;
 mod fuzzy;
 mod git;
 mod highlight;
+mod html_markdown;
 mod key_prompt;
 mod keymap;
 mod languages;

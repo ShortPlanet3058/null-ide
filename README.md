@@ -132,7 +132,9 @@ scroll and type. Markdown and text wrap on their own setting (⌥Z switches it i
 those files); Enter carries lists and quotes on, Tab nests an item. Images and files dropped
 from the Finder become links where they land (copied next to the file when from outside
 the project); an image pasted (a screenshot) is saved next to the file and linked; a web address
-pasted over some words links them; ⌥⇧F lines the tables up, and in a table ⇥ ⇧⇥ go from cell to cell
+pasted over some words links them; text copied from a web page or a document (Notes, Pages,
+Google Docs) pastes as Markdown, its headings, links, bold, lists and tables kept (⌥⇧⌘V for
+the plain text); ⌥⇧F lines the tables up, and in a table ⇥ ⇧⇥ go from cell to cell
 (⇥ in the last one adds a row). `*`, `_` or `~` typed over selected words wrap them (twice
 for **bold**). The preview shows footnotes (`[^1]`, gathered at the end) and GitHub's
 callouts (`> [!NOTE]`, `[!TIP]`, `[!WARNING]`…).
