@@ -259,7 +259,8 @@ called from, ⌥F12 shows a definition where you are without going there; ⌥⇧
 problem found.
 
 In Rust, **Expand Macro** (⌘K) shows what the macro at the caret turns into (`println!`, a
-`derive`), from rust-analyzer, in the info card.
+`derive`), from rust-analyzer, in the info card; **Go to Parent Module** goes to the `mod` line
+that brings the file in, and **Open Cargo.toml** to its crate's.
 
 ## AI (optional, off by default)
 
