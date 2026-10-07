@@ -31,8 +31,31 @@ pub use bookmarks::{NextBookmark, PreviousBookmark, ToggleBookmark};
 pub use breakpoints::{Breakpoint, ToggleBreakpoint};
 pub use completion::CompletionMenu;
 
+/// Markdown for `html` copied along with `text`, when it's the same words (not left over
+/// from an earlier copy) and says more than the plain text does.
+fn formatted_paste(html: &str, text: &str) -> Option<String> {
+    let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let letters = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).take(200).collect::<String>();
+    if letters(&crate::html_markdown::plain_text(html)) != letters(text) {
+        return None;
+    }
+    let markdown = crate::html_markdown::markdown(html)?;
+    (words(&markdown) != words(text)).then_some(markdown)
+}
+
 /// A snippet's text with its variables filled in for `here` (placeholders dropped): for
 /// checking what a snippet becomes.
+#[cfg(test)]
+#[test]
+fn formatted_paste_only_when_it_says_more() {
+    let html = "<h2>Title</h2><p>A <a href=\"https://x.dev\">link</a></p>";
+    assert_eq!(formatted_paste(html, "Title\nA link").as_deref(), Some("## Title\n\nA [link](https://x.dev)"));
+    // Plain words only: the text as it is.
+    assert_eq!(formatted_paste("<p>just words</p>", "just words"), None);
+    // Formatting left from another copy: not these words.
+    assert_eq!(formatted_paste(html, "something else"), None);
+}
+
 #[cfg(test)]
 pub fn fill_snippet(snippet: &str, here: &crate::snippets::Here) -> String {
     snippet::parse_with(snippet, &|name| crate::snippets::variable(name, here)).text
@@ -1991,6 +2014,25 @@ impl Editor {
                 crate::file_style::LineEnding::Lf => table,
             };
             return self.edit(self.selection.range(), &table, EditKind::Other, cx);
+        }
+        // Copied from a web page or a document, pasted in Markdown: its formatting as
+        // Markdown (headings, links, bold, lists…). ⌥⇧⌘V pastes the plain text.
+        if adjust
+            && self.is_markdown()
+            && self.extra.is_empty()
+            && !self.in_fence(self.buffer.point(self.selection.range().start).0)
+            && let Some(markdown) =
+                crate::html_markdown::clipboard_html().and_then(|html| formatted_paste(&html, &text))
+        {
+            // Blocks (headings, lists…) start on a line of their own; a phrase goes in the line.
+            let (_, column) = self.buffer.point(self.selection.range().start);
+            let blocks = markdown.contains("\n\n") || markdown.starts_with(['#', '-', '>', '|', '`']);
+            let markdown = if column > 0 && blocks { format!("\n\n{markdown}") } else { markdown };
+            let markdown = match self.style.line_ending {
+                crate::file_style::LineEnding::Crlf => markdown.replace('\n', "\r\n"),
+                crate::file_style::LineEnding::Lf => markdown,
+            };
+            return self.edit(self.selection.range(), &markdown, EditKind::Other, cx);
         }
         let kind = item.metadata().cloned().unwrap_or_default();
         // Pasted line breaks become the file's own.

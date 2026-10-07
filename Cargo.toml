@@ -52,7 +52,7 @@ url = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std", "NSSpellChecker", "NSWorkspace",
-    "NSColorPanel", "NSColor", "NSColorSpace", "NSPanel", "NSWindow", "NSResponder", "NSApplication", "objc2-core-foundation",
+    "NSColorPanel", "NSColor", "NSColorSpace", "NSPanel", "NSWindow", "NSResponder", "NSApplication", "NSPasteboard", "objc2-core-foundation",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSRange", "NSArray", "NSURL", "NSUserDefaults"] }
 # copyfile(3): a save keeps the file's tags, extended attributes and ACLs.
