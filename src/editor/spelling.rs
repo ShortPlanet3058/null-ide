@@ -58,7 +58,7 @@ impl Editor {
     fn checks_spelling(&self, cx: &App) -> bool {
         cx.global::<crate::settings::Settings>().spell_check
             && self.preview.is_none()
-            && (self.is_prose() || self.language().is_some())
+            && (self.is_prose() || self.comment_marks().is_some())
     }
 
     /// Whether the line is code in a Markdown fence. Worked out once per version of the text.
