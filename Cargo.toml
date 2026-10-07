@@ -46,9 +46,12 @@ unicode-segmentation = "1"
 ureq = { version = "3", features = ["json"] }
 url = "2"
 
-# The Mac's own spell checker. Already built for GPUI: only the parts used are named.
+# The Mac's own spell checker and color panel. Already built for GPUI: only the parts used are named.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSSpellChecker", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std", "NSSpellChecker", "NSWorkspace",
+    "NSColorPanel", "NSColor", "NSColorSpace", "NSPanel", "NSWindow", "NSResponder", "objc2-core-foundation",
+] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSRange", "NSArray", "NSURL", "NSUserDefaults"] }
 # copyfile(3): a save keeps the file's tags, extended attributes and ACLs.
 libc = "0.2"

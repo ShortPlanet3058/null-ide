@@ -1,5 +1,6 @@
 //! Colors written in code: `#f80`, `#ff8800cc`, `rgb(255 136 0)`, `hsl(30, 100%, 50%)`.
-//! The editor shows a small square of each color just before it.
+//! The editor shows a small square of each color just before it; a click on the square
+//! picks another, written back the way the first was.
 
 use gpui::{Hsla, Rgba};
 
@@ -36,6 +37,53 @@ pub fn colors_in(text: &str) -> Vec<(usize, Hsla)> {
         }
     }
     found
+}
+
+/// The color written at `byte` of `text` (where `colors_in` found one), and its length.
+pub fn color_at(text: &str, byte: usize) -> Option<(Hsla, usize)> {
+    let rest = text.get(byte..)?;
+    if let Some(digits) = rest.strip_prefix('#') { hex(digits) } else { function(rest) }
+}
+
+/// `color` written the way `written` is: hex with as many digits (more when the alpha
+/// needs them), or the same function, commas or spaces, with an alpha only when it
+/// isn't opaque.
+pub fn written_like(written: &str, color: Rgba) -> String {
+    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    let (r, g, b, a) = (byte(color.r), byte(color.g), byte(color.b), byte(color.a));
+    let opaque = a == 255;
+    if let Some(digits) = written.strip_prefix('#') {
+        let upper = digits.chars().any(|c| c.is_ascii_uppercase());
+        let short = digits.len() <= 4 && [r, g, b, a].iter().all(|v| v % 17 == 0);
+        let text = match (short, opaque) {
+            (true, true) => format!("#{:x}{:x}{:x}", r / 17, g / 17, b / 17),
+            (true, false) => format!("#{:x}{:x}{:x}{:x}", r / 17, g / 17, b / 17, a / 17),
+            (false, true) => format!("#{r:02x}{g:02x}{b:02x}"),
+            (false, false) => format!("#{r:02x}{g:02x}{b:02x}{a:02x}"),
+        };
+        return if upper { text.to_uppercase() } else { text };
+    }
+    let name = written.split('(').next().unwrap_or("rgb").to_ascii_lowercase();
+    let commas = written.contains(',');
+    let alpha = {
+        let a = (color.a.clamp(0., 1.) * 100.).round() / 100.;
+        let text = format!("{a:.2}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    let (base, parts) = if name.starts_with("hsl") {
+        let h: Hsla = color.into();
+        let percent = |v: f32| format!("{}%", (v * 100.).round() as i32);
+        ("hsl", [((h.h * 360.).round() as i32 % 360).to_string(), percent(h.s), percent(h.l)])
+    } else {
+        ("rgb", [r.to_string(), g.to_string(), b.to_string()])
+    };
+    match (commas, opaque) {
+        (true, true) if name.ends_with('a') => format!("{base}a({}, {}, {}, 1)", parts[0], parts[1], parts[2]),
+        (true, true) => format!("{base}({}, {}, {})", parts[0], parts[1], parts[2]),
+        (true, false) => format!("{base}a({}, {}, {}, {alpha})", parts[0], parts[1], parts[2]),
+        (false, true) => format!("{name}({} {} {})", parts[0], parts[1], parts[2]),
+        (false, false) => format!("{name}({} {} {} / {alpha})", parts[0], parts[1], parts[2]),
+    }
 }
 
 /// Whether `color`, drawn on `background`, would hardly show (near-black on a black
@@ -119,6 +167,28 @@ mod tests {
         let c: Rgba = c.into();
         let byte = |v: f32| (v * 255.).round() as u8;
         (byte(c.r), byte(c.g), byte(c.b), byte(c.a))
+    }
+
+    #[test]
+    fn a_picked_color_is_written_as_the_first_was() {
+        let orange = Rgba { r: 1., g: 136. / 255., b: 0., a: 1. };
+        let see_through = Rgba { a: 0.5, ..orange };
+        let white = Rgba { r: 1., g: 1., b: 1., a: 1. };
+        assert_eq!(written_like("#f80", orange), "#f80");
+        assert_eq!(written_like("#f80", Rgba { g: 137. / 255., ..orange }), "#ff8900", "no short form for 137");
+        assert_eq!(written_like("#f80", white), "#fff");
+        assert_eq!(written_like("#FFF", orange), "#F80");
+        assert_eq!(written_like("#ff8800", see_through), "#ff880080");
+        assert_eq!(written_like("rgb(1, 2, 3)", orange), "rgb(255, 136, 0)");
+        assert_eq!(written_like("rgb(1, 2, 3)", see_through), "rgba(255, 136, 0, 0.5)");
+        assert_eq!(written_like("rgba(1, 2, 3, 0.2)", orange), "rgba(255, 136, 0, 1)");
+        assert_eq!(written_like("rgb(1 2 3)", see_through), "rgb(255 136 0 / 0.5)");
+        assert_eq!(written_like("hsl(0, 0%, 0%)", orange), "hsl(32, 100%, 50%)");
+        assert_eq!(written_like("hsl(0 0% 0%)", see_through), "hsl(32 100% 50% / 0.5)");
+        // And read back as the same color.
+        let (back, len) = color_at("a: rgb(255 136 0 / 0.5);", 3).unwrap();
+        assert_eq!((rgba(back), len), ((255, 136, 0, 128), 20));
+        assert_eq!(color_at("x #ff8800", 2).map(|(_, len)| len), Some(7));
     }
 
     #[test]
