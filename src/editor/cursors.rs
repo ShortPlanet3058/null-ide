@@ -384,7 +384,9 @@ impl Editor {
             lines.dedup();
             let text: String = lines.iter().map(|&l| format!("{}\n", self.buffer.line_text(l))).collect();
             let indent = self.line_indent(lines[0]);
-            cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, format!("{LINES}|{indent}")));
+            let item = ClipboardItem::new_string_with_metadata(text, format!("{LINES}|{indent}"));
+            crate::clipboard_history::remember(&item, cx);
+            cx.write_to_clipboard(item);
             return true;
         }
         let kind = if texts.len() > 1 {
@@ -392,7 +394,9 @@ impl Editor {
         } else {
             format!("|{}", self.line_indent(self.buffer.point(self.selection.range().start).0))
         };
-        cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(texts.join("\n"), kind));
+        let item = ClipboardItem::new_string_with_metadata(texts.join("\n"), kind);
+        crate::clipboard_history::remember(&item, cx);
+        cx.write_to_clipboard(item);
         true
     }
 

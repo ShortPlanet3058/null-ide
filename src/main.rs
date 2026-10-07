@@ -3,6 +3,7 @@ mod ai_agent;
 mod ai_task;
 mod assets;
 mod buffer;
+mod clipboard_history;
 mod colors;
 mod dap;
 mod debugger;
