@@ -1140,33 +1140,49 @@ pub fn headings(source: &str) -> Vec<(u8, String, String)> {
         *n += 1;
         found.push((level, text, anchor));
     };
-    // The line before, when it's a paragraph's: a `===` or `---` under it makes it a heading.
-    let mut paragraph: Option<&str> = None;
-    for line in buffer_lines(source) {
+    // A line of `===` or `---` (not a rule after a blank line) makes the paragraph line above
+    // it a heading. Only lines with one under them are looked at closely: this runs as text
+    // is typed, over the whole file.
+    let lines = buffer_lines(source);
+    let underline = |line: &str| {
+        let t = line.trim();
+        let all = |c: char| !t.is_empty() && t.chars().all(|x| x == c);
+        if all('=') {
+            Some(1)
+        } else if all('-') && t.len() >= 2 {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    let mut skip_next = false;
+    for (i, line) in lines.iter().enumerate() {
+        if std::mem::take(&mut skip_next) {
+            continue;
+        }
         let t = line.trim_start();
         if let Some(open) = fence_of(t) {
             fence = if fence == Some(open) { None } else { fence.or(Some(open)) };
-            paragraph = None;
             continue;
         }
         if fence.is_some() {
             continue;
         }
-        if let Some((level, text)) = heading(t) {
-            add(level, text, &mut found);
-            paragraph = None;
+        if t.starts_with('#') {
+            if let Some((level, text)) = heading(t) {
+                add(level, text, &mut found);
+            }
             continue;
         }
-        let underline = |c: char| !t.is_empty() && t.trim_end().chars().all(|x| x == c);
-        if let Some(text) = paragraph
-            && (underline('=') || underline('-') && t.trim_end().len() >= 2)
+        if let Some(level) = lines.get(i + 1).and_then(|next| underline(next))
+            && !t.is_empty()
+            && !t.starts_with('>')
+            && list_marker(line).is_none()
+            && !is_rule(t)
         {
-            add(if underline('=') { 1 } else { 2 }, text.trim(), &mut found);
-            paragraph = None;
-            continue;
+            add(level, t.trim(), &mut found);
+            skip_next = true;
         }
-        let plain = !t.is_empty() && !t.starts_with('>') && list_marker(line).is_none() && !is_rule(t);
-        paragraph = plain.then_some(line);
     }
     found
 }
