@@ -3129,6 +3129,7 @@ impl Workspace {
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
             (Edit, "Copy as Rich Text".into(), Box::new(CopyAsRichText)),
+            (Edit, "Toggle Task".into(), Box::new(crate::editor::ToggleTask)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
             (File, "Copy Path".into(), Box::new(CopyFilePath)),
