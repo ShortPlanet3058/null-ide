@@ -536,6 +536,26 @@ impl SettingsPanel {
                 },
                 &theme,
             ),
+            Self::row(
+                "Line numbers",
+                Some("In code only leaves them out of Markdown and text"),
+                {
+                    use crate::settings::LineNumbers;
+                    Self::choices(
+                        "line-numbers",
+                        vec![
+                            (LineNumbers::Shown, "Shown".into()),
+                            (LineNumbers::InCode, "In code only".into()),
+                            (LineNumbers::Hidden, "Hidden".into()),
+                        ],
+                        s.line_numbers,
+                        &theme,
+                        cx,
+                        |_, numbers, cx| settings::update(cx, |s| s.line_numbers = numbers),
+                    )
+                },
+                &theme,
+            ),
             Self::stacked_row(
                 "Code font",
                 Some("Five come with Null; fonts you install show up here too"),

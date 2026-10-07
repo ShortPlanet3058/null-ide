@@ -3571,6 +3571,15 @@ impl Editor {
         cx.global::<Settings>().ligatures && !self.is_prose()
     }
 
+    /// Whether the gutter shows line numbers here, as Settings say.
+    pub fn shows_line_numbers(&self, cx: &App) -> bool {
+        match cx.global::<Settings>().line_numbers {
+            crate::settings::LineNumbers::Shown => true,
+            crate::settings::LineNumbers::InCode => !self.is_prose(),
+            crate::settings::LineNumbers::Hidden => false,
+        }
+    }
+
     /// Prose: Markdown, or a text file (no language of its own). It wraps by its own setting.
     pub fn is_prose(&self) -> bool {
         if self.is_markdown() {
@@ -4259,6 +4268,30 @@ mod tests {
         });
         cx.simulate_keystrokes("alt-shift-cmd-v");
         editor.read_with(cx, |e, _| assert!(e.buffer.to_string().ends_with("| Tea  | 2   |\nItem\tQty\nTea\t2\n")));
+    }
+
+    /// Line numbers: in code only leaves them out of Markdown; hidden, out of code too.
+    #[gpui::test]
+    fn line_numbers_show_where_settings_say(cx: &mut TestAppContext) {
+        use crate::settings::LineNumbers;
+        cx.update(|cx| {
+            cx.set_global(Settings { line_numbers: LineNumbers::InCode, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let text_left = |name: &str, cx: &mut TestAppContext| {
+            let name = PathBuf::from(name);
+            let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("one\ntwo\n"), Some(name), cx));
+            cx.run_until_parked();
+            e.read_with(cx, |e, _| {
+                let l = e.layout.as_ref().expect("drawn");
+                l.text_bounds.left() - l.bounds.left()
+            })
+        };
+        let (prose, code) = (text_left("notes.md", cx), text_left("a.rs", cx));
+        assert!(prose < code, "no numbers in Markdown: {prose:?} vs {code:?}");
+        cx.update(|cx| cx.set_global(Settings { line_numbers: LineNumbers::Hidden, ..Settings::default() }));
+        assert_eq!(text_left("a.rs", cx), prose, "hidden in code too");
     }
 
     /// Dragging the selection moves it where it's dropped; with ⌥, copies it. A click in it

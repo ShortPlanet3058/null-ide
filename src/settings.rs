@@ -24,6 +24,8 @@ pub struct Settings {
     pub font_size: f32,
     /// Room between lines of code.
     pub line_spacing: LineSpacing,
+    /// Where the line numbers show.
+    pub line_numbers: LineNumbers,
     pub sidebar_visible: bool,
     /// Dim the title bar, sidebar and status bar while typing.
     pub fade_bars_while_typing: bool,
@@ -77,6 +79,7 @@ impl Default for Settings {
             ui_font: DEFAULT_UI_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
             line_spacing: LineSpacing::Normal,
+            line_numbers: LineNumbers::Shown,
             sidebar_visible: true,
             fade_bars_while_typing: false,
             word_wrap: false,
@@ -103,6 +106,16 @@ impl Default for Settings {
 }
 
 impl Global for Settings {}
+
+/// Where line numbers show: everywhere, in code only (not in Markdown and text), or nowhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineNumbers {
+    #[default]
+    Shown,
+    InCode,
+    Hidden,
+}
 
 /// How much room there is between lines of code.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
