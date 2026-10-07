@@ -1,0 +1,178 @@
+//! A Markdown file as a page of its own (Export as HTML): what the preview shows, written
+//! as HTML with a little CSS, to open in a browser, print to PDF or send.
+
+use crate::markdown_view::{Align, Block, Callout, Inline};
+
+/// The whole page for `source`, titled `title`.
+pub fn page(source: &str, title: &str) -> String {
+    let blocks: Vec<Block> = crate::markdown_view::parse_located(source).into_iter().map(|(_, b)| b).collect();
+    let mut anchors = crate::markdown_view::headings(source).into_iter().map(|(_, _, anchor)| anchor);
+    let mut body = String::new();
+    for block in &blocks {
+        write_block(block, &mut body, &mut anchors);
+    }
+    format!(
+        "<!doctype html>\n{MARK}\n<html>\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n<main>\n{body}</main>\n</body>\n</html>\n",
+        escape(title)
+    )
+}
+
+/// Written at the top of every page Null exports: one found there is Null's to write over.
+pub const MARK: &str = "<!-- Exported from Markdown by Null -->";
+
+/// Calm, readable, in light and dark as the reader's system is.
+const STYLE: &str = "
+:root { color-scheme: light dark; --fg: #1d1e22; --muted: #6a6b72; --line: #e6e5e1; --code: #f4f4f2; --accent: #b4690e; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e8e6e3; --muted: #9a9890; --line: #2c2c33; --code: #16161a; --accent: #f5a524; } }
+body { margin: 0; background: Canvas; color: var(--fg); font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+main { max-width: 46rem; margin: 0 auto; padding: 3rem 1.5rem; }
+h1, h2 { border-bottom: 1px solid var(--line); padding-bottom: .3em; }
+a { color: var(--accent); }
+code, pre { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: .9em; background: var(--code); border-radius: 6px; }
+code { padding: .1em .35em; }
+pre { padding: 1em; overflow-x: auto; }
+pre code { padding: 0; background: none; }
+blockquote { margin: 0; padding-left: 1em; border-left: 3px solid var(--line); color: var(--muted); }
+.callout { margin: 1em 0; padding-left: 1em; border-left: 3px solid var(--tint); }
+.callout > .title { color: var(--tint); font-weight: 600; margin: 0; }
+.note { --tint: #4a8fd8; } .tip { --tint: #3fa66b; } .important { --tint: var(--accent); } .warning { --tint: #c9a227; } .caution { --tint: #d9534f; }
+table { border-collapse: collapse; }
+th, td { border: 1px solid var(--line); padding: .35em .75em; }
+img { max-width: 100%; }
+hr { border: 0; border-top: 1px solid var(--line); }
+li.task { list-style: none; } li.task input { margin: 0 .5em 0 -1.4em; }
+";
+
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn write_block(block: &Block, out: &mut String, anchors: &mut impl Iterator<Item = String>) {
+    match block {
+        Block::Heading(level, content) => {
+            let id = anchors.next().unwrap_or_default();
+            out.push_str(&format!("<h{level} id=\"{}\">{}</h{level}>\n", escape(&id), inlines(content)));
+        }
+        Block::Paragraph(content) => out.push_str(&format!("<p>{}</p>\n", inlines(content))),
+        Block::Code { language, text, .. } => {
+            let class =
+                if language.is_empty() { String::new() } else { format!(" class=\"language-{}\"", escape(language)) };
+            out.push_str(&format!("<pre><code{class}>{}</code></pre>\n", escape(text)));
+        }
+        Block::Quote(blocks) => {
+            out.push_str("<blockquote>\n");
+            blocks.iter().for_each(|b| write_block(b, out, anchors));
+            out.push_str("</blockquote>\n");
+        }
+        Block::Callout(kind, blocks) => {
+            let (class, name) = match kind {
+                Callout::Note => ("note", "Note"),
+                Callout::Tip => ("tip", "Tip"),
+                Callout::Important => ("important", "Important"),
+                Callout::Warning => ("warning", "Warning"),
+                Callout::Caution => ("caution", "Caution"),
+            };
+            out.push_str(&format!("<div class=\"callout {class}\">\n<p class=\"title\">{name}</p>\n"));
+            blocks.iter().for_each(|b| write_block(b, out, anchors));
+            out.push_str("</div>\n");
+        }
+        Block::List { start, items } => {
+            let (open, close) = match start {
+                Some(1) => ("<ol>".to_string(), "</ol>"),
+                Some(n) => (format!("<ol start=\"{n}\">"), "</ol>"),
+                None => ("<ul>".to_string(), "</ul>"),
+            };
+            out.push_str(&open);
+            out.push('\n');
+            for item in items {
+                match item.task {
+                    Some(done) => {
+                        let checked = if done { " checked" } else { "" };
+                        out.push_str(&format!("<li class=\"task\"><input type=\"checkbox\" disabled{checked}>"));
+                    }
+                    None => out.push_str("<li>"),
+                }
+                // A one-paragraph item reads as its text, without a <p> around it.
+                match item.blocks.as_slice() {
+                    [Block::Paragraph(content)] => out.push_str(&inlines(content)),
+                    blocks => blocks.iter().for_each(|b| write_block(b, out, anchors)),
+                }
+                out.push_str("</li>\n");
+            }
+            out.push_str(close);
+            out.push('\n');
+        }
+        Block::Table { head, align, rows } => {
+            let cell = |tag: &str, i: usize, content: &[Inline]| {
+                let style = match align.get(i) {
+                    Some(Align::Center) => " style=\"text-align:center\"",
+                    Some(Align::Right) => " style=\"text-align:right\"",
+                    _ => "",
+                };
+                format!("<{tag}{style}>{}</{tag}>", inlines(content))
+            };
+            out.push_str("<table>\n<thead><tr>");
+            head.iter().enumerate().for_each(|(i, c)| out.push_str(&cell("th", i, c)));
+            out.push_str("</tr></thead>\n<tbody>\n");
+            for row in rows {
+                out.push_str("<tr>");
+                row.iter().enumerate().for_each(|(i, c)| out.push_str(&cell("td", i, c)));
+                out.push_str("</tr>\n");
+            }
+            out.push_str("</tbody>\n</table>\n");
+        }
+        Block::Rule => out.push_str("<hr>\n"),
+        Block::Note(label, content) => out.push_str(&format!("<p>[^{}]: {}</p>\n", escape(label), inlines(content))),
+    }
+}
+
+fn inlines(content: &[Inline]) -> String {
+    content
+        .iter()
+        .map(|inline| match inline {
+            Inline::Text(text) => escape(text),
+            Inline::Code(code) => format!("<code>{}</code>", escape(code)),
+            Inline::Strong(inner) => format!("<strong>{}</strong>", inlines(inner)),
+            Inline::Emphasis(inner) => format!("<em>{}</em>", inlines(inner)),
+            Inline::Strike(inner) => format!("<del>{}</del>", inlines(inner)),
+            Inline::Link { text, url } => format!("<a href=\"{}\">{}</a>", escape(url), inlines(text)),
+            Inline::Image { alt, url } => format!("<img src=\"{}\" alt=\"{}\">", escape(url), escape(alt)),
+            Inline::Break => "<br>\n".to_string(),
+            Inline::NoteRef(label) => format!("[^{}]", escape(label)),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes a sample page to `$NULL_HTML_OUT`, to look at (run by hand).
+    #[test]
+    #[ignore]
+    fn writes_a_sample_page() {
+        let source = "# Field notes\n\nNull keeps what each save replaced[^1], so going back needs **no git**.\n\n> [!TIP]\n> Press ⌘K to find any command.\n\n## Keys\n\n| Key | Does |\n|:----|-----:|\n| ⌘P | Go to a file |\n| ⌘K | Commands |\n\n- [x] Spell check\n- [ ] Windows build\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n[^1]: Up to 50 versions a file, for 30 days.\n";
+        std::fs::write(std::env::var("NULL_HTML_OUT").unwrap(), page(source, "Field notes")).unwrap();
+    }
+
+    #[test]
+    fn a_document_becomes_a_page() {
+        let source = "# Notes & more\n\nSome *words* with `code` and a [link](a.md)[^1].\n\n> [!TIP]\n> Use ⌘K.\n\n- [x] done\n- [ ] not yet\n\n| A | B |\n|:-:|--:|\n| 1 | <2> |\n\n```rust\nfn main() {}\n```\n\n[^1]: A note.\n";
+        let html = page(source, "Notes");
+        for expected in [
+            "<title>Notes</title>",
+            "<h1 id=\"notes--more\">Notes &amp; more</h1>",
+            "<em>words</em>",
+            "<code>code</code>",
+            "<a href=\"a.md\">link</a>¹",
+            "<div class=\"callout tip\">",
+            "<li class=\"task\"><input type=\"checkbox\" disabled checked>done</li>",
+            "<th style=\"text-align:center\">A</th>",
+            "<td style=\"text-align:right\">&lt;2&gt;</td>",
+            "<pre><code class=\"language-rust\">fn main() {}</code></pre>",
+            "<li>A note.</li>",
+        ] {
+            assert!(html.contains(expected), "missing {expected}\n{html}");
+        }
+    }
+}

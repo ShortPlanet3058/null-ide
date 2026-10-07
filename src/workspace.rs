@@ -47,6 +47,7 @@ actions!(
         FindTodos,
         RunSelectionInTerminal,
         PasteFromHistory,
+        ExportHtml,
         PushBranch,
         PullBranch,
         FileHistory,
@@ -3282,9 +3283,10 @@ impl Workspace {
                 Some(_) => commands.push((Ai, "Stop AI Task".into(), Box::new(StopAiTask))),
             }
         }
-        // Markdown: a table of contents of its headings.
+        // Markdown: a table of contents of its headings; the document as a page.
         if self.active_editor().is_some_and(|e| e.read(cx).is_markdown()) {
             commands.push((Edit, "Insert Table of Contents".into(), Box::new(crate::editor::InsertTableOfContents)));
+            commands.push((File, "Export as HTML".into(), Box::new(ExportHtml)));
         }
         // A page or a picture: open it in the browser.
         if self.active_editor().and_then(|e| e.read(cx).path()).is_some_and(crate::file_tree::opens_in_browser) {
@@ -4592,6 +4594,39 @@ impl Workspace {
     fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let root = self.tree.read(cx).root().to_path_buf();
         self.add_terminal_in(root, window, cx)
+    }
+
+    /// The Markdown file as a page next to it (`notes.md` → `notes.html`), opened in the
+    /// browser to read, print or send. A page of that name Null didn't make isn't written over.
+    fn export_html(&mut self, _: &ExportHtml, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let (path, source) = {
+            let e = editor.read(cx);
+            match e.path() {
+                Some(path) if e.is_markdown() => (path.to_path_buf(), e.buffer.to_string()),
+                _ => return self.show_notice("Export as HTML is for a saved Markdown file.".into(), cx),
+            }
+        };
+        let out = path.with_extension("html");
+        let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let ours = std::fs::read_to_string(&out).map_or(true, |text| text.contains(crate::markdown_html::MARK));
+        if out.exists() && !ours {
+            return self
+                .show_notice(format!("{name} is already there, and not one Null made: it's left as it is."), cx);
+        }
+        let title = crate::markdown_view::headings(&source)
+            .into_iter()
+            .next()
+            .map(|(_, text, _)| text)
+            .unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+        let html = crate::markdown_html::page(&source, &title);
+        match crate::fs_ops::write_file(&out, html.as_bytes()) {
+            Ok(()) => {
+                self.show_notice(format!("Exported {name}."), cx);
+                crate::file_tree::open_in_browser(&out, cx);
+            }
+            Err(error) => self.show_notice(format!("Couldn't export it: {error}"), cx),
+        }
     }
 
     /// The last things copied or cut in Null, newest first: ↵ pastes one (it's on the
@@ -6429,6 +6464,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::find_todos))
             .on_action(cx.listener(Self::run_selection_in_terminal))
             .on_action(cx.listener(Self::paste_from_history))
+            .on_action(cx.listener(Self::export_html))
             .on_action(cx.listener(|this, _: &OpenInBrowser, _, cx| {
                 // Saved first: the browser reads the file.
                 if let Some(editor) = this.active_editor().cloned()
