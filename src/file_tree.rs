@@ -98,6 +98,13 @@ pub struct DraggedEntry {
     name: SharedString,
 }
 
+impl DraggedEntry {
+    /// The file or folder being dragged.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// What follows the pointer while dragging: the name, as a small pill.
 struct EntryGhost {
     name: SharedString,

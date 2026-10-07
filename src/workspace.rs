@@ -8098,6 +8098,55 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A file dragged from the files into a Markdown file: linked where it's dropped.
+    #[gpui::test]
+    fn a_file_dragged_from_the_files_is_linked(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-tree-drop-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shot.png"), "x").unwrap();
+        std::fs::write(dir.join("notes.md"), "See: \n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("notes.md"), window, cx));
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+        let selector = format!("tree-row {}", dir.join("shot.png").display());
+        let row = cx.debug_bounds(Box::leak(selector.into_boxed_str())).expect("the row").center();
+        let target = editor.read_with(cx, |e, _| e.caret_bounds(5).expect("drawn").center());
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: row,
+            button: gpui::MouseButton::Left,
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        for step in 1..=4 {
+            let t = step as f32 / 4.;
+            let position = gpui::point(row.x + (target.x - row.x) * t, row.y + (target.y - row.y) * t);
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position,
+                pressed_button: Some(gpui::MouseButton::Left),
+                modifiers: Default::default(),
+            });
+        }
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: target,
+            button: gpui::MouseButton::Left,
+            modifiers: Default::default(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "See: ![shot](shot.png)\n"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Renaming a folder of images, then moving a guide up a level: the Markdown links to
     /// them, and the guide's own, still point where they should; the open README too.
     #[gpui::test]
