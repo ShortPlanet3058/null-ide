@@ -115,6 +115,7 @@ actions!(
         Redo,
         Save,
         GoToDefinition,
+        PeekDefinition,
         GoToTypeDefinition,
         GoToImplementation,
         ShowCallers,
@@ -202,6 +203,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-z", Redo, ctx),
         KeyBinding::new("secondary-s", Save, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
+        KeyBinding::new("alt-f12", PeekDefinition, ctx),
         KeyBinding::new("secondary-f12", GoToImplementation, ctx),
         KeyBinding::new("ctrl-alt-h", ShowCallers, ctx),
         KeyBinding::new("secondary-shift-i", ShowInfo, ctx),
@@ -2893,6 +2895,10 @@ impl Editor {
         self.go_to_definition_at(self.selection.head, cx);
     }
 
+    fn peek_definition(&mut self, _: &PeekDefinition, _: &mut Window, cx: &mut Context<Self>) {
+        self.peek_definition_at(self.selection.head, cx);
+    }
+
     fn go_to_type_definition(&mut self, _: &GoToTypeDefinition, _: &mut Window, cx: &mut Context<Self>) {
         self.go_to_target(crate::lsp_store::Target::TypeDefinition, cx);
     }
@@ -3264,6 +3270,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::fold_all))
             .on_action(cx.listener(Self::unfold_all))
             .on_action(cx.listener(Self::go_to_definition))
+            .on_action(cx.listener(Self::peek_definition))
             .on_action(cx.listener(Self::go_to_type_definition))
             .on_action(cx.listener(Self::go_to_implementation))
             .on_action(cx.listener(Self::show_info))
