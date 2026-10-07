@@ -84,11 +84,85 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Folders listed this many entries at most (a huge folder of build output).
+const MAX_ENTRIES: usize = 500;
+/// How many folders up from the file a relative path is looked for, at most: up to the
+/// project's top (where `.git` is).
+const FOLDERS_UP: usize = 8;
+
+/// The path written at the end of `before` (the line up to the caret): the folder part as
+/// written (up to its last `/`) and the name being typed after it. Only what reads as a
+/// path: not `a / b`, a `//` comment, a web address, nor `/` alone.
+fn path_at_end(before: &str) -> Option<(&str, &str)> {
+    let start = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace() || "\"'`([<>{}=,;|".contains(*c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let token = &before[start..];
+    let slash = token.rfind('/')?;
+    let (dir, name) = (&token[..=slash], &token[slash + 1..]);
+    if token.contains("//") || token.contains("/*") || token.contains(':') {
+        return None;
+    }
+    // An absolute path only past its first folder (`/Users/`), so a division sign or a
+    // regex's `/` doesn't list the disk.
+    if dir.starts_with('/') && dir.matches('/').count() < 2 {
+        return None;
+    }
+    Some((dir, name))
+}
+
+/// The folder `written` names, from the file in `dir`: there, or in a folder above it up to
+/// the project's top (`.git`). Outside a repository, only from the file's own folder: the
+/// list opens by itself, so not from any folder that happens to be above.
+fn folder_for(written: &str, dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let path = match (written.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => std::path::PathBuf::from(written),
+    };
+    if path.is_absolute() {
+        return path.is_dir().then_some(path);
+    }
+    let dir = dir?;
+    let top = dir.ancestors().take(FOLDERS_UP).position(|d| d.join(".git").exists()).unwrap_or(0);
+    dir.ancestors().take(top + 1).map(|d| d.join(&path)).find(|p| p.is_dir())
+}
+
+/// What's in `folder`, as suggestions: folders first (with their `/`), hidden ones only
+/// once a `.` is typed.
+fn entries(folder: &std::path::Path, typed: &str) -> Vec<CompletionItem> {
+    let Ok(read) = std::fs::read_dir(folder) else { return Vec::new() };
+    read.filter_map(Result::ok)
+        .take(MAX_ENTRIES)
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            if name.starts_with('.') && !typed.starts_with('.') {
+                return None;
+            }
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+            let label = if is_dir { format!("{name}/") } else { name.clone() };
+            Some(CompletionItem {
+                sort_text: Some(format!("{}{name}", if is_dir { 0 } else { 1 })),
+                filter_text: Some(name),
+                kind: Some(if is_dir { CompletionItemKind::FOLDER } else { CompletionItemKind::FILE }),
+                label,
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
 impl Editor {
     /// After typing `text`: open, refresh or close the list.
     pub(super) fn completion_after_typing(&mut self, text: &str, cx: &mut Context<Self>) {
         if !self.selection.is_empty() || self.multi_cursor() {
             return self.close_completion(cx);
+        }
+        // A path being written (`./`, `src/`, `img/`): what's in that folder.
+        if (self.completion.is_some() || cx.global::<Settings>().autocomplete) && self.complete_path(cx) {
+            return;
         }
         let Some(last) = text.chars().last() else { return };
         let caret = self.selection.head;
@@ -121,6 +195,27 @@ impl Editor {
             (Some(lsp), Some(path)) => lsp.read(cx).serves(path),
             _ => false,
         }
+    }
+
+    /// When the caret ends a path to a folder that exists, lists what's in it and returns
+    /// true; otherwise false, and nothing changes.
+    fn complete_path(&mut self, cx: &mut Context<Self>) -> bool {
+        let caret = self.selection.head;
+        let (line, column) = self.buffer.point(caret);
+        let text = self.buffer.line_text(line);
+        let before: String = text.chars().take(column).collect();
+        let Some((dir, name)) = path_at_end(&before) else { return false };
+        let Some(folder) = folder_for(dir, self.path.as_deref().and_then(std::path::Path::parent)) else {
+            return false;
+        };
+        let items = entries(&folder, name);
+        if items.is_empty() {
+            return false;
+        }
+        let name_start = caret - name.chars().count();
+        self.completion_task = None;
+        self.show_suggestions(items, name_start, cx);
+        self.completion.is_some()
     }
 
     /// The words of the file around the caret, nearest first, but the one being typed.
@@ -168,6 +263,10 @@ impl Editor {
         let word_start = menu.word_start;
         let caret = self.selection.head;
         // Close once the word is gone, unless the caret sits right after a `.` or `::`.
+        // Still in a path: what's in its folder, for what's left of the name.
+        if self.complete_path(cx) {
+            return;
+        }
         if caret < word_start || caret == word_start && !self.after_trigger(word_start) {
             return self.close_completion(cx);
         }
@@ -189,6 +288,9 @@ impl Editor {
 
     /// Ctrl+Space: ask for suggestions now, even with autocomplete off.
     pub(super) fn show_completions_now(&mut self, cx: &mut Context<Self>) {
+        if self.complete_path(cx) {
+            return;
+        }
         let caret = self.selection.head;
         self.request_completion(self.word_start_before(caret), None, Duration::ZERO, cx);
     }
@@ -328,9 +430,14 @@ impl Editor {
         if let Some(item) = suggestion.unresolved.clone() {
             self.resolve_picked(item, inserted_at, cx);
         }
+        // A folder picked: on into it.
+        let into_folder = suggestion.kind == Some(CompletionItemKind::FOLDER) && suggestion.insert.ends_with('/');
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
+        if into_folder {
+            self.complete_path(cx);
+        }
     }
 
     /// Asks the server what else a picked completion brings (the import it adds), then adds
@@ -396,6 +503,19 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_are_told_from_code() {
+        assert_eq!(path_at_end("![shot](img/sh"), Some(("img/", "sh")));
+        assert_eq!(path_at_end("<img src=\"./assets/"), Some(("./assets/", "")));
+        assert_eq!(path_at_end("import x from '../lib/ut"), Some(("../lib/", "ut")));
+        assert_eq!(path_at_end("cat ~/Documents/no"), Some(("~/Documents/", "no")));
+        assert_eq!(path_at_end("let half = total/"), Some(("total/", "")), "a folder only if one exists");
+        assert_eq!(path_at_end("x = a / b"), None);
+        assert_eq!(path_at_end("// note"), None);
+        assert_eq!(path_at_end("see https://x.dev/do"), None);
+        assert_eq!(path_at_end("a = b /"), None, "the disk's root isn't listed");
+    }
     use lsp_types::{Position, TextEdit};
 
     #[test]
@@ -494,6 +614,33 @@ mod tests {
         cx.simulate_input("l");
         cx.simulate_keystrokes("enter");
         e.update(cx, |e, _| assert!(e.buffer.to_string().ends_with("release_name: y\nrelease_name")));
+    }
+
+    /// Writing a path lists what's in its folder: a folder picked goes on into it, a file
+    /// picked finishes the path.
+    #[gpui::test]
+    fn paths_are_completed_from_the_folder(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-path-completion-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("img/icons")).unwrap();
+        for f in ["img/shot.png", "img/hero.jpg", "img/.hidden"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let notes = dir.join("notes.md");
+        let (e, cx) = editor(cx, notes.to_str().unwrap(), "See ![a](");
+        cx.simulate_input("img/");
+        cx.run_until_parked();
+        assert_eq!(shown(cx, &e), ["icons/", "hero.jpg", "shot.png"], "folders first, hidden ones not");
+        cx.simulate_input("sh");
+        cx.run_until_parked();
+        assert_eq!(shown(cx, &e), ["shot.png"]);
+        cx.simulate_keystrokes("enter");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "See ![a](img/shot.png"));
+        // Code with a division isn't a path.
+        cx.simulate_input(" x/2");
+        cx.run_until_parked();
+        assert!(shown(cx, &e).is_empty(), "{:?} for {:?}", shown(cx, &e), e.read_with(cx, |e, _| e.buffer.to_string()));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// In prose they only come when asked for: writing doesn't pop a list up.
