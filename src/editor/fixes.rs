@@ -89,8 +89,8 @@ impl Editor {
         if let Some(conflict) = self.conflict_at_caret() {
             return self.conflict_choices(conflict, cx);
         }
-        // On a misspelled word: its corrections.
-        if self.spelling_choices(cx) {
+        // On a link to nothing: names nearby. On a misspelled word: its corrections.
+        if self.broken_link_choices(cx) || self.spelling_choices(cx) {
             return;
         }
         if let Some(message) = self.not_ready_message(cx) {

@@ -1,0 +1,255 @@
+//! Broken links in Markdown: a link or image to a file that isn't there, or to a
+//! `#section` no heading of the file makes, gets a wavy line; ⌘. on it offers the names
+//! nearest to what's written, from that folder (or the file's sections).
+
+use super::Editor;
+use super::fixes::FixMenu;
+use gpui::{App, Context, ScrollHandle};
+use lsp_types::{CodeActionOrCommand, Command};
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// Whether a file exists is asked again after this long (it may have been made since).
+const KNOWN_FOR: Duration = Duration::from_secs(2);
+/// At most this many names are offered.
+const CHOICES: usize = 5;
+
+/// The `#anchors` a Markdown text's headings make (`## Get started` → `get-started`).
+fn anchors(text: &str) -> Vec<String> {
+    let mut fence: Option<&str> = None;
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let t = line.trim_start();
+        if let Some(open) = ["```", "~~~"].into_iter().find(|f| t.starts_with(f)) {
+            fence = if fence == Some(open) { None } else { fence.or(Some(open)) };
+            continue;
+        }
+        if fence.is_none()
+            && let Some(heading) = t.strip_prefix('#')
+        {
+            let heading = heading.trim_start_matches('#');
+            if heading.starts_with(' ') {
+                found.push(crate::markdown_view::slug(heading.trim().trim_end_matches('#')));
+            }
+        }
+    }
+    found
+}
+
+impl Editor {
+    /// The Markdown file's folder, where its relative links start.
+    fn link_folder(&self) -> Option<PathBuf> {
+        self.path.as_ref()?.parent().map(Path::to_path_buf)
+    }
+
+    /// The file a link names (`%20` read as a space), from this file's folder.
+    fn linked_file(&self, written: &str) -> Option<PathBuf> {
+        let path = written.split('#').next()?.replace("%20", " ");
+        if path.is_empty() {
+            return None;
+        }
+        Some(crate::markdown_links::tidy(&self.link_folder()?.join(path)))
+    }
+
+    /// Whether a file is there, remembered a moment so drawing doesn't ask the disk each frame.
+    fn exists(&self, path: &Path) -> bool {
+        let mut known = self.link_targets.borrow_mut();
+        if let Some((there, when)) = known.get(path)
+            && when.elapsed() < KNOWN_FOR
+        {
+            return *there;
+        }
+        let there = path.exists();
+        if known.len() > 1000 {
+            known.clear();
+        }
+        known.insert(path.to_path_buf(), (there, Instant::now()));
+        there
+    }
+
+    /// This file's `#anchors`, worked out once per version of its text.
+    fn doc_anchors(&self) -> Vec<String> {
+        let mut cache = self.anchors.borrow_mut();
+        let version = self.buffer.version();
+        if cache.as_ref().is_none_or(|(v, _)| *v != version) {
+            *cache = Some((version, anchors(&self.buffer.to_string())));
+        }
+        cache.as_ref().map(|(_, a)| a.clone()).unwrap_or_default()
+    }
+
+    /// Whether the link written `written` leads nowhere.
+    fn link_is_broken(&self, written: &str) -> bool {
+        match (self.linked_file(written), written.strip_prefix('#')) {
+            (Some(file), _) => !self.exists(&file),
+            // This file's own section: one of its headings.
+            (None, Some(anchor)) => !self.doc_anchors().iter().any(|a| a == anchor),
+            (None, None) => false,
+        }
+    }
+
+    /// The broken links on line `line` (its text `text`), by byte range in it.
+    pub fn broken_links_on_line(&self, line: usize, text: &str) -> Vec<Range<usize>> {
+        if !self.is_markdown() || self.path.is_none() || self.in_fence(line) {
+            return Vec::new();
+        }
+        crate::markdown_links::targets(text)
+            .into_iter()
+            .chain(text.match_indices("](#").map(|(at, _)| {
+                let start = at + 2;
+                let end = text[start..].find([')', ' ']).map_or(text.len(), |e| start + e);
+                crate::markdown_links::Target { line: 0, start, text: &text[start..end] }
+            }))
+            .filter(|t| self.link_is_broken(t.text))
+            .map(|t| t.start..t.start + t.text.len())
+            .collect()
+    }
+
+    /// ⌘. on a broken link: the existing names nearest to it, to change it to. True when the
+    /// caret was on one.
+    pub(super) fn broken_link_choices(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((range, written)) = self.broken_link_at_caret(cx) else { return false };
+        let choices = match written.strip_prefix('#') {
+            Some(anchor) => nearest(anchor, self.doc_anchors()).into_iter().map(|a| format!("#{a}")).collect(),
+            None => self.nearest_files(&written),
+        };
+        if choices.is_empty() {
+            self.show_notice(range.start, "Nothing there by a name like that.".into(), cx);
+            return true;
+        }
+        let fixes = choices
+            .into_iter()
+            .map(|choice| {
+                CodeActionOrCommand::Command(Command {
+                    title: choice.clone(),
+                    command: super::spelling::CHANGE.into(),
+                    arguments: Some(vec![serde_json::Value::String(choice)]),
+                })
+            })
+            .collect();
+        self.close_hover(cx);
+        self.fix_menu = Some(FixMenu {
+            fixes,
+            selected: 0,
+            at: range.start,
+            scroll: ScrollHandle::new(),
+            conflict: None,
+            spelling: Some(range),
+        });
+        cx.notify();
+        true
+    }
+
+    /// The broken link the caret is in, by char range, and as written.
+    fn broken_link_at_caret(&self, cx: &App) -> Option<(Range<usize>, String)> {
+        let _ = cx;
+        let (line, column) = self.caret_point();
+        let text = self.buffer.line_text(line);
+        let at = text.char_indices().nth(column).map_or(text.len(), |(b, _)| b);
+        let link = self.broken_links_on_line(line, &text).into_iter().find(|r| r.start <= at && at <= r.end)?;
+        let start = self.buffer.rope().line_to_char(line) + text[..link.start].chars().count();
+        let written = text[link.clone()].to_string();
+        Some((start..start + written.chars().count(), written))
+    }
+
+    /// For a link to a missing file: the names nearest to it in the folder it names (or, if
+    /// that folder isn't there either, in this file's), written as the link was.
+    fn nearest_files(&self, written: &str) -> Vec<String> {
+        let (path, fragment) = match written.find('#') {
+            Some(at) => (&written[..at], &written[at..]),
+            None => (written, ""),
+        };
+        let (folder_written, name) = match path.rfind('/') {
+            Some(at) => (&path[..=at], &path[at + 1..]),
+            None => ("", path),
+        };
+        let Some(here) = self.link_folder() else { return Vec::new() };
+        let folder = crate::markdown_links::tidy(&here.join(folder_written.replace("%20", " ")));
+        let (folder, prefix) = if folder.is_dir() { (folder, folder_written) } else { (here, "") };
+        let Ok(entries) = std::fs::read_dir(&folder) else { return Vec::new() };
+        let names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        let encode = written.contains("%20");
+        nearest(&name.replace("%20", " "), names)
+            .into_iter()
+            .map(|n| {
+                let n = if encode { n.replace(' ', "%20") } else { n };
+                format!("{prefix}{n}{fragment}")
+            })
+            .collect()
+    }
+}
+
+/// The names in `names` most like `wanted`: same letters in order first, then the most in
+/// common.
+fn nearest(wanted: &str, names: Vec<String>) -> Vec<String> {
+    let wanted = wanted.to_lowercase();
+    let mut scored: Vec<(i64, String)> = names
+        .into_iter()
+        .map(|name| {
+            let lower = name.to_lowercase();
+            let fuzzy = crate::fuzzy::score(&lower, &wanted).map_or(0, |(s, _)| s as i64 + 1000);
+            let shared = wanted.chars().filter(|c| lower.contains(*c)).count() as i64;
+            let stem = |s: &str| s.split('.').next().unwrap_or(s).to_string();
+            let same_stem = i64::from(stem(&lower) == stem(&wanted)) * 500;
+            (fuzzy + shared * 10 + same_stem - (lower.len() as i64 - wanted.len() as i64).abs(), name)
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().take(CHOICES).map(|(_, n)| n).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headings_make_anchors() {
+        let text = "# Null\n\n## Get started\n```\n# not a heading\n```\n### Keys & shortcuts ###\n#hashtag\n";
+        assert_eq!(anchors(text), ["null", "get-started", "keys--shortcuts"]);
+    }
+
+    /// A link to a file that isn't there is marked, one to a section that is isn't; ⌘. on
+    /// it offers the nearest name, ↵ takes it.
+    #[gpui::test]
+    fn broken_links_are_marked_and_fixed(cx: &mut gpui::TestAppContext) {
+        use crate::fonts::Fonts;
+        use crate::settings::Settings;
+        use crate::theme::Theme;
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let dir = std::env::temp_dir().join(format!("null-broken-links-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/setup.md"), "x").unwrap();
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, "See [setup](docs/setpu.md), [intro](#intro), [x](#nowhere).\n# Intro\n").unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(notes.clone(), None, cx));
+        editor.update_in(cx, |e, window, cx| {
+            let text = e.buffer.line_text(0);
+            let broken: Vec<String> =
+                e.broken_links_on_line(0, &text).into_iter().map(|r| text[r].to_string()).collect();
+            assert_eq!(broken, ["docs/setpu.md", "#nowhere"]);
+            window.focus(&e.focus_handle);
+            e.selection = super::super::Selection::caret(15);
+            cx.notify();
+        });
+        cx.simulate_keystrokes("cmd-. enter");
+        editor.read_with(cx, |e, _| assert!(e.buffer.to_string().starts_with("See [setup](docs/setup.md),")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn nearest_names_first() {
+        let names = vec!["setup.md".to_string(), "install.md".to_string(), "README.md".to_string()];
+        assert_eq!(nearest("setpu.md", names.clone())[0], "setup.md");
+        assert_eq!(nearest("instal.md", names)[0], "install.md");
+    }
+}

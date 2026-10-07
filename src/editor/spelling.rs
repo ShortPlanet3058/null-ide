@@ -11,7 +11,7 @@ use lsp_types::{CodeActionOrCommand, Command};
 use std::ops::Range;
 
 /// Stand for picks in ⌘.'s list: spelling, handled here, not by a server.
-const CHANGE: &str = "null.spellChange";
+pub(super) const CHANGE: &str = "null.spellChange";
 const LEARN: &str = "null.spellLearn";
 /// At most this many corrections are offered.
 const GUESSES: usize = 5;
@@ -55,7 +55,7 @@ impl Editor {
     }
 
     /// Whether the line is code in a Markdown fence. Worked out once per version of the text.
-    fn in_fence(&self, line: usize) -> bool {
+    pub(super) fn in_fence(&self, line: usize) -> bool {
         if !self.is_markdown() {
             return false;
         }
