@@ -805,6 +805,29 @@ pub fn table_step(lines: &[&str], at: usize, column: usize, forward: bool) -> Op
 }
 
 /// One table's lines (head, rule, rows) with every column as wide as its widest cell.
+/// Cells copied from a spreadsheet (rows on lines, cells split by tabs) as a Markdown table,
+/// lined up, its first row the header. None for anything else: fewer than two rows, rows of
+/// different lengths, a row starting with a tab (that's indentation: code).
+pub fn table_from_cells(text: &str) -> Option<String> {
+    let rows: Vec<&str> = text.trim_end_matches(['\n', '\r']).lines().collect();
+    if rows.len() < 2 || rows.iter().any(|r| !r.contains('\t') || r.starts_with('\t')) {
+        return None;
+    }
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| r.trim_end_matches('\r').split('\t').map(|c| c.trim().replace('|', "\\|")).collect())
+        .collect();
+    let columns = cells[0].len();
+    if columns < 2 || cells.iter().any(|r| r.len() != columns) {
+        return None;
+    }
+    let row = |r: &[String]| format!("| {} |", r.join(" | "));
+    let mut lines = vec![row(&cells[0]), row(&vec!["---".to_string(); columns])];
+    lines.extend(cells[1..].iter().map(|r| row(r)));
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    Some(align_table(&refs).join("\n") + "\n")
+}
+
 fn align_table(lines: &[&str]) -> Vec<String> {
     if lines.len() < 2 {
         return lines.iter().map(|l| l.to_string()).collect();
@@ -1560,6 +1583,20 @@ mod tests {
         assert!(matches!(&blocks[1], Block::Callout(Callout::Tip, _)));
         assert!(matches!(&blocks[2], Block::Quote(_)));
         assert!(matches!(&blocks[3], Block::Quote(_)), "not a kind GitHub knows");
+    }
+
+    /// Spreadsheet cells become a lined-up table; code indented with tabs, one row, or rows
+    /// of different lengths don't.
+    #[test]
+    fn spreadsheet_cells_become_a_table() {
+        let table = table_from_cells("Name\tPrice\nTea\t3\nCoffee | strong\t4.5\n").unwrap();
+        assert_eq!(
+            table,
+            "| Name             | Price |\n| ---------------- | ----- |\n| Tea              | 3     |\n| Coffee \\| strong | 4.5   |\n"
+        );
+        assert_eq!(table_from_cells("\tfoo();\n\tbar();\n"), None);
+        assert_eq!(table_from_cells("a\tb\n"), None);
+        assert_eq!(table_from_cells("a\tb\nc\n"), None);
     }
 
     /// Footnotes: references numbered by first use, notes gathered at the end in that

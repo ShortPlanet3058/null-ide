@@ -1934,6 +1934,20 @@ impl Editor {
         {
             return self.edit(self.selection.range(), &link, EditKind::Other, cx);
         }
+        // Cells copied from a spreadsheet, pasted in Markdown: a table, on lines of its own.
+        if adjust
+            && self.is_markdown()
+            && self.extra.is_empty()
+            && let Some(table) = crate::markdown_view::table_from_cells(&text)
+        {
+            let (_, column) = self.buffer.point(self.selection.range().start);
+            let table = if column > 0 { format!("\n\n{table}") } else { table };
+            let table = match self.style.line_ending {
+                crate::file_style::LineEnding::Crlf => table.replace('\n', "\r\n"),
+                crate::file_style::LineEnding::Lf => table,
+            };
+            return self.edit(self.selection.range(), &table, EditKind::Other, cx);
+        }
         let kind = item.metadata().cloned().unwrap_or_default();
         // Pasted line breaks become the file's own.
         let text = text.replace("\r\n", "\n");
@@ -4079,6 +4093,32 @@ mod tests {
             assert!(e.disk_changed);
         });
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Spreadsheet cells pasted in Markdown: a table on lines of its own. ⌥⇧⌘V, or a code
+    /// file, pastes them as they are.
+    #[gpui::test]
+    fn spreadsheet_cells_paste_as_a_table(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let cells = "Item\tQty\nTea\t2\n";
+        let (editor, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("Prices:"), Some(PathBuf::from("notes.md")), cx));
+        editor.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection::caret(7);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(cells.to_string()));
+        });
+        cx.simulate_keystrokes("cmd-v");
+        editor.read_with(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "Prices:\n\n| Item | Qty |\n| ---- | --- |\n| Tea  | 2   |\n")
+        });
+        cx.simulate_keystrokes("alt-shift-cmd-v");
+        editor.read_with(cx, |e, _| assert!(e.buffer.to_string().ends_with("| Tea  | 2   |\nItem\tQty\nTea\t2\n")));
     }
 
     /// Markdown: * _ ~ over a selection wrap it, and it stays selected to wrap again
