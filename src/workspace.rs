@@ -2338,7 +2338,19 @@ impl Workspace {
                     }
                     this.schedule_session_save(cx);
                 }
-                EditorEvent::BookmarksChanged => this.schedule_session_save(cx),
+                EditorEvent::BookmarksChanged => {
+                    // The other copy of the file, on the other side, has the same bookmarks.
+                    let (path, lines) = {
+                        let editor = editor.read(cx);
+                        (editor.path().map(Path::to_path_buf), editor.bookmarks.clone())
+                    };
+                    for tab in &this.tabs {
+                        if tab.editor != *editor && path.is_some() && tab.editor.read(cx).path() == path.as_deref() {
+                            tab.editor.update(cx, |twin, cx| twin.set_bookmarks(lines.clone(), cx));
+                        }
+                    }
+                    this.schedule_session_save(cx);
+                }
                 EditorEvent::GoTo { path, range } => {
                     let range = *range;
                     this.go_to(path.clone(), range, window, cx);
@@ -4642,15 +4654,14 @@ impl Workspace {
         };
         let out = path.with_extension("html");
         let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let ours = std::fs::read_to_string(&out).map_or(true, |text| text.contains(crate::markdown_html::MARK));
+        // A page that can't be read, or isn't text, isn't taken for one of Null's.
+        let mark = crate::markdown_html::MARK.as_bytes();
+        let ours = std::fs::read(&out).is_ok_and(|bytes| bytes.windows(mark.len()).any(|w| w == mark));
         if out.exists() && !ours {
             return self
                 .show_notice(format!("{name} is already there, and not one Null made: it's left as it is."), cx);
         }
-        let title = crate::markdown_view::headings(&source)
-            .into_iter()
-            .next()
-            .map(|(_, text, _)| text)
+        let title = crate::markdown_html::title(&source)
             .unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
         let html = crate::markdown_html::page(&source, &title);
         match crate::fs_ops::write_file(&out, html.as_bytes()) {

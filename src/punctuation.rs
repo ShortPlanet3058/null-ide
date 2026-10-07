@@ -1,7 +1,8 @@
 //! Smart quotes and dashes, for writing in Markdown and text: a typed `"` or `'` becomes the
 //! opening or closing quote it stands for, in the style set on the Mac (“ ” ‘ ’ or « » …), and
 //! a second hyphen after a word becomes an em dash. Never in code: not in `ticks`, not inside
-//! an HTML tag, and not a line of dashes (`---` stays a rule, `|---|` a table).
+//! an HTML tag or a link's address and title, and not a line of dashes (`---` stays a rule,
+//! `|---|` a table). The editor also leaves fences, front matter and open comments alone.
 
 use std::sync::LazyLock;
 
@@ -51,10 +52,11 @@ pub fn smart(c: char, before: &str, quotes: Quotes) -> Option<Smart> {
     match c {
         '"' | '\'' => {
             let (open, close) = if c == '"' { quotes.double } else { quotes.single };
-            // Opening at the start, after a space, a bracket, a tag, a dash or an opening quote.
+            // Opening at the start, after a space, a bracket, a tag, a mark (`*"So"*`), a dash
+            // or an opening quote.
             let opens = previous.is_none_or(|p| {
                 p.is_whitespace()
-                    || matches!(p, '(' | '[' | '{' | '<' | '>' | '—' | '–' | '-' | '/')
+                    || matches!(p, '(' | '[' | '{' | '<' | '>' | '*' | '_' | '~' | '—' | '–' | '-' | '/')
                     || [quotes.double.0, quotes.single.0].contains(&p)
             });
             Some(Smart::Write(if opens { open } else { close }))
@@ -69,11 +71,34 @@ pub fn smart(c: char, before: &str, quotes: Quotes) -> Option<Smart> {
     }
 }
 
-/// Whether the caret, after `before`, is in code: inside `ticks` or an HTML tag.
+/// Whether the caret, after `before`, is in code: inside `ticks` (or ``double ticks``), an
+/// HTML tag, or a link's address and title (`](a.md "Title"`).
 fn in_code(before: &str) -> bool {
-    let ticks = before.matches('`').count();
-    let in_tag = before.rfind('<').is_some_and(|open| before.rfind('>').is_none_or(|close| close < open));
-    ticks % 2 == 1 || in_tag
+    let after_last =
+        |open: &str, close: char| before.rfind(open).is_some_and(|at| before.rfind(close).is_none_or(|end| end < at));
+    in_ticks(before) || after_last("<", '>') || after_last("](", ')')
+}
+
+/// Whether a run of backticks is open at the end of `before`: one closes only at a run as
+/// long as itself.
+fn in_ticks(before: &str) -> bool {
+    let mut open: Option<usize> = None;
+    let mut run = 0;
+    for c in before.chars().chain(std::iter::once(' ')) {
+        if c == '`' {
+            run += 1;
+            continue;
+        }
+        if run > 0 {
+            open = match open {
+                None => Some(run),
+                Some(n) if n == run => None,
+                other => other,
+            };
+            run = 0;
+        }
+    }
+    open.is_some() || run > 0
 }
 
 #[cfg(test)]
@@ -122,7 +147,14 @@ mod tests {
     #[test]
     fn code_is_left_alone() {
         assert_eq!(typed(r#"Run `say "hi" --loud` then "go""#), r#"Run `say "hi" --loud` then “go”"#);
+        assert_eq!(typed(r#"Run ``say "hi" `a` `` then "go""#), r#"Run ``say "hi" `a` `` then “go”"#);
         assert_eq!(typed(r#"<a href="x.md">"link"</a>"#), r#"<a href="x.md">“link”</a>"#);
+        assert_eq!(typed(r#"[a](b.md "Title") and "more""#), r#"[a](b.md "Title") and “more”"#);
+    }
+
+    #[test]
+    fn quotes_open_inside_marks() {
+        assert_eq!(typed(r#"*"Note"* and **"Warning"** and _'word'_"#), "*“Note”* and **“Warning”** and _‘word’_");
     }
 
     /// The Mac's quotes are read (run by hand: they're the Mac's own setting).

@@ -38,6 +38,43 @@ impl Editor {
         cx.notify();
     }
 
+    /// Sets the bookmarks from the other copy of this file (the other side of a split).
+    pub fn set_bookmarks(&mut self, lines: Vec<usize>, cx: &mut Context<Self>) {
+        if self.bookmarks != lines {
+            self.bookmarks = lines;
+            self.bookmarks_revision = self.buffer.revision();
+            cx.notify();
+        }
+    }
+
+    /// Lines moved up or down (⌥↑ ⌥↓) take their bookmarks and breakpoints along: `to` says
+    /// where each line of `span` went.
+    pub(super) fn marks_moved(
+        &mut self,
+        span: std::ops::Range<usize>,
+        to: impl Fn(usize) -> usize,
+        cx: &mut Context<Self>,
+    ) {
+        let moved = |lines: &mut Vec<usize>| {
+            for line in lines.iter_mut().filter(|l| span.contains(&**l)) {
+                *line = to(*line);
+            }
+            lines.sort_unstable();
+        };
+        let (bookmarks, breakpoints) = (self.bookmarks.clone(), self.breakpoints.clone());
+        moved(&mut self.bookmarks);
+        moved(&mut self.breakpoints);
+        for (line, _) in self.breakpoint_conditions.iter_mut().filter(|(l, _)| span.contains(l)) {
+            *line = to(*line);
+        }
+        if self.bookmarks != bookmarks {
+            cx.emit(EditorEvent::BookmarksChanged);
+        }
+        if self.breakpoints != breakpoints {
+            cx.emit(EditorEvent::BreakpointsChanged);
+        }
+    }
+
     pub(super) fn next_bookmark(&mut self, _: &NextBookmark, _: &mut Window, cx: &mut Context<Self>) {
         self.go_to_bookmark(true, cx);
     }
@@ -57,19 +94,22 @@ impl Editor {
         self.bookmarks.binary_search(&line).is_ok()
     }
 
-    /// After an edit: the bookmarks move with their lines.
+    /// After an edit (an undo is one too): the bookmarks move with their lines.
     pub(super) fn bookmarks_after_edit(&mut self, cx: &mut Context<Self>) {
         let revision = self.buffer.revision();
-        let edits = (!self.bookmarks.is_empty()).then(|| self.buffer.edits_since(self.bookmarks_revision)).flatten();
+        let edits = (!self.bookmarks.is_empty()).then(|| self.buffer.edits_since(self.bookmarks_revision));
         self.bookmarks_revision = revision;
         let Some(edits) = edits else { return };
         let before = self.bookmarks.clone();
-        for edit in edits {
-            let (start, old_end, new_end) = (edit.start.0, edit.old_end.0, edit.new_end.0);
+        // Not all edits known (a great many at once): they stay, inside the text.
+        for edit in edits.into_iter().flatten() {
             for line in &mut self.bookmarks {
-                *line = super::breakpoints::move_line(*line, start, old_end, new_end);
+                *line = super::breakpoints::move_line(*line, edit);
             }
         }
+        let lines = self.buffer.len_lines();
+        self.bookmarks.retain(|&l| l < lines);
+        self.bookmarks.sort_unstable();
         self.bookmarks.dedup();
         if self.bookmarks != before {
             cx.emit(EditorEvent::BookmarksChanged);
@@ -131,5 +171,24 @@ mod tests {
         cx.simulate_keystrokes("cmd-f2");
         assert_eq!(e.read_with(cx, |e, _| e.bookmarks.clone()), vec![2]);
         assert!(e.read_with(cx, |e, _| e.is_bookmarked(2)));
+        // Undo puts it back where it was then; redo, where it went.
+        e.update(cx, |e, cx| e.step_history(true, cx));
+        assert_eq!(e.read_with(cx, |e, _| e.bookmarks.clone()), vec![1]);
+        e.update(cx, |e, cx| e.step_history(false, cx));
+        assert_eq!(e.read_with(cx, |e, _| e.bookmarks.clone()), vec![2]);
+        // Enter at the very start of its line takes it down with its text.
+        e.update(cx, |e, cx| {
+            let at = e.buffer.offset(2, 0);
+            e.selection = super::super::Selection::caret(at);
+            e.edit(at..at, "\n", super::super::EditKind::Other, cx);
+        });
+        assert_eq!(e.read_with(cx, |e, _| e.bookmarks.clone()), vec![3]);
+        // A line moved down takes its bookmark; the one it passes doesn't take it.
+        e.update(cx, |e, cx| {
+            e.selection = super::super::Selection::caret(e.buffer.offset(3, 0));
+            e.move_lines(true, cx);
+        });
+        assert_eq!(e.read_with(cx, |e, _| e.bookmarks.clone()), vec![4]);
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(4)), "one");
     }
 }

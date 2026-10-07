@@ -4,7 +4,6 @@
 
 use std::path::PathBuf;
 
-/// Where Null keeps what it installs itself (language servers), never on the system:
 /// A folder for tests, `name` inside one of this test run's own. All runs
 /// share one parent, where the folders of runs over an hour old are swept away, so a test
 /// that fails before cleaning up leaves nothing behind for long.
@@ -27,6 +26,7 @@ pub fn test_dir(name: &str) -> PathBuf {
     this_run.join(name)
 }
 
+/// Where Null keeps what it installs itself (language servers), never on the system:
 /// `~/Library/Application Support/Null` on macOS, `$XDG_DATA_HOME/null` (or
 /// `~/.local/share/null`) on Linux, `%LOCALAPPDATA%\Null` on Windows.
 pub fn data_dir() -> Option<PathBuf> {

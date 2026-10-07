@@ -178,7 +178,19 @@ impl Editor {
             let neighbour = texts.remove(0);
             texts.push(neighbour);
         }
-        self.rewrite_lines(span, texts, |(l, c)| (if down { l + 1 } else { l - 1 }, c), cx);
+        let (first, last) = (span.start, span.end - 1);
+        self.rewrite_lines(span.clone(), texts, |(l, c)| (if down { l + 1 } else { l - 1 }, c), cx);
+        // Bookmarks and breakpoints go with their lines; the neighbour's to the other end.
+        self.marks_moved(
+            span,
+            |l| match (down, l) {
+                (true, l) if l == last => first,
+                (true, l) => l + 1,
+                (false, l) if l == first => last,
+                (false, l) => l - 1,
+            },
+            cx,
+        );
     }
 
     pub(super) fn duplicate_lines(&mut self, down: bool, cx: &mut Context<Self>) {
@@ -294,8 +306,16 @@ impl Editor {
         if self.in_fence(line) {
             return false;
         }
+        if self.in_front_matter(line) {
+            return false;
+        }
         let before: String = self.buffer.line_text(line).chars().take(column).collect();
-        match smart(c, &before, *QUOTES) {
+        let smart = smart(c, &before, *QUOTES);
+        // In an HTML comment still open from a line above, `--` is the start of its `-->`.
+        if matches!(smart, Some(Smart::Join(_))) && self.in_open_comment(range.start) {
+            return false;
+        }
+        match smart {
             // Over a selection, a quote wraps it.
             Some(Smart::Write(_)) if !range.is_empty() => {
                 let (open, close) = if c == '"' { QUOTES.double } else { QUOTES.single };
@@ -318,6 +338,21 @@ impl Editor {
             _ => return false,
         }
         true
+    }
+
+    /// Whether `line` is in the settings at the top of a Markdown file (`---` … `---`), or
+    /// in ones still being written (no closing `---` yet, nor a blank line).
+    fn in_front_matter(&self, line: usize) -> bool {
+        if !self.is_markdown() || self.buffer.line_text(0).trim() != "---" {
+            return false;
+        }
+        (1..line).all(|l| !matches!(self.buffer.line_text(l).trim(), "---" | ""))
+    }
+
+    /// Whether the text before `offset` has an HTML comment (`<!--`) not closed yet.
+    fn in_open_comment(&self, offset: usize) -> bool {
+        let before = self.buffer.rope().slice(..offset).to_string();
+        before.rfind("<!--").is_some_and(|open| before.rfind("-->").is_none_or(|close| close < open))
     }
 
     /// Backspace between an empty pair like `()` removes both.
@@ -725,6 +760,10 @@ mod editor_tests {
         assert_eq!(typed(cx, "notes.md", "", "`a--b \"c\"`"), "`a--b \"c\"`");
         assert_eq!(typed(cx, "notes.md", "```\n", "x--\"y"), "```\nx--\"y\"");
         assert_eq!(typed(cx, "main.rs", "", "a--b"), "a--b");
+        // Front matter is settings; `--` in a comment open from above is its end.
+        assert_eq!(typed(cx, "notes.md", "---\ntitle: ", "\"Day 1\""), "---\ntitle: \"Day 1\"");
+        assert_eq!(typed(cx, "notes.md", "<!--\nold draft ", "-->"), "<!--\nold draft -->");
+        assert_eq!(typed(cx, "notes.md", "<!-- a -->\nso ", "--"), "<!-- a -->\nso —");
         // Over a selection, a quote wraps it.
         let (e, cx2) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("a word"), Some("x.txt".into()), cx));
         e.update_in(cx2, |e, window, cx| {

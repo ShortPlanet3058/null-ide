@@ -962,8 +962,10 @@ impl Element for EditorElement {
                 .filter_map(|&line| {
                     let rows = rows_of(line..line + 1);
                     (!rows.is_empty()).then(|| {
+                        // Inside a breakpoint's dot, smaller, so both show.
+                        let mark = if editor.breakpoints.contains(&line) { px(4.) } else { mark };
                         let y = row_top(rows.start) + (line_height - mark) / 2.;
-                        Bounds::new(point(bounds.left() + px(6.), y), size(mark, mark))
+                        Bounds::new(point(bounds.left() + px(9.) - mark / 2., y), size(mark, mark))
                     })
                 })
                 .collect();
@@ -1051,9 +1053,9 @@ impl Element for EditorElement {
                 .map(|(r, row)| {
                     let line = r.row.line;
                     let label = (line + 1).to_string();
-                    let color = flagged[line - lines_shown.start].unwrap_or(if editor.is_bookmarked(line) {
-                        theme.caret
-                    } else if line == caret_line {
+                    // A bookmark shows over a problem's colour: the problem has its wavy line.
+                    let bookmarked = editor.is_bookmarked(line).then_some(theme.caret);
+                    let color = bookmarked.or(flagged[line - lines_shown.start]).unwrap_or(if line == caret_line {
                         theme.muted
                     } else {
                         theme.faint
@@ -1379,7 +1381,8 @@ impl Element for EditorElement {
                             let spans = editor.line_spans(line);
                             let runs = runs_for(&text, line_byte, &spans, &[], &theme, &font);
                             let (shaped, _) = shape_row(&text, &runs);
-                            let label = (line + 1).to_string();
+                            // Hidden line numbers stay hidden on the pinned lines too.
+                            let label = if numbered { (line + 1).to_string() } else { String::new() };
                             let number = shape(label.clone(), &[run(label.len(), &font, theme.faint)]);
                             let number_x =
                                 bounds.left() + gutter_width - px(GUTTER_PADDING + FOLD_SPACE) - number.width;
@@ -1474,9 +1477,6 @@ impl Element for EditorElement {
             window.paint_quad(fill(band, theme.warning.opacity(0.14)));
             window.paint_quad(fill(mark, theme.warning));
         }
-        for dot in &prepaint.bookmark_dots {
-            window.paint_quad(fill(*dot, theme.caret).corner_radii(px(3.)));
-        }
         for (dot, conditional) in &prepaint.breakpoint_dots {
             let quad = if *conditional {
                 fill(*dot, gpui::transparent_black()).border_widths(px(1.5)).border_color(theme.error)
@@ -1484,6 +1484,9 @@ impl Element for EditorElement {
                 fill(*dot, theme.error)
             };
             window.paint_quad(quad.corner_radii(px(4.)));
+        }
+        for dot in &prepaint.bookmark_dots {
+            window.paint_quad(fill(*dot, theme.caret).corner_radii(dot.size.width / 2.));
         }
         if let Some(band) = prepaint.assist_band {
             window.paint_quad(fill(band, theme.accent_soft));
