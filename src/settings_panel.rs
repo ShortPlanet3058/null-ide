@@ -668,6 +668,14 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Smart quotes and dashes",
+                Some("In Markdown and text, \"quotes\" curl as set on the Mac and -- becomes —; never in code"),
+                Self::toggle("smart-punctuation", s.smart_punctuation, &theme, cx, |s| {
+                    s.smart_punctuation = !s.smart_punctuation
+                }),
+                &theme,
+            ),
+            Self::row(
                 "Spelling",
                 Some("Marks misspelled words in Markdown, text and comments; ⌘. on one offers corrections"),
                 Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),

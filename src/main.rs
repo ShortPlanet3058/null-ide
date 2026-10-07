@@ -36,6 +36,7 @@ mod palette;
 mod preview;
 mod project_index;
 mod project_search;
+mod punctuation;
 mod search;
 mod servers;
 mod session;
