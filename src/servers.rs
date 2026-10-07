@@ -148,6 +148,8 @@ pub fn language_id(path: &Path) -> &'static str {
         "json" => "json",
         "jsonc" => "jsonc",
         "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "toml" => "toml",
         _ => "plaintext",
     }
 }
