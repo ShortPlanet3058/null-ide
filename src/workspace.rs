@@ -60,6 +60,7 @@ actions!(
         CopyFilePath,
         CopyRelativeFilePath,
         CopyAsCodeBlock,
+        CopyAsRichText,
         RevealFile,
         RenameFile,
         TrashFile,
@@ -1638,6 +1639,27 @@ impl Workspace {
         self.show_notice(format!("Copied {what} as a code block."), cx);
     }
 
+    /// Markdown (the selection, or the whole file) on the clipboard as formatted text too:
+    /// pasted in Mail, Notes or Docs it keeps its headings, bold and links; in code, it's
+    /// the Markdown.
+    fn copy_as_rich_text(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor() else { return };
+        let e = editor.read(cx);
+        if !e.is_markdown() {
+            return self.show_notice("Copy as Rich Text is for Markdown.".into(), cx);
+        }
+        let range = e.selection.range();
+        let whole = range.is_empty();
+        let source = if whole { e.buffer.to_string() } else { e.buffer.slice(range) };
+        let item = gpui::ClipboardItem::new_string(source.clone());
+        if !crate::markdown_html::copy_rich(&source, &crate::markdown_html::fragment(&source)) {
+            cx.write_to_clipboard(item.clone());
+        }
+        crate::clipboard_history::remember(&item, cx);
+        let what = if whole { "The document" } else { "The selection" };
+        self.show_notice(format!("{what} is copied as rich text: it pastes formatted in Mail, Notes or Docs."), cx);
+    }
+
     fn copy_line_link(&mut self, cx: &mut Context<Self>) {
         self.line_link(false, cx);
     }
@@ -3106,6 +3128,7 @@ impl Workspace {
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
+            (Edit, "Copy as Rich Text".into(), Box::new(CopyAsRichText)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
             (File, "Copy Path".into(), Box::new(CopyFilePath)),
@@ -6506,6 +6529,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenLineOnWeb, _, cx| this.line_link(true, cx)))
             .on_action(cx.listener(Self::fetch_branch))
             .on_action(cx.listener(|this, _: &CopyAsCodeBlock, _, cx| this.copy_as_code_block(cx)))
+            .on_action(cx.listener(|this, _: &CopyAsRichText, _, cx| this.copy_as_rich_text(cx)))
             .on_action(
                 cx.listener(|this, _: &CopyFilePath, _, cx| this.copy_path(this.active_path(cx).as_deref(), false, cx)),
             )
@@ -6891,6 +6915,35 @@ mod tests {
             String::from_utf8_lossy(&committed.stdout).split_whitespace().collect::<Vec<_>>(),
             ["only", "b", "b.txt"]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Copy as Rich Text: the selection's Markdown on the clipboard (the formatted copy goes
+    /// to the Mac's own clipboard, which tests leave alone), and in the history.
+    #[gpui::test]
+    fn copy_as_rich_text_copies_the_markdown(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("rich-text");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), "# Notes\n\nSome **bold** text.\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let file = dir.join("notes.md");
+        workspace.update_in(cx, |w, window, cx| w.open_file(file, window, cx));
+        cx.run_until_parked();
+        workspace.update(cx, |w, cx| {
+            w.active_editor()
+                .unwrap()
+                .update(cx, |e, _| e.selection = crate::editor::Selection { anchor: 9, head: 27 });
+            w.copy_as_rich_text(cx);
+        });
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(copied.as_deref(), Some("Some **bold** text"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
