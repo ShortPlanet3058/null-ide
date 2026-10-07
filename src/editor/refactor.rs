@@ -14,7 +14,10 @@ use gpui::{
 use lsp_types::{Position, TextEdit};
 use std::ops::Range;
 
-actions!(refactor, [RenameSymbol, FindReferences, FormatDocument, FormatSelection, ConfirmRename, CancelRename]);
+actions!(
+    refactor,
+    [RenameSymbol, FindReferences, FormatDocument, FormatSelection, ConfirmRename, CancelRename, InsertTableOfContents]
+);
 
 pub fn bind_keys(cx: &mut App) {
     let editor = Some("Editor");
@@ -199,6 +202,40 @@ impl Editor {
             return self.format_selection_now(cx);
         }
         self.format_then(false, cx);
+    }
+
+    /// Markdown: a list of links to the headings, at the caret; or, where Null wrote one
+    /// before, that one brought up to date.
+    pub(super) fn insert_table_of_contents(
+        &mut self,
+        _: &InsertTableOfContents,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let at = self.selection.head;
+        if !self.is_markdown() {
+            return self.show_notice(at, "A table of contents is for Markdown files.".into(), cx);
+        }
+        let toc = crate::markdown_view::table_of_contents(&self.buffer.to_string());
+        if toc.is_empty() {
+            return self.show_notice(at, "No headings to list yet.".into(), cx);
+        }
+        let ending = self.style.line_ending.text();
+        let text = toc.join(ending);
+        // The one written before: its lines, start mark to end mark.
+        let lines = self.buffer.len_lines();
+        let line = |i: usize| self.buffer.line_text(i);
+        let start = (0..lines).find(|&i| line(i).trim() == crate::markdown_view::TOC_START);
+        let end = start.and_then(|s| (s..lines).find(|&i| line(i).trim() == crate::markdown_view::TOC_END));
+        if let (Some(start), Some(end)) = (start, end) {
+            let range = self.buffer.line_to_char(start)..self.buffer.line_to_char(end) + self.buffer.line_len(end);
+            self.edit(range, &text, EditKind::Other, cx);
+            return self.show_notice(at, "Brought the table of contents up to date.".into(), cx);
+        }
+        let range = self.selection.range();
+        let (_, column) = self.buffer.point(range.start);
+        let text = if column > 0 { format!("{ending}{ending}{text}{ending}") } else { format!("{text}{ending}") };
+        self.edit(range, &text, EditKind::Other, cx);
     }
 
     /// Every table of a Markdown file with its columns lined up, as one undo step.

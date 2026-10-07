@@ -1121,6 +1121,53 @@ pub fn link_to(dir: &std::path::Path, target: &std::path::Path) -> String {
     }
 }
 
+/// The marks around a table of contents Null wrote, so the next one replaces it.
+pub const TOC_START: &str = "<!-- toc -->";
+pub const TOC_END: &str = "<!-- /toc -->";
+
+/// The headings of a Markdown text (`#` ones, outside code fences): their level, text as it
+/// reads, and `#anchor`, numbered as GitHub does when two read the same (`-1`, `-2`).
+pub fn headings(source: &str) -> Vec<(u8, String, String)> {
+    let mut fence: Option<&str> = None;
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut found = Vec::new();
+    for line in buffer_lines(source) {
+        let t = line.trim_start();
+        if let Some(open) = fence_of(t) {
+            fence = if fence == Some(open) { None } else { fence.or(Some(open)) };
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if let Some((level, text)) = heading(t) {
+            let text = plain_text(&inlines(text));
+            let base = slug(&text);
+            let n = seen.entry(base.clone()).or_insert(0);
+            let anchor = if *n == 0 { base.clone() } else { format!("{base}-{n}") };
+            *n += 1;
+            found.push((level, text, anchor));
+        }
+    }
+    found
+}
+
+/// A table of contents for a Markdown text: a nested list of links to its headings (the
+/// title, when there's one `#` heading, left out), between marks Null finds again.
+pub fn table_of_contents(source: &str) -> Vec<String> {
+    let mut list = headings(source);
+    if list.iter().filter(|(level, ..)| *level == 1).count() == 1 && list.first().is_some_and(|(l, ..)| *l == 1) {
+        list.remove(0);
+    }
+    let Some(top) = list.iter().map(|(level, ..)| *level).min() else { return Vec::new() };
+    let mut lines = vec![TOC_START.to_string()];
+    lines.extend(list.iter().map(|(level, text, anchor)| {
+        format!("{}- [{}](#{anchor})", "  ".repeat((level - top) as usize), text.replace(['[', ']'], ""))
+    }));
+    lines.push(TOC_END.to_string());
+    lines
+}
+
 pub fn slug(heading: &str) -> String {
     heading
         .trim()
@@ -1583,6 +1630,25 @@ mod tests {
         assert!(matches!(&blocks[1], Block::Callout(Callout::Tip, _)));
         assert!(matches!(&blocks[2], Block::Quote(_)));
         assert!(matches!(&blocks[3], Block::Quote(_)), "not a kind GitHub knows");
+    }
+
+    /// A table of contents: the title left out, levels nested, repeated headings numbered
+    /// as their anchors are, code fences not read.
+    #[test]
+    fn table_of_contents_lists_the_headings() {
+        let source = "# Null\n\n## Install\n### On a Mac\n```\n# not a heading\n```\n## Use `null`\n## Install\n";
+        assert_eq!(
+            table_of_contents(source),
+            [
+                TOC_START,
+                "- [Install](#install)",
+                "  - [On a Mac](#on-a-mac)",
+                "- [Use null](#use-null)",
+                "- [Install](#install-1)",
+                TOC_END,
+            ]
+        );
+        assert!(table_of_contents("Just text.\n").is_empty());
     }
 
     /// Spreadsheet cells become a lined-up table; code indented with tabs, one row, or rows

@@ -3239,6 +3239,10 @@ impl Workspace {
                 Some(_) => commands.push((Ai, "Stop AI Task".into(), Box::new(StopAiTask))),
             }
         }
+        // Markdown: a table of contents of its headings.
+        if self.active_editor().is_some_and(|e| e.read(cx).is_markdown()) {
+            commands.push((Edit, "Insert Table of Contents".into(), Box::new(crate::editor::InsertTableOfContents)));
+        }
         // A page or a picture: open it in the browser.
         if self.active_editor().and_then(|e| e.read(cx).path()).is_some_and(crate::file_tree::opens_in_browser) {
             commands.push((File, "Open in Browser".into(), Box::new(OpenInBrowser)));
