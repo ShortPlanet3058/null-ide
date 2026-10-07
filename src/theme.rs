@@ -31,6 +31,11 @@ impl ThemeName {
         }
     }
 
+    /// Whether it's one of the light ones (dark text on a pale ground).
+    pub fn is_light(self) -> bool {
+        matches!(self, ThemeName::Paper | ThemeName::Dune)
+    }
+
     /// A few words on it, for the choosers.
     pub fn note(self) -> &'static str {
         match self {

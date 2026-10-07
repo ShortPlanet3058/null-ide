@@ -14,6 +14,9 @@ pub const MAX_FONT_SIZE: f32 = 32.;
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemeName,
+    /// Follow the Mac's light and dark: `theme` in dark mode, `light_theme` in light mode.
+    pub match_appearance: bool,
+    pub light_theme: ThemeName,
     /// Font family for code. Any installed font works; Geist Mono ships with Null.
     pub code_font: String,
     /// Font family for menus, tabs and the palette. Instrument Sans ships with Null.
@@ -68,6 +71,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeName::Null,
+            match_appearance: false,
+            light_theme: ThemeName::Paper,
             code_font: DEFAULT_CODE_FONT.into(),
             ui_font: DEFAULT_UI_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
@@ -218,10 +223,38 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// Picks `name`: as the light mode's theme when following the Mac's appearance and it's
+    /// a light one, otherwise as the theme.
+    pub fn pick_theme(&mut self, name: ThemeName) {
+        if self.match_appearance && name.is_light() {
+            self.light_theme = name;
+        } else {
+            self.theme = name;
+        }
+    }
+
+    /// The theme to show now: following the Mac's appearance, the one for it.
+    pub fn shown_theme(&self, cx: &App) -> ThemeName {
+        let light =
+            matches!(cx.window_appearance(), gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight);
+        if self.match_appearance && light { self.light_theme } else { self.theme }
+    }
+}
+
+/// The Mac switched between light and dark: the theme follows, when it's asked to.
+pub fn appearance_changed(cx: &mut App) {
+    let shown = cx.global::<Settings>().shown_theme(cx);
+    if Theme::named(shown).background != cx.global::<Theme>().background {
+        cx.set_global(Theme::named(shown));
+        cx.refresh_windows();
+    }
+}
+
 pub fn init(cx: &mut App) {
     fonts::register(cx);
     let settings = Settings::load();
-    cx.set_global(Theme::named(settings.theme));
+    cx.set_global(Theme::named(settings.shown_theme(cx)));
     fonts::apply(&settings.code_font, &settings.ui_font, cx);
     cx.set_global(settings);
 }
@@ -247,11 +280,11 @@ pub fn reload(cx: &mut App) {
 
 fn apply(settings: Settings, cx: &mut App) {
     let old = cx.global::<Settings>();
-    let theme_changed = settings.theme != old.theme;
+    let theme_changed = settings.shown_theme(cx) != old.shown_theme(cx);
     let fonts_changed = settings.code_font != old.code_font || settings.ui_font != old.ui_font;
     let keymap = (settings.keymap != old.keymap).then_some(settings.keymap);
     if theme_changed {
-        cx.set_global(Theme::named(settings.theme));
+        cx.set_global(Theme::named(settings.shown_theme(cx)));
     }
     if fonts_changed {
         fonts::apply(&settings.code_font, &settings.ui_font, cx);
@@ -288,6 +321,31 @@ mod tests {
         assert_eq!(Settings::default().line_spacing, LineSpacing::Normal);
         let settings = Settings::parse(r#"{ "line_spacing": "relaxed" }"#).unwrap();
         assert_eq!(settings.line_spacing.factor(), 2.0);
+    }
+
+    #[test]
+    fn following_the_macs_appearance_keeps_a_theme_for_each() {
+        let mut s = Settings::default();
+        s.pick_theme(ThemeName::Paper);
+        assert_eq!((s.theme, s.light_theme), (ThemeName::Paper, ThemeName::Paper), "not following: the theme");
+        s.theme = ThemeName::Midnight;
+        s.match_appearance = true;
+        s.pick_theme(ThemeName::Dune);
+        s.pick_theme(ThemeName::Ash);
+        assert_eq!((s.theme, s.light_theme), (ThemeName::Ash, ThemeName::Dune));
+        assert!(!Settings::parse("{}").unwrap().match_appearance);
+    }
+
+    #[gpui::test]
+    fn the_theme_shown_follows_the_appearance(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let s = Settings { match_appearance: true, light_theme: ThemeName::Dune, ..Settings::default() };
+            let light =
+                matches!(cx.window_appearance(), gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight);
+            assert_eq!(s.shown_theme(cx), if light { ThemeName::Dune } else { ThemeName::Null });
+            let off = Settings { match_appearance: false, ..s };
+            assert_eq!(off.shown_theme(cx), ThemeName::Null);
+        });
     }
 
     #[test]

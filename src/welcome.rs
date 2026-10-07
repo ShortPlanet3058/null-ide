@@ -450,83 +450,84 @@ impl Welcome {
             window.request_animation_frame();
         }
         let eased = 1. - (1. - t).powi(3);
-        let (title, sub, body): (&str, &str, AnyElement) = match steps[n] {
-            StepKind::Look => (
-                "Choose how Null looks",
-                "Switch any time from ⌘K or Settings.",
-                div()
-                    .grid()
-                    .grid_cols(3)
-                    .gap(px(18.))
-                    .children(ThemeName::ALL.into_iter().map(|name| {
-                        div()
-                            .id(name.label())
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .cursor_pointer()
-                            .child(ui::theme_preview_scaled(name, settings.theme == name, &theme, 1.45))
-                            .child(div().text_size(px(ui::T_SM)).text_color(theme.faint).child(name.note()))
-                            .active(|s| s.opacity(0.7))
-                            .on_click(
-                                cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.theme = name)),
-                            )
-                    }))
-                    .into_any_element(),
-            ),
-            StepKind::Type => (
-                "Pick a typeface you can read all day",
-                "Each is monospaced, calm and made for code. The size changes with ⌘+ and ⌘- too.",
-                self.type_step(&settings, &theme, cx),
-            ),
-            StepKind::Keys => (
-                "Which shortcuts do your hands know?",
-                "Null's own keep the common VS Code ones. Change them any time in Settings.",
-                div()
-                    .grid()
-                    .grid_cols(2)
-                    .gap(px(10.))
-                    .children(Keymap::ALL.into_iter().enumerate().map(|(i, k)| {
-                        Self::card(("keymap", i), k.label(), k.summary(), settings.keymap == k, &theme)
-                            .active(|s| s.opacity(0.7))
-                            .on_click(
-                                cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.keymap = k)),
-                            )
-                    }))
-                    .into_any_element(),
-            ),
-            StepKind::Presence => {
-                let now = match (settings.ai.enabled, settings.ai.completions) {
-                    (false, _) => Presence::Off,
-                    (true, false) => Presence::WhenAsked,
-                    (true, true) => Presence::WhileTyping,
-                };
-                (
-                    "How present should AI be?",
-                    "It never opens a panel on its own, and never changes code without showing you the change.",
+        let (title, sub, body): (&str, &str, AnyElement) =
+            match steps[n] {
+                StepKind::Look => (
+                    "Choose how Null looks",
+                    "Switch any time from ⌘K or Settings.",
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.))
-                        .children(PRESENCE.into_iter().enumerate().map(|(i, (choice, title, line))| {
-                            Self::card(("presence", i), title, line, now == choice, &theme)
+                        .grid()
+                        .grid_cols(3)
+                        .gap(px(18.))
+                        .children(ThemeName::ALL.into_iter().map(|name| {
+                            div()
+                                .id(name.label())
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .cursor_pointer()
+                                .child(ui::theme_preview_scaled(name, settings.theme == name, &theme, 1.45))
+                                .child(div().text_size(px(ui::T_SM)).text_color(theme.faint).child(name.note()))
                                 .active(|s| s.opacity(0.7))
                                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                    settings::update(cx, |s| {
-                                        s.ai.enabled = choice != Presence::Off;
-                                        s.ai.completions = choice == Presence::WhileTyping;
-                                    })
+                                    settings::update(cx, |s| s.pick_theme(name))
                                 }))
                         }))
                         .into_any_element(),
-                )
-            }
-            StepKind::Provider => (
-                "Where should answers come from?",
-                "A plan you already have, an API key from any of these (free tiers included), or this computer.",
-                self.provider_step(&settings, &theme, cx),
-            ),
-        };
+                ),
+                StepKind::Type => (
+                    "Pick a typeface you can read all day",
+                    "Each is monospaced, calm and made for code. The size changes with ⌘+ and ⌘- too.",
+                    self.type_step(&settings, &theme, cx),
+                ),
+                StepKind::Keys => (
+                    "Which shortcuts do your hands know?",
+                    "Null's own keep the common VS Code ones. Change them any time in Settings.",
+                    div()
+                        .grid()
+                        .grid_cols(2)
+                        .gap(px(10.))
+                        .children(Keymap::ALL.into_iter().enumerate().map(|(i, k)| {
+                            Self::card(("keymap", i), k.label(), k.summary(), settings.keymap == k, &theme)
+                                .active(|s| s.opacity(0.7))
+                                .on_click(
+                                    cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.keymap = k)),
+                                )
+                        }))
+                        .into_any_element(),
+                ),
+                StepKind::Presence => {
+                    let now = match (settings.ai.enabled, settings.ai.completions) {
+                        (false, _) => Presence::Off,
+                        (true, false) => Presence::WhenAsked,
+                        (true, true) => Presence::WhileTyping,
+                    };
+                    (
+                        "How present should AI be?",
+                        "It never opens a panel on its own, and never changes code without showing you the change.",
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.))
+                            .children(PRESENCE.into_iter().enumerate().map(|(i, (choice, title, line))| {
+                                Self::card(("presence", i), title, line, now == choice, &theme)
+                                    .active(|s| s.opacity(0.7))
+                                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                        settings::update(cx, |s| {
+                                            s.ai.enabled = choice != Presence::Off;
+                                            s.ai.completions = choice == Presence::WhileTyping;
+                                        })
+                                    }))
+                            }))
+                            .into_any_element(),
+                    )
+                }
+                StepKind::Provider => (
+                    "Where should answers come from?",
+                    "A plan you already have, an API key from any of these (free tiers included), or this computer.",
+                    self.provider_step(&settings, &theme, cx),
+                ),
+            };
         let last = n + 1 == steps.len();
         let dot = |i: usize| -> Hsla { if i == n { theme.caret } else { theme.line_strong } };
         let count = steps.len();
