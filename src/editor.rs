@@ -45,6 +45,7 @@ use crate::buffer::Buffer;
 use crate::element::{EditorElement, RowLayout};
 use crate::file_style::Indent as IndentStyle;
 use crate::find_bar::{CloseFind, DeployFind, DeployReplace, FindBar, FindNext, FindPrevious, UseSelectionForFind};
+use crate::fonts::CodeFont;
 use crate::fonts::Fonts;
 use crate::highlight::{Highlighter, Span};
 use crate::languages;
@@ -2235,7 +2236,6 @@ impl Editor {
         let menu = self.completion.as_ref()?;
         let bounds = self.caret_bounds(menu.word_start().min(self.selection.head))?;
         let theme = cx.global::<Theme>();
-        let code_font = cx.global::<Fonts>().code.clone();
         let rows = (0..menu.shown.len()).map(|ix| {
             let suggestion = menu.suggestion(ix);
             let selected = ix == menu.selected;
@@ -2301,7 +2301,7 @@ impl Editor {
             .border_1()
             .border_color(theme.hairline)
             .shadow_md()
-            .font_family(code_font)
+            .code_font(cx)
             .text_size(self.font_size * 0.93)
             .children(rows);
         // The names start exactly where the word being typed does.
@@ -2320,7 +2320,6 @@ impl Editor {
         let card = self.hover.as_ref()?;
         let bounds = self.caret_bounds(card.range.start)?;
         let theme = cx.global::<Theme>();
-        let code_font = cx.global::<Fonts>().code.clone();
         let diagnostics = card.diagnostics.iter().map(|(severity, message)| {
             let color = if *severity == lsp_types::DiagnosticSeverity::ERROR {
                 theme.error
@@ -2338,7 +2337,7 @@ impl Editor {
                     .py(px(6.))
                     .rounded(px(ui::R_ROW))
                     .bg(theme.sunken)
-                    .font_family(code_font.clone())
+                    .code_font(cx)
                     .text_size(px(12.5))
                     .text_color(theme.foreground)
                     .child(block.text.clone())
@@ -3450,6 +3449,7 @@ impl Editor {
             theme: theme.clone(),
             ui_font: fonts.ui.clone(),
             code_font: fonts.code.clone(),
+            code_features: crate::fonts::code_features(cx.global::<Settings>().ligatures),
             base: self.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default(),
             open: Rc::new(move |target, _, cx| match target {
                 crate::markdown_view::Follow::Web(url) => cx.open_url(&url),

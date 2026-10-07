@@ -59,6 +59,37 @@ pub struct Fonts {
 
 impl Global for Fonts {}
 
+/// How the code font joins characters. Never through `liga`: Geist Mono's joined glyphs
+/// are one column wide, so whatever follows `->` or `!=` drifts left over it. Through
+/// `calt` (how JetBrains Mono, Fira Code and Cascadia Code do it, column for column) when
+/// ligatures are on.
+pub fn code_features(ligatures: bool) -> gpui::FontFeatures {
+    let mut off = vec![("liga".to_string(), 0)];
+    if !ligatures {
+        off.push(("calt".to_string(), 0));
+    }
+    gpui::FontFeatures(std::sync::Arc::new(off))
+}
+
+/// Code shown outside the editor (lists, cards, fields): the code font, joining
+/// characters as the settings say.
+pub trait CodeFont: gpui::Styled + Sized {
+    fn code_font(self, cx: &App) -> Self {
+        let ligatures = cx.global::<crate::settings::Settings>().ligatures;
+        self.code_font_as(cx.global::<Fonts>().code.clone(), code_features(ligatures))
+    }
+
+    /// The code font `family`, joining characters by `features`.
+    fn code_font_as(mut self, family: SharedString, features: gpui::FontFeatures) -> Self {
+        let style = self.text_style().get_or_insert_with(Default::default);
+        style.font_family = Some(family);
+        style.font_features = Some(features);
+        self
+    }
+}
+
+impl<T: gpui::Styled> CodeFont for T {}
+
 pub fn register(cx: &mut App) {
     if let Err(err) = cx.text_system().add_fonts(EMBEDDED.iter().map(|bytes| Cow::Borrowed(*bytes)).collect()) {
         eprintln!("null: couldn't load bundled fonts: {err}");

@@ -439,10 +439,7 @@ impl Element for EditorElement {
             let line_height = editor.line_height();
             let lh = f32::from(line_height);
             let mut font = font(code_font.clone());
-            if !editor.ligatures(cx) {
-                // Both kinds: some fonts (Geist Mono) join characters through `liga` too.
-                font.features = gpui::FontFeatures(std::sync::Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)]));
-            }
+            font.features = crate::fonts::code_features(editor.ligatures(cx));
             let text_system = window.text_system().clone();
             let shape = |text: String, runs: &[TextRun]| text_system.shape_line(text.into(), font_size, runs, None);
             // A row of text, with its tabs drawn as spaces.

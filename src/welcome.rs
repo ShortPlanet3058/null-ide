@@ -3,6 +3,7 @@
 //! Shown again any time with "Welcome to Null…".
 
 use crate::ai::{self, ProviderId};
+use crate::fonts::CodeFont;
 use crate::keymap::Keymap;
 use crate::settings::{self, Settings};
 use crate::text_input::TextInput;
@@ -339,7 +340,6 @@ impl Welcome {
 
     fn render_hello(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>().clone();
-        let code_font = cx.global::<crate::fonts::Fonts>().code.clone();
         let t = (self.hello_since.elapsed().as_secs_f32() / FADE.as_secs_f32()).min(1.);
         if t < 1. {
             window.request_animation_frame();
@@ -377,7 +377,7 @@ impl Welcome {
                             .items_center()
                             .opacity(eased)
                             .mt(px(10. * (1. - eased)))
-                            .font_family(code_font)
+                            .code_font(cx)
                             .text_size(px(48.))
                             .child(StyledText::new(text).with_highlights(highlights))
                             .child(

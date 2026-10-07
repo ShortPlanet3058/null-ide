@@ -1,4 +1,4 @@
-use crate::fonts::Fonts;
+use crate::fonts::CodeFont;
 use crate::search::SearchQuery;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
@@ -425,14 +425,7 @@ impl ProjectSearch {
                             .text_color(theme.faint)
                             .child((line_match.line + 1).to_string()),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .font_family(cx.global::<Fonts>().code.clone())
-                            .child(text),
-                    )
+                    .child(div().flex_1().min_w_0().overflow_hidden().code_font(cx).child(text))
                     .when(self.show_replace, |row| {
                         row.child(
                             div()
@@ -484,7 +477,7 @@ impl ProjectSearch {
             .items_center()
             .justify_center()
             .rounded(px(ui::R_KEY))
-            .font_family(cx.global::<Fonts>().code.clone())
+            .code_font(cx)
             .text_size(px(ui::T_SM))
             .text_color(if on { theme.caret } else { theme.muted })
             .when(on, |b| b.bg(theme.accent_soft))

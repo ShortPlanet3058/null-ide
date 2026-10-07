@@ -3,6 +3,7 @@
 
 use super::{EditKind, Editor, EditorEvent, Selection};
 use crate::buffer::Buffer;
+use crate::fonts::CodeFont;
 use crate::settings::Settings;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
@@ -141,7 +142,6 @@ impl Editor {
         let renaming = self.renaming.as_ref()?;
         let bounds = self.caret_bounds(renaming.word.start)?;
         let theme = cx.global::<Theme>();
-        let code_font = cx.global::<crate::fonts::Fonts>().code.clone();
         let chars = renaming.input.read(cx).text().chars().count().max(8) as f32;
         let width = self.layout.as_ref().map_or(px(200.), |l| l.char_width * (chars + 4.));
         Some(
@@ -160,7 +160,7 @@ impl Editor {
                         .border_color(theme.caret)
                         .bg(theme.raised)
                         .shadow_md()
-                        .font_family(code_font)
+                        .code_font(cx)
                         .text_size(self.font_size)
                         .line_height(self.line_height())
                         .child(renaming.input.clone()),
