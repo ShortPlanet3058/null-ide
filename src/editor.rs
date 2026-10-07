@@ -953,7 +953,10 @@ impl Editor {
     }
 
     pub fn language_name(&self) -> &'static str {
-        self.language().map_or("Plain Text", |l| l.name)
+        match self.language() {
+            Some(language) => language.name,
+            None => self.basic_syntax().map_or("Plain Text", |b| b.name),
+        }
     }
 
     /// Zero-based line and column of the caret.
@@ -1066,6 +1069,9 @@ impl Editor {
         /// The room never goes past this many bytes either side: on a minified file's one
         /// long line, a few lines of room were the whole file.
         const MAX_ROOM_BYTES: usize = 32 * 1024;
+        if self.highlighter.is_none() {
+            return self.basic_highlight(wanted, MAX_ROOM_BYTES);
+        }
         let Some(highlighter) = &mut self.highlighter else { return };
         let revision = self.buffer.revision();
         let edited = match &self.spans_for {
@@ -1092,6 +1098,35 @@ impl Editor {
         self.spans_for = Some((revision, range));
     }
 
+    /// A language without a grammar (see `basic_syntax`): its spans around `wanted`.
+    fn basic_highlight(&mut self, wanted: Range<usize>, room: usize) {
+        let Some(basic) = self.basic_syntax() else { return };
+        let rope = self.buffer.rope();
+        if rope.len_bytes() > crate::basic_syntax::MAX_BYTES {
+            return;
+        }
+        let revision = self.buffer.revision();
+        if let Some((r, range)) = &self.spans_for
+            && *r == revision
+            && range.start <= wanted.start
+            && wanted.end <= range.end
+        {
+            return;
+        }
+        let text: Vec<u8> = rope.bytes().collect();
+        let range = wanted.start.saturating_sub(room)..(wanted.end + room).min(text.len());
+        self.spans = crate::basic_syntax::spans(&text, range.clone(), basic);
+        self.spans_for = Some((revision, range));
+    }
+
+    /// The scanner colouring this file when Null has no grammar for it (Swift, Kotlin…).
+    pub fn basic_syntax(&self) -> Option<&'static crate::basic_syntax::Basic> {
+        if self.highlighter.is_some() {
+            return None;
+        }
+        self.path.as_deref().and_then(crate::basic_syntax::for_path)
+    }
+
     /// The colours of one line, for a line shown away from the others (pinned at the top).
     pub(crate) fn line_spans(&mut self, line: usize) -> Vec<Span> {
         let start = self.buffer.line_to_byte(line);
@@ -1104,6 +1139,16 @@ impl Editor {
             // Positions stay in the whole text's bytes, as the other spans are.
             let first = self.spans.partition_point(|(r, _)| r.end <= start);
             return self.spans[first..].iter().take_while(|(r, _)| r.start < end).cloned().collect();
+        }
+        // Without a grammar: this line alone, leaving what's on screen as it was coloured.
+        if self.highlighter.is_none() {
+            let Some(basic) = self.basic_syntax() else { return Vec::new() };
+            let rope = self.buffer.rope();
+            if rope.len_bytes() > crate::basic_syntax::MAX_BYTES {
+                return Vec::new();
+            }
+            let text: Vec<u8> = rope.bytes().take(end).collect();
+            return crate::basic_syntax::spans(&text, start..end, basic);
         }
         let Some(highlighter) = &mut self.highlighter else { return Vec::new() };
         highlighter.sync(&self.buffer);

@@ -8,7 +8,8 @@ without ever making it the center of the room.
 
 > Status: **pre-alpha**, used daily on macOS. An editor with language servers, git, a
 > terminal, tests and a debugger, syntax highlighting for Rust, Python, JavaScript,
-> TypeScript, JSON, TOML, Markdown, HTML, CSS, Go, C, C++, YAML and shell scripts, and AI
+> TypeScript, JSON, TOML, Markdown, HTML, CSS, Go, C, C++, YAML and shell scripts (and basic
+> colouring for Swift, Kotlin, Java, C#, Dart, Ruby, PHP, Lua, SQL, Dockerfiles, Makefiles and XML), and AI
 > that stays out of the way until called.
 
 ## Building
