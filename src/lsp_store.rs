@@ -99,6 +99,22 @@ pub enum LspEvent {
 }
 
 /// The language servers for one project, and what they've reported.
+/// rust-analyzer's own request for a macro's expansion.
+pub enum ExpandMacro {}
+
+impl lsp_types::request::Request for ExpandMacro {
+    type Params = TextDocumentPositionParams;
+    type Result = Option<ExpandedMacro>;
+    const METHOD: &'static str = "rust-analyzer/expandMacro";
+}
+
+/// A macro's name and what it expands to.
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExpandedMacro {
+    pub name: String,
+    pub expansion: String,
+}
+
 pub struct LspStore {
     root: PathBuf,
     servers: HashMap<&'static str, ServerState>,
@@ -521,6 +537,15 @@ impl LspStore {
             },
             cx,
         );
+    }
+
+    /// What the macro at `position` expands to, from rust-analyzer: its name and the code.
+    pub fn expand_macro(&self, path: &Path, position: Position) -> impl Future<Output = Option<ExpandedMacro>> + use<> {
+        let request = self
+            .server_for(path)
+            .zip(Self::position_params(path, position))
+            .map(|(server, params)| server.request::<ExpandMacro>(params));
+        async move { request?.await.ok().flatten() }
     }
 
     fn position_params(path: &Path, position: Position) -> Option<TextDocumentPositionParams> {
@@ -957,5 +982,21 @@ impl LspStore {
             }
         }
         self.servers.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// rust-analyzer's answer for a macro, as it sends it, and no macro there.
+    #[test]
+    fn a_macro_expansion_is_read() {
+        let answer = serde_json::json!({ "name": "println", "expansion": "{ $crate::io::_print(...); }" });
+        let expanded: Option<ExpandedMacro> = serde_json::from_value(answer).unwrap();
+        assert_eq!(expanded.map(|e| e.name), Some("println".to_string()));
+        let none: Option<ExpandedMacro> = serde_json::from_value(serde_json::Value::Null).unwrap();
+        assert_eq!(none, None);
+        assert_eq!(<ExpandMacro as lsp_types::request::Request>::METHOD, "rust-analyzer/expandMacro");
     }
 }

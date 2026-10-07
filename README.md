@@ -258,6 +258,9 @@ called from, ⌥F12 shows a definition where you are without going there; ⌥⇧
 "Format on save" does it on ⌘S; ⌘⇧M, or the error count in the status bar, lists every
 problem found.
 
+In Rust, **Expand Macro** (⌘K) shows what the macro at the caret turns into (`println!`, a
+`derive`), from rust-analyzer, in the info card.
+
 ## AI (optional, off by default)
 
 AI is a tool: it shows up only when you call it, right in the code, and a switch (⌘K or
