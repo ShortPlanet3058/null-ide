@@ -713,6 +713,10 @@ impl Workspace {
             this.window_state = Some(window_state(window));
             this.schedule_session_save(cx);
         }));
+        // The Mac going light or dark: the theme follows, when Settings say to.
+        workspace
+            ._subscriptions
+            .push(cx.observe_window_appearance(window, |_, _, cx| crate::settings::appearance_changed(cx)));
         workspace._subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if !window.is_window_active() {
                 // Off to another app: files save now when they save by themselves.
@@ -6516,7 +6520,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
-            .on_action(cx.listener(|_, _: &UseNullTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Null)))
+            .on_action(
+                cx.listener(|_, _: &UseNullTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Null))),
+            )
             .on_action(cx.listener(|_, _: &CompactLineSpacing, _, cx| {
                 settings::update(cx, |s| s.line_spacing = crate::settings::LineSpacing::Compact)
             }))
@@ -6526,13 +6532,21 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &RelaxedLineSpacing, _, cx| {
                 settings::update(cx, |s| s.line_spacing = crate::settings::LineSpacing::Relaxed)
             }))
-            .on_action(cx.listener(|_, _: &UseAshTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Ash)))
+            .on_action(cx.listener(|_, _: &UseAshTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Ash))))
             .on_action(
-                cx.listener(|_, _: &UseMidnightTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Midnight)),
+                cx.listener(|_, _: &UseMidnightTheme, _, cx| {
+                    settings::update(cx, |s| s.pick_theme(ThemeName::Midnight))
+                }),
             )
-            .on_action(cx.listener(|_, _: &UseMossTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Moss)))
-            .on_action(cx.listener(|_, _: &UsePaperTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Paper)))
-            .on_action(cx.listener(|_, _: &UseDuneTheme, _, cx| settings::update(cx, |s| s.theme = ThemeName::Dune)))
+            .on_action(
+                cx.listener(|_, _: &UseMossTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Moss))),
+            )
+            .on_action(
+                cx.listener(|_, _: &UsePaperTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Paper))),
+            )
+            .on_action(
+                cx.listener(|_, _: &UseDuneTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Dune))),
+            )
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::search_project))
             .on_action(cx.listener(Self::show_files))

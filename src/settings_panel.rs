@@ -421,21 +421,23 @@ impl SettingsPanel {
     // ---------- sections ----------
 
     /// A small preview of a theme: its background with a few lines of colored "code".
-    fn theme_card(&self, name: ThemeName, current: ThemeName, cx: &mut Context<Self>) -> AnyElement {
+    fn theme_card(&self, name: ThemeName, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>().clone();
-        ui::theme_preview(name, name == current, &theme)
+        let s = cx.global::<Settings>();
+        // Following the Mac's light and dark: its pick for each is chosen.
+        let chosen = name == s.theme || s.match_appearance && name == s.light_theme;
+        ui::theme_preview(name, chosen, &theme)
             .id(name.label())
             .cursor_pointer()
             .active(|s| s.opacity(0.7))
-            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.theme = name)))
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.pick_theme(name))))
             .into_any_element()
     }
 
     fn appearance(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = cx.global::<Settings>().clone();
         let theme = cx.global::<Theme>().clone();
-        let cards: Vec<AnyElement> =
-            ThemeName::ALL.into_iter().map(|name| self.theme_card(name, s.theme, cx)).collect();
+        let cards: Vec<AnyElement> = ThemeName::ALL.into_iter().map(|name| self.theme_card(name, cx)).collect();
         let size = div()
             .flex()
             .items_center()
@@ -486,6 +488,23 @@ impl SettingsPanel {
             shown_row("Theme", Some(&ThemeName::ALL.map(|t| t.label()).join(" ")), || {
                 div().grid().grid_cols(3).gap(px(16.)).py(px(12.)).children(cards).into_any_element()
             }),
+            Self::row(
+                "Match the Mac's light and dark",
+                Some(&if s.match_appearance {
+                    format!("Dark: {} · Light: {}. Pick one of each above", s.theme.label(), s.light_theme.label())
+                } else {
+                    "A dark theme in dark mode, a light one in light mode, switching as the Mac does".to_string()
+                }),
+                Self::toggle("match-appearance", s.match_appearance, &theme, cx, |s| {
+                    s.match_appearance = !s.match_appearance;
+                    // The theme picked so far stays for its own mode.
+                    if s.match_appearance && s.theme.is_light() {
+                        s.light_theme = s.theme;
+                        s.theme = ThemeName::Null;
+                    }
+                }),
+                &theme,
+            ),
             Self::heading("Text", &theme),
             Self::row(
                 "Text size",
