@@ -564,6 +564,7 @@ impl Workspace {
                 FileTreeEvent::RenameRequested { from, to } => this.rename_file(from.clone(), to.clone(), cx),
                 FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
                 FileTreeEvent::OpenTerminal(dir) => this.open_terminal_in(dir.clone(), window, cx),
+                FileTreeEvent::FindInFolder(dir) => this.find_in_folder(dir, window, cx),
                 FileTreeEvent::DiscardChanges(path, status) => this.discard_changes(path.clone(), *status, window, cx),
                 FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),
             }),
@@ -3590,6 +3591,16 @@ impl Workspace {
         settings::update(cx, |s| s.sidebar_visible = true);
         let query = crate::project_search::todo_query();
         self.project_search.update(cx, |search, cx| search.search_for(query, window, cx));
+        cx.notify();
+    }
+
+    /// Project search, in folder `dir` only (from the files' menu).
+    fn find_in_folder(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let folder = dir.strip_prefix(&root).unwrap_or(dir).to_string_lossy().replace('\\', "/");
+        self.sidebar_search.set(true, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        self.project_search.update(cx, |search, cx| search.search_in_folder(&folder, window, cx));
         cx.notify();
     }
 
