@@ -865,6 +865,28 @@ impl Element for EditorElement {
                     ai_tints.push((rect, tint));
                 }
             }
+            // In a changed line, the words that changed: a little stronger, on each side.
+            let words = editor.word_changes(lines_shown.clone());
+            for (r, row) in row_layouts.iter().zip(visible.clone()) {
+                let (ranges, color, cols) = match r.row.block {
+                    Some(block) => {
+                        (words.removed.get(&block), theme.git_deleted.opacity(0.3), 0..r.text.chars().count())
+                    }
+                    None => (words.added.get(&r.row.line), theme.git_added.opacity(0.3), r.row.cols.clone()),
+                };
+                for range in ranges.into_iter().flatten() {
+                    let (from, to) = (range.start.max(cols.start), range.end.min(cols.end));
+                    if from >= to {
+                        continue;
+                    }
+                    let byte =
+                        |col: usize| r.text.char_indices().nth(col - cols.start).map_or(r.text.len(), |(b, _)| b);
+                    let x = |col: usize| origin.x + r.x + r.shaped.x_for_index(r.shown_byte(byte(col)));
+                    let rect =
+                        Bounds::from_corners(point(x(from), row_top(row)), point(x(to), row_top(row) + line_height));
+                    ai_tints.push((rect, color));
+                }
+            }
             // Merge conflicts: the current side tinted green, the incoming one blue, each
             // marker a little more; the common ancestor (diff3) and `=======` stay neutral.
             for c in conflicts.iter() {
