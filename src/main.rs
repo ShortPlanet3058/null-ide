@@ -7,6 +7,7 @@ mod ai_task;
 mod assets;
 mod buffer;
 mod clipboard_history;
+mod color_panel;
 mod colors;
 mod dap;
 mod debugger;

@@ -3,6 +3,7 @@ mod bookmarks;
 mod breakpoints;
 mod broken_links;
 mod changes;
+mod color_pick;
 mod commands;
 mod completion;
 mod conflicts;
@@ -596,8 +597,11 @@ pub struct Editor {
     folds: fold::Folds,
     /// The file as last committed, to mark changed lines in the gutter.
     git_base: Option<std::sync::Arc<str>>,
-    /// The mouse is over a changed line's mark in the gutter (a click opens the change).
+    /// The mouse is over a changed line's mark in the gutter (a click opens the change), or
+    /// a color's square (a click picks another).
     over_change_mark: bool,
+    /// A color being picked in the Mac's color panel.
+    color_pick: Option<color_pick::ColorPick>,
     pub git_hunks: Vec<crate::git::Hunk>,
     git_base_task: Option<Task<()>>,
     /// Who last changed the caret's line, once it rests there.
@@ -753,6 +757,7 @@ impl Editor {
             folds: Default::default(),
             git_base: None,
             over_change_mark: false,
+            color_pick: None,
             git_hunks: Vec::new(),
             git_base_task: None,
             blame: None,
@@ -2596,6 +2601,13 @@ impl Editor {
         if let Some(line) = self.fold_click(event.position) {
             return self.toggle_fold(line, cx);
         }
+        // A color's square: pick another in the Mac's color panel.
+        if event.click_count == 1
+            && !event.modifiers.modified()
+            && let Some((start, written, color)) = self.swatch_at(event.position)
+        {
+            return self.pick_color(start, written, color, cx);
+        }
         // A line pinned at the top: go to it.
         if let Some(&(_, line)) =
             self.layout.as_ref().and_then(|l| l.sticky.iter().find(|(b, _)| b.contains(&event.position)))
@@ -2677,7 +2689,7 @@ impl Editor {
         if was_over_scrollbar != self.over_scrollbar() {
             cx.notify();
         }
-        let over_mark = self.change_mark_at(event.position).is_some();
+        let over_mark = self.change_mark_at(event.position).is_some() || self.swatch_at(event.position).is_some();
         if over_mark != self.over_change_mark {
             self.over_change_mark = over_mark;
             cx.notify();

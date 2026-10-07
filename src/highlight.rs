@@ -331,6 +331,20 @@ pub(crate) mod tests {
         highlighter.spans(buffer.rope(), 0..source.len())
     }
 
+    /// Markdown folds by its sections: a heading down to the next one of its level or above.
+    #[test]
+    fn markdown_folds_by_section() {
+        let language = crate::languages::for_path(std::path::Path::new("a.md")).unwrap();
+        let mut highlighter = Highlighter::new(language).unwrap();
+        let source = "# Title\n\nIntro.\n\n## One\n\nText.\nMore.\n\n## Two\n\nText.\n\n```\na\nb\nc\n```\n";
+        highlighter.sync(&Buffer::from_text(source));
+        let folds = highlighter.fold_ranges();
+        // The title's section, "## One" (shown up to "## Two", which stays), "## Two", a fence.
+        for section in [0..18, 4..9, 9..18, 14..17] {
+            assert!(folds.contains(&section), "{section:?} in {folds:?}");
+        }
+    }
+
     #[test]
     fn edits_reparse_only_what_changed_and_match_a_fresh_parse() {
         let language = crate::languages::for_path(std::path::Path::new("a.rs")).unwrap();
