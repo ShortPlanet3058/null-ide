@@ -71,7 +71,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 - Multiple cursors (⌘D, ⌘⇧-click), a box with ⌥⇧-drag, cursors at line ends (⌥⇧I);
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
 - In HTML and JSX, typing the `>` of a tag adds its closing tag, `</` finishes the one
-  still open, and renaming a tag renames its pair.
+  still open, and renaming a tag renames its pair. In HTML, ⇥ after an Emmet abbreviation
+  writes its tags out: `ul>li.item*3`, `.card>h2{Title}+p`, `a`, `input[type=email]`.
 - ⌘-click a web address or a file's path written in the text (`src/a.rs:12`, a README's
   links) to open it; anywhere else, ⌘-click goes to the definition.
 - Files no language server knows (YAML, shell, a language not installed yet) still get
