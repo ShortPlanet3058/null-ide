@@ -7,13 +7,20 @@
 /// gave one (a browser, Notes, Pages, Google Docs). Never for what Null copied: it gives
 /// plain text only, which clears the rest.
 pub fn clipboard_html() -> Option<String> {
-    #[cfg(target_os = "macos")]
+    // Tests never read the real clipboard.
+    #[cfg(all(target_os = "macos", not(test)))]
     {
         use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML};
-        let html = NSPasteboard::generalPasteboard().stringForType(unsafe { NSPasteboardTypeHTML })?;
+        use objc2_foundation::NSString;
+        let board = NSPasteboard::generalPasteboard();
+        // Null's own Markdown, copied as rich text: the Markdown is the text already.
+        if board.stringForType(&NSString::from_str(crate::markdown_html::OWN_COPY)).is_some() {
+            return None;
+        }
+        let html = board.stringForType(unsafe { NSPasteboardTypeHTML })?;
         Some(html.to_string())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(not(target_os = "macos"), test))]
     None
 }
 

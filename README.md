@@ -143,7 +143,9 @@ Links stay right: renaming or moving a file in Null rewrites the Markdown links 
 to a file or `#section` that isn't there gets a wavy line, and **⌘.** offers the nearest
 names; `](#` completes from the headings. Cells copied from a spreadsheet paste as a table,
 and **Insert Table of Contents** (⌘K) lists the headings, kept up to date when run again.
-**Export as HTML** (⌘K) writes the document as a page next to it and opens it in the browser.
+**Export as HTML** (⌘K) writes the document as a page next to it and opens it in the browser;
+**Copy as Rich Text** (⌘K) copies it (or the selection) to paste formatted in Mail, Notes or
+Docs.
 
 For long writing, the status bar counts the words and the minutes they take to read. In
 Settings, **typewriter scrolling** keeps the line being written in the middle of the window,

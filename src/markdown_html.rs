@@ -5,16 +5,54 @@ use crate::markdown_view::{Align, Block, Callout, Inline};
 
 /// The whole page for `source`, titled `title`.
 pub fn page(source: &str, title: &str) -> String {
+    let body = body(source);
+    format!(
+        "<!doctype html>\n{MARK}\n<html>\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n<main>\n{body}</main>\n</body>\n</html>\n",
+        escape(title)
+    )
+}
+
+/// `source` as HTML elements, without a page around them.
+fn body(source: &str) -> String {
     let blocks: Vec<Block> = crate::markdown_view::parse_located(source).into_iter().map(|(_, b)| b).collect();
     let mut anchors = Anchors::default();
     let mut body = String::new();
     for block in &blocks {
         write_block(block, &mut body, &mut anchors);
     }
-    format!(
-        "<!doctype html>\n{MARK}\n<html>\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n<main>\n{body}</main>\n</body>\n</html>\n",
-        escape(title)
-    )
+    body
+}
+
+/// `source` as the formatted text other apps paste (Mail, Notes, Pages, Docs).
+pub fn fragment(source: &str) -> String {
+    format!("<meta charset=\"utf-8\">{}", body(source))
+}
+
+/// Says a copy is Null's own Markdown, so pasting it back isn't read from its HTML.
+#[cfg_attr(test, allow(dead_code))]
+pub const OWN_COPY: &str = "dev.null-ide.markdown";
+
+/// Puts `text` on the clipboard with `html` for apps that paste formatted text. Returns
+/// false where that isn't done (the text alone should go then).
+pub fn copy_rich(text: &str, html: &str) -> bool {
+    // Tests never touch the real clipboard.
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
+        use objc2_foundation::NSString;
+        let board = NSPasteboard::generalPasteboard();
+        board.clearContents();
+        let text = NSString::from_str(text);
+        let ok = board.setString_forType(&text, unsafe { NSPasteboardTypeString })
+            && board.setString_forType(&NSString::from_str(html), unsafe { NSPasteboardTypeHTML });
+        board.setString_forType(&text, &NSString::from_str(OWN_COPY));
+        ok
+    }
+    #[cfg(any(not(target_os = "macos"), test))]
+    {
+        let _ = (text, html);
+        false
+    }
 }
 
 /// The page's title: its first heading, if it has one.
@@ -212,6 +250,20 @@ mod tests {
 
     /// Ids follow the headings the page shows: one in a quote counts, a `#` line in a
     /// comment doesn't, and a repeat gets a number.
+    #[test]
+    fn a_fragment_is_the_page_without_the_page() {
+        let html = fragment("# Notes\n\nSome **bold** and a [link](https://x.dev).\n");
+        assert_eq!(
+            html,
+            "<meta charset=\"utf-8\"><h1 id=\"notes\">Notes</h1>\n<p>Some <strong>bold</strong> and a <a href=\"https://x.dev\">link</a>.</p>\n"
+        );
+        // And read back as the same Markdown.
+        assert_eq!(
+            crate::html_markdown::markdown(&html).as_deref(),
+            Some("# Notes\n\nSome **bold** and a [link](https://x.dev).")
+        );
+    }
+
     #[test]
     fn heading_ids_stay_in_step() {
         let source = "# Setup\n\n<!--\n# not a heading\n-->\n\n> ## Aside\n\n## Usage\n\n## Usage\n";
