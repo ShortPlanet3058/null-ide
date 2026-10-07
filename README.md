@@ -75,6 +75,9 @@ doesn't need Xcode's separate Metal Toolchain download.
   links) to open it; anywhere else, ⌘-click goes to the definition.
 - Files no language server knows (YAML, shell, a language not installed yet) still get
   suggestions: the file's own words, nearest first. In Markdown and text, only on ⌃Space.
+  A path being written (`./`, `src/`, `img/`) lists what's in that folder.
+- **Paste from History…** (⌘K) brings back the last 20 things copied or cut. `TODO`, `FIXME`
+  and `HACK` stand out in comments; **Find TODOs** lists them all.
 - Pasted code takes the indentation of where it goes, its lines keeping theirs relative
   to each other; ⌥⇧⌘V pastes it as it was.
 - **Rewrap** (⌘K) refills a comment or a paragraph to the project's line length, keeping
@@ -96,6 +99,7 @@ doesn't need Xcode's separate Metal Toolchain download.
   not at all, and keep the file's permissions and tags.
 - **Local history**: what each save replaced is kept for a month, git or not, and listed in
   **Show File History** with the commits, to compare with and take back.
+- In the files, typing a name goes to it, as in the Finder.
 - Images open as images; other files that aren't text are never saved over. Minified
   files with very long lines stay quick. Holding ⌥ over an image's path written in the text
   (`![](shot.png)`, `src="logo.svg"`) shows the image. HTML and SVG files open in the browser
@@ -114,6 +118,11 @@ pasted over some words links them; ⌥⇧F lines the tables up, and in a table �
 for **bold**). The preview shows footnotes (`[^1]`, gathered at the end) and GitHub's
 callouts (`> [!NOTE]`, `[!TIP]`, `[!WARNING]`…).
 
+Links stay right: renaming or moving a file in Null rewrites the Markdown links to it; a link
+to a file or `#section` that isn't there gets a wavy line, and **⌘.** offers the nearest
+names; `](#` completes from the headings. Cells copied from a spreadsheet paste as a table,
+and **Insert Table of Contents** (⌘K) lists the headings, kept up to date when run again.
+
 ## Git
 
 - **⌃⇧G** lists what changed since the last commit; each file opens with its changes to
@@ -121,14 +130,15 @@ callouts (`> [!NOTE]`, `[!TIP]`, `[!WARNING]`…).
 - **Commit** lists the files under the message: ⇥ leaves one out; with AI on, ⌘I writes the
   message from the changes. **Undo Last Commit** takes it back (not once pushed), its
   message waiting for the next. **Set Changes Aside** and **Bring Back Changes** stash and
-  return them. **Push** and **Pull**;
+  return them. **Push**, **Pull** and **Fetch**;
   ↑ and ↓ beside the branch count what's to push and pull (as last fetched: Null never
   goes to the network on its own). Switch or start a branch from the status bar.
 - A click on a changed line's mark in the gutter shows the change, to keep (⇥) or take
   back (Esc). **Discard Changes…** in a file's right-click menu takes a whole file back
   (a new one goes to the Trash, never deleted).
 - Who last changed the caret's line, faintly at its end. **Show File History**, and any
-  commit's version compared with the file now. Compare with Saved, the Clipboard, or another
+  commit's version compared with the file now; in every comparison, the words that changed
+  in a line stand out. **Open Line on the Web** shows it on GitHub, GitLab or Bitbucket. Compare with Saved, the Clipboard, or another
   File, each difference kept or taken back.
 - Merge conflicts: each side tinted, **⌘.** keeps one or both, **⌥F8** to the next.
 
@@ -137,7 +147,8 @@ callouts (`> [!NOTE]`, `[!TIP]`, `[!WARNING]`…).
 - **⌘⇧B** runs what the project defines (Cargo, package.json scripts, Make, just, Go).
 - **⌥⌘T** runs the test at the caret (Rust, Go, pytest, vitest, jest), or all of a file's.
 - The terminal (**⌃\`**, more with **⌃⇧\`**): ⌘-click a `file:line:col` or a link in its
-  output to open it, **⌘F** searches it.
+  output to open it, **⌘F** searches it. **Run Selection in Terminal** (⌘K) runs the lines
+  selected, or steps through a script line by line.
 - **F5** debugs (lldb-dap, with Xcode): breakpoints with **F9**, conditions with a
   right-click, values shown faintly beside the code and in a panel.
 
