@@ -114,6 +114,16 @@ pub fn commit(root: &Path, message: &str, left_out: &[PathBuf]) -> Result<String
 /// (others may have it), a merge, or the first commit.
 pub fn undo_last_commit(root: &Path) -> Result<String, String> {
     let commit = run(root, &["rev-list", "--parents", "-n", "1", "HEAD"]).map_err(|_| "There's no commit to undo.")?;
+    if run(root, &["symbolic-ref", "-q", "HEAD"]).is_err() {
+        return Err("No branch is checked out: switch to one first.".into());
+    }
+    let git_dir = run(root, &["rev-parse", "--absolute-git-dir"]).map(|d| PathBuf::from(d.trim()))?;
+    if ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
+        .iter()
+        .any(|f| git_dir.join(f).exists())
+    {
+        return Err("A merge or rebase is under way: finish it first.".into());
+    }
     match commit.split_whitespace().count() {
         2 => {}
         1 => return Err("That's the first commit: there's nothing before it to go back to.".into()),
@@ -225,6 +235,10 @@ pub fn push(root: &Path) -> Result<String, String> {
 /// the Trash (and out of what's staged), whatever `status` says: never deleted.
 pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String> {
     let name = path.to_string_lossy();
+    // A folder that isn't new (a submodule): taken back by git, never trashed whole.
+    if status != FileStatus::Added && path.is_dir() {
+        return run(root, &["restore", "--source=HEAD", "--staged", "--worktree", "--", &name]).map(|_| ());
+    }
     if status == FileStatus::Added || (path.exists() && !in_last_commit(path)) {
         crate::fs_ops::move_to_trash(path)?;
         run(root, &["rm", "-q", "--cached", "--ignore-unmatch", "--", &name]).ok();
@@ -233,10 +247,14 @@ pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String
     run(root, &["restore", "--source=HEAD", "--staged", "--worktree", "--", &name]).map(|_| ())
 }
 
-/// Whether the last commit has the file at `path`.
+/// Whether the last commit has the file at `path` (its tree lists it: a submodule's commit
+/// isn't in this repository, so asking for the object itself would say no).
 fn in_last_commit(path: &Path) -> bool {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return false };
-    command(dir).args(["cat-file", "-e", &format!("HEAD:./{name}")]).output().is_ok_and(|o| o.status.success())
+    command(dir)
+        .args(["ls-tree", "HEAD", "--", name])
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// A branch to switch to.

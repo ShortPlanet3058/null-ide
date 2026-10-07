@@ -50,7 +50,17 @@ url = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSSpellChecker"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSRange", "NSArray"] }
+# copyfile(3): a save keeps the file's tags, extended attributes and ACLs.
+libc = "0.2"
 
 [dev-dependencies]
 # Lets tests run real views and actions without opening windows.
 gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
+
+# Debug builds keep line numbers for backtraces but not full debug info: target/ once
+# reached 77 GB of it on a small disk.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

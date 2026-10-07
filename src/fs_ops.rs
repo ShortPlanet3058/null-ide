@@ -181,31 +181,46 @@ fn copy_recursively(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Writes a file whole or not at all: the bytes go to a file beside it first, then take
 /// its place, so a crash or a full disk mid-write leaves the old file as it was. A link
-/// is written through to its file; the file keeps its permissions. A file with other
-/// hard links, or a folder Null can't add to, is written in place instead. What the file
-/// held before is kept in its local history.
+/// is written through to its file; the file keeps its permissions, tags and extended
+/// attributes. A read-only file isn't written. A file with other hard links, someone
+/// else's file, or one in a folder Null can't add to is written in place instead. What
+/// the file held before is kept in its local history.
 pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SAVES: AtomicU64 = AtomicU64::new(0);
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let existing = std::fs::metadata(&target).ok();
+    if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "it's read-only"));
+    }
     #[cfg(unix)]
-    let shared = existing.as_ref().is_some_and(|m| std::os::unix::fs::MetadataExt::nlink(m) > 1);
+    let in_place = existing.as_ref().is_some_and(|m| {
+        use std::os::unix::fs::MetadataExt;
+        // Swapping in a new file would make it this user's.
+        m.nlink() > 1 || !owned_by_me(m.uid())
+    });
     #[cfg(not(unix))]
-    let shared = false;
+    let in_place = false;
     let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else { return std::fs::write(path, bytes) };
     // What it held is kept a while, to go back to (Show File History).
     crate::local_history::keep_before_writing(&target, bytes);
-    if shared {
+    if in_place {
         return std::fs::write(&target, bytes);
     }
-    let temp = dir.join(format!(".{}.null-saving-{}", name.to_string_lossy(), std::process::id()));
-    let written = std::fs::File::create(&temp).and_then(|mut file| {
+    // Its own name, so two saves at once (an AI task, auto-save) never share one.
+    let n = SAVES.fetch_add(1, Ordering::Relaxed);
+    let temp = dir.join(format!(".{}.null-saving-{}-{n}", name.to_string_lossy(), std::process::id()));
+    let written = std::fs::File::options().write(true).create_new(true).open(&temp).and_then(|mut file| {
         file.write_all(bytes)?;
         if let Some(meta) = &existing {
             file.set_permissions(meta.permissions())?;
         }
         file.sync_all()
     });
+    if written.is_ok() && existing.is_some() {
+        copy_metadata(&target, &temp);
+    }
     match written.and_then(|()| std::fs::rename(&temp, &target)) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -220,6 +235,37 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         }
     }
 }
+
+/// Whether the file's owner is the user Null runs as.
+#[cfg(unix)]
+fn owned_by_me(uid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // Safety: no arguments, can't fail.
+        uid == unsafe { libc::geteuid() }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = uid;
+        true
+    }
+}
+
+/// The file's tags, extended attributes and access lists, onto the new one.
+#[cfg(target_os = "macos")]
+fn copy_metadata(from: &Path, to: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let (Ok(from), Ok(to)) =
+        (std::ffi::CString::new(from.as_os_str().as_bytes()), std::ffi::CString::new(to.as_os_str().as_bytes()))
+    else {
+        return;
+    };
+    // Safety: two valid C strings; no state.
+    unsafe { libc::copyfile(from.as_ptr(), to.as_ptr(), std::ptr::null_mut(), libc::COPYFILE_METADATA) };
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_metadata(_: &Path, _: &Path) {}
 
 /// Moves to the Trash (or the platform's recycle bin): never deletes outright.
 #[cfg(not(test))]
@@ -287,6 +333,11 @@ mod tests {
             std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, ["link.sh", "new.txt", "run.sh"]);
+        // A read-only file isn't written over.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(super::write_file(&file, b"over\n").is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "linked\n");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 

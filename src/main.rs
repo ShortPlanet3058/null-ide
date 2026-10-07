@@ -156,6 +156,8 @@ fn main() {
             }
         })
         .detach();
+        // Local history past its month goes, now and then.
+        std::thread::spawn(local_history::sweep);
         settings::init(cx);
         find_bar::init(cx);
         keymap::register(cx.global::<settings::Settings>().keymap, cx);
@@ -202,6 +204,12 @@ pub(crate) fn window_on(
 /// Opens a window on project `root`, as it was left (and `file` in it, if given); the
 /// window already on it, if there's one.
 pub(crate) fn open_project_window(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::App) {
+    // Once the window asking (if any) is done updating: until then it can't be read, so
+    // its own project wouldn't be found open.
+    cx.defer(move |cx| open_project_window_now(root, file, cx));
+}
+
+fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::App) {
     if let Some(handle) = window_on(&root, None, cx) {
         handle
             .update(cx, |workspace, window, cx| {

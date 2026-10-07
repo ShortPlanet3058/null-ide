@@ -51,12 +51,17 @@ pub fn blends_into(color: Hsla, background: Hsla) -> bool {
 /// `rgb`/`rgba`/`hsl`/`hsla` with its arguments: the color and the length taken
 /// (counting the `#` for hex).
 fn function(text: &str) -> Option<(Hsla, usize)> {
-    let name_len = text.find('(')?;
+    // A short name right before `(`: looked for without reading the rest of the row.
+    let name_len = text.bytes().take(5).take_while(u8::is_ascii_alphabetic).count();
+    if !(3..=4).contains(&name_len) || text.as_bytes().get(name_len) != Some(&b'(') {
+        return None;
+    }
     let name = text[..name_len].to_ascii_lowercase();
     if !matches!(name.as_str(), "rgb" | "rgba" | "hsl" | "hsla") {
         return None;
     }
-    let close = text[name_len..].find(')')? + name_len;
+    // The arguments are short: a `)` far away isn't this one's.
+    let close = text[name_len..].bytes().take(64).position(|b| b == b')')? + name_len;
     let inside = &text[name_len + 1..close];
     let parts: Vec<&str> = inside.split([',', ' ', '/']).map(str::trim).filter(|p| !p.is_empty()).collect();
     if !(3..=4).contains(&parts.len()) {

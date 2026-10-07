@@ -784,6 +784,11 @@ impl Editor {
             self.preview = None;
         }
         let Ok((text, encoding)) = read else { return };
+        // What Null itself last wrote (the watcher saw a save, typing has gone on since):
+        // nothing changed on disk.
+        if !discard_edits && self.on_disk == Some(fingerprint(&text)) {
+            return;
+        }
         self.on_disk = Some(fingerprint(&text));
         self.encoding = encoding;
         if text == self.buffer.to_string() {
@@ -3962,6 +3967,34 @@ mod tests {
             assert!(!e.missing);
         });
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn a() {}\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The watcher reporting Null's own save after typing went on: not a change on disk,
+    /// so saving (and auto-saving) goes on without asking.
+    #[gpui::test]
+    fn its_own_save_isnt_a_change_on_disk(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = std::env::temp_dir().join(format!("null-own-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(path.clone(), None, cx));
+        editor.update(cx, |e, cx| {
+            e.restore_unsaved("two\n", cx);
+            assert!(e.save_to_disk(cx));
+            e.restore_unsaved("three\n", cx);
+            e.reload_from_disk(cx);
+            assert!(!e.disk_changed, "its own save");
+            // Someone else's change still counts.
+            std::fs::write(&path, "theirs\n").unwrap();
+            e.reload_from_disk(cx);
+            assert!(e.disk_changed);
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 
