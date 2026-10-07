@@ -3154,8 +3154,6 @@ impl Workspace {
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
-            (Edit, "Copy as Rich Text".into(), Box::new(CopyAsRichText)),
-            (Edit, "Toggle Task".into(), Box::new(crate::editor::ToggleTask)),
             (Edit, "Organize Imports".into(), Box::new(OrganizeImports)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
@@ -3359,6 +3357,9 @@ impl Workspace {
         // Markdown: a table of contents of its headings; the document as a page.
         if self.active_editor().is_some_and(|e| e.read(cx).is_markdown()) {
             commands.push((Edit, "Insert Table of Contents".into(), Box::new(crate::editor::InsertTableOfContents)));
+            commands.push((Edit, "Insert Footnote".into(), Box::new(crate::editor::InsertFootnote)));
+            commands.push((Edit, "Toggle Task".into(), Box::new(crate::editor::ToggleTask)));
+            commands.push((Edit, "Copy as Rich Text".into(), Box::new(CopyAsRichText)));
             commands.push((File, "Export as HTML".into(), Box::new(ExportHtml)));
         }
         // A page or a picture: open it in the browser.

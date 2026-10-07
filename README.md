@@ -139,7 +139,8 @@ pasted over some words links them; text copied from a web page or a document (No
 Google Docs) pastes as Markdown, its headings, links, bold, lists and tables kept (⌥⇧⌘V for
 the plain text); ⌥⇧F lines the tables up, and in a table ⇥ ⇧⇥ go from cell to cell
 (⇥ in the last one adds a row). `*`, `_` or `~` typed over selected words wrap them (twice
-for **bold**). The preview shows footnotes (`[^1]`, gathered at the end) and GitHub's
+for **bold**). **Insert Footnote** (⌘K) puts the next `[^n]` at the caret and starts its note
+at the end, ⌃- coming back. The preview shows footnotes (`[^1]`, gathered at the end) and GitHub's
 callouts (`> [!NOTE]`, `[!TIP]`, `[!WARNING]`…).
 
 Links stay right: renaming or moving a file in Null rewrites the Markdown links to it; a link

@@ -1333,6 +1333,18 @@ pub fn toggle_task(line: &str) -> Option<String> {
     Some(format!("{}[{mark}]{}", &line[..at], &line[at + 3..]))
 }
 
+/// The number the next footnote takes: one past the highest numbered one (`[^3]` → 4).
+pub fn next_footnote(text: &str) -> u64 {
+    text.match_indices("[^")
+        .filter_map(|(at, _)| {
+            let rest = &text[at + 2..];
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            rest[digits..].starts_with(']').then(|| rest[..digits].parse::<u64>().ok()).flatten()
+        })
+        .max()
+        .map_or(1, |n| n + 1)
+}
+
 /// Where a task's box (`[ ]`, `[x]`) is in its line (bytes), if the line is a task.
 pub fn task_box(line: &str) -> Option<std::ops::Range<usize>> {
     let ticked = toggle_task(line)?;

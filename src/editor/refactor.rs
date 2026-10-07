@@ -16,7 +16,16 @@ use std::ops::Range;
 
 actions!(
     refactor,
-    [RenameSymbol, FindReferences, FormatDocument, FormatSelection, ConfirmRename, CancelRename, InsertTableOfContents]
+    [
+        RenameSymbol,
+        FindReferences,
+        FormatDocument,
+        FormatSelection,
+        ConfirmRename,
+        CancelRename,
+        InsertTableOfContents,
+        InsertFootnote
+    ]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -202,6 +211,45 @@ impl Editor {
             return self.format_selection_now(cx);
         }
         self.format_then(false, cx);
+    }
+
+    /// Markdown: the next footnote's mark at the caret (`[^3]`), its note started at the end of
+    /// the document (with the notes there, if any), and the caret there to write it; ⌃- goes
+    /// back. One undo step.
+    pub(super) fn insert_footnote(&mut self, _: &InsertFootnote, _: &mut Window, cx: &mut Context<Self>) {
+        let at = self.selection.range().end;
+        if !self.is_markdown() {
+            return self.show_notice(at, "Footnotes are for Markdown files.".into(), cx);
+        }
+        let text = self.buffer.to_string();
+        let n = crate::markdown_view::next_footnote(&text);
+        let ending = self.style.line_ending.text();
+        let content = text.trim_end();
+        let content_end = content.chars().count();
+        let last = content.lines().last().unwrap_or("");
+        // After the notes already at the end, else after a blank line.
+        let gap = if content.is_empty() {
+            String::new()
+        } else if last.starts_with("[^") {
+            ending.to_string()
+        } else {
+            ending.repeat(2)
+        };
+        let label = format!("[^{n}]");
+        let note = format!("{gap}{label}: ");
+        let after = if text.ends_with(['\n', '\r']) { ending } else { "" };
+        // The mark: at the caret (after the selection), or at the text's end when the caret
+        // is past it.
+        let mark_at = at.min(content_end);
+        let from = self.caret_point();
+        self.apply_char_edits(
+            vec![(mark_at..mark_at, label.clone()), (content_end..self.buffer.len_chars(), format!("{note}{after}"))],
+            cx,
+        );
+        let caret = content_end + label.chars().count() + note.chars().count();
+        self.selection = super::Selection::caret(caret);
+        cx.emit(EditorEvent::Jumped { from });
+        self.touch(cx);
     }
 
     /// Markdown: a list of links to the headings, at the caret; or, where Null wrote one
