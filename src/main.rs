@@ -180,7 +180,9 @@ fn main() {
         })
         .detach();
 
-        open_project_window(root, file, cx);
+        // Nothing else is open yet: the window opens now (a deferred open would wait for
+        // an update that never comes, and Null would start with no window).
+        open_project_window_now(root, file, cx);
         cx.activate(true);
     });
 }
