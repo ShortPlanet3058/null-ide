@@ -1866,7 +1866,19 @@ impl Editor {
             // Python blocks open with a colon.
             let python_block = before == Some(':') && this.language_name() == "Python";
             let opens = matches!(before, Some('{' | '(' | '[')) || python_block;
-            let inner = format!("{indent}{}", if opens { this.style.indent.unit() } else { String::new() });
+            // Python: after `return`, `pass`, `break`, `continue` or `raise`, the block is over.
+            let ends_block = this.language_name() == "Python" && {
+                let word =
+                    line_text.trim_start().split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
+                matches!(word, "return" | "pass" | "break" | "continue" | "raise")
+                    && line_text.chars().skip(col).all(char::is_whitespace)
+            };
+            let unit = this.style.indent.unit();
+            let indent = match indent.strip_suffix(unit.as_str()) {
+                Some(out) if ends_block => out.to_string(),
+                _ => indent,
+            };
+            let inner = format!("{indent}{}", if opens { unit } else { String::new() });
             // The file's own line break: "\r\n" in a Windows file.
             let nl = this.style.line_ending.text();
             if opens
@@ -3503,6 +3515,8 @@ impl EntityInputHandler for Editor {
         match text {
             ">" => self.close_tag(cx),
             "/" => self.finish_closing_tag(cx),
+            "}" | ")" | "]" => self.outdent_closer(cx),
+            ":" if self.language_name() == "Python" => self.outdent_python_clause(cx),
             _ => {}
         }
         self.completion_after_typing(text, cx);
