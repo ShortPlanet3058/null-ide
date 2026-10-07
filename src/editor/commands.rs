@@ -399,6 +399,60 @@ impl Editor {
         true
     }
 
+    /// `<` typed over selected text in HTML (or JSX content): the text wrapped in a tag, the
+    /// name typed in both of its ends at once, ⇥ or Esc when it's done. Whole lines get the
+    /// tag on lines of its own, and go in a level. Returns whether it did.
+    pub(super) fn wrap_in_tag(&mut self, c: char, cx: &mut Context<Self>) -> bool {
+        let range = self.selection.range();
+        if c != '<' || range.is_empty() || !self.extra.is_empty() {
+            return false;
+        }
+        match self.language().map(|l| l.name) {
+            Some("HTML") => {}
+            Some("JavaScript" | "TSX") if self.in_jsx_content(range.start + 1) => {}
+            _ => return false,
+        }
+        let (first, first_col) = self.buffer.point(range.start);
+        let (last, last_col) = self.buffer.point(range.end);
+        let first_text = self.buffer.line_text(first);
+        let indent: String = first_text.chars().take_while(|c| c.is_whitespace()).collect();
+        // Whole lines: from their indentation (or start) to the end of the last, or the
+        // start of the line after it.
+        let whole = last > first
+            && first_col <= indent.chars().count()
+            && (last_col == 0
+                || last_col == self.buffer.line_text(last).trim_end_matches(['\n', '\r']).chars().count());
+        let (start, snippet) = if whole {
+            let end_line = if last_col == 0 { last - 1 } else { last };
+            let unit = self.style.indent.unit();
+            let lines: Vec<String> = (first..=end_line)
+                .map(|l| {
+                    let text = self.buffer.line_text(l);
+                    let text = text.trim_end_matches(['\n', '\r']);
+                    if text.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!("{unit}{}", crate::emmet::literal(text))
+                    }
+                })
+                .collect();
+            let start = self.buffer.offset(first, 0);
+            let end = self.buffer.offset(end_line, self.buffer.line_len(end_line));
+            self.selection = Selection { anchor: start, head: end };
+            let ending = self.style.line_ending.text();
+            (start, format!("{indent}<$1>{ending}{}{ending}{indent}</$1>$0", lines.join(ending)))
+        } else {
+            let inner = crate::emmet::literal(&self.buffer.slice(range.clone()));
+            (range.start, format!("<$1>{inner}</$1>$0"))
+        };
+        let parsed = super::snippet::parse(&snippet);
+        let replace = self.selection.range();
+        self.edit(replace, &parsed.text.clone(), EditKind::Other, cx);
+        self.start_snippet(start, parsed, cx);
+        cx.notify();
+        true
+    }
+
     /// Whether the text just before `at` is in a JSX element's content (between its tags, not
     /// in a tag or a `{…}`), as the syntax tree has it.
     fn in_jsx_content(&mut self, at: usize) -> bool {
@@ -825,6 +879,42 @@ mod editor_tests {
         // A word, or code in a script: ⇥ is a tab, no tags.
         assert_eq!(typed(cx, "", "hello"), "hello   One Two");
         assert_eq!(typed(cx, "<script>\n", "ul>li"), "<script>\nul>li   One Two");
+    }
+
+    /// `<` over selected text wraps it in a tag: the name goes in both ends as it's typed;
+    /// over whole lines, the tag takes lines of its own. Not in code.
+    #[gpui::test]
+    fn typing_a_bracket_over_a_selection_wraps_it_in_a_tag(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let wrapped = |cx: &mut TestAppContext, file: &str, text: &str, selected: std::ops::Range<usize>| {
+            let (text, file) = (text.to_string(), PathBuf::from(file));
+            let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(file), cx));
+            e.update_in(cx, |e, window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(e, cx));
+                e.selection = Selection { anchor: selected.start, head: selected.end };
+            });
+            cx.simulate_input("<strong");
+            cx.simulate_keystrokes("tab");
+            cx.simulate_input("!");
+            e.read_with(cx, |e, _| e.buffer.to_string())
+        };
+        assert_eq!(
+            wrapped(cx, "a.html", "<p>Very important</p>\n", 8..17),
+            "<p>Very <strong>important</strong>!</p>\n"
+        );
+        assert_eq!(
+            wrapped(cx, "a.html", "<ul>\n  <li>a</li>\n  <li>b</li>\n</ul>\n", 5..30),
+            "<ul>\n  <strong>\n    <li>a</li>\n    <li>b</li>\n  </strong>!\n</ul>\n"
+        );
+        let jsx = "const P = () => <p>Hello there</p>;\n";
+        assert_eq!(wrapped(cx, "P.jsx", jsx, 25..30), "const P = () => <p>Hello <strong>there</strong>!</p>;\n");
+        // In code, < is just typed over it.
+        assert_eq!(wrapped(cx, "a.rs", "let a = b;\n", 8..9), "let a = <strong !;\n");
     }
 
     /// In JSX, ⇥ expands inside an element's content only: JSX's names there; plain code

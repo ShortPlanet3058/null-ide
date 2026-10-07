@@ -73,7 +73,9 @@ doesn't need Xcode's separate Metal Toolchain download.
 - In HTML and JSX, typing the `>` of a tag adds its closing tag, `</` finishes the one
   still open, and renaming a tag renames its pair. ⇥ after an Emmet abbreviation writes its
   tags out: `ul>li.item*3`, `.card>h2{Title}+p`, `a`, `input[type=email]`; in HTML, and in
-  JSX inside an element (with `className`, `htmlFor`, `<img />`).
+  JSX inside an element (with `className`, `htmlFor`, `<img />`). `<` typed over selected
+  text wraps it in a tag, its name typed in both ends at once (whole lines get it on lines
+  of its own).
 - ⌘-click a web address or a file's path written in the text (`src/a.rs:12`, a README's
   links) to open it; anywhere else, ⌘-click goes to the definition.
 - Files no language server knows (YAML, shell, a language not installed yet) still get
