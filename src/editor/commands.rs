@@ -514,6 +514,73 @@ impl Editor {
         false
     }
 
+    /// A closing bracket typed first on its line: the line goes back to the indentation of
+    /// the line its opening bracket is on.
+    pub(super) fn outdent_closer(&mut self, cx: &mut Context<Self>) {
+        let caret = self.selection.head;
+        let (line, col) = self.buffer.point(caret);
+        let text = self.buffer.line_text(line);
+        let before: String = text.chars().take(col).collect();
+        let Some(close) = before.chars().last().filter(|_| before.trim().chars().count() == 1) else { return };
+        let open = match close {
+            '}' => '{',
+            ')' => '(',
+            ']' => '[',
+            _ => return,
+        };
+        // Its opening bracket: back from it, over the pairs inside.
+        let rope = self.buffer.rope();
+        let mut chars = rope.chars_at(caret - 1);
+        let (mut depth, mut at) = (1, caret - 1);
+        while depth > 0 && caret - at < 20_000 {
+            let Some(c) = chars.prev() else { return };
+            at -= 1;
+            if c == close {
+                depth += 1;
+            } else if c == open {
+                depth -= 1;
+            }
+        }
+        let open_line = self.buffer.point(at).0;
+        if open_line == line {
+            return;
+        }
+        let indent = |t: &str| t.chars().take_while(|c| *c == ' ' || *c == '\t').collect::<String>();
+        let (wanted, current) = (indent(&self.buffer.line_text(open_line)), indent(&text));
+        if wanted == current {
+            return;
+        }
+        let start = self.buffer.line_to_char(line);
+        self.edit(start..start + current.chars().count(), &wanted, EditKind::Typing, cx);
+        self.selection = Selection::caret(start + wanted.chars().count() + 1);
+    }
+
+    /// Python: `else:`, `elif …:`, `except …:` or `finally:` just finished at the body's
+    /// indentation goes out a level, to its `if` or `try`.
+    pub(super) fn outdent_python_clause(&mut self, cx: &mut Context<Self>) {
+        let caret = self.selection.head;
+        let (line, col) = self.buffer.point(caret);
+        let text = self.buffer.line_text(line);
+        let before: String = text.chars().take(col).collect();
+        let word = before.trim_start().split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+        let after_ok = text.chars().skip(col).all(char::is_whitespace);
+        if !matches!(word, "else" | "elif" | "except" | "finally") || !before.ends_with(':') || !after_ok {
+            return;
+        }
+        let indent_of = |t: &str| super::reindent::indent_columns(t, 4);
+        let current = indent_of(&text);
+        let previous = (0..line).rev().map(|l| self.buffer.line_text(l)).find(|t| !t.trim().is_empty());
+        let unit = self.style.indent.unit();
+        let leading = text.len() - text.trim_start().len();
+        if current == 0 || previous.is_none_or(|p| indent_of(&p) < current) || !text[..leading].ends_with(&unit) {
+            return;
+        }
+        let start = self.buffer.line_to_char(line);
+        let new_len = leading - unit.len();
+        self.edit(start..start + text[..leading].chars().count(), &text[..new_len], EditKind::Typing, cx);
+        self.selection = Selection::caret(caret - unit.chars().count());
+    }
+
     /// Backspace between an empty pair like `()` removes both.
     pub(super) fn empty_pair_around_caret(&self) -> bool {
         let caret = self.selection.head;
@@ -976,6 +1043,46 @@ mod editor_tests {
         // A word, or code in a script: ⇥ is a tab, no tags.
         assert_eq!(typed(cx, "", "hello"), "hello   One Two");
         assert_eq!(typed(cx, "<script>\n", "ul>li"), "<script>\nul>li   One Two");
+    }
+
+    /// A closing bracket typed first on its line goes back to its opening line's indentation;
+    /// in Python, a finished block steps out after `return`, and `else:` goes back to its `if`.
+    #[gpui::test]
+    fn closing_lines_step_back_out(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let typed = |cx: &mut TestAppContext, file: &str, text: &str, keys: &[&str]| {
+            let (text, file) = (text.to_string(), PathBuf::from(file));
+            let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(file), cx));
+            e.update_in(cx, |e, window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(e, cx));
+                e.selection = Selection::caret(e.buffer.len_chars());
+            });
+            for key in keys {
+                match *key {
+                    "enter" => cx.simulate_keystrokes("enter"),
+                    text => cx.simulate_input(text),
+                }
+            }
+            e.read_with(cx, |e, _| (e.buffer.to_string(), e.caret_point()))
+        };
+        let (text, caret) = typed(cx, "a.rs", "fn f() {\n    let a = vec![\n        1,\n        ", &["]"]);
+        assert_eq!(text, "fn f() {\n    let a = vec![\n        1,\n    ]");
+        assert_eq!(caret, (3, 5));
+        let (text, _) = typed(cx, "a.rs", "fn f() {\n    x();\n    ", &["}"]);
+        assert_eq!(text, "fn f() {\n    x();\n}");
+        let (text, _) = typed(cx, "a.py", "def f(a):\n    if a:\n        return 1", &["enter", "x"]);
+        assert_eq!(text, "def f(a):\n    if a:\n        return 1\n    x");
+        let (text, caret) = typed(cx, "a.py", "def f(a):\n    if a:\n        g()\n        else", &[":"]);
+        assert_eq!(text, "def f(a):\n    if a:\n        g()\n    else:");
+        assert_eq!(caret, (3, 9));
+        // Already out: left as it is.
+        let (text, _) = typed(cx, "a.py", "if a:\n    g()\nelse", &[":"]);
+        assert_eq!(text, "if a:\n    g()\nelse:");
     }
 
     /// Enter in a doc comment carries it on, splitting a plain comment too; code that looks

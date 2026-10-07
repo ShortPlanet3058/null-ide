@@ -92,6 +92,9 @@ doesn't need Xcode's separate Metal Toolchain download.
   `$CURRENT_YEAR`, `$CLIPBOARD`, `$UUID`…).
 - **Paste from History…** (⌘K) brings back the last 20 things copied or cut. `TODO`, `FIXME`
   and `HACK` stand out in comments; **Find TODOs** lists them all.
+- A `}`, `)` or `]` typed first on a line goes back to its opening line's indentation; in
+  Python, the line after `return` (or `pass`, `break`…) steps out of the block, and `else:`,
+  `elif`, `except`, `finally` go back to their `if` or `try` as their `:` is typed.
 - Pasted code takes the indentation of where it goes, its lines keeping theirs relative
   to each other; ⌥⇧⌘V pastes it as it was.
 - Enter in a doc comment (`///`, `//!`, ` * ` in `/** */`) starts the next line with it; in a
