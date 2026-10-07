@@ -157,19 +157,24 @@ impl Editor {
     fn subword_right_of(&self, offset: usize) -> usize {
         let (line, col) = self.buffer.point(offset);
         let text: Vec<char> = self.buffer.line_text(line).chars().collect();
+        // At the line's end, over its line break as → goes (a "\r\n" whole).
         if col >= text.len() {
-            return (offset + 1).min(self.buffer.len_chars()).max(offset);
+            return self.right_of(offset);
         }
-        self.buffer.line_to_char(line) + subword_right(&text, col)
+        let to = subword_right(&text, col);
+        // Always on by one at least (a character no part takes, like `²`).
+        self.buffer.line_to_char(line) + if to > col { to } else { col + 1 }
     }
 
     fn subword_left_of(&self, offset: usize) -> usize {
         let (line, col) = self.buffer.point(offset);
         if col == 0 {
-            return offset.saturating_sub(1);
+            return self.left_of(offset);
         }
         let text: Vec<char> = self.buffer.line_text(line).chars().collect();
-        self.buffer.line_to_char(line) + subword_left(&text, col)
+        let col = col.min(text.len());
+        let to = subword_left(&text, col);
+        self.buffer.line_to_char(line) + if to < col { to } else { col.saturating_sub(1) }
     }
 
     pub(super) fn move_subword_left(&mut self, _: &MoveSubwordLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -352,6 +357,9 @@ mod subword_tests {
         assert_eq!(stops("HTMLParser"), (vec![4, 10], vec![4, 0]));
         assert_eq!(stops("x = getID(v2)"), (vec![1, 3, 7, 9, 10, 11, 12, 13], vec![12, 11, 10, 9, 7, 4, 2, 0]));
         assert_eq!(stops("été_très"), (vec![3, 8], vec![4, 0]));
+        // A character no part takes (`²`): the functions leave it to the caller to step over.
+        let squared: Vec<char> = "x²y".chars().collect();
+        assert_eq!(subword_right(&squared, 1), 1);
     }
 }
 
@@ -385,6 +393,22 @@ mod view_tests {
         e.update(cx, |e, _| e.selection = Selection::caret(13));
         cx.simulate_keystrokes("ctrl-alt-backspace");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "let parseRequest = 1;\n"));
+        // A Windows file: over a line break whole; ⌃⌥⌫ at a line's start joins the lines.
+        let (w, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("ab\r\ncd²x"), Some(PathBuf::from("w.rs")), cx));
+        w.update_in(cx, |e, window, _| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection::caret(4);
+        });
+        cx.simulate_keystrokes("ctrl-alt-left");
+        w.update(cx, |e, _| assert_eq!(e.selection.head, 2, "before the \\r\\n, not between"));
+        cx.simulate_keystrokes("ctrl-alt-right");
+        w.update(cx, |e, _| assert_eq!(e.selection.head, 4));
+        cx.simulate_keystrokes("ctrl-alt-right ctrl-alt-right ctrl-alt-right");
+        w.update(cx, |e, _| assert_eq!(e.selection.head, 8, "over `cd`, `²`, `x`"));
+        w.update(cx, |e, _| e.selection = Selection::caret(4));
+        cx.simulate_keystrokes("ctrl-alt-backspace");
+        w.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "abcd²x"));
     }
 
     /// ⌃L puts the caret's line in the middle; ⌘J, after scrolling away, brings it back.

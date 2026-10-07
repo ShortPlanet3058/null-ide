@@ -539,6 +539,9 @@ pub struct Editor {
     pub reveal_only: bool,
     /// The next scroll to the caret puts its line in the middle (⌃L).
     pub center_once: bool,
+    /// The tag pair outlined, for a (revision, caret).
+    #[allow(clippy::type_complexity)]
+    tag_pair_seen: Option<((u64, usize), Option<[Range<usize>; 2]>)>,
     dragging: Option<DragUnit>,
     /// Where dragged text would land, shown as a caret while it's dragged.
     pub drop_at: Option<usize>,
@@ -740,6 +743,7 @@ impl Editor {
             autoscroll: false,
             reveal_only: false,
             center_once: false,
+            tag_pair_seen: None,
             dragging: None,
             drop_at: None,
             font_size: px(cx.global::<Settings>().font_size),
@@ -1880,6 +1884,7 @@ impl Editor {
                     line_text.trim_start().split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
                 matches!(word, "return" | "pass" | "break" | "continue" | "raise")
                     && line_text.chars().skip(col).all(char::is_whitespace)
+                    && !opens
             };
             let unit = this.style.indent.unit();
             let indent = match indent.strip_suffix(unit.as_str()) {

@@ -371,6 +371,10 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(language) = self.language() else { return false };
+        // Enter over a selection replaces it; only a plain Enter carries a comment on.
+        if !range.is_empty() {
+            return false;
+        }
         let before: String = line_text.chars().take(col).collect();
         let after: String = line_text.chars().skip(col).collect();
         let Some(prefix) = comment_continuation(&before, &after, language.line_comment, language.block_comment) else {
@@ -522,24 +526,50 @@ impl Editor {
         let text = self.buffer.line_text(line);
         let before: String = text.chars().take(col).collect();
         let Some(close) = before.chars().last().filter(|_| before.trim().chars().count() == 1) else { return };
+        if self.language().is_none() || self.is_markdown() {
+            return;
+        }
         let open = match close {
             '}' => '{',
             ')' => '(',
             ']' => '[',
             _ => return,
         };
-        // Its opening bracket: back from it, over the pairs inside.
+        // Its opening bracket: back from it, over the pairs inside, not counting brackets in
+        // strings and comments (`'}'`), nor the one typed if it's in one itself.
+        const LOOK_BACK: usize = 20_000;
+        let from = caret.saturating_sub(LOOK_BACK);
+        let rope = self.buffer.rope();
+        let (from_byte, caret_byte) = (rope.char_to_byte(from), rope.char_to_byte(caret));
+        self.highlight_bytes(from_byte..caret_byte);
+        let quoted = |byte: usize, spans: &[crate::highlight::Span]| {
+            matches!(
+                super::spelling::syntax_at(spans, byte),
+                Some(crate::theme::Syntax::String | crate::theme::Syntax::Comment)
+            )
+        };
+        if quoted(caret_byte - close.len_utf8(), &self.spans) {
+            return;
+        }
         let rope = self.buffer.rope();
         let mut chars = rope.chars_at(caret - 1);
-        let (mut depth, mut at) = (1, caret - 1);
-        while depth > 0 && caret - at < 20_000 {
+        let (mut depth, mut at, mut byte) = (1, caret - 1, caret_byte - close.len_utf8());
+        while depth > 0 && at > from {
             let Some(c) = chars.prev() else { return };
             at -= 1;
+            byte -= c.len_utf8();
+            if quoted(byte, &self.spans) {
+                continue;
+            }
             if c == close {
                 depth += 1;
             } else if c == open {
                 depth -= 1;
             }
+        }
+        // Not found near enough: left where it is.
+        if depth > 0 {
+            return;
         }
         let open_line = self.buffer.point(at).0;
         if open_line == line {
@@ -562,23 +592,39 @@ impl Editor {
         let (line, col) = self.buffer.point(caret);
         let text = self.buffer.line_text(line);
         let before: String = text.chars().take(col).collect();
-        let word = before.trim_start().split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+        let first_word =
+            |t: &str| t.trim_start().split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("").to_string();
+        let word = first_word(&before);
         let after_ok = text.chars().skip(col).all(char::is_whitespace);
-        if !matches!(word, "else" | "elif" | "except" | "finally") || !before.ends_with(':') || !after_ok {
+        // What it belongs to: `else` to an `if`, a loop or a `try`, `except` to a `try`…
+        let openers: &[&str] = match word.as_str() {
+            "else" => &["if", "elif", "for", "while", "try", "except"],
+            "elif" => &["if", "elif"],
+            "except" => &["try", "except"],
+            "finally" => &["try", "except", "else"],
+            _ => return,
+        };
+        if !before.ends_with(':') || !after_ok {
             return;
         }
         let indent_of = |t: &str| super::reindent::indent_columns(t, 4);
         let current = indent_of(&text);
-        let previous = (0..line).rev().map(|l| self.buffer.line_text(l)).find(|t| !t.trim().is_empty());
-        let unit = self.style.indent.unit();
-        let leading = text.len() - text.trim_start().len();
-        if current == 0 || previous.is_none_or(|p| indent_of(&p) < current) || !text[..leading].ends_with(&unit) {
+        // Up to the nearest line it can belong to, no further in than it is.
+        let opener = (0..line)
+            .rev()
+            .map(|l| self.buffer.line_text(l))
+            .filter(|t| !t.trim().is_empty())
+            .find(|t| indent_of(t) <= current && openers.contains(&first_word(t).as_str()));
+        let Some(opener) = opener else { return };
+        let wanted: String = opener.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        let leading: String = text.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        if wanted == leading {
             return;
         }
         let start = self.buffer.line_to_char(line);
-        let new_len = leading - unit.len();
-        self.edit(start..start + text[..leading].chars().count(), &text[..new_len], EditKind::Typing, cx);
-        self.selection = Selection::caret(caret - unit.chars().count());
+        let (had, has) = (leading.chars().count(), wanted.chars().count());
+        self.edit(start..start + had, &wanted, EditKind::Typing, cx);
+        self.selection = Selection::caret(caret + has - had);
     }
 
     /// Backspace between an empty pair like `()` removes both.
@@ -639,7 +685,7 @@ fn comment_continuation(
     let indent: String = before.chars().take_while(|c| c.is_whitespace()).collect();
     let text = &before[indent.len()..];
     // A block comment's lines: `/**` or `/*` opening it, `*` going on, not closed before the caret.
-    if let Some((open, close)) = block_comment
+    if let Some((open, close)) = block_comment.filter(|(open, _)| *open == "/*")
         && !text.contains(close)
     {
         if text.starts_with(open) {
@@ -1083,6 +1129,21 @@ mod editor_tests {
         // Already out: left as it is.
         let (text, _) = typed(cx, "a.py", "if a:\n    g()\nelse", &[":"]);
         assert_eq!(text, "if a:\n    g()\nelse:");
+        // After a `return` stepped out, `else:` stays with its `if` (not out a second time).
+        let (text, _) = typed(cx, "a.py", "def f(a):\n    if a:\n        return 1", &["enter", "else:"]);
+        assert_eq!(text, "def f(a):\n    if a:\n        return 1\n    else:");
+        // A name that starts like one (`finally_cb:`) is left alone.
+        let (text, _) = typed(cx, "a.py", "class A:\n    x: int\n    finally_cb", &[":"]);
+        assert_eq!(text, "class A:\n    x: int\n    finally_cb:");
+        // `return (` then Enter: inside the brackets, a level in.
+        let (text, _) = typed(cx, "a.py", "def f():\n    return (", &["enter", "x"]);
+        assert_eq!(text, "def f():\n    return (\n        x");
+        // A `}` in a string isn't counted: the closing one lines up with its own `{`.
+        let (text, _) = typed(cx, "a.rs", "impl A {\n    fn f(c: char) -> bool {\n        c == '}'\n        ", &["}"]);
+        assert_eq!(text, "impl A {\n    fn f(c: char) -> bool {\n        c == '}'\n    }");
+        // Unbalanced (no opening one): left where it is.
+        let (text, _) = typed(cx, "a.rs", "fn f() {}\n    ", &["}"]);
+        assert_eq!(text, "fn f() {}\n    }");
         // Enter between a tag and its closing one opens it up, as between braces.
         let at = |cx: &mut TestAppContext, file: &str, text: &str, col: usize| {
             let (text, file) = (text.to_string(), PathBuf::from(file));
@@ -1130,6 +1191,17 @@ mod editor_tests {
             "fn f() {\n    // see the\n    // docs\n}\n"
         );
         assert_eq!(typed(cx, "// note\n", 0, 7, "x"), "// note\nx\n", "at its end: code goes on");
+        // Enter over a selection in a comment: the selection replaced, nothing else taken.
+        let (e, cx2) = cx.add_window_view(|_, cx| {
+            Editor::new(Buffer::from_text("/// foo bar\nfn f() {}\n"), Some("b.rs".into()), cx)
+        });
+        e.update_in(cx2, |e, window, cx| {
+            window.focus(&gpui::Focusable::focus_handle(e, cx));
+            e.selection = Selection { anchor: 7, head: 11 };
+        });
+        cx2.simulate_keystrokes("enter");
+        assert!(e.read_with(cx2, |e, _| e.buffer.to_string()).ends_with("\nfn f() {}\n"), "the next line kept");
+        assert!(super::comment_continuation("<!-- TODO", "", None, Some(("<!--", "-->"))).is_none(), "not HTML's");
         assert_eq!(
             typed(cx, "fn f() {\n    let a = b\n        * c\n}\n", 2, 11, "d"),
             "fn f() {\n    let a = b\n        * c\n        d\n}\n",
