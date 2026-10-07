@@ -355,10 +355,16 @@ impl Editor {
         before.rfind("<!--").is_some_and(|open| before.rfind("-->").is_none_or(|close| close < open))
     }
 
-    /// ⇥ after an Emmet abbreviation in HTML (see `emmet`): its tags, as a snippet to fill
-    /// in. Not in a script or a style sheet. Returns whether it did.
+    /// ⇥ after an Emmet abbreviation (see `emmet`): its tags, as a snippet to fill in. In
+    /// HTML, not in a script or a style sheet; in JSX, only in an element's content, where
+    /// `a.b` can't be code. Returns whether it did.
     pub(super) fn expand_abbreviation(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.language().is_some_and(|l| l.name == "HTML") || !self.selection.is_empty() {
+        let jsx = match self.language().map(|l| l.name) {
+            Some("HTML") => false,
+            Some("JavaScript" | "TSX") => true,
+            _ => return false,
+        };
+        if !self.selection.is_empty() {
             return false;
         }
         let caret = self.selection.head;
@@ -366,17 +372,24 @@ impl Editor {
         let text = self.buffer.line_text(line);
         let before: String = text.chars().take(column).collect();
         let indent = &text[..text.len() - text.trim_start().len()];
-        let Some((start_byte, snippet)) = crate::emmet::expand_at_end(&before, indent, &self.style.indent.unit())
+        let Some((start_byte, snippet)) = crate::emmet::expand_at_end(&before, indent, &self.style.indent.unit(), jsx)
         else {
             return false;
         };
-        // Inside <script> or <style>, it's code.
-        let html = self.buffer.rope().slice(..caret).to_string().to_lowercase();
-        let open = |tag: &str| {
-            html.rfind(&format!("<{tag}")).is_some_and(|at| html.rfind(&format!("</{tag}")).is_none_or(|end| end < at))
-        };
-        if open("script") || open("style") {
-            return false;
+        if jsx {
+            if !self.in_jsx_content(caret) {
+                return false;
+            }
+        } else {
+            // Inside <script> or <style>, it's code.
+            let html = self.buffer.rope().slice(..caret).to_string().to_lowercase();
+            let open = |tag: &str| {
+                html.rfind(&format!("<{tag}"))
+                    .is_some_and(|at| html.rfind(&format!("</{tag}")).is_none_or(|end| end < at))
+            };
+            if open("script") || open("style") {
+                return false;
+            }
         }
         let start = caret - before[start_byte..].chars().count();
         let parsed = super::snippet::parse(&snippet);
@@ -384,6 +397,28 @@ impl Editor {
         self.start_snippet(start, parsed, cx);
         cx.notify();
         true
+    }
+
+    /// Whether the text just before `at` is in a JSX element's content (between its tags, not
+    /// in a tag or a `{…}`), as the syntax tree has it.
+    fn in_jsx_content(&mut self, at: usize) -> bool {
+        let byte = self.buffer.rope().char_to_byte(at).saturating_sub(1);
+        let Some(highlighter) = &mut self.highlighter else { return false };
+        highlighter.sync(&self.buffer);
+        let Some(tree) = highlighter.tree() else { return false };
+        let mut node = tree.root_node().descendant_for_byte_range(byte, byte);
+        while let Some(n) = node {
+            match n.kind() {
+                "jsx_element" | "jsx_fragment" => return true,
+                "jsx_opening_element"
+                | "jsx_closing_element"
+                | "jsx_self_closing_element"
+                | "jsx_expression"
+                | "jsx_attribute" => return false,
+                _ => node = n.parent(),
+            }
+        }
+        false
     }
 
     /// Backspace between an empty pair like `()` removes both.
@@ -790,6 +825,40 @@ mod editor_tests {
         // A word, or code in a script: ⇥ is a tab, no tags.
         assert_eq!(typed(cx, "", "hello"), "hello   One Two");
         assert_eq!(typed(cx, "<script>\n", "ul>li"), "<script>\nul>li   One Two");
+    }
+
+    /// In JSX, ⇥ expands inside an element's content only: JSX's names there; plain code
+    /// (`user.name`) and a `{…}` stay as they are.
+    #[gpui::test]
+    fn tab_expands_abbreviations_in_jsx_content(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let typed = |cx: &mut TestAppContext, file: &str, start: &str, keys: &str, end: &str| {
+            let text = format!("{start}{end}");
+            let caret = start.chars().count();
+            let file = PathBuf::from(file);
+            let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(file), cx));
+            e.update_in(cx, |e, window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(e, cx));
+                e.selection = Selection::caret(caret);
+            });
+            cx.simulate_input(keys);
+            cx.simulate_keystrokes("tab");
+            e.read_with(cx, |e, _| e.buffer.to_string())
+        };
+        let page = "const Page = () => (\n  <main>\n    ";
+        let close = "\n  </main>\n);\n";
+        assert_eq!(typed(cx, "Page.jsx", page, ".card", close), format!("{page}<div className=\"card\"></div>{close}"));
+        assert_eq!(typed(cx, "Page.tsx", page, "img", close), format!("{page}<img src=\"\" alt=\"\" />{close}"));
+        // Code, and an expression inside the element: ⇥ is a tab.
+        let code = typed(cx, "user.tsx", "const name = ", "user.name", ";\n");
+        assert!(!code.contains('<'), "{code}");
+        let inside = typed(cx, "Page.jsx", "const P = () => <p>{", "a.b", "}</p>;\n");
+        assert!(!inside.contains("<div"), "{inside}");
     }
 
     /// Typed one key at a time, smart quotes and dashes on: curled in Markdown prose, left
