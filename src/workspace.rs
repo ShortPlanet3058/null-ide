@@ -579,7 +579,17 @@ impl Workspace {
                     this.show_notice(message, cx);
                 }
                 crate::lsp_store::LspEvent::ApplyEdit(edit) => this.apply_fix_edit(edit.clone(), cx),
-                crate::lsp_store::LspEvent::DiagnosticsChanged => {}
+                // Files with errors stand out in the files.
+                crate::lsp_store::LspEvent::DiagnosticsChanged => {
+                    let errors = this
+                        .lsp
+                        .read(cx)
+                        .all_diagnostics()
+                        .filter(|(_, d)| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+                        .map(|(path, _)| path.clone())
+                        .collect();
+                    this.tree.update(cx, |tree, cx| tree.set_errors(errors, cx));
+                }
             }),
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
                 ProjectSearchEvent::Open { path, line, columns, query, keep_focus } => {
@@ -8120,6 +8130,45 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(crate::session::load_backups(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An error reported in a file: it and its folder stand out in the files; a warning
+    /// doesn't, and once fixed the mark goes.
+    #[gpui::test]
+    fn files_with_errors_stand_out(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-tree-errors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let file = dir.join("src/a.rs");
+        let report = |severity, cx: &mut gpui::VisualTestContext| {
+            let file = file.clone();
+            workspace.update(cx, |w, cx| {
+                w.lsp.update(cx, |lsp, cx| {
+                    let diagnostic = lsp_types::Diagnostic { severity, message: "x".into(), ..Default::default() };
+                    lsp.set_diagnostics(file, severity.map(|_| diagnostic).into_iter().collect());
+                    cx.emit(crate::lsp_store::LspEvent::DiagnosticsChanged);
+                })
+            });
+            cx.run_until_parked();
+        };
+        let marked = |path: &Path, cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.tree.read(cx).marked_for_errors(path))
+        };
+        report(Some(lsp_types::DiagnosticSeverity::ERROR), cx);
+        assert!(marked(&file, cx) && marked(&dir.join("src"), cx));
+        report(Some(lsp_types::DiagnosticSeverity::WARNING), cx);
+        assert!(!marked(&file, cx), "a warning isn't an error");
+        report(None, cx);
+        assert!(!marked(&dir.join("src"), cx));
         std::fs::remove_dir_all(&dir).ok();
     }
 

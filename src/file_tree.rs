@@ -312,6 +312,9 @@ pub struct FileTree {
     /// Files changed since the last commit, and the folders holding any.
     git: HashMap<PathBuf, crate::git::FileStatus>,
     git_folders: HashSet<PathBuf>,
+    /// Files a language server finds errors in, and the folders holding any.
+    errors: HashSet<PathBuf>,
+    error_folders: HashSet<PathBuf>,
     /// Files and folders aren't renamed straight away: the workspace is asked first (see
     /// [`FileTreeEvent::RenameRequested`]).
     pub ask_before_renaming: bool,
@@ -341,6 +344,8 @@ impl FileTree {
             scroll: UniformListScrollHandle::new(),
             git: HashMap::new(),
             git_folders: HashSet::new(),
+            errors: HashSet::new(),
+            error_folders: HashSet::new(),
             typed: (String::new(), Instant::now()),
         };
         tree.rebuild();
@@ -905,6 +910,27 @@ impl FileTree {
         cx.notify();
     }
 
+    /// The files with errors in them: their names in the error colour, their folders with a
+    /// red dot.
+    pub fn set_errors(&mut self, files: HashSet<PathBuf>, cx: &mut Context<Self>) {
+        if files == self.errors {
+            return;
+        }
+        self.error_folders = files
+            .iter()
+            .flat_map(|p| p.ancestors().skip(1).take_while(|a| a.starts_with(&self.root) && *a != self.root))
+            .map(Path::to_path_buf)
+            .collect();
+        self.errors = files;
+        cx.notify();
+    }
+
+    /// Whether `path` is marked for errors: in it (a file) or under it (a folder).
+    #[cfg(test)]
+    pub fn marked_for_errors(&self, path: &Path) -> bool {
+        self.errors.contains(path) || self.error_folders.contains(path)
+    }
+
     fn open_menu(
         &mut self,
         target: Option<Entry>,
@@ -1120,6 +1146,8 @@ impl FileTree {
                     crate::git::FileStatus::Conflicted => theme.error,
                     _ => theme.git_modified,
                 });
+                // An error in it outweighs what git says.
+                let changed = if self.errors.contains(&entry.path) { Some(theme.error) } else { changed };
                 let color = if let Some(changed) = changed {
                     changed
                 } else if active || selected {
@@ -1130,6 +1158,7 @@ impl FileTree {
                     theme.muted
                 };
                 let holds_changes = entry.is_dir && self.git_folders.contains(&entry.path);
+                let holds_errors = entry.is_dir && self.error_folders.contains(&entry.path);
                 let dot = if active { theme.caret } else { theme.faint };
                 let path = entry.path.clone();
                 let menu_entry = entry.clone();
@@ -1156,8 +1185,9 @@ impl FileTree {
                     row_el
                         .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
                         // A folder with changes inside: a small dot at the end.
-                        .when(holds_changes, |r| {
-                            r.child(div().flex_none().size(px(5.)).rounded_full().bg(theme.git_modified.opacity(0.8)))
+                        .when(holds_changes || holds_errors, |r| {
+                            let dot = if holds_errors { theme.error } else { theme.git_modified };
+                            r.child(div().flex_none().size(px(5.)).rounded_full().bg(dot.opacity(0.8)))
                         })
                         .active(|s| s.opacity(0.7))
                         .on_drag(dragged, |d, _, _, cx| cx.new(|_| EntryGhost { name: d.name.clone() }))
