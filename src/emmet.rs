@@ -2,12 +2,13 @@
 //! fill in visited with ⇥. Elements (`div`), classes (`.card`, alone a `div`), ids (`#top`),
 //! attributes (`[type=email]`), text (`{Hello}`), children (`>`), siblings (`+`), climbing
 //! back up (`^`), repeats (`*3`, with `$` numbering them). A plain word expands only when
-//! it's an HTML element, so ordinary words stay words.
+//! it's an HTML element, so ordinary words stay words. In JSX the tags are JSX's:
+//! `className`, `htmlFor`, `<img />`.
 
 /// The abbreviation ending at the end of `before` (a line up to the caret), if there is one
 /// to expand: where it starts (a byte) and the snippet it becomes, its lines after the first
-/// indented by `indent`, each level deeper by `unit`.
-pub fn expand_at_end(before: &str, indent: &str, unit: &str) -> Option<(usize, String)> {
+/// indented by `indent`, each level deeper by `unit`; as JSX when `jsx`.
+pub fn expand_at_end(before: &str, indent: &str, unit: &str, jsx: bool) -> Option<(usize, String)> {
     let start = abbreviation_start(before)?;
     let abbreviation = &before[start..];
     let nodes = parse(abbreviation)?;
@@ -16,7 +17,7 @@ pub fn expand_at_end(before: &str, indent: &str, unit: &str) -> Option<(usize, S
     if !operators && !ELEMENTS.contains(&abbreviation) {
         return None;
     }
-    let mut out = Writer { text: String::new(), stop: 0, unit: unit.to_string() };
+    let mut out = Writer { text: String::new(), stop: 0, unit: unit.to_string(), jsx };
     out.nodes(&nodes, 0, indent);
     out.text.push_str("$0");
     Some((start, out.text))
@@ -315,6 +316,8 @@ struct Writer {
     /// The last place to fill in numbered so far.
     stop: usize,
     unit: String,
+    /// JSX's names for attributes, and void elements closed with `/>`.
+    jsx: bool,
 }
 
 impl Writer {
@@ -341,7 +344,8 @@ impl Writer {
             open.push_str(&format!(" id=\"{}\"", literal(id)));
         }
         if !node.classes.is_empty() {
-            open.push_str(&format!(" class=\"{}\"", literal(&node.classes.join(" "))));
+            let name = if self.jsx { "className" } else { "class" };
+            open.push_str(&format!(" {name}=\"{}\"", literal(&node.classes.join(" "))));
         }
         let mut attributes: Vec<(String, Option<String>)> = node.attributes.clone();
         if attributes.is_empty() {
@@ -354,15 +358,21 @@ impl Writer {
                 .collect();
         }
         for (key, value) in attributes {
+            let key = match key.as_str() {
+                "class" if self.jsx => "className".to_string(),
+                "for" if self.jsx => "htmlFor".to_string(),
+                _ => key,
+            };
             let value = match value {
                 Some(v) => literal(&v),
                 None => self.place(),
             };
             open.push_str(&format!(" {}=\"{value}\"", literal(&key)));
         }
-        open.push('>');
+        let void = VOID.contains(&node.tag.as_str());
+        open.push_str(if void && self.jsx { " />" } else { ">" });
         self.text.push_str(&open);
-        if VOID.contains(&node.tag.as_str()) {
+        if void {
             return;
         }
         if node.children.is_empty() {
@@ -396,7 +406,7 @@ mod tests {
     use super::*;
 
     fn expand(abbreviation: &str) -> Option<String> {
-        expand_at_end(abbreviation, "", "  ").map(|(_, snippet)| snippet)
+        expand_at_end(abbreviation, "", "  ", false).map(|(_, snippet)| snippet)
     }
 
     #[test]
@@ -427,22 +437,31 @@ mod tests {
     fn only_abbreviations_expand() {
         // Words in a sentence, not elements; a tag being written; nothing.
         assert_eq!(expand("hello"), None);
-        assert_eq!(expand_at_end("Some text and", "", "  "), None);
-        assert_eq!(expand_at_end("<a href=\"x", "", "  "), None);
+        assert_eq!(expand_at_end("Some text and", "", "  ", false), None);
+        assert_eq!(expand_at_end("<a href=\"x", "", "  ", false), None);
         assert_eq!(expand(""), None);
         assert_eq!(expand("ul>"), None);
         assert_eq!(expand("li*0"), None);
         assert_eq!(expand("li*x"), None);
         // After a space or a tag that ends there, only what's after it.
-        assert_eq!(expand_at_end("  <p>span.note", "  ", "  ").map(|(start, _)| start), Some(5));
-        assert_eq!(expand_at_end("<p>ul>li", "", "  ").map(|(start, _)| start), Some(3));
-        assert_eq!(expand_at_end("Read the p", "", "  ").map(|(start, _)| start), Some(9));
-        assert_eq!(expand_at_end("x p{a b}", "", "  "), Some((2, "<p>a b</p>$0".into())));
+        assert_eq!(expand_at_end("  <p>span.note", "  ", "  ", false).map(|(start, _)| start), Some(5));
+        assert_eq!(expand_at_end("<p>ul>li", "", "  ", false).map(|(start, _)| start), Some(3));
+        assert_eq!(expand_at_end("Read the p", "", "  ", false).map(|(start, _)| start), Some(9));
+        assert_eq!(expand_at_end("x p{a b}", "", "  ", false), Some((2, "<p>a b</p>$0".into())));
+    }
+
+    #[test]
+    fn jsx_gets_jsx_names() {
+        let jsx = |abbreviation: &str| expand_at_end(abbreviation, "", "  ", true).map(|(_, s)| s);
+        assert_eq!(jsx(".card").as_deref(), Some("<div className=\"card\">$1</div>$0"));
+        assert_eq!(jsx("label[for=email]").as_deref(), Some("<label htmlFor=\"email\">$1</label>$0"));
+        assert_eq!(jsx("img").as_deref(), Some("<img src=\"$1\" alt=\"$2\" />$0"));
+        assert_eq!(jsx("label").as_deref(), Some("<label htmlFor=\"$1\">$2</label>$0"));
     }
 
     #[test]
     fn nested_lines_take_the_lines_indentation() {
-        let (_, snippet) = expand_at_end("    ul>li", "    ", "\t").unwrap();
+        let (_, snippet) = expand_at_end("    ul>li", "    ", "\t", false).unwrap();
         assert_eq!(snippet, "<ul>\n    \t<li>$1</li>\n    </ul>$0");
     }
 }
