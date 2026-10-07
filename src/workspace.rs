@@ -61,6 +61,7 @@ actions!(
         CopyRelativeFilePath,
         CopyAsCodeBlock,
         CopyAsRichText,
+        OrganizeImports,
         RevealFile,
         RenameFile,
         TrashFile,
@@ -1660,6 +1661,31 @@ impl Workspace {
         self.show_notice(format!("{what} is copied as rich text: it pastes formatted in Mail, Notes or Docs."), cx);
     }
 
+    /// Organize Imports: the language server's own (sorted, the unused ones gone), for the
+    /// whole file, as its quick fixes are applied.
+    fn organize_imports(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor() else { return };
+        let e = editor.read(cx);
+        let Some(path) = e.path().map(Path::to_path_buf) else { return };
+        if !self.lsp.read(cx).serves(&path) {
+            return self.show_notice("No language server for this file: nothing to organize imports with.".into(), cx);
+        }
+        let last = e.buffer.len_lines().saturating_sub(1);
+        let end = lsp_types::Position::new(last as u32, e.buffer.line_text(last).encode_utf16().count() as u32);
+        let range = lsp_types::Range::new(lsp_types::Position::new(0, 0), end);
+        let only = Some(vec![lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS]);
+        let request = self.lsp.read(cx).code_actions_of(&path, range, Vec::new(), only);
+        cx.spawn(async move |this, cx| {
+            let actions = request.await;
+            this.update(cx, |this, cx| match organize_action(actions) {
+                Some(action) => this.run_fix(path, action, cx),
+                None => this.show_notice("The language server has no imports to organize here.".into(), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn copy_line_link(&mut self, cx: &mut Context<Self>) {
         self.line_link(false, cx);
     }
@@ -3130,6 +3156,7 @@ impl Workspace {
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
             (Edit, "Copy as Rich Text".into(), Box::new(CopyAsRichText)),
             (Edit, "Toggle Task".into(), Box::new(crate::editor::ToggleTask)),
+            (Edit, "Organize Imports".into(), Box::new(OrganizeImports)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
             (File, "Copy Path".into(), Box::new(CopyFilePath)),
@@ -5854,6 +5881,25 @@ fn reading_time(words: usize) -> Option<String> {
     (minutes > 0).then(|| format!("{minutes} min read"))
 }
 
+/// Of the actions a server offers for organizing imports, the one to run: its own
+/// `source.organizeImports` (some servers send others too, or a command alone).
+fn organize_action(actions: Vec<lsp_types::CodeActionOrCommand>) -> Option<lsp_types::CodeActionOrCommand> {
+    use lsp_types::{CodeActionKind, CodeActionOrCommand};
+    let organizes = |a: &CodeActionOrCommand| match a {
+        CodeActionOrCommand::CodeAction(action) => {
+            action.disabled.is_none()
+                && action
+                    .kind
+                    .as_ref()
+                    .is_some_and(|k| k.as_str().starts_with(CodeActionKind::SOURCE_ORGANIZE_IMPORTS.as_str()))
+        }
+        CodeActionOrCommand::Command(_) => false,
+    };
+    let mut actions = actions;
+    let at = actions.iter().position(organizes).or_else(|| (actions.len() == 1).then_some(0))?;
+    Some(actions.swap_remove(at))
+}
+
 /// How much of the changes AI reads to write a commit message, in characters.
 const COMMIT_DIFF_CHARS: usize = 24_000;
 
@@ -6531,6 +6577,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::fetch_branch))
             .on_action(cx.listener(|this, _: &CopyAsCodeBlock, _, cx| this.copy_as_code_block(cx)))
             .on_action(cx.listener(|this, _: &CopyAsRichText, _, cx| this.copy_as_rich_text(cx)))
+            .on_action(cx.listener(|this, _: &OrganizeImports, _, cx| this.organize_imports(cx)))
             .on_action(
                 cx.listener(|this, _: &CopyFilePath, _, cx| this.copy_path(this.active_path(cx).as_deref(), false, cx)),
             )
@@ -8213,6 +8260,28 @@ mod tests {
         assert_eq!(text, "Ln 1, Col 1 · 700 words · 3 min read");
         assert_eq!(thousands(1234567), "1,234,567");
         assert_eq!(thousands(999), "999");
+    }
+
+    #[test]
+    fn the_servers_organize_imports_is_the_one_run() {
+        use lsp_types::{CodeAction, CodeActionKind, CodeActionOrCommand, Command};
+        let action = |title: &str, kind: Option<CodeActionKind>| {
+            CodeActionOrCommand::CodeAction(CodeAction { title: title.into(), kind, ..Default::default() })
+        };
+        let picked = |list: Vec<CodeActionOrCommand>| {
+            organize_action(list).map(|a| match a {
+                CodeActionOrCommand::CodeAction(a) => a.title,
+                CodeActionOrCommand::Command(c) => c.title,
+            })
+        };
+        let sort = action("Sort imports", Some(CodeActionKind::SOURCE));
+        let organize = action("Organize Imports", Some(CodeActionKind::new("source.organizeImports.ts")));
+        assert_eq!(picked(vec![sort.clone(), organize]).as_deref(), Some("Organize Imports"));
+        // One answer with no kind (a command alone): that's it.
+        let command = CodeActionOrCommand::Command(Command { title: "Organize".into(), ..Default::default() });
+        assert_eq!(picked(vec![command]).as_deref(), Some("Organize"));
+        assert_eq!(picked(vec![]), None);
+        assert_eq!(picked(vec![sort.clone(), sort]), None, "nothing that organizes imports");
     }
 
     #[test]

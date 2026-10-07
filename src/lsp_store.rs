@@ -843,13 +843,24 @@ impl LspStore {
         range: lsp_types::Range,
         diagnostics: Vec<Diagnostic>,
     ) -> impl Future<Output = Vec<lsp_types::CodeActionOrCommand>> + use<> {
+        self.code_actions_of(path, range, diagnostics, None)
+    }
+
+    /// The code actions of the kinds in `only` (all when None): `source.organizeImports`…
+    pub fn code_actions_of(
+        &self,
+        path: &Path,
+        range: lsp_types::Range,
+        diagnostics: Vec<Diagnostic>,
+        only: Option<Vec<lsp_types::CodeActionKind>>,
+    ) -> impl Future<Output = Vec<lsp_types::CodeActionOrCommand>> + use<> {
         let request = self.server_for(path).zip(uri_for(path)).map(|(server, uri)| {
             server.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
                 text_document: TextDocumentIdentifier { uri },
                 range,
                 context: lsp_types::CodeActionContext {
                     diagnostics,
-                    only: None,
+                    only,
                     trigger_kind: Some(lsp_types::CodeActionTriggerKind::INVOKED),
                 },
                 work_done_progress_params: Default::default(),
