@@ -826,6 +826,51 @@ pub fn spans(text: &[u8], wanted: Range<usize>, basic: &Basic) -> Vec<Span> {
     found
 }
 
+/// The blocks of a file without a grammar, by indentation: a line followed by lines further
+/// in, down to the next one no further in (its closing `}` or `end`, which stays shown).
+/// As (first line, closing line), sorted.
+pub fn indent_blocks<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Range<usize>> {
+    let indents: Vec<Option<usize>> = lines
+        .map(|l| {
+            (!l.trim().is_empty())
+                .then(|| l.chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum())
+        })
+        .collect();
+    let mut blocks = Vec::new();
+    // The lines still open, outermost first: (line, indentation).
+    let mut open: Vec<(usize, usize)> = Vec::new();
+    let mut last = None;
+    for (i, indent) in indents.iter().enumerate() {
+        let Some(indent) = *indent else { continue };
+        while let Some(&(start, at)) = open.last() {
+            if indent > at {
+                break;
+            }
+            open.pop();
+            if i > start + 1 {
+                blocks.push(start..i);
+            }
+        }
+        if let Some((prev, prev_indent)) = last
+            && indent > prev_indent
+            && open.last().is_none_or(|&(l, _)| l != prev)
+        {
+            // The line before opened this one's block: it may still be open after `open` closed
+            // lines deeper than it.
+            open.push((prev, prev_indent));
+        }
+        last = Some((i, indent));
+    }
+    // Blocks open to the end of the file.
+    for (start, _) in open {
+        if indents.len() > start + 1 {
+            blocks.push(start..indents.len());
+        }
+    }
+    blocks.sort_by_key(|b| (b.start, b.end));
+    blocks
+}
+
 fn find(text: &[u8], from: usize, token: &str) -> Option<usize> {
     let token = token.as_bytes();
     (from..text.len().saturating_sub(token.len() - 1)).find(|&at| text[at..].starts_with(token))
@@ -878,6 +923,18 @@ mod tests {
             spans(&bytes, end - 5000..end, basic);
         }
         println!("basic colouring at the end of {} KB: {:?} a keystroke", text.len() / 1024, start.elapsed() / 10);
+    }
+
+    #[test]
+    fn blocks_go_by_indentation() {
+        let ruby = "module Shop\n  class Cart\n    def total\n      1\n    end\n  end\nend\n";
+        assert_eq!(indent_blocks(ruby.lines()), [0..6, 1..5, 2..4]);
+        let swift = "struct A {\n    func f() {\n        g()\n\n        h()\n    }\n}\nlet x = 1\n";
+        assert_eq!(indent_blocks(swift.lines()), [0..6, 1..5]);
+        // Open to the end of the file; one line further in folds too, as with a grammar.
+        assert_eq!(indent_blocks("if a\n  b\n  c".lines()), [0..3]);
+        assert_eq!(indent_blocks("a\n  b\nc".lines()), [0..2]);
+        assert!(indent_blocks("a\nb\n".lines()).is_empty());
     }
 
     #[test]
