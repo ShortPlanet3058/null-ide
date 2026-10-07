@@ -504,6 +504,11 @@ pub struct Editor {
     link_targets: std::cell::RefCell<std::collections::HashMap<PathBuf, (bool, Instant)>>,
     /// The `#anchors` the headings make, as of a version of the text.
     anchors: std::cell::RefCell<Option<(u64, Vec<String>)>>,
+    /// The words changed in the changes shown, for the version, blocks and lines they were
+    /// worked out for (see `word_changes`).
+    #[allow(clippy::type_complexity)]
+    word_changes:
+        std::cell::RefCell<Option<((u64, Vec<(usize, usize)>, Range<usize>), std::rc::Rc<review::WordChanges>)>>,
     pub search: Option<SearchState>,
     /// Find looks only here (bytes, as of a revision of the text): the lines selected when
     /// the find bar opened. It follows edits, Replace All's own included.
@@ -686,6 +691,7 @@ impl Editor {
             fences: Default::default(),
             link_targets: Default::default(),
             anchors: Default::default(),
+            word_changes: Default::default(),
             search: None,
             find_scope: None,
             find_scope_at: Vec::new(),
@@ -1934,10 +1940,12 @@ impl Editor {
         {
             return self.edit(self.selection.range(), &link, EditKind::Other, cx);
         }
-        // Cells copied from a spreadsheet, pasted in Markdown: a table, on lines of its own.
+        // Cells copied from a spreadsheet, pasted in Markdown: a table, on lines of its own
+        // (not in a code fence: that's code).
         if adjust
             && self.is_markdown()
             && self.extra.is_empty()
+            && !self.in_fence(self.buffer.point(self.selection.range().start).0)
             && let Some(table) = crate::markdown_view::table_from_cells(&text)
         {
             let (_, column) = self.buffer.point(self.selection.range().start);
@@ -3536,9 +3544,15 @@ impl Editor {
     /// In the preview: to the heading whose anchor is `anchor` (a `#section` link).
     fn scroll_preview_to(&mut self, anchor: &str, cx: &mut Context<Self>) {
         let Some((_, blocks)) = &self.markdown else { return };
+        // Numbered as anchors are: a second "Install" is #install-1.
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let found = blocks.iter().position(|(_, block)| {
-            matches!(block, crate::markdown_view::Block::Heading(_, text)
-                if crate::markdown_view::slug(&crate::markdown_view::plain_text(text)) == anchor)
+            let crate::markdown_view::Block::Heading(_, text) = block else { return false };
+            let base = crate::markdown_view::slug(&crate::markdown_view::plain_text(text));
+            let n = seen.entry(base.clone()).or_insert(0);
+            let numbered = if *n == 0 { base } else { format!("{base}-{n}") };
+            *n += 1;
+            numbered == anchor
         });
         if let Some(ix) = found {
             self.reading_scroll.scroll_to_top_of_item(ix);
@@ -4128,6 +4142,11 @@ mod tests {
             let text = e.buffer.to_string();
             assert_eq!(text.matches("<!-- toc -->").count(), 1);
             assert!(text.contains("- [Use](#use)\n- [Help](#help)\n<!-- /toc -->"), "{text}");
+            // Another tool's start mark, with no end of Null's after it: left alone.
+            let start = e.buffer.len_chars();
+            e.edit(start..start, "<!-- toc -->\nkeep me\n", EditKind::Other, cx);
+            e.insert_table_of_contents(&InsertTableOfContents, window, cx);
+            assert!(e.buffer.to_string().ends_with("<!-- toc -->\nkeep me\n"));
         });
         std::fs::remove_dir_all(&dir).ok();
     }

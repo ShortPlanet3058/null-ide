@@ -202,7 +202,23 @@ impl Editor {
     /// In the changes shown (a review, ⌘I's), the words that changed in each changed line,
     /// on lines `lines`: by buffer line for the new text, by (block, row) for the old. Only
     /// where a change replaced lines one for one.
-    pub fn word_changes(&self, lines: Range<usize>) -> WordChanges {
+    pub fn word_changes(&self, lines: Range<usize>) -> std::rc::Rc<WordChanges> {
+        // Worked out again only when the text, the changes shown or the lines in view move.
+        let blocks: Vec<(usize, usize)> = self.blocks.iter().map(|b| (b.before_line, b.rows)).collect();
+        let key = (self.buffer.version(), blocks, lines.clone());
+        if let Some((k, changes)) = &*self.word_changes.borrow()
+            && *k == key
+        {
+            return changes.clone();
+        }
+        let changes = std::rc::Rc::new(self.find_word_changes(lines));
+        *self.word_changes.borrow_mut() = Some((key, changes.clone()));
+        changes
+    }
+
+    fn find_word_changes(&self, lines: Range<usize>) -> WordChanges {
+        /// Lines longer than this aren't compared word by word (a minified line).
+        const LONGEST: usize = 2_000;
         let mut changes = WordChanges::default();
         let added = self.ai_added_lines();
         for (b, block) in self.blocks.iter().enumerate() {
@@ -213,7 +229,14 @@ impl Editor {
                 continue;
             }
             for (i, old_line) in old.iter().enumerate() {
+                // Only around what's in view: a long change isn't compared all at once.
+                if start + i + old.len() < lines.start || start + i > lines.end || old_line.len() > LONGEST {
+                    continue;
+                }
                 let new_line = self.buffer.line_text(start + i);
+                if new_line.len() > LONGEST {
+                    continue;
+                }
                 let (removed, added) = changed_words(old_line, new_line.trim_end_matches(['\n', '\r']));
                 if !removed.is_empty() {
                     changes.removed.insert((b, i), removed);

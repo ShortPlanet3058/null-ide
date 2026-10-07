@@ -222,11 +222,12 @@ impl Editor {
         }
         let ending = self.style.line_ending.text();
         let text = toc.join(ending);
-        // The one written before: its lines, start mark to end mark.
+        // The one written before: its end mark, and the start mark nearest above it (another
+        // tool's `<!-- toc -->` without Null's end isn't one), neither inside a code fence.
         let lines = self.buffer.len_lines();
-        let line = |i: usize| self.buffer.line_text(i);
-        let start = (0..lines).find(|&i| line(i).trim() == crate::markdown_view::TOC_START);
-        let end = start.and_then(|s| (s..lines).find(|&i| line(i).trim() == crate::markdown_view::TOC_END));
+        let mark = |i: usize, m: &str| self.buffer.line_text(i).trim() == m && !self.in_fence(i);
+        let end = (0..lines).find(|&i| mark(i, crate::markdown_view::TOC_END));
+        let start = end.and_then(|e| (0..e).rev().find(|&i| mark(i, crate::markdown_view::TOC_START)));
         if let (Some(start), Some(end)) = (start, end) {
             let range = self.buffer.line_to_char(start)..self.buffer.line_to_char(end) + self.buffer.line_len(end);
             self.edit(range, &text, EditKind::Other, cx);

@@ -28,8 +28,9 @@ impl Editor {
 
     /// The file a link names (`%20` read as a space), from this file's folder.
     fn linked_file(&self, written: &str) -> Option<PathBuf> {
-        let path = written.split('#').next()?.replace("%20", " ");
-        if path.is_empty() {
+        let path = crate::markdown_links::decoded(written);
+        // From the site's root (`/docs/a.md`): where that is isn't known here.
+        if path.is_empty() || path.starts_with('/') {
             return None;
         }
         Some(crate::markdown_links::tidy(&self.link_folder()?.join(path)))
@@ -53,12 +54,17 @@ impl Editor {
 
     /// This file's `#anchors`, worked out once per version of its text.
     fn doc_anchors(&self) -> Vec<String> {
+        self.with_anchors(|anchors| anchors.to_vec())
+    }
+
+    /// `f` given this file's anchors, without copying them (drawing asks for each `#link`).
+    fn with_anchors<T>(&self, f: impl FnOnce(&[String]) -> T) -> T {
         let mut cache = self.anchors.borrow_mut();
         let version = self.buffer.version();
         if cache.as_ref().is_none_or(|(v, _)| *v != version) {
             *cache = Some((version, anchors(&self.buffer.to_string())));
         }
-        cache.as_ref().map(|(_, a)| a.clone()).unwrap_or_default()
+        f(cache.as_ref().map_or(&[][..], |(_, a)| a.as_slice()))
     }
 
     /// Whether the link written `written` leads nowhere.
@@ -66,7 +72,8 @@ impl Editor {
         match (self.linked_file(written), written.strip_prefix('#')) {
             (Some(file), _) => !self.exists(&file),
             // This file's own section: one of its headings.
-            (None, Some(anchor)) => !self.doc_anchors().iter().any(|a| a == anchor),
+            // `#` alone: the top of the page.
+            (None, Some(anchor)) => !anchor.is_empty() && !self.with_anchors(|a| a.iter().any(|a| a == anchor)),
             (None, None) => false,
         }
     }
@@ -76,9 +83,10 @@ impl Editor {
         if !self.is_markdown() || self.path.is_none() || self.in_fence(line) {
             return Vec::new();
         }
+        let code = crate::markdown_links::code_spans(text);
         crate::markdown_links::targets(text)
             .into_iter()
-            .chain(text.match_indices("](#").map(|(at, _)| {
+            .chain(text.match_indices("](#").filter(|(at, _)| !code.iter().any(|c| c.contains(at))).map(|(at, _)| {
                 let start = at + 2;
                 let end = text[start..].find([')', ' ']).map_or(text.len(), |e| start + e);
                 crate::markdown_links::Target { line: 0, start, text: &text[start..end] }
@@ -214,13 +222,21 @@ mod tests {
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::write(dir.join("docs/setup.md"), "x").unwrap();
         let notes = dir.join("notes.md");
-        std::fs::write(&notes, "See [setup](docs/setpu.md), [intro](#intro), [x](#nowhere).\n# Intro\n").unwrap();
+        std::fs::write(
+            &notes,
+            "See [setup](docs/setpu.md), [intro](#intro), [x](#nowhere).\n# Intro\n[top](#) `[a](#b)` [s](/docs/x.md)\n[^1]: Some note\n",
+        )
+        .unwrap();
         let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(notes.clone(), None, cx));
         editor.update_in(cx, |e, window, cx| {
             let text = e.buffer.line_text(0);
             let broken: Vec<String> =
                 e.broken_links_on_line(0, &text).into_iter().map(|r| text[r].to_string()).collect();
             assert_eq!(broken, ["docs/setpu.md", "#nowhere"]);
+            // The top of the page, a link in code, one from the site's root, a footnote: fine.
+            for line in [2, 3] {
+                assert!(e.broken_links_on_line(line, &e.buffer.line_text(line)).is_empty(), "line {line}");
+            }
             window.focus(&e.focus_handle);
             e.selection = super::super::Selection::caret(15);
             cx.notify();

@@ -129,7 +129,7 @@ pub fn parse(source: &str) -> Vec<Block> {
 
 /// The text's lines as the editor counts them: a line ends at "\n", "\r\n" or a lone
 /// "\r" (old Mac files), so line numbers here are the editor's.
-fn buffer_lines(text: &str) -> Vec<&str> {
+pub(crate) fn buffer_lines(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut lines = Vec::new();
     let (mut start, mut i) = (0, 0);
@@ -504,7 +504,7 @@ fn colours_for_extension(extension: &str, text: &str) -> Vec<(Range<usize>, Synt
     highlighter.spans(buffer.rope(), 0..text.len())
 }
 
-fn fence_of(trimmed: &str) -> Option<&'static str> {
+pub(crate) fn fence_of(trimmed: &str) -> Option<&'static str> {
     if trimmed.starts_with("```") {
         Some("```")
     } else if trimmed.starts_with("~~~") {
@@ -1125,29 +1125,48 @@ pub fn link_to(dir: &std::path::Path, target: &std::path::Path) -> String {
 pub const TOC_START: &str = "<!-- toc -->";
 pub const TOC_END: &str = "<!-- /toc -->";
 
-/// The headings of a Markdown text (`#` ones, outside code fences): their level, text as it
-/// reads, and `#anchor`, numbered as GitHub does when two read the same (`-1`, `-2`).
+/// The headings of a Markdown text (`#` ones, and a line underlined with `===` or `---`,
+/// outside code fences): their level, text as it reads, and `#anchor`, numbered as GitHub
+/// does when two read the same (`-1`, `-2`).
 pub fn headings(source: &str) -> Vec<(u8, String, String)> {
     let mut fence: Option<&str> = None;
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut found = Vec::new();
+    let mut add = |level: u8, written: &str, found: &mut Vec<(u8, String, String)>| {
+        let text = plain_text(&inlines(written));
+        let base = slug(&text);
+        let n = seen.entry(base.clone()).or_insert(0);
+        let anchor = if *n == 0 { base.clone() } else { format!("{base}-{n}") };
+        *n += 1;
+        found.push((level, text, anchor));
+    };
+    // The line before, when it's a paragraph's: a `===` or `---` under it makes it a heading.
+    let mut paragraph: Option<&str> = None;
     for line in buffer_lines(source) {
         let t = line.trim_start();
         if let Some(open) = fence_of(t) {
             fence = if fence == Some(open) { None } else { fence.or(Some(open)) };
+            paragraph = None;
             continue;
         }
         if fence.is_some() {
             continue;
         }
         if let Some((level, text)) = heading(t) {
-            let text = plain_text(&inlines(text));
-            let base = slug(&text);
-            let n = seen.entry(base.clone()).or_insert(0);
-            let anchor = if *n == 0 { base.clone() } else { format!("{base}-{n}") };
-            *n += 1;
-            found.push((level, text, anchor));
+            add(level, text, &mut found);
+            paragraph = None;
+            continue;
         }
+        let underline = |c: char| !t.is_empty() && t.trim_end().chars().all(|x| x == c);
+        if let Some(text) = paragraph
+            && (underline('=') || underline('-') && t.trim_end().len() >= 2)
+        {
+            add(if underline('=') { 1 } else { 2 }, text.trim(), &mut found);
+            paragraph = None;
+            continue;
+        }
+        let plain = !t.is_empty() && !t.starts_with('>') && list_marker(line).is_none() && !is_rule(t);
+        paragraph = plain.then_some(line);
     }
     found
 }
@@ -1649,6 +1668,10 @@ mod tests {
             ]
         );
         assert!(table_of_contents("Just text.\n").is_empty());
+        // Underlined headings count; a rule after a blank line doesn't.
+        let anchors: Vec<String> =
+            headings("Title\n=====\n\nPart one\n---\n\n---\n").into_iter().map(|(_, _, a)| a).collect();
+        assert_eq!(anchors, ["title", "part-one"]);
     }
 
     /// Spreadsheet cells become a lined-up table; code indented with tabs, one row, or rows

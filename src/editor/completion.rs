@@ -250,8 +250,10 @@ impl Editor {
             let Some(dir) = self.path.as_deref().and_then(std::path::Path::parent) else { return false };
             let path = crate::markdown_links::tidy(&dir.join(file.replace("%20", " ")));
             let markdown = path.extension().is_some_and(|x| x == "md" || x == "markdown" || x == "mdx");
+            // Read as the caret moves: not a huge file.
+            let small = std::fs::metadata(&path).is_ok_and(|m| m.len() <= 1024 * 1024);
             match std::fs::read_to_string(&path) {
-                Ok(text) if markdown => text,
+                Ok(text) if markdown && small => text,
                 _ => return false,
             }
         };
