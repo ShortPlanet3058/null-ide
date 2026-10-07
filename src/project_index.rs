@@ -48,14 +48,20 @@ static DEFINITION: LazyLock<Regex> = LazyLock::new(|| {
           | func\s+(?:\([^)]*\)\s*)?\w | type\s+\w+\s+(?:struct|interface)                                       # Go
           | \#\s*define\s+\w | typedef\s | (?:struct|enum|union)\s+\w+\s*\{                                       # C
           | (?:static\s+|inline\s+|extern\s+|const\s+|unsigned\s+|signed\s+)*[A-Za-z_][\w]*[\s\*]+\**\w+\s*\([^;{}]*\)\s*[;{]?\s*$  # C functions
+          | (?:(?:public|private|protected|internal|open|abstract|final|sealed|data|inner|enum|annotation|static|override|suspend|inline|partial|readonly|export|default)\s+)*
+            (?:class|interface|object|protocol|extension|actor|struct|enum|record|module|namespace|fun|func|trait)\s+[\w`]   # Swift, Kotlin, Java, C#, Ruby
+          | (?:local\s+)?function\s+[\w.:]+                                                                          # Lua, PHP
+          | (?:(?:public|private|protected|internal|static|final|abstract|override|virtual|async|synchronized|sealed|partial|extern|unsafe)\s+)+
+            [\w<>\[\],.?]+\s+[A-Za-z_]\w*\s*\(                                                                    # Java, C#: a method with modifiers
+          | [A-Z][\w<>\[\],.?]*\s+[a-z_]\w*\s*\([^;=]*\)\s*(?:\{|=>|async)?\s*$                                        # Java, Dart: a method returning a type
         )",
     )
     .unwrap()
 });
 
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "rs", "py", "js", "jsx", "ts", "tsx", "go", "c", "h", "cc", "cpp", "hpp", "hh", "java", "kt", "swift", "rb", "php",
-    "cs", "lua", "zig",
+    "rs", "py", "js", "jsx", "ts", "tsx", "go", "c", "h", "cc", "cpp", "hpp", "hh", "java", "kt", "kts", "swift", "rb",
+    "php", "cs", "lua", "zig", "dart", "scala",
 ];
 
 /// Words that start a C-looking line without it being a function.
@@ -68,7 +74,16 @@ static NAMES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
         (r"#\s*define\s+([A-Za-z_]\w*)", "macro"),
         (r"\btypedef\b.*?([A-Za-z_]\w*)\s*;", "type"),
         (r"\bfunc\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)", "func"),
-        (r"\b(fn|def|class|function\s*\*?|struct|enum|trait|interface|type|mod|union)\s+([A-Za-z_$][\w$]*)", ""),
+        // Java, C#: a method with modifiers (before Rust's `static NAME`).
+        (
+            r"^\s*(?:(?:public|private|protected|internal|static|final|abstract|override|virtual|async|synchronized|sealed|partial|extern|unsafe)\s+)+[\w<>\[\],.?]+\s+([A-Za-z_]\w*)\s*\(",
+            "fn",
+        ),
+        (r"\bfunction\s+([A-Za-z_]\w*[.:][\w.:]+)", "function"),
+        (
+            r"\b(fn|fun|def|class|function\s*\*?|struct|enum|trait|interface|type|mod|union|protocol|extension|actor|object|module|namespace|record)\s+([A-Za-z_$][\w$]*)",
+            "",
+        ),
         (r"\b(const|static|let)\s+(?:mut\s+)?([A-Za-z_$][\w$]*)", ""),
         (r"([A-Za-z_]\w*)\s*\(", "fn"),
     ]
@@ -85,6 +100,14 @@ fn name_and_kind(line: &str) -> Option<(String, &'static str)> {
             let keyword = caps.get(1)?.as_str().split_whitespace().next()?.trim_end_matches('*');
             let keyword = [
                 "fn",
+                "fun",
+                "protocol",
+                "extension",
+                "actor",
+                "object",
+                "module",
+                "namespace",
+                "record",
                 "def",
                 "class",
                 "function",
@@ -221,6 +244,56 @@ pub fn outline_for(definitions: &[Definition], current: &Path, root: &Path, comm
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What ⌘⇧O lists in each language: (name, kind) of its definitions.
+    fn names(file: &str, text: &str) -> Vec<(String, &'static str)> {
+        definitions_in(Path::new(file), text).into_iter().map(|d| (d.name, d.kind)).collect()
+    }
+
+    #[test]
+    fn definitions_in_more_languages() {
+        let pairs = |list: &[(&str, &'static str)]| list.iter().map(|(n, k)| (n.to_string(), *k)).collect::<Vec<_>>();
+        let swift = "import UIKit\nprotocol Shape {}\nstruct Card: View {\n    func render() {\n    }\n}\nextension Card {}\nenum Kind {\n    case a\n}\nactor Store {}\n";
+        assert_eq!(
+            names("a.swift", swift),
+            pairs(&[
+                ("Shape", "protocol"),
+                ("Card", "struct"),
+                ("render", "func"),
+                ("Card", "extension"),
+                ("Kind", "enum"),
+                ("Store", "actor")
+            ])
+        );
+        let kotlin = "class Repo {\n    fun load(id: Int): User? = null\n    private suspend fun save() {\n    }\n}\nobject Cache\ninterface Api\ndata class User(val id: Int)\n";
+        assert_eq!(
+            names("a.kt", kotlin),
+            pairs(&[
+                ("Repo", "class"),
+                ("load", "fun"),
+                ("save", "fun"),
+                ("Cache", "object"),
+                ("Api", "interface"),
+                ("User", "class")
+            ])
+        );
+        let java = "public class Main {\n    public static void main(String[] args) {\n        run();\n        String s = format(x);\n        return compute(a);\n    }\n    private List<String> names(int count) {\n    }\n}\ninterface Shape {}\n";
+        assert_eq!(
+            names("Main.java", java),
+            pairs(&[("Main", "class"), ("main", "fn"), ("names", "fn"), ("Shape", "interface")])
+        );
+        let csharp = "namespace App {\n    public class Program {\n        static void Main(string[] args) {\n        }\n        public async Task<int> LoadAsync() {\n        }\n    }\n}\n";
+        assert_eq!(
+            names("a.cs", csharp),
+            pairs(&[("App", "namespace"), ("Program", "class"), ("Main", "fn"), ("LoadAsync", "fn")])
+        );
+        let ruby = "module Shop\n  class Cart\n    def total\n    end\n  end\nend\n";
+        assert_eq!(names("a.rb", ruby), pairs(&[("Shop", "module"), ("Cart", "class"), ("total", "def")]));
+        let lua = "local function add(a, b)\n  return a + b\nend\nfunction M.run()\nend\n";
+        assert_eq!(names("a.lua", lua), pairs(&[("add", "function"), ("M.run", "function")]));
+        let dart = "class Card extends StatelessWidget {\n  Widget build(BuildContext context) {\n    return Text('hi');\n  }\n}\n";
+        assert_eq!(names("a.dart", dart), pairs(&[("Card", "class"), ("build", "fn")]));
+    }
 
     #[test]
     fn a_markdown_file_s_symbols_are_its_headings() {
