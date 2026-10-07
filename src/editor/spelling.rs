@@ -19,11 +19,13 @@ const GUESSES: usize = 5;
 /// Which lines of a Markdown text are inside fences (``` or ~~~): code, not prose.
 fn fenced_lines(rope: &ropey::Rope) -> Vec<bool> {
     let mut fence: Option<char> = None;
-    rope.lines()
+    // The text once, its lines as the editor counts them: no copy of each line.
+    let text = rope.to_string();
+    crate::markdown_view::buffer_lines(&text)
+        .into_iter()
         .map(|line| {
-            let start: String = line.chars().take(8).collect();
-            let start = start.trim_start_matches(' ');
-            let opens = ['`', '~'].into_iter().find(|c| start.starts_with(&c.to_string().repeat(3)));
+            let start = line.trim_start_matches(' ');
+            let opens = [('`', "```"), ('~', "~~~")].into_iter().find(|(_, f)| start.starts_with(f)).map(|(c, _)| c);
             match (fence, opens) {
                 (Some(open), Some(c)) if c == open => {
                     fence = None;
@@ -38,6 +40,11 @@ fn fenced_lines(rope: &ropey::Rope) -> Vec<bool> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+pub(super) fn fenced_lines_for_timing(rope: &ropey::Rope) -> Vec<bool> {
+    fenced_lines(rope)
 }
 
 /// What colours the byte at `at`, if anything does.
@@ -163,6 +170,6 @@ mod tests {
     #[test]
     fn fences_are_found() {
         let rope = ropey::Rope::from_str("text\n```rust\nlet teh = 1;\n```\nmore\n~~~\nx\n~~~\n");
-        assert_eq!(fenced_lines(&rope), [false, true, true, true, false, true, true, true, false]);
+        assert_eq!(fenced_lines(&rope), [false, true, true, true, false, true, true, true]);
     }
 }

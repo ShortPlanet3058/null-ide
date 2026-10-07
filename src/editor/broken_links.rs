@@ -246,6 +246,66 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// What a frame of a big Markdown file costs in link and spelling checks, right after
+    /// a keystroke (anchors and fences worked out again). Run by hand:
+    /// `cargo test timing_markdown -- --ignored --nocapture`
+    #[gpui::test]
+    #[ignore]
+    fn timing_markdown_frame(cx: &mut gpui::TestAppContext) {
+        use crate::fonts::Fonts;
+        use crate::settings::Settings;
+        use crate::theme::Theme;
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = std::env::temp_dir().join(format!("null-timing-markdown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut text = String::from("# Notes\n\n");
+        for i in 0..4000 {
+            text.push_str(&format!("Some words teh here [link](docs/x{i}.md) ![i](img/{i}.png) [s](#notes)\n"));
+            if i % 20 == 0 {
+                text.push_str(&format!("## Part {i}\n"));
+            }
+        }
+        let path = dir.join("big.md");
+        std::fs::write(&path, &text).unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(path.clone(), None, cx));
+        editor.update(cx, |e, cx| {
+            let frame = |e: &Editor, cx: &App| {
+                for line in 2000..2060 {
+                    let text = e.buffer.line_text(line);
+                    e.broken_links_on_line(line, &text);
+                    e.misspellings_on_line(line, &text, cx);
+                }
+            };
+            frame(e, cx);
+            let start = Instant::now();
+            for i in 0..10 {
+                e.edit(0..0, if i % 2 == 0 { "x" } else { "" }, super::super::EditKind::Typing, cx);
+                frame(e, cx);
+            }
+            println!("a frame after a keystroke, 60 lines: {:?}", start.elapsed() / 10);
+            let start = Instant::now();
+            for _ in 0..10 {
+                frame(e, cx);
+            }
+            println!("a frame with nothing typed: {:?}", start.elapsed() / 10);
+            let start = Instant::now();
+            for _ in 0..10 {
+                anchors(&e.buffer.to_string());
+            }
+            println!("  anchors of the whole file: {:?}", start.elapsed() / 10);
+            let start = Instant::now();
+            for _ in 0..10 {
+                super::super::spelling::fenced_lines_for_timing(e.buffer.rope());
+            }
+            println!("  fences of the whole file: {:?}", start.elapsed() / 10);
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn nearest_names_first() {
         let names = vec!["setup.md".to_string(), "install.md".to_string(), "README.md".to_string()];
