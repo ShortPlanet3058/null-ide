@@ -100,14 +100,19 @@ impl Editor {
 
     /// Comments the selected lines out, or back in when they all already are.
     pub(super) fn toggle_comment(&mut self, cx: &mut Context<Self>) {
-        let Some(language) = self.language() else { return };
+        // A language with a grammar, or one the basic colouring knows (Swift, Ruby…).
+        let (line_comment, block_comment) = match (self.language(), self.basic_syntax()) {
+            (Some(language), _) => (language.line_comment, language.block_comment),
+            (None, Some(basic)) => (basic.line_comment.first().copied(), basic.block_comment),
+            (None, None) => return,
+        };
         let lines = self.selected_lines();
         let texts = self.line_texts(&lines);
-        if let Some(marker) = language.line_comment {
+        if let Some(marker) = line_comment {
             let (new_lines, shift) = toggle_line_comments(&texts, marker);
             let start = lines.start;
             self.rewrite_lines(lines, new_lines, |(l, c)| (l, shift(l - start, c)), cx);
-        } else if let Some((open, close)) = language.block_comment {
+        } else if let Some((open, close)) = block_comment {
             let new_lines = toggle_block_comment(&texts, open, close);
             self.rewrite_lines(lines, new_lines, |p| p, cx);
         }
@@ -1387,5 +1392,32 @@ mod editor_tests {
         // Off, quotes are typed as they are.
         cx.update(|cx| cx.set_global(crate::settings::Settings::default()));
         assert_eq!(typed(cx, "notes.md", "", "\"x\""), "\"x\"");
+    }
+}
+
+#[cfg(test)]
+mod basic_colouring_tests {
+    use crate::buffer::Buffer;
+    use crate::editor::{Editor, Selection};
+    use gpui::{AppContext as _, TestAppContext};
+    use std::path::PathBuf;
+
+    /// A Swift file without a grammar: named Swift, coloured, ⌘/ comments it with `//`.
+    #[gpui::test]
+    fn languages_without_a_grammar_still_read_as_code(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+        });
+        let text = "let n = 42\n";
+        let e = cx.new(|cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("a.swift")), cx));
+        e.update(cx, |e, cx| {
+            assert_eq!(e.language_name(), "Swift");
+            e.highlight_bytes(0..text.len());
+            assert!(e.spans.iter().any(|(r, s)| *r == (0..3) && *s == crate::theme::Syntax::Keyword));
+            e.selection = Selection::caret(0);
+            e.toggle_comment(cx);
+            assert_eq!(e.buffer.to_string(), "// let n = 42\n");
+        });
     }
 }

@@ -5,6 +5,7 @@ mod ai;
 mod ai_agent;
 mod ai_task;
 mod assets;
+mod basic_syntax;
 mod buffer;
 mod clipboard_history;
 mod color_panel;
