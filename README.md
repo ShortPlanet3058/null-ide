@@ -98,6 +98,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 - Colours written in CSS, HTML, scripts and theme files (`#f80`, `rgb()`, `hsl()`) show a
   small square of themselves just before; a click on it opens the Mac's colour panel, and the
   colour picked there is written back the way the first was (one undo takes it back).
+- Code the language server says is unused (an import, a variable) is drawn faded, and a
+  deprecated name struck through.
 - Faint indent guides, sticky scroll (the enclosing lines stay at the top), the other uses
   of a name tinted, and a line at the length the project keeps to (from `.editorconfig`,
   rustfmt, Prettier, Black or Ruff). Each can be turned off.

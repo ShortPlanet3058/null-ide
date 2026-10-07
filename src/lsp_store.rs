@@ -279,7 +279,16 @@ impl LspStore {
                         content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
                         ..Default::default()
                     }),
-                    publish_diagnostics: Some(PublishDiagnosticsClientCapabilities::default()),
+                    // Unused code is faded, deprecated names struck through.
+                    publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
+                        tag_support: Some(lsp_types::TagSupport {
+                            value_set: vec![
+                                lsp_types::DiagnosticTag::UNNECESSARY,
+                                lsp_types::DiagnosticTag::DEPRECATED,
+                            ],
+                        }),
+                        ..Default::default()
+                    }),
                     rename: Some(lsp_types::RenameClientCapabilities::default()),
                     references: Some(Default::default()),
                     type_definition: Some(Default::default()),

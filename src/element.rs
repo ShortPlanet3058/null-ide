@@ -345,16 +345,27 @@ fn run(len: usize, font: &Font, color: gpui::Hsla) -> TextRun {
 
 /// Text runs covering exactly `text`, colored by the highlight spans that
 /// fall inside it. `line_start` is the line's byte offset in the document.
+/// How a stretch of a line is marked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mark {
+    /// A wavy underline: a problem, a broken link, a misspelling.
+    Wavy(Hsla),
+    /// Faded: code the language server says isn't used (or is switched off).
+    Faded,
+    /// Struck through: a deprecated name.
+    Struck,
+}
+
 fn runs_for(
     text: &str,
     line_start: usize,
     spans: &[Span],
-    underlines: &[(Range<usize>, Hsla)],
+    underlines: &[(Range<usize>, Mark)],
     theme: &Theme,
     font: &Font,
 ) -> Vec<TextRun> {
     let colored: Vec<Span> = spans_in(spans, line_start..line_start + text.len()).collect();
-    // Cut the line wherever a color or an underline starts or ends.
+    // Cut the line wherever a color or a mark starts or ends.
     let mut cuts: Vec<usize> = vec![0, text.len()];
     cuts.extend(colored.iter().flat_map(|(r, _)| [r.start, r.end]));
     cuts.extend(underlines.iter().flat_map(|(r, _)| [r.start, r.end]));
@@ -373,8 +384,20 @@ fn runs_for(
             let syntax =
                 colored.get(next).filter(|(r, _)| r.start <= a && b <= r.end).map_or(Syntax::Plain, |(_, s)| *s);
             let mut run = run(b - a, font, theme.syntax(syntax));
-            if let Some((_, color)) = underlines.iter().find(|(r, _)| r.start <= a && b <= r.end) {
-                run.underline = Some(UnderlineStyle { color: Some(*color), thickness: px(1.), wavy: true });
+            let marks = underlines.iter().filter(|(r, _)| r.start <= a && b <= r.end).map(|(_, mark)| *mark);
+            let mut wavy = None;
+            for mark in marks {
+                match mark {
+                    Mark::Wavy(color) => wavy = wavy.or(Some(color)),
+                    Mark::Faded => run.color = run.color.opacity(0.45),
+                    Mark::Struck => {}
+                }
+            }
+            if let Some(color) = wavy {
+                run.underline = Some(UnderlineStyle { color: Some(color), thickness: px(1.), wavy: true });
+            }
+            if underlines.iter().any(|(r, mark)| r.start <= a && b <= r.end && *mark == Mark::Struck) {
+                run.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: Some(run.color) });
             }
             run
         })
@@ -604,26 +627,41 @@ impl Element for EditorElement {
                 if over_gutter { editor.foldable().iter().map(|r| r.start).collect() } else { Default::default() };
 
             // Errors and warnings get a wavy underline and color their line number.
-            // Hints and notes only show in the hover card, to keep the code calm.
-            let mut underlines: Vec<Vec<(Range<usize>, Hsla)>> = vec![Vec::new(); lines_shown.len()];
+            // Hints and notes only show in the hover card, to keep the code calm; code the
+            // server says is unused (or switched off) fades, a deprecated name is struck through.
+            let mut underlines: Vec<Vec<(Range<usize>, Mark)>> = vec![Vec::new(); lines_shown.len()];
             let mut flagged: Vec<Option<Hsla>> = vec![None; lines_shown.len()];
             for problem in editor.problems(cx).iter() {
                 let color = match problem.severity {
-                    DiagnosticSeverity::ERROR => theme.error,
-                    DiagnosticSeverity::WARNING => theme.warning,
-                    _ => continue,
+                    DiagnosticSeverity::ERROR => Some(theme.error),
+                    DiagnosticSeverity::WARNING => Some(theme.warning),
+                    _ => None,
                 };
+                let tagged = |tag| problem.diagnostic.tags.as_ref().is_some_and(|t| t.contains(&tag));
+                let faded = tagged(lsp_types::DiagnosticTag::UNNECESSARY);
+                let struck = tagged(lsp_types::DiagnosticTag::DEPRECATED);
+                if color.is_none() && !faded && !struck {
+                    continue;
+                }
                 let (start_line, start_col) = editor.buffer.point(problem.range.start);
                 let (end_line, end_col) = editor.buffer.point(problem.range.end);
                 for line in start_line.max(lines_shown.start)..=end_line.min(lines_shown.end.saturating_sub(1)) {
                     let i = line - lines_shown.start;
                     let text = &texts[i];
                     let from = if line == start_line { start_col } else { 0 };
-                    let mut to = if line == end_line { end_col } else { text.chars().count() };
-                    if to <= from {
-                        to = from + 1; // zero-width problems still get one character underlined
+                    let to = if line == end_line { end_col } else { text.chars().count() };
+                    let range = byte_of_column(text, from)..byte_of_column(text, to);
+                    if to > from {
+                        for (on, mark) in [(faded, Mark::Faded), (struck, Mark::Struck)] {
+                            if on {
+                                underlines[i].push((range.clone(), mark));
+                            }
+                        }
                     }
-                    underlines[i].push((byte_of_column(text, from)..byte_of_column(text, to), color));
+                    let Some(color) = color else { continue };
+                    // Zero-width problems still get one character underlined.
+                    let wavy = if to > from { range } else { range.start..byte_of_column(text, from + 1) };
+                    underlines[i].push((wavy, Mark::Wavy(color)));
                     if line == start_line && flagged[i] != Some(theme.error) {
                         flagged[i] = Some(color);
                     }
@@ -633,10 +671,10 @@ impl Element for EditorElement {
             // so a problem's colour wins.
             for (i, line) in lines_shown.clone().enumerate() {
                 for link in editor.broken_links_on_line(line, &texts[i]) {
-                    underlines[i].push((link, theme.warning));
+                    underlines[i].push((link, Mark::Wavy(theme.warning)));
                 }
                 for word in editor.misspellings_on_line(line, &texts[i], cx) {
-                    underlines[i].push((word, theme.muted));
+                    underlines[i].push((word, Mark::Wavy(theme.muted)));
                 }
             }
 
@@ -695,7 +733,7 @@ impl Element for EditorElement {
                         byte_in_line(&editor.buffer, line_text, row.line, row.cols.end),
                     );
                     let text = line_text[b0..b1].to_string();
-                    let row_underlines: Vec<(Range<usize>, Hsla)> = underlines[i]
+                    let row_underlines: Vec<(Range<usize>, Mark)> = underlines[i]
                         .iter()
                         .filter_map(|(r, color)| {
                             let (start, end) = (r.start.max(b0), r.end.min(b1));
@@ -711,7 +749,7 @@ impl Element for EditorElement {
                     {
                         let at = byte_of_column(&text, caret_col - row.cols.start);
                         let (before, after) = text.split_at(at);
-                        let split = |r: &(Range<usize>, Hsla), from: usize, to: usize| {
+                        let split = |r: &(Range<usize>, Mark), from: usize, to: usize| {
                             let (start, end) = (r.0.start.max(from), r.0.end.min(to));
                             (start < end).then(|| (start - from..end - from, r.1))
                         };
@@ -1725,6 +1763,34 @@ mod problem_notes {
             message: message.into(),
             diagnostic: Default::default(),
         }
+    }
+
+    /// Unused code fades, a deprecated name is struck through, and a problem's wavy line
+    /// still shows over faded code.
+    #[test]
+    fn marks_fade_strike_and_underline() {
+        let theme = Theme::oled();
+        let font = gpui::font("Menlo");
+        let text = "let unused = old();";
+        let marks =
+            [(4..10, Mark::Faded), (13..16, Mark::Struck), (4..10, Mark::Wavy(theme.warning)), (0..3, Mark::Faded)];
+        let runs = runs_for(text, 0, &[], &marks, &theme, &font);
+        let at = |byte: usize| {
+            let mut start = 0;
+            runs.iter()
+                .find(|r| {
+                    start += r.len;
+                    byte < start
+                })
+                .unwrap()
+        };
+        let plain = theme.syntax(Syntax::Plain);
+        assert_eq!(at(5).color, plain.opacity(0.45));
+        assert!(at(5).underline.is_some_and(|u| u.wavy && u.color == Some(theme.warning)));
+        assert!(at(14).strikethrough.is_some());
+        assert_eq!(at(14).color, plain);
+        assert_eq!(at(11).color, plain);
+        assert!(at(11).underline.is_none() && at(11).strikethrough.is_none());
     }
 
     #[test]
