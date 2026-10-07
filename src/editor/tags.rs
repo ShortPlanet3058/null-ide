@@ -302,6 +302,17 @@ impl Editor {
         cx.emit(EditorEvent::Edited);
     }
 
+    /// With the caret in a tag's name (and nothing selected): that name and its pair's, to
+    /// outline them.
+    pub fn tag_pair_at_caret(&mut self) -> Option<[Range<usize>; 2]> {
+        if !self.selection.is_empty() {
+            return None;
+        }
+        let caret = self.selection.head;
+        let names = self.linked_tag(&(caret..caret))?;
+        names.iter().all(|r| !r.is_empty()).then_some(names)
+    }
+
     /// The tag name `range` (chars) is within, and its pair's, when editing one should
     /// edit the other.
     pub(super) fn linked_tag(&mut self, range: &Range<usize>) -> Option<[Range<usize>; 2]> {
@@ -365,6 +376,28 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The caret in a tag's name: that name and its pair's, from either end; nothing elsewhere.
+    #[gpui::test]
+    fn the_caret_s_tag_and_its_pair(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+        });
+        let text = "<div class=\"a\"><p>Hi</p></div>";
+        let e = cx.new(|cx| Editor::new(crate::buffer::Buffer::from_text(text), Some("a.html".into()), cx));
+        let pair = |cx: &mut gpui::TestAppContext, at: usize| {
+            e.update(cx, |e, _| {
+                e.selection = Selection::caret(at);
+                e.tag_pair_at_caret()
+            })
+        };
+        assert_eq!(pair(cx, 2), Some([1..4, 26..29]), "in <div");
+        assert_eq!(pair(cx, 27), Some([26..29, 1..4]), "in </div>");
+        assert_eq!(pair(cx, 19), None, "in the text");
+        assert_eq!(pair(cx, 7), None, "in an attribute");
+    }
 
     fn tree(text: &str, flavor: Flavor) -> Tree {
         let language: tree_sitter::Language = match flavor {
