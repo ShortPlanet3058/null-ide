@@ -260,7 +260,8 @@ problem found.
 
 In Rust, **Expand Macro** (⌘K) shows what the macro at the caret turns into (`println!`, a
 `derive`), from rust-analyzer, in the info card; **Go to Parent Module** goes to the `mod` line
-that brings the file in, and **Open Cargo.toml** to its crate's.
+that brings the file in, **Open Cargo.toml** to its crate's, and **Open Documentation** opens
+the docs.rs (or standard library) page of the name at the caret.
 
 ## AI (optional, off by default)
 

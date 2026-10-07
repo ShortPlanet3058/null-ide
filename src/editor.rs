@@ -156,6 +156,7 @@ actions!(
         GoToDefinition,
         PeekDefinition,
         ExpandMacro,
+        OpenDocumentation,
         GoToParentModule,
         OpenCargoToml,
         GoToTypeDefinition,
@@ -3325,6 +3326,10 @@ impl Editor {
         self.expand_macro_at(self.selection.head, cx);
     }
 
+    fn open_documentation(&mut self, _: &OpenDocumentation, _: &mut Window, cx: &mut Context<Self>) {
+        self.open_docs_at(self.selection.head, cx);
+    }
+
     fn go_to_parent_module(&mut self, _: &GoToParentModule, _: &mut Window, cx: &mut Context<Self>) {
         self.go_to_target(crate::lsp_store::Target::ParentModule, cx);
     }
@@ -3727,6 +3732,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::unfold_all))
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::expand_macro))
+            .on_action(cx.listener(Self::open_documentation))
             .on_action(cx.listener(Self::go_to_parent_module))
             .on_action(cx.listener(Self::open_cargo_toml))
             .on_action(cx.listener(Self::peek_definition))

@@ -103,6 +103,32 @@ pub enum LspEvent {
 }
 
 /// The language servers for one project, and what they've reported.
+/// rust-analyzer's own request for the web page documenting what's at a position.
+pub enum ExternalDocs {}
+
+/// Its answer: the page's address, or (when the client says it reads local docs) both.
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum DocsLink {
+    Web(String),
+    Both { web: Option<String>, local: Option<String> },
+}
+
+impl DocsLink {
+    pub fn web(self) -> Option<String> {
+        match self {
+            DocsLink::Web(url) => Some(url),
+            DocsLink::Both { web, .. } => web,
+        }
+    }
+}
+
+impl lsp_types::request::Request for ExternalDocs {
+    type Params = TextDocumentPositionParams;
+    type Result = Option<DocsLink>;
+    const METHOD: &'static str = "experimental/externalDocs";
+}
+
 /// rust-analyzer's own request for where a file's module is declared.
 pub enum ParentModule {}
 
@@ -565,6 +591,16 @@ impl LspStore {
             },
             cx,
         );
+    }
+
+    /// The web page documenting what's at `position`, from rust-analyzer (docs.rs, the
+    /// standard library's docs).
+    pub fn docs_link(&self, path: &Path, position: Position) -> impl Future<Output = Option<String>> + use<> {
+        let request = self
+            .server_for(path)
+            .zip(Self::position_params(path, position))
+            .map(|(server, params)| server.request::<ExternalDocs>(params));
+        async move { request?.await.ok().flatten().and_then(DocsLink::web) }
     }
 
     /// What the macro at `position` expands to, from rust-analyzer: its name and the code.
@@ -1044,5 +1080,12 @@ mod tests {
             serde_json::json!({ "textDocument": { "uri": "file:///a/src/main.rs" } })
         );
         assert_eq!(<ParentModule as lsp_types::request::Request>::METHOD, "experimental/parentModule");
+        // A docs link, as a plain address or with a local one.
+        let plain: Option<DocsLink> = serde_json::from_value(serde_json::json!("https://docs.rs/x")).unwrap();
+        assert_eq!(plain.and_then(DocsLink::web).as_deref(), Some("https://docs.rs/x"));
+        let both: Option<DocsLink> =
+            serde_json::from_value(serde_json::json!({ "web": "https://doc.rust-lang.org/std", "local": null }))
+                .unwrap();
+        assert_eq!(both.and_then(DocsLink::web).as_deref(), Some("https://doc.rust-lang.org/std"));
     }
 }
