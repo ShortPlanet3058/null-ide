@@ -1943,12 +1943,28 @@ impl Workspace {
     fn rename_file(&mut self, from: PathBuf, to: PathBuf, cx: &mut Context<Self>) {
         const WAIT: Duration = Duration::from_secs(2);
         let request = self.lsp.read(cx).will_rename(&from, &to);
+        // Markdown's links to it (and a moved Markdown file's own), which no server keeps.
+        let root = self.tree.read(cx).root().to_path_buf();
+        let (old, new) = (from.clone(), to.clone());
+        // Open files as they are in their tabs, saved or not.
+        let open: std::collections::HashMap<PathBuf, String> = self
+            .tabs
+            .iter()
+            .filter_map(|t| {
+                let editor = t.editor.read(cx);
+                Some((editor.path()?.to_path_buf(), editor.buffer.to_string())).filter(|_| editor.is_markdown())
+            })
+            .collect();
+        let links = cx
+            .background_executor()
+            .spawn(async move { crate::markdown_links::edits_for_move(&root, &old, &new, &open) });
         cx.spawn(async move |this, cx| {
             let timeout = cx.background_executor().timer(WAIT);
-            let edits = futures::select_biased! {
+            let mut edits = futures::select_biased! {
                 edits = futures::FutureExt::fuse(request) => edits,
                 _ = futures::FutureExt::fuse(timeout) => Vec::new(),
             };
+            edits.extend(links.await);
             this.update(cx, |this, cx| {
                 // What every server asked for, as one: the files changed and those that couldn't be.
                 let changed = (!edits.is_empty()).then(|| {
@@ -7924,6 +7940,44 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(crate::session::load_backups(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Renaming a folder of images, then moving a guide up a level: the Markdown links to
+    /// them, and the guide's own, still point where they should; the open README too.
+    #[gpui::test]
+    fn markdown_links_follow_renames(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-markdown-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("img")).unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("img/a.png"), "x").unwrap();
+        std::fs::write(dir.join("README.md"), "![a](img/a.png) and [guide](docs/guide.md#run)\n").unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "Back to [readme](../README.md), ![a](../img/a.png)\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("README.md"), window, cx);
+            w.rename_file(dir.join("img"), dir.join("pics"), cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |w, _, cx| w.rename_file(dir.join("docs/guide.md"), dir.join("guide.md"), cx));
+        cx.run_until_parked();
+        // The open README changed in its tab (saved with the rest).
+        workspace.update(cx, |w, cx| {
+            let readme = w.active_editor().unwrap().read(cx).buffer.to_string();
+            assert_eq!(readme, "![a](pics/a.png) and [guide](guide.md#run)\n");
+        });
+        assert_eq!(
+            std::fs::read_to_string(dir.join("guide.md")).unwrap(),
+            "Back to [readme](README.md), ![a](pics/a.png)\n"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

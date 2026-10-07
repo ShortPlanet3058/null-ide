@@ -24,6 +24,7 @@ mod local_history;
 mod lsp;
 mod lsp_store;
 mod markdown;
+mod markdown_links;
 mod markdown_view;
 mod menus;
 mod palette;
