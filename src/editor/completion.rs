@@ -496,11 +496,15 @@ impl Editor {
             let (line, _) = self.buffer.point(start);
             let line_text = self.buffer.line_text(line);
             let word = self.buffer.slice(start..end);
+            // The clipboard's lines as the file's, each after the first at this line's indentation.
+            let indent: String = line_text.chars().take_while(|c| c.is_whitespace()).collect();
+            let ending = self.style.line_ending.text();
             let clipboard = suggestion
                 .insert
                 .contains("CLIPBOARD")
                 .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
-                .flatten();
+                .flatten()
+                .map(|text| text.replace("\r\n", "\n").replace('\n', &format!("{ending}{indent}")));
             let path = self.path.clone().unwrap_or_default();
             let language = self.language();
             let here = crate::snippets::Here {

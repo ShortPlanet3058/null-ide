@@ -35,7 +35,9 @@ pub use completion::CompletionMenu;
 /// from an earlier copy) and says more than the plain text does.
 fn formatted_paste(html: &str, text: &str) -> Option<String> {
     let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let letters = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).take(200).collect::<String>();
+    // Letters only, in lower case: list numbers and CSS's capitals differ between the two.
+    let letters =
+        |s: &str| s.chars().filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase).take(200).collect::<String>();
     if letters(&crate::html_markdown::plain_text(html)) != letters(text) {
         return None;
     }
@@ -1903,11 +1905,27 @@ impl Editor {
             self.edit(start..start + self.buffer.line_len(line), "", EditKind::Other, cx);
             return true;
         }
+        // A list numbered all the same on purpose (`1.` `1.`) goes on that way.
+        let next = match self.list_lines(line).and_then(|(lines, at)| crate::markdown_view::same_number(&lines, at)) {
+            Some(n) => {
+                let indent = next.len() - next.trim_start().len();
+                let digits = next[indent..].chars().take_while(char::is_ascii_digit).count();
+                if digits > 0 { format!("{}{n}{}", &next[..indent], &next[indent + digits..]) } else { next }
+            }
+            None => next,
+        };
         let nl = self.style.line_ending.text();
         self.edit(range, &format!("{nl}{next}"), EditKind::Other, cx);
         // A numbered item added in the middle: the ones after it count on.
         self.renumber_list(line + 1, cx);
         true
+    }
+
+    /// The lines near `line` (a list isn't thousands of lines long), and where `line` is
+    /// among them.
+    fn list_lines(&self, line: usize) -> Option<(Vec<String>, usize)> {
+        let window = line.saturating_sub(2000)..(line + 2000).min(self.buffer.len_lines());
+        (line < window.end).then(|| (window.clone().map(|l| self.buffer.line_text(l)).collect(), line - window.start))
     }
 
     /// Numbered Markdown lists around `line` brought back in order (see
@@ -1916,27 +1934,29 @@ impl Editor {
         if !self.is_markdown() || self.in_fence(line) {
             return;
         }
-        // The lines near it: a list isn't thousands of lines long.
-        let window = line.saturating_sub(2000)..(line + 2000).min(self.buffer.len_lines());
-        let lines: Vec<String> = window.clone().map(|l| self.buffer.line_text(l)).collect();
-        let changes = crate::markdown_view::renumbered(&lines, line - window.start);
+        let Some((lines, at)) = self.list_lines(line) else { return };
+        let start_line = line - at;
+        let changes = crate::markdown_view::renumbered(&lines, at);
         if changes.is_empty() {
             return;
         }
-        let (caret_line, caret_col) = self.caret_point();
-        let mut caret_col = caret_col as isize;
+        let point = |o: usize| self.buffer.point(o);
+        let (mut anchor, mut head) = (point(self.selection.anchor), point(self.selection.head));
         for (i, text) in changes.iter().rev() {
-            let l = window.start + i;
+            let l = start_line + i;
             let old_len = self.buffer.line_len(l);
             let start = self.buffer.line_to_char(l);
             self.buffer.replace(start..start + old_len, text);
             let grew = text.chars().count() as isize - old_len as isize;
-            // The caret after the number moves with the line's text.
-            if l == caret_line && caret_col > 0 {
-                caret_col = (caret_col + grew).max(0);
+            // The selection's ends after the number move with the line's text.
+            for end in [&mut anchor, &mut head] {
+                if end.0 == l && end.1 > 0 {
+                    end.1 = (end.1 as isize + grew).max(0) as usize;
+                }
             }
         }
-        self.selection = Selection::caret(self.buffer.offset(caret_line, caret_col as usize));
+        let offset = |(l, c): (usize, usize)| self.buffer.offset(l, c);
+        self.selection = Selection { anchor: offset(anchor), head: offset(head) };
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
         cx.notify();
@@ -2062,10 +2082,22 @@ impl Editor {
             && let Some(markdown) =
                 crate::html_markdown::clipboard_html().and_then(|html| formatted_paste(&html, &text))
         {
-            // Blocks (headings, lists…) start on a line of their own; a phrase goes in the line.
-            let (_, column) = self.buffer.point(self.selection.range().start);
-            let blocks = markdown.contains("\n\n") || markdown.starts_with(['#', '-', '>', '|', '`']);
-            let markdown = if column > 0 && blocks { format!("\n\n{markdown}") } else { markdown };
+            // Blocks (headings, lists…) go on lines of their own; a phrase goes in the line.
+            let range = self.selection.range();
+            let (_, column) = self.buffer.point(range.start);
+            let (end_line, end_column) = self.buffer.point(range.end);
+            let first = markdown.lines().next().unwrap_or("");
+            let numbered = first
+                .split_once(['.', ')'])
+                .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+            let blocks = markdown.contains('\n') || numbered || first.starts_with(['#', '-', '>', '|', '`', '~']);
+            let text_after = end_column < self.buffer.line_len(end_line);
+            let markdown = match (blocks && column > 0, blocks && text_after) {
+                (true, true) => format!("\n\n{markdown}\n\n"),
+                (true, false) => format!("\n\n{markdown}"),
+                (false, true) => format!("{markdown}\n\n"),
+                (false, false) => markdown,
+            };
             let markdown = match self.style.line_ending {
                 crate::file_style::LineEnding::Crlf => markdown.replace('\n', "\r\n"),
                 crate::file_style::LineEnding::Lf => markdown,
@@ -2315,6 +2347,10 @@ impl Editor {
         let mut tick: Option<bool> = None;
         for line in first..=last {
             let text = self.buffer.line_text(line);
+            // Code, and the fences around it, aren't tasks.
+            if self.in_fence(line) || crate::markdown_view::fence_of(text.trim_start()).is_some() {
+                continue;
+            }
             let Some(mut new) = crate::markdown_view::task_toggled(&text) else { continue };
             // The first line says which way they all go.
             let ticked = |t: &str| crate::markdown_view::task_box(t).is_some_and(|b| t[b].contains(['x', 'X']));
@@ -2812,6 +2848,7 @@ impl Editor {
             let text = self.buffer.line_text(line);
             let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
             if self.is_markdown()
+                && !self.in_fence(line)
                 && crate::markdown_view::task_box(&text).is_some_and(|b| b.contains(&byte) || b.end == byte)
                 && let Some(ticked) = crate::markdown_view::toggle_task(&text)
             {
@@ -4154,6 +4191,20 @@ mod tests {
             assert_eq!(e.buffer.to_string(), "# Essay\n\nA claim.[^1] Another.\n\n[^1]: Source.\n");
         });
         assert_eq!(crate::markdown_view::next_footnote("x[^note] y[^7] z[^2]"), 8);
+        // At the very end of the text (where a footnote often goes), with or without a last
+        // line break.
+        for (text, expected) in
+            [("Hello world\n", "Hello world[^1]\n\n[^1]: \n"), ("Hello world", "Hello world[^1]\n\n[^1]: ")]
+        {
+            let (e, cx) =
+                cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("b.md")), cx));
+            e.update_in(cx, |e, window, cx| {
+                e.selection = Selection::caret(e.buffer.offset(0, 11));
+                e.insert_footnote(&InsertFootnote, window, cx);
+                assert_eq!(e.buffer.to_string(), expected);
+                assert_eq!(e.caret_point(), (2, 6));
+            });
+        }
     }
 
     /// ⌥⇧F in Markdown (no server for it) lines the tables up, as one undo step.

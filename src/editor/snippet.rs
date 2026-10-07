@@ -157,22 +157,19 @@ impl Parser<'_> {
                     self.stop(n, start..self.len);
                 } else {
                     // A variable: its value, else its default if it has one.
+                    // (A transform, `${NAME/…/…/}`, isn't applied: the value goes in as it is.)
                     let name = self.name();
                     let value = (self.variable)(&name);
                     match (value, self.peek() == Some(':')) {
-                        (Some(value), default) => {
+                        (Some(value), _) => {
                             self.value(&value);
-                            if default {
-                                self.skip_nested();
-                            } else {
-                                self.skip_past('}');
-                            }
+                            self.skip_nested();
                         }
                         (None, true) => {
                             self.at += 1;
                             self.until(true);
                         }
-                        (None, false) => self.skip_past('}'),
+                        (None, false) => self.skip_nested(),
                     }
                 }
             }
@@ -214,11 +211,14 @@ impl Parser<'_> {
     /// Past the `}` closing this `${…}`, over any nested in it.
     fn skip_nested(&mut self) {
         let mut depth = 1;
+        let mut after_dollar = false;
         while let Some(c) = self.peek() {
             self.at += 1;
+            let dollar = std::mem::replace(&mut after_dollar, c == '$');
             match c {
                 '\\' => self.at += 1,
-                '{' => depth += 1,
+                // Only `${` opens one inside: a `{` alone is text.
+                '{' if dollar => depth += 1,
                 '}' => {
                     depth -= 1;
                     if depth == 0 {

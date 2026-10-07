@@ -5899,7 +5899,12 @@ fn organize_action(actions: Vec<lsp_types::CodeActionOrCommand>) -> Option<lsp_t
         CodeActionOrCommand::Command(_) => false,
     };
     let mut actions = actions;
-    let at = actions.iter().position(organizes).or_else(|| (actions.len() == 1).then_some(0))?;
+    // A lone answer counts only when it says nothing else: a command, or an action of no kind.
+    let plain = |a: &CodeActionOrCommand| match a {
+        CodeActionOrCommand::Command(_) => true,
+        CodeActionOrCommand::CodeAction(action) => action.kind.is_none() && action.disabled.is_none(),
+    };
+    let at = actions.iter().position(organizes).or_else(|| (actions.len() == 1 && plain(&actions[0])).then_some(0))?;
     Some(actions.swap_remove(at))
 }
 
@@ -8291,7 +8296,15 @@ mod tests {
         let command = CodeActionOrCommand::Command(Command { title: "Organize".into(), ..Default::default() });
         assert_eq!(picked(vec![command]).as_deref(), Some("Organize"));
         assert_eq!(picked(vec![]), None);
-        assert_eq!(picked(vec![sort.clone(), sort]), None, "nothing that organizes imports");
+        assert_eq!(picked(vec![sort.clone(), sort.clone()]), None, "nothing that organizes imports");
+        assert_eq!(picked(vec![sort]), None, "a lone action of another kind");
+        let disabled = CodeActionOrCommand::CodeAction(CodeAction {
+            title: "Organize Imports".into(),
+            kind: Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS),
+            disabled: Some(lsp_types::CodeActionDisabled { reason: "Nothing to organize".into() }),
+            ..Default::default()
+        });
+        assert_eq!(picked(vec![disabled]), None, "a disabled one");
     }
 
     #[test]
