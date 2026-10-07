@@ -43,6 +43,7 @@ actions!(
         UndoLastCommit,
         SetChangesAside,
         BringBackChanges,
+        OpenInBrowser,
         PushBranch,
         PullBranch,
         FileHistory,
@@ -3179,6 +3180,10 @@ impl Workspace {
                 Some(_) => commands.push((Ai, "Stop AI Task".into(), Box::new(StopAiTask))),
             }
         }
+        // A page or a picture: open it in the browser.
+        if self.active_editor().and_then(|e| e.read(cx).path()).is_some_and(crate::file_tree::opens_in_browser) {
+            commands.push((File, "Open in Browser".into(), Box::new(OpenInBrowser)));
+        }
         commands.push((App, "Welcome to Null…".into(), Box::new(ShowWelcome)));
         commands.push((App, "Quit Null".into(), Box::new(Quit)));
         commands
@@ -6213,6 +6218,16 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::revert_all_changes))
             .on_action(cx.listener(Self::undo_last_commit))
             .on_action(cx.listener(Self::set_changes_aside))
+            .on_action(cx.listener(|this, _: &OpenInBrowser, _, cx| {
+                // Saved first: the browser reads the file.
+                if let Some(editor) = this.active_editor().cloned()
+                    && let Some(path) = editor.read(cx).path().map(Path::to_path_buf)
+                    && crate::file_tree::opens_in_browser(&path)
+                {
+                    Self::save_if_named(&editor, cx);
+                    crate::file_tree::open_in_browser(&path, cx);
+                }
+            }))
             .on_action(cx.listener(Self::bring_back_changes))
             .on_action(cx.listener(|this, _: &ShowWelcome, window, cx| this.show_welcome(window, cx)))
             .on_action(cx.listener(Self::install_shell_command))

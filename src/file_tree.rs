@@ -195,9 +195,23 @@ fn terminal_dir(target: Option<(&Path, bool)>, root: &Path) -> PathBuf {
     }
 }
 
+/// Whether the file is a page or a picture a browser shows (HTML, SVG): it can open there.
+pub fn opens_in_browser(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    matches!(ext.as_str(), "html" | "htm" | "xhtml" | "svg")
+}
+
+/// Opens the file in the default browser.
+pub fn open_in_browser(path: &Path, cx: &mut App) {
+    if let Ok(url) = url::Url::from_file_path(path) {
+        cx.open_url(url.as_str());
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum MenuItem {
     Open,
+    OpenInBrowser,
     NewFile,
     NewFolder,
     Rename,
@@ -215,6 +229,7 @@ impl MenuItem {
     fn label(self) -> &'static str {
         match self {
             MenuItem::Open => "Open",
+            MenuItem::OpenInBrowser => "Open in Browser",
             MenuItem::NewFile => "New File…",
             MenuItem::NewFolder => "New Folder…",
             MenuItem::Rename => "Rename…",
@@ -834,8 +849,11 @@ impl FileTree {
                 vec![NewFile, NewFolder, Rename, Duplicate, CopyPath, CopyRelativePath, Reveal, OpenInTerminal, Trash]
             }
             Some(e) => {
-                let mut items = vec![
-                    Open,
+                let mut items = vec![Open];
+                if opens_in_browser(&e.path) {
+                    items.push(OpenInBrowser);
+                }
+                items.extend([
                     NewFile,
                     NewFolder,
                     Rename,
@@ -844,7 +862,7 @@ impl FileTree {
                     CopyRelativePath,
                     Reveal,
                     OpenInTerminal,
-                ];
+                ]);
                 // A changed file (not one in a merge conflict: that's resolved, not discarded).
                 if self.git.get(&e.path).is_some_and(|s| *s != crate::git::FileStatus::Conflicted) {
                     items.push(DiscardChanges);
@@ -867,6 +885,11 @@ impl FileTree {
             MenuItem::Open => {
                 if let Some(entry) = target {
                     cx.emit(FileTreeEvent::Open(entry.path));
+                }
+            }
+            MenuItem::OpenInBrowser => {
+                if let Some(entry) = target {
+                    open_in_browser(&entry.path, cx);
                 }
             }
             MenuItem::NewFile => {
@@ -1289,6 +1312,14 @@ impl Render for FileTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pages_and_pictures_open_in_the_browser() {
+        assert!(opens_in_browser(Path::new("site/index.HTML")));
+        assert!(opens_in_browser(Path::new("logo.svg")));
+        assert!(!opens_in_browser(Path::new("main.rs")));
+        assert!(!opens_in_browser(Path::new("notes.md")));
+    }
 
     #[test]
     fn a_terminal_opens_in_the_folder_chosen() {
