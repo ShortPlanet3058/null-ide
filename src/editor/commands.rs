@@ -69,9 +69,9 @@ impl Editor {
     /// one; with nothing selected, or over several lines, the whole lines.
     pub(super) fn toggle_block_comment(&mut self, cx: &mut Context<Self>) {
         let at = self.selection.head;
-        let Some(language) = self.language() else { return };
-        let Some((open, close)) = language.block_comment else {
-            return self.show_notice(at, format!("{} has no block comments.", language.name), cx);
+        let Some((_, block)) = self.comment_marks() else { return };
+        let Some((open, close)) = block else {
+            return self.show_notice(at, format!("{} has no block comments.", self.language_name()), cx);
         };
         let range = self.selection.range();
         let (first, _) = self.buffer.point(range.start);
@@ -98,14 +98,20 @@ impl Editor {
         self.rewrite_lines(lines, new_lines, |p| p, cx);
     }
 
+    /// How this file's comments are written: its line comment's mark and its block comment's
+    /// ends, from its grammar or from the basic colouring (Swift, Ruby…). None for text.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn comment_marks(&self) -> Option<(Option<&'static str>, Option<(&'static str, &'static str)>)> {
+        match (self.language(), self.basic_syntax()) {
+            (Some(language), _) => Some((language.line_comment, language.block_comment)),
+            (None, Some(basic)) => Some((basic.line_comment.first().copied(), basic.block_comment)),
+            (None, None) => None,
+        }
+    }
+
     /// Comments the selected lines out, or back in when they all already are.
     pub(super) fn toggle_comment(&mut self, cx: &mut Context<Self>) {
-        // A language with a grammar, or one the basic colouring knows (Swift, Ruby…).
-        let (line_comment, block_comment) = match (self.language(), self.basic_syntax()) {
-            (Some(language), _) => (language.line_comment, language.block_comment),
-            (None, Some(basic)) => (basic.line_comment.first().copied(), basic.block_comment),
-            (None, None) => return,
-        };
+        let Some((line_comment, block_comment)) = self.comment_marks() else { return };
         let lines = self.selected_lines();
         let texts = self.line_texts(&lines);
         if let Some(marker) = line_comment {
@@ -375,14 +381,14 @@ impl Editor {
         line_text: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(language) = self.language() else { return false };
+        let Some((line_comment, block_comment)) = self.comment_marks() else { return false };
         // Enter over a selection replaces it; only a plain Enter carries a comment on.
         if !range.is_empty() {
             return false;
         }
         let before: String = line_text.chars().take(col).collect();
         let after: String = line_text.chars().skip(col).collect();
-        let Some(prefix) = comment_continuation(&before, &after, language.line_comment, language.block_comment) else {
+        let Some(prefix) = comment_continuation(&before, &after, line_comment, block_comment) else {
             return false;
         };
         // Only in a comment, as the syntax has it (`* b` can be code).
@@ -531,7 +537,7 @@ impl Editor {
         let text = self.buffer.line_text(line);
         let before: String = text.chars().take(col).collect();
         let Some(close) = before.chars().last().filter(|_| before.trim().chars().count() == 1) else { return };
-        if self.language().is_none() || self.is_markdown() {
+        if self.comment_marks().is_none() || self.is_markdown() {
             return;
         }
         let open = match close {
@@ -1419,5 +1425,36 @@ mod basic_colouring_tests {
             e.toggle_comment(cx);
             assert_eq!(e.buffer.to_string(), "// let n = 42\n");
         });
+    }
+
+    /// The editing helpers of code files, in one without a grammar: a doc comment carried on,
+    /// a `}` back out, comments spell-checked.
+    #[gpui::test]
+    fn languages_without_a_grammar_get_the_editing_helpers(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let typed = |cx: &mut TestAppContext, text: &str, keys: &[&str]| {
+            let text = text.to_string();
+            let (e, cx) =
+                cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(PathBuf::from("a.swift")), cx));
+            e.update_in(cx, |e, window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(e, cx));
+                e.selection = Selection::caret(e.buffer.len_chars());
+            });
+            cx.run_until_parked();
+            for key in keys {
+                match *key {
+                    "enter" => cx.simulate_keystrokes("enter"),
+                    text => cx.simulate_input(text),
+                }
+            }
+            e.read_with(cx, |e, _| e.buffer.to_string())
+        };
+        assert_eq!(typed(cx, "/// Adds one.", &["enter", "More."]), "/// Adds one.\n/// More.");
+        assert_eq!(typed(cx, "func f() {\n    g()\n    ", &["}"]), "func f() {\n    g()\n}");
     }
 }
