@@ -155,6 +155,7 @@ actions!(
         Save,
         GoToDefinition,
         PeekDefinition,
+        ExpandMacro,
         GoToTypeDefinition,
         GoToImplementation,
         ShowCallers,
@@ -3318,6 +3319,10 @@ impl Editor {
         self.peek_definition_at(self.selection.head, cx);
     }
 
+    fn expand_macro(&mut self, _: &ExpandMacro, _: &mut Window, cx: &mut Context<Self>) {
+        self.expand_macro_at(self.selection.head, cx);
+    }
+
     fn go_to_type_definition(&mut self, _: &GoToTypeDefinition, _: &mut Window, cx: &mut Context<Self>) {
         self.go_to_target(crate::lsp_store::Target::TypeDefinition, cx);
     }
@@ -3711,6 +3716,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::fold_all))
             .on_action(cx.listener(Self::unfold_all))
             .on_action(cx.listener(Self::go_to_definition))
+            .on_action(cx.listener(Self::expand_macro))
             .on_action(cx.listener(Self::peek_definition))
             .on_action(cx.listener(Self::go_to_type_definition))
             .on_action(cx.listener(Self::go_to_implementation))

@@ -660,6 +660,43 @@ impl Editor {
 
     /// The definition of the name at `offset`, shown in the info card where the caret is:
     /// its file and line, then its first lines. Nothing moves.
+    /// Expand Macro (Rust): what the macro at `offset` turns into, in the card.
+    pub fn expand_macro_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if self.language_name() != "Rust" {
+            return self.show_notice(offset, "Expand Macro is for Rust (rust-analyzer).".into(), cx);
+        }
+        if let Some(message) = self.not_ready_message(cx) {
+            return self.show_notice(offset, message, cx);
+        }
+        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return };
+        let request = lsp.read(cx).expand_macro(path, self.lsp_position(offset));
+        self.definition_task = Some(cx.spawn(async move |this, cx| {
+            let expanded = request.await;
+            this.update(cx, |this, cx| {
+                let Some(expanded) = expanded.filter(|e| !e.expansion.trim().is_empty()) else {
+                    return this.show_notice(offset, "No macro to expand here.".into(), cx);
+                };
+                let word = this.word_at(offset);
+                this.hover_word = Some(word.clone());
+                this.hover_from_keyboard = true;
+                this.hover = Some(HoverCard {
+                    range: word,
+                    diagnostics: Vec::new(),
+                    blocks: vec![
+                        HoverBlock {
+                            code: false,
+                            text: format!("{}! expands to", expanded.name.trim_end_matches('!')),
+                        },
+                        HoverBlock { code: true, text: expanded.expansion.trim_end().to_string() },
+                    ],
+                    image: None,
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     pub fn peek_definition_at(&mut self, offset: usize, cx: &mut Context<Self>) {
         if let Some(message) = self.not_ready_message(cx) {
             self.show_notice(offset, message, cx);

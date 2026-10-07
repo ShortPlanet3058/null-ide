@@ -3354,6 +3354,10 @@ impl Workspace {
                 Some(_) => commands.push((Ai, "Stop AI Task".into(), Box::new(StopAiTask))),
             }
         }
+        // Rust: what a macro expands to (rust-analyzer).
+        if self.active_editor().is_some_and(|e| e.read(cx).language_name() == "Rust") {
+            commands.push((Go, "Expand Macro".into(), Box::new(crate::editor::ExpandMacro)));
+        }
         // Markdown: a table of contents of its headings; the document as a page.
         if self.active_editor().is_some_and(|e| e.read(cx).is_markdown()) {
             commands.push((Edit, "Insert Table of Contents".into(), Box::new(crate::editor::InsertTableOfContents)));
