@@ -70,10 +70,10 @@ pub enum TextInputEvent {
     Changed,
 }
 
-/// A single-line text field, used by the command palette.
-
 /// Room between the caret and the hint shown in an empty field.
 const PLACEHOLDER_GAP: gpui::Pixels = px(4.);
+
+/// A single-line text field, used by the command palette.
 
 pub struct TextInput {
     focus_handle: FocusHandle,
