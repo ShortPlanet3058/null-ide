@@ -45,6 +45,7 @@ actions!(
         BringBackChanges,
         OpenInBrowser,
         FindTodos,
+        RunSelectionInTerminal,
         PushBranch,
         PullBranch,
         FileHistory,
@@ -3066,6 +3067,7 @@ impl Workspace {
             (File, "Open Line on the Web".into(), Box::new(OpenLineOnWeb)),
             (File, "Fetch".into(), Box::new(FetchBranch)),
             (Go, "Find TODOs".into(), Box::new(FindTodos)),
+            (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
@@ -4547,6 +4549,35 @@ impl Workspace {
     fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let root = self.tree.read(cx).root().to_path_buf();
         self.add_terminal_in(root, window, cx)
+    }
+
+    /// The selected lines (or the caret's line) run in the terminal, opened if it isn't;
+    /// the keyboard stays in the code. With no selection the caret goes on to the next line,
+    /// to run lines one by one.
+    fn run_selection_in_terminal(&mut self, _: &RunSelectionInTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let text = editor.update(cx, |e, cx| {
+            let selected = e.selected_text();
+            if !selected.is_empty() {
+                return selected;
+            }
+            let (line, _) = e.caret_point();
+            let text = e.buffer.line_text(line);
+            let next = (line + 1).min(e.buffer.len_lines().saturating_sub(1));
+            e.set_caret_point((next, 0), cx);
+            text
+        });
+        if text.trim().is_empty() {
+            return;
+        }
+        if self.terminals.is_empty() && !self.add_terminal(window, cx) {
+            return;
+        }
+        self.terminal_open.set(true, TERMINAL_SLIDE, TERMINAL_SLIDE);
+        if let Some(terminal) = self.terminal().cloned() {
+            terminal.update(cx, |t, cx| t.run_text(&text, cx));
+        }
+        cx.notify();
     }
 
     /// A terminal in folder `dir`, opened and focused (the tree's Open in Terminal).
@@ -6320,6 +6351,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::undo_last_commit))
             .on_action(cx.listener(Self::set_changes_aside))
             .on_action(cx.listener(Self::find_todos))
+            .on_action(cx.listener(Self::run_selection_in_terminal))
             .on_action(cx.listener(|this, _: &OpenInBrowser, _, cx| {
                 // Saved first: the browser reads the file.
                 if let Some(editor) = this.active_editor().cloned()

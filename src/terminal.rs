@@ -359,6 +359,15 @@ impl TerminalView {
         }
     }
 
+    /// Runs `text` as if typed and entered, line after line (no escape characters: text
+    /// can't steer the terminal); in a shell still starting, once it has.
+    pub fn run_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.term.lock().scroll_display(Scroll::Bottom);
+        for line in run_lines(text) {
+            self.run_command(&line, cx);
+        }
+    }
+
     pub(crate) fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
         self.sender.send(Msg::Input(bytes.into())).ok();
     }
@@ -1266,6 +1275,12 @@ impl Element for TerminalElement {
 
 /// Paths as a shell reads them back: plain ones as they are, others in single quotes; each
 /// followed by a space, ready for the next word.
+/// The lines running `text` enters, one by one, escapes left out.
+fn run_lines(text: &str) -> Vec<String> {
+    let text = text.replace('\x1b', "").replace("\r\n", "\n");
+    text.trim_end_matches('\n').split(['\n', '\r']).map(str::to_string).collect()
+}
+
 fn shell_words(paths: &[std::path::PathBuf]) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%~".contains(c);
     paths
@@ -1285,6 +1300,8 @@ mod tests {
     fn dropped_paths_are_quoted_for_the_shell() {
         let paths = ["/Users/me/src/main.rs", "/Users/me/My Notes.md", "/tmp/it's.txt"].map(std::path::PathBuf::from);
         assert_eq!(shell_words(&paths), r"/Users/me/src/main.rs '/Users/me/My Notes.md' '/tmp/it'\''s.txt' ");
+        // Run: each line entered, escapes gone.
+        assert_eq!(run_lines("ls\r\necho \x1b[2Jhi\n"), ["ls", "echo [2Jhi"]);
     }
 
     fn keys(s: &str) -> Option<Vec<u8>> {
