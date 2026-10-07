@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn searches_are_kept_between_launches() {
-        let path = std::env::temp_dir().join(format!("null-searches-{}", std::process::id())).join("searches.json");
+        let path = crate::tools::test_dir("searches").join("searches.json");
         assert!(load_history(&path).is_empty());
         save_history(&path, &["alpha".into(), "beta \"quoted\"".into()]);
         assert_eq!(load_history(&path), ["alpha", "beta \"quoted\""]);

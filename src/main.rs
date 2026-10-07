@@ -1,3 +1,6 @@
+// Ranges of text are everywhere here: a list of one range is a list, not a mistake.
+#![allow(clippy::single_range_in_vec_init)]
+
 mod ai;
 mod ai_agent;
 mod ai_task;

@@ -77,7 +77,7 @@ mod tests {
 
     #[gpui::test]
     fn finds_addresses_and_files_that_exist(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!("null-editor-links-{}", std::process::id()));
+        let root = crate::tools::test_dir("editor-links");
         std::fs::create_dir_all(root.join("src/deep")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "").unwrap();
         std::fs::write(root.join("README.md"), "").unwrap();

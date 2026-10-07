@@ -210,10 +210,10 @@ impl Debugger {
             while let Some(message) = messages.next().await {
                 let alive = this.update(cx, |this, cx| match message {
                     AdapterMessage::Event { event, body } => {
-                        if event == "initialized" {
-                            if let Some(tx) = initialized_tx.take() {
-                                tx.send(()).ok();
-                            }
+                        if event == "initialized"
+                            && let Some(tx) = initialized_tx.take()
+                        {
+                            tx.send(()).ok();
                         }
                         this.handle_event(&event, body, cx);
                     }
@@ -503,7 +503,7 @@ mod tests {
     #[gpui::test]
     #[ignore]
     fn debugs_a_c_program(cx: &mut TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-debug-{}", std::process::id()));
+        let dir = crate::tools::test_dir("debug");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("main.c");

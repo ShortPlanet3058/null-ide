@@ -266,7 +266,7 @@ mod rust_analyzer_tests {
     #[test]
     #[ignore]
     fn reports_problems_and_hovers() {
-        let dir = std::env::temp_dir().join(format!("null-ra-test-{}", std::process::id()));
+        let dir = crate::tools::test_dir("ra-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
@@ -349,7 +349,7 @@ mod rust_analyzer_tests {
     #[test]
     #[ignore]
     fn lists_callers() {
-        let dir = std::env::temp_dir().join(format!("null-ra-callers-{}", std::process::id()));
+        let dir = crate::tools::test_dir("ra-callers");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")

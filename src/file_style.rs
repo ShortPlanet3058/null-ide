@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn the_line_length_comes_from_the_project_s_config() {
-        let root = std::env::temp_dir().join(format!("null-ruler-{}", std::process::id()));
+        let root = crate::tools::test_dir("ruler");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn nearer_editorconfig_files_win() {
-        let root = std::env::temp_dir().join(format!("null-editorconfig-{}", std::process::id()));
+        let root = crate::tools::test_dir("editorconfig");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("web")).unwrap();
         std::fs::write(

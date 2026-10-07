@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn finds_a_project_s_tasks() {
-        let dir = std::env::temp_dir().join(format!("null-tasks-{}", std::process::id()));
+        let dir = crate::tools::test_dir("tasks");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("package.json"), r#"{"scripts":{"dev":"vite"}}"#).unwrap();

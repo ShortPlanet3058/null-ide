@@ -177,15 +177,12 @@ impl Editor {
                     r.start = (r.start as isize + shift) as usize;
                     r.end = (r.end as isize + shift) as usize;
                     true
-                } else if from > r.end {
-                    true
-                } else if from == to && to == new_to && (from == r.start || from == r.end) {
-                    true
-                } else if from == r.end && to == r.end {
-                    // Lines added at the very end of the closing line stay after the fold.
-                    true
                 } else {
-                    false
+                    // Below it, nothing changed at its edges, or lines added at the very end of
+                    // the closing line (they stay after the fold): kept as it is.
+                    from > r.end
+                        || (from == to && to == new_to && (from == r.start || from == r.end))
+                        || (from == r.end && to == r.end)
                 }
             });
         }

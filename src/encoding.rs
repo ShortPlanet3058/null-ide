@@ -46,8 +46,8 @@ pub fn decode(bytes: Vec<u8>) -> Option<(String, Encoding)> {
         return String::from_utf8(rest.to_vec()).ok().map(|t| (t, Encoding::Utf8Bom));
     }
     let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
-        let units: Vec<u16> = rest.chunks_exact(2).map(|c| unit([c[0], c[1]])).collect();
-        (rest.len() % 2 == 0).then(|| String::from_utf16(&units).ok()).flatten()
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|c| unit([c[0], c[1]])).collect();
+        rest.len().is_multiple_of(2).then(|| String::from_utf16(&units).ok()).flatten()
     };
     if let Some(rest) = bytes.strip_prefix(b"\xFF\xFE") {
         return utf16(rest, u16::from_le_bytes).map(|t| (t, Encoding::Utf16Le));

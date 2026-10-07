@@ -140,7 +140,9 @@ mod tests {
             let (len, offset) = (u16_at(r + 8)?, u16_at(r + 10)?);
             let units: Vec<u16> = font
                 .get(strings + offset..strings + offset + len)?
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_be_bytes([c[0], c[1]]))
                 .collect();
             let text = String::from_utf16(&units).ok()?;

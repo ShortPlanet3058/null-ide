@@ -298,7 +298,7 @@ mod tests {
     }
 
     fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("null-test-at-{name}-{}", std::process::id()));
+        let dir = crate::tools::test_dir(&format!("test-at-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         for (path, text) in files {
             let path = dir.join(path);

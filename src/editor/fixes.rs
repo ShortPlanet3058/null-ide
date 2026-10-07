@@ -195,7 +195,7 @@ impl Editor {
             return self.fix_with_ai(window, cx);
         }
         if ix < menu.fixes.len() {
-            cx.emit(EditorEvent::CodeAction(menu.fixes.swap_remove(ix)));
+            cx.emit(EditorEvent::CodeAction(Box::new(menu.fixes.swap_remove(ix))));
         }
         cx.notify();
     }

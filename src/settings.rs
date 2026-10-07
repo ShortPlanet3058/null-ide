@@ -192,7 +192,7 @@ impl Settings {
     pub fn path() -> Option<PathBuf> {
         // Tests never read or write the real settings.
         if cfg!(test) {
-            let dir = std::env::temp_dir().join(format!("null-test-config-{}", std::process::id()));
+            let dir = crate::tools::test_dir("test-config");
             return Some(dir.join("settings.json"));
         }
         let dir = if cfg!(target_os = "windows") {

@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn recent_projects_go_first_once_each() {
-        let dir = std::env::temp_dir().join(format!("null-recent-{}", std::process::id()));
+        let dir = crate::tools::test_dir("recent");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("recent.json");
         let _ = std::fs::remove_file(&file);
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn missing_files_are_dropped_and_the_active_tab_follows() {
-        let dir = std::env::temp_dir().join(format!("null-session-{}", std::process::id()));
+        let dir = crate::tools::test_dir("session");
         std::fs::create_dir_all(&dir).unwrap();
         let kept = dir.join("kept.rs");
         std::fs::write(&kept, "fn main() {}").unwrap();

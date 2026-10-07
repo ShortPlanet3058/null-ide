@@ -218,7 +218,7 @@ mod tests {
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
             crate::keymap::register(crate::keymap::Keymap::Null, cx);
         });
-        let dir = std::env::temp_dir().join(format!("null-broken-links-{}", std::process::id()));
+        let dir = crate::tools::test_dir("broken-links");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::write(dir.join("docs/setup.md"), "x").unwrap();
         let notes = dir.join("notes.md");
@@ -260,7 +260,7 @@ mod tests {
             cx.set_global(Theme::oled());
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });
-        let dir = std::env::temp_dir().join(format!("null-timing-markdown-{}", std::process::id()));
+        let dir = crate::tools::test_dir("timing-markdown");
         std::fs::create_dir_all(&dir).unwrap();
         let mut text = String::from("# Notes\n\n");
         for i in 0..4000 {

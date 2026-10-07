@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn ignored_files_are_recognised_through_their_folders() {
-        let root = std::env::temp_dir().join(format!("null-ignore-{}", std::process::id()));
+        let root = crate::tools::test_dir("ignore");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join(".gitignore"), "target/\nnode_modules\n*.gen.ts\n").unwrap();
         let rules = ignore_rules(&root);

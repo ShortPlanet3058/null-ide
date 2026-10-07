@@ -686,7 +686,7 @@ mod tests {
     /// A link's #section lists the headings' anchors: this file's, or the file named's.
     #[gpui::test]
     fn sections_are_completed_from_headings(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-anchor-completion-{}", std::process::id()));
+        let dir = crate::tools::test_dir("anchor-completion");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("other.md"), "# Other\n## Install it\n").unwrap();
@@ -709,7 +709,7 @@ mod tests {
     /// picked finishes the path.
     #[gpui::test]
     fn paths_are_completed_from_the_folder(cx: &mut gpui::TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("null-path-completion-{}", std::process::id()));
+        let dir = crate::tools::test_dir("path-completion");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("img/icons")).unwrap();
         for f in ["img/shot.png", "img/hero.jpg", "img/.hidden"] {

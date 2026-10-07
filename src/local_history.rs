@@ -163,7 +163,7 @@ mod tests {
     /// from before it stays, even when the file was last changed months ago.
     #[test]
     fn keeps_what_each_write_replaced() {
-        let dir = std::env::temp_dir().join(format!("null-local-history-{}", std::process::id()));
+        let dir = crate::tools::test_dir("local-history");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = std::fs::canonicalize(&dir).unwrap().join("notes.txt");

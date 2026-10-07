@@ -301,7 +301,7 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
 /// Where tests' "Trash" is.
 #[cfg(test)]
 pub fn test_trash() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("null-test-trash-{}", std::process::id()))
+    crate::tools::test_dir("test-trash")
 }
 
 #[cfg(test)]
@@ -312,7 +312,7 @@ mod tests {
     #[cfg(unix)]
     fn saves_replace_files_whole() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("null-write-file-{}", std::process::id()));
+        let dir = crate::tools::test_dir("write-file");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("run.sh");
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn moves_into_another_folder_but_not_into_itself_or_over_something() {
-        let dir = std::env::temp_dir().join(format!("null-move-{}", std::process::id()));
+        let dir = crate::tools::test_dir("move");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src/inner")).unwrap();
         std::fs::create_dir_all(dir.join("docs")).unwrap();
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn copies_dropped_files_without_writing_over_anything() {
-        let root = std::env::temp_dir().join(format!("null-copy-into-{}", std::process::id()));
+        let root = crate::tools::test_dir("copy-into");
         let _ = std::fs::remove_dir_all(&root);
         let (from, into) = (root.join("outside"), root.join("project/src"));
         std::fs::create_dir_all(from.join("assets")).unwrap();
@@ -385,7 +385,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("null-fs-{name}-{}", std::process::id()));
+        let dir = crate::tools::test_dir(&format!("fs-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
