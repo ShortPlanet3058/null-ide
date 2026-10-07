@@ -66,7 +66,9 @@ pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
-pub use refactor::{FindReferences, FormatDocument, FormatSelection, InsertTableOfContents, RenameSymbol, apply_edits};
+pub use refactor::{
+    FindReferences, FormatDocument, FormatSelection, InsertFootnote, InsertTableOfContents, RenameSymbol, apply_edits,
+};
 pub use review::{KeepHunk, UndoHunk};
 pub use rewrap::Rewrap;
 pub use structure::{
@@ -3689,6 +3691,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::format_document))
             .on_action(cx.listener(Self::insert_table_of_contents))
+            .on_action(cx.listener(Self::insert_footnote))
             .on_action(cx.listener(Self::format_selection))
             .on_action(cx.listener(Self::accept_ghost_word))
             .on_action(cx.listener(Self::accept_ghost_line))
@@ -4121,6 +4124,36 @@ mod tests {
         });
         cx.simulate_click(at, gpui::Modifiers::command());
         assert_eq!(now(cx), "# Shop\n\n- [ ] milk\n- [x] eggs\n- [ ] Tea\n");
+    }
+
+    /// Insert Footnote: the next number's mark at the caret, its note at the end (with the
+    /// notes there), the caret there; one undo takes both back.
+    #[gpui::test]
+    fn footnotes_are_marked_here_and_written_at_the_end(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let text = "# Essay\n\nA claim. Another.\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("a.md")), cx));
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(e.buffer.offset(2, 8));
+            e.insert_footnote(&InsertFootnote, window, cx);
+            assert_eq!(e.buffer.to_string(), "# Essay\n\nA claim.[^1] Another.\n\n[^1]: \n");
+            assert_eq!(e.caret_point(), (4, 6), "ready to write the note");
+            e.replace_text_in_range(None, "Source.", window, cx);
+            e.selection = Selection::caret(e.buffer.offset(2, 21));
+            e.insert_footnote(&InsertFootnote, window, cx);
+            assert_eq!(
+                e.buffer.to_string(),
+                "# Essay\n\nA claim.[^1] Another.[^2]\n\n[^1]: Source.\n[^2]: \n",
+                "the next number, with the notes"
+            );
+            e.step_history(true, cx);
+            assert_eq!(e.buffer.to_string(), "# Essay\n\nA claim.[^1] Another.\n\n[^1]: Source.\n");
+        });
+        assert_eq!(crate::markdown_view::next_footnote("x[^note] y[^7] z[^2]"), 8);
     }
 
     /// ⌥⇧F in Markdown (no server for it) lines the tables up, as one undo step.
