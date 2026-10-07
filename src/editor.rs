@@ -3094,7 +3094,7 @@ impl Editor {
     }
 
     /// Screen bounds of the caret position at `offset`, if it was drawn last frame.
-    fn caret_bounds(&self, offset: usize) -> Option<Bounds<Pixels>> {
+    pub(crate) fn caret_bounds(&self, offset: usize) -> Option<Bounds<Pixels>> {
         let layout = self.layout.as_ref()?;
         let (line, col) = self.buffer.point(offset);
         let (row, x) = crate::element::position(
@@ -3362,6 +3362,16 @@ impl Render for Editor {
                     cx.emit(EditorEvent::FilesDropped { paths: dropped.paths().to_vec(), at });
                 }))
             })
+            // A file dragged from the files: linked where it lands in Markdown, opened elsewhere.
+            .on_drop(cx.listener(|this, dragged: &crate::file_tree::DraggedEntry, window, cx| {
+                let path = dragged.path().to_path_buf();
+                if this.is_markdown() {
+                    let at = this.offset_at(window.mouse_position());
+                    cx.emit(EditorEvent::FilesDropped { paths: vec![path], at });
+                } else if path.is_file() {
+                    cx.emit(EditorEvent::GoTo { path, range: Default::default() });
+                }
+            }))
             .size_full()
             .cursor(if self.link_word.is_some() || self.over_change_mark {
                 CursorStyle::PointingHand
