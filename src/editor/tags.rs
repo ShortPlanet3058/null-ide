@@ -304,13 +304,22 @@ impl Editor {
 
     /// With the caret in a tag's name (and nothing selected): that name and its pair's, to
     /// outline them.
+    /// Asked again only once the text or the caret moved (it's drawn every frame, and
+    /// finding a big element's end walks its children).
     pub fn tag_pair_at_caret(&mut self) -> Option<[Range<usize>; 2]> {
         if !self.selection.is_empty() {
             return None;
         }
         let caret = self.selection.head;
-        let names = self.linked_tag(&(caret..caret))?;
-        names.iter().all(|r| !r.is_empty()).then_some(names)
+        let key = (self.buffer.revision(), caret);
+        if let Some((known, pair)) = &self.tag_pair_seen
+            && *known == key
+        {
+            return pair.clone();
+        }
+        let names = self.linked_tag(&(caret..caret)).filter(|names| names.iter().all(|r| !r.is_empty()));
+        self.tag_pair_seen = Some((key, names.clone()));
+        names
     }
 
     /// The tag name `range` (chars) is within, and its pair's, when editing one should
