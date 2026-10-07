@@ -1,7 +1,8 @@
 //! The ⌃ keys every macOS text field knows: ⌃A and ⌃E to the line's ends, ⌃F ⌃B ⌃N ⌃P to
 //! move, ⌃D and ⌃H to delete, ⌃K to cut the rest of the line and ⌃Y to put it back, ⌃T to
 //! swap two letters, ⌃O to open a line and ⌃L to center the caret's line; ⌘J brings the
-//! selection back into view (Jump to Selection), as in the Mac's own apps.
+//! selection back into view (Jump to Selection), as in the Mac's own apps. ⌃⌥← → go by the
+//! parts of a name (`parse` `Http` `Request`, `snake` `case`), ⌃⌥⇧ selecting, ⌃⌥⌫ deleting.
 
 use super::{
     Backspace, CompletionNext, CompletionPrevious, Delete, EditKind, Editor, MoveDown, MoveLeft, MoveLineEnd,
@@ -10,7 +11,22 @@ use super::{
 };
 use gpui::{App, Context, Global, KeyBinding, Window, actions};
 
-actions!(editor, [DeleteToLineEnd, Yank, Transpose, OpenLine, CenterCaretLine, JumpToSelection]);
+actions!(
+    editor,
+    [
+        DeleteToLineEnd,
+        Yank,
+        Transpose,
+        OpenLine,
+        CenterCaretLine,
+        JumpToSelection,
+        MoveSubwordLeft,
+        MoveSubwordRight,
+        SelectSubwordLeft,
+        SelectSubwordRight,
+        DeleteSubwordLeft
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     if !cfg!(target_os = "macos") {
@@ -19,6 +35,11 @@ pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Editor");
     cx.bind_keys([
         KeyBinding::new("ctrl-l", CenterCaretLine, ctx),
+        KeyBinding::new("ctrl-alt-left", MoveSubwordLeft, ctx),
+        KeyBinding::new("ctrl-alt-right", MoveSubwordRight, ctx),
+        KeyBinding::new("ctrl-alt-shift-left", SelectSubwordLeft, ctx),
+        KeyBinding::new("ctrl-alt-shift-right", SelectSubwordRight, ctx),
+        KeyBinding::new("ctrl-alt-backspace", DeleteSubwordLeft, ctx),
         KeyBinding::new("cmd-j", JumpToSelection, ctx),
         KeyBinding::new("ctrl-a", MoveLineStart, ctx),
         KeyBinding::new("ctrl-e", MoveLineEnd, ctx),
@@ -51,7 +72,128 @@ struct Killed(String);
 
 impl Global for Killed {}
 
+/// Where the next part of a name ends, going right from `at` in `text`: past spaces, then
+/// one run of marks, or one part of a word (`parse`, `Http`, an acronym like `HTML` before
+/// `Parser`, a run of digits), underscores before it taken along.
+fn subword_right(text: &[char], at: usize) -> usize {
+    let mut i = at;
+    while i < text.len() && text[i].is_whitespace() {
+        i += 1;
+    }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    if i < text.len() && !word(text[i]) {
+        while i < text.len() && !word(text[i]) && !text[i].is_whitespace() {
+            i += 1;
+        }
+        return i;
+    }
+    while i < text.len() && text[i] == '_' {
+        i += 1;
+    }
+    let start = i;
+    if i < text.len() && text[i].is_uppercase() {
+        while i < text.len() && text[i].is_uppercase() {
+            i += 1;
+        }
+        // An acronym before a capitalised part (`HTMLParser`): its last capital is the part's.
+        if i - start > 1 && i < text.len() && text[i].is_lowercase() {
+            return i - 1;
+        }
+    }
+    if i < text.len() && text[i].is_ascii_digit() {
+        while i < text.len() && text[i].is_ascii_digit() {
+            i += 1;
+        }
+        return i;
+    }
+    while i < text.len() && text[i].is_alphabetic() && !text[i].is_uppercase() {
+        i += 1;
+    }
+    i
+}
+
+/// Where the part of a name before `at` starts (see `subword_right`).
+fn subword_left(text: &[char], at: usize) -> usize {
+    let mut i = at;
+    while i > 0 && text[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    if i > 0 && !word(text[i - 1]) {
+        while i > 0 && !word(text[i - 1]) && !text[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        return i;
+    }
+    while i > 0 && text[i - 1] == '_' {
+        i -= 1;
+    }
+    if i > 0 && text[i - 1].is_ascii_digit() {
+        while i > 0 && text[i - 1].is_ascii_digit() {
+            i -= 1;
+        }
+        return i;
+    }
+    if i > 0 && text[i - 1].is_uppercase() {
+        // An acronym: all its capitals.
+        while i > 0 && text[i - 1].is_uppercase() {
+            i -= 1;
+        }
+        return i;
+    }
+    while i > 0 && text[i - 1].is_alphabetic() && !text[i - 1].is_uppercase() {
+        i -= 1;
+    }
+    // The part's own capital (`Request`).
+    if i > 0 && text[i - 1].is_uppercase() {
+        i -= 1;
+    }
+    i
+}
+
 impl Editor {
+    /// Where ⌃⌥→ goes from `offset`: the end of the next part of a name, on the line (at its
+    /// end, the next line's start).
+    fn subword_right_of(&self, offset: usize) -> usize {
+        let (line, col) = self.buffer.point(offset);
+        let text: Vec<char> = self.buffer.line_text(line).chars().collect();
+        if col >= text.len() {
+            return (offset + 1).min(self.buffer.len_chars()).max(offset);
+        }
+        self.buffer.line_to_char(line) + subword_right(&text, col)
+    }
+
+    fn subword_left_of(&self, offset: usize) -> usize {
+        let (line, col) = self.buffer.point(offset);
+        if col == 0 {
+            return offset.saturating_sub(1);
+        }
+        let text: Vec<char> = self.buffer.line_text(line).chars().collect();
+        self.buffer.line_to_char(line) + subword_left(&text, col)
+    }
+
+    pub(super) fn move_subword_left(&mut self, _: &MoveSubwordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| this.move_head(this.subword_left_of(this.selection.head), false, cx));
+    }
+
+    pub(super) fn move_subword_right(&mut self, _: &MoveSubwordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| this.move_head(this.subword_right_of(this.selection.head), false, cx));
+    }
+
+    pub(super) fn select_subword_left(&mut self, _: &SelectSubwordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| this.move_head(this.subword_left_of(this.selection.head), true, cx));
+    }
+
+    pub(super) fn select_subword_right(&mut self, _: &SelectSubwordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| this.move_head(this.subword_right_of(this.selection.head), true, cx));
+    }
+
+    pub(super) fn delete_subword_left(&mut self, _: &DeleteSubwordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| {
+            this.delete_or(|this| this.subword_left_of(this.selection.head)..this.selection.head, cx);
+        });
+    }
+
     /// ⌃L: the caret's line in the middle of the window.
     pub(super) fn center_caret_line(&mut self, _: &CenterCaretLine, _: &mut Window, cx: &mut Context<Self>) {
         self.center_once = true;
@@ -184,11 +326,66 @@ mod tests {
 }
 
 #[cfg(test)]
+mod subword_tests {
+    use super::{subword_left, subword_right};
+
+    /// Every stop going right, then going left, through `text`.
+    fn stops(text: &str) -> (Vec<usize>, Vec<usize>) {
+        let chars: Vec<char> = text.chars().collect();
+        let (mut right, mut at) = (Vec::new(), 0);
+        while at < chars.len() {
+            at = subword_right(&chars, at);
+            right.push(at);
+        }
+        let (mut left, mut at) = (Vec::new(), chars.len());
+        while at > 0 {
+            at = subword_left(&chars, at);
+            left.push(at);
+        }
+        (right, left)
+    }
+
+    #[test]
+    fn names_go_by_their_parts() {
+        assert_eq!(stops("parseHttpRequest"), (vec![5, 9, 16], vec![9, 5, 0]));
+        assert_eq!(stops("snake_case_name"), (vec![5, 10, 15], vec![11, 6, 0]));
+        assert_eq!(stops("HTMLParser"), (vec![4, 10], vec![4, 0]));
+        assert_eq!(stops("x = getID(v2)"), (vec![1, 3, 7, 9, 10, 11, 12, 13], vec![12, 11, 10, 9, 7, 4, 2, 0]));
+        assert_eq!(stops("été_très"), (vec![3, 8], vec![4, 0]));
+    }
+}
+
+#[cfg(test)]
 mod view_tests {
     use crate::buffer::Buffer;
     use crate::editor::{Editor, Selection};
     use gpui::TestAppContext;
     use std::path::PathBuf;
+
+    /// ⌃⌥→ twice, ⌃⌥⇧← to select a part, ⌃⌥⌫ to delete one: by the parts of a name.
+    #[gpui::test]
+    fn keys_go_by_the_parts_of_a_name(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(Buffer::from_text("let parseHttpRequest = 1;\n"), Some(PathBuf::from("a.rs")), cx)
+        });
+        e.update_in(cx, |e, window, _| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection::caret(4);
+        });
+        cx.simulate_keystrokes("ctrl-alt-right ctrl-alt-right");
+        e.update(cx, |e, _| assert_eq!(e.selection.head, 13, "after `parseHttp`"));
+        cx.simulate_keystrokes("ctrl-alt-shift-left");
+        e.update(cx, |e, _| assert_eq!(e.buffer.slice(e.selection.range()), "Http"));
+        e.update(cx, |e, _| e.selection = Selection::caret(13));
+        cx.simulate_keystrokes("ctrl-alt-backspace");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "let parseRequest = 1;\n"));
+    }
 
     /// ⌃L puts the caret's line in the middle; ⌘J, after scrolling away, brings it back.
     #[gpui::test]
