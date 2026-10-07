@@ -24,6 +24,9 @@ pub enum Block {
         colours: Vec<(Range<usize>, Syntax)>,
     },
     Quote(Vec<Block>),
+    /// A quote that starts `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]` or `[!CAUTION]`
+    /// (as GitHub writes callouts): drawn with its kind's name and colour.
+    Callout(Callout, Vec<Block>),
     /// `start` is the first number of an ordered list.
     List {
         start: Option<u64>,
@@ -37,6 +40,50 @@ pub enum Block {
     Rule,
     /// A footnote's text (`[^label]: …`). Gathered at the end once the document is read.
     Note(String, Vec<Inline>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Callout {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl Callout {
+    /// From a quote's first line: `[!NOTE]` and the others, any case.
+    fn from_marker(line: &str) -> Option<Self> {
+        let kind = line.trim().strip_prefix("[!")?.strip_suffix(']')?.to_ascii_uppercase();
+        Some(match kind.as_str() {
+            "NOTE" => Callout::Note,
+            "TIP" => Callout::Tip,
+            "IMPORTANT" => Callout::Important,
+            "WARNING" => Callout::Warning,
+            "CAUTION" => Callout::Caution,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Callout::Note => "Note",
+            Callout::Tip => "Tip",
+            Callout::Important => "Important",
+            Callout::Warning => "Warning",
+            Callout::Caution => "Caution",
+        }
+    }
+
+    fn color(self, theme: &crate::theme::Theme) -> gpui::Hsla {
+        match self {
+            Callout::Note => theme.git_modified,
+            Callout::Tip => theme.git_added,
+            Callout::Important => theme.caret,
+            Callout::Warning => theme.warning,
+            Callout::Caution => theme.error,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -169,7 +216,7 @@ fn with_footnotes(blocks: Vec<(usize, Block)>) -> Vec<(usize, Block)> {
 fn block_inlines(block: &mut Block, each: &mut dyn FnMut(&mut Vec<Inline>)) {
     match block {
         Block::Heading(_, content) | Block::Paragraph(content) | Block::Note(_, content) => each(content),
-        Block::Quote(blocks) => blocks.iter_mut().for_each(|b| block_inlines(b, each)),
+        Block::Quote(blocks) | Block::Callout(_, blocks) => blocks.iter_mut().for_each(|b| block_inlines(b, each)),
         Block::List { items, .. } => {
             items.iter_mut().flat_map(|i| i.blocks.iter_mut()).for_each(|b| block_inlines(b, each))
         }
@@ -314,7 +361,10 @@ fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
                 quoted.push(rest.strip_prefix(' ').unwrap_or(rest));
                 i += 1;
             }
-            blocks.push(Block::Quote(parse_lines(&quoted)));
+            match quoted.first().and_then(|first| Callout::from_marker(first)) {
+                Some(kind) => blocks.push(Block::Callout(kind, parse_lines(&quoted[1..]))),
+                None => blocks.push(Block::Quote(parse_lines(&quoted))),
+            }
             continue;
         }
         if let Some(marker) = list_marker(line) {
@@ -1228,6 +1278,19 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
             .gap(px(10.))
             .children(blocks.iter().map(|b| render_block(b, style, counter, theme.muted)))
             .into_any_element(),
+        Block::Callout(kind, blocks) => {
+            let tint = kind.color(theme);
+            div()
+                .pl(px(14.))
+                .border_l_2()
+                .border_color(tint)
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(tint).child(kind.name()))
+                .children(blocks.iter().map(|b| render_block(b, style, counter, color)))
+                .into_any_element()
+        }
         Block::List { start, items } => div()
             .flex()
             .flex_col()
@@ -1460,6 +1523,18 @@ fn flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `> [!NOTE]` and the other GitHub callouts: their kind and what follows; any other
+    /// quote stays a quote.
+    #[test]
+    fn callouts_are_told_from_quotes() {
+        let blocks =
+            parse("> [!WARNING]\n> Back up first.\n\n> [!tip]\n> Use ⌘K.\n\n> Just quoted.\n\n> [!OTHER]\n> x\n");
+        assert!(matches!(&blocks[0], Block::Callout(Callout::Warning, inner) if inner.len() == 1));
+        assert!(matches!(&blocks[1], Block::Callout(Callout::Tip, _)));
+        assert!(matches!(&blocks[2], Block::Quote(_)));
+        assert!(matches!(&blocks[3], Block::Quote(_)), "not a kind GitHub knows");
+    }
 
     /// Footnotes: references numbered by first use, notes gathered at the end in that
     /// order (after a line), a reference to no note left as written.
