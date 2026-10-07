@@ -49,6 +49,8 @@ actions!(
         FileHistory,
         CompareWithSaved,
         CopyLineLink,
+        OpenLineOnWeb,
+        FetchBranch,
         CopyFilePath,
         CopyRelativeFilePath,
         CopyAsCodeBlock,
@@ -1617,6 +1619,11 @@ impl Workspace {
     }
 
     fn copy_line_link(&mut self, cx: &mut Context<Self>) {
+        self.line_link(false, cx);
+    }
+
+    /// The link to the selected lines (or the caret's), copied, or opened in the browser.
+    fn line_link(&mut self, open: bool, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor().cloned() else { return };
         let (path, first, last) = {
             let e = editor.read(cx);
@@ -1636,6 +1643,10 @@ impl Workspace {
             let link = cx.background_executor().spawn(async move { git::line_link(&path, first, last) }).await;
             this.update(cx, |this, cx| {
                 let notice = match link {
+                    Ok(link) if open => {
+                        cx.open_url(&link);
+                        return;
+                    }
                     Ok(link) => {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(link));
                         if first == last {
@@ -1742,6 +1753,36 @@ impl Workspace {
 
     /// Pulls the branch (open files saved first). Conflicts open at the first one, where
     /// ⌘. resolves each.
+    /// Asks the remotes what's new: the counts beside the branch catch up, and say so.
+    fn fetch_branch(&mut self, _: &FetchBranch, _: &mut Window, cx: &mut Context<Self>) {
+        if self.branch.is_none() {
+            return self.show_notice("This folder isn't a git repository.".into(), cx);
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        self.show_notice("Fetching…".into(), cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { git::fetch(&root).map(|()| git::ahead_behind(&root)) })
+                .await;
+            this.update(cx, |this, cx| {
+                let commits = |n: usize| if n == 1 { "1 commit".to_string() } else { format!("{n} commits") };
+                let notice = match result {
+                    Ok(Some((0, 0))) => "Up to date.".to_string(),
+                    Ok(Some((ahead, 0))) => format!("{} to push.", commits(ahead)),
+                    Ok(Some((0, behind))) => format!("{} to pull.", commits(behind)),
+                    Ok(Some((ahead, behind))) => format!("{} to pull, {} to push.", commits(behind), commits(ahead)),
+                    Ok(None) => "Fetched. This branch isn't tracking one on a remote.".to_string(),
+                    Err(error) => format!("Couldn't fetch: {error}"),
+                };
+                this.show_notice(notice, cx);
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn pull_branch(&mut self, _: &PullBranch, window: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
@@ -2980,6 +3021,8 @@ impl Workspace {
             (File, "Show File History".into(), Box::new(FileHistory)),
             (File, "Compare with Saved".into(), Box::new(CompareWithSaved)),
             (File, "Copy Link to Line".into(), Box::new(CopyLineLink)),
+            (File, "Open Line on the Web".into(), Box::new(OpenLineOnWeb)),
+            (File, "Fetch".into(), Box::new(FetchBranch)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
@@ -6184,6 +6227,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::file_history))
             .on_action(cx.listener(|this, _: &CompareWithSaved, window, cx| this.compare_with_saved(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLineLink, _, cx| this.copy_line_link(cx)))
+            .on_action(cx.listener(|this, _: &OpenLineOnWeb, _, cx| this.line_link(true, cx)))
+            .on_action(cx.listener(Self::fetch_branch))
             .on_action(cx.listener(|this, _: &CopyAsCodeBlock, _, cx| this.copy_as_code_block(cx)))
             .on_action(
                 cx.listener(|this, _: &CopyFilePath, _, cx| this.copy_path(this.active_path(cx).as_deref(), false, cx)),
