@@ -546,9 +546,9 @@ impl Element for EditorElement {
                 }
             }
             let typewriter = cx.global::<Settings>().typewriter;
-            if editor.autoscroll && typewriter && !editor.reveal_only {
-                // Typewriter: the caret's line in the middle, from the keyboard (a click doesn't
-                // pull the text about).
+            if editor.autoscroll && (editor.center_once || (typewriter && !editor.reveal_only)) {
+                // Typewriter (or ⌃L): the caret's line in the middle, from the keyboard (a click
+                // doesn't pull the text about).
                 let y = caret_row as f32 * lh + TOP_PADDING;
                 editor.scroll.target_y = (y + lh / 2. - viewport_height / 2.).max(0.);
             } else if editor.autoscroll {
@@ -870,6 +870,7 @@ impl Element for EditorElement {
                 window.request_animation_frame();
             }
             editor.autoscroll = false;
+            editor.center_once = false;
             editor.reveal_only = false;
 
             let origin = point(

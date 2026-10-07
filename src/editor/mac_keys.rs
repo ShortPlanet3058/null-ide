@@ -1,6 +1,7 @@
 //! The ⌃ keys every macOS text field knows: ⌃A and ⌃E to the line's ends, ⌃F ⌃B ⌃N ⌃P to
 //! move, ⌃D and ⌃H to delete, ⌃K to cut the rest of the line and ⌃Y to put it back, ⌃T to
-//! swap two letters and ⌃O to open a line.
+//! swap two letters, ⌃O to open a line and ⌃L to center the caret's line; ⌘J brings the
+//! selection back into view (Jump to Selection), as in the Mac's own apps.
 
 use super::{
     Backspace, CompletionNext, CompletionPrevious, Delete, EditKind, Editor, MoveDown, MoveLeft, MoveLineEnd,
@@ -9,7 +10,7 @@ use super::{
 };
 use gpui::{App, Context, Global, KeyBinding, Window, actions};
 
-actions!(editor, [DeleteToLineEnd, Yank, Transpose, OpenLine]);
+actions!(editor, [DeleteToLineEnd, Yank, Transpose, OpenLine, CenterCaretLine, JumpToSelection]);
 
 pub fn bind_keys(cx: &mut App) {
     if !cfg!(target_os = "macos") {
@@ -17,6 +18,8 @@ pub fn bind_keys(cx: &mut App) {
     }
     let ctx = Some("Editor");
     cx.bind_keys([
+        KeyBinding::new("ctrl-l", CenterCaretLine, ctx),
+        KeyBinding::new("cmd-j", JumpToSelection, ctx),
         KeyBinding::new("ctrl-a", MoveLineStart, ctx),
         KeyBinding::new("ctrl-e", MoveLineEnd, ctx),
         KeyBinding::new("ctrl-shift-a", SelectLineStart, ctx),
@@ -49,6 +52,20 @@ struct Killed(String);
 impl Global for Killed {}
 
 impl Editor {
+    /// ⌃L: the caret's line in the middle of the window.
+    pub(super) fn center_caret_line(&mut self, _: &CenterCaretLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.center_once = true;
+        self.autoscroll = true;
+        cx.notify();
+    }
+
+    /// ⌘J: the selection back in view after scrolling away from it.
+    pub(super) fn jump_to_selection(&mut self, _: &JumpToSelection, _: &mut Window, cx: &mut Context<Self>) {
+        self.autoscroll = true;
+        self.reveal_only = false;
+        cx.notify();
+    }
+
     /// The rest of the line, or the line break at its end; ⌃K again adds to what ⌃Y puts back.
     pub(super) fn delete_to_line_end(&mut self, _: &DeleteToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
         let again = self.extra.is_empty() && self.killed_at == Some((self.buffer.revision(), self.selection.head));
@@ -163,5 +180,57 @@ mod tests {
         e.update(cx, |e, _| e.selection = Selection::caret(9));
         cx.simulate_keystrokes("ctrl-d ctrl-f ctrl-h");
         assert_eq!(state(cx), ("oenthree\nour two\n\n".into(), 9));
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use crate::buffer::Buffer;
+    use crate::editor::{Editor, Selection};
+    use gpui::TestAppContext;
+    use std::path::PathBuf;
+
+    /// ⌃L puts the caret's line in the middle; ⌘J, after scrolling away, brings it back.
+    #[gpui::test]
+    fn the_caret_line_centered_and_found_again(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let text = (1..=300).map(|n| format!("line {n}\n")).collect::<String>();
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(PathBuf::from("a.txt")), cx));
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle);
+            e.go_to_line(150, cx);
+        });
+        cx.run_until_parked();
+        // Where the caret's line is in the view, as a share of its height (0 top, 1 bottom).
+        let place = |cx: &mut gpui::VisualTestContext| {
+            e.read_with(cx, |e, _| {
+                let layout = e.layout.as_ref().unwrap();
+                let height = f32::from(layout.text_bounds.size.height);
+                let row = e.caret_point().0 as f32;
+                let y = row * f32::from(layout.line_height) - e.scroll.target_y;
+                y / height
+            })
+        };
+        assert!(place(cx) > 0.6, "near the bottom after going there: {}", place(cx));
+        cx.simulate_keystrokes("ctrl-l");
+        cx.run_until_parked();
+        assert!((place(cx) - 0.5).abs() < 0.1, "in the middle: {}", place(cx));
+        // Scrolled to the top, away from the caret; ⌘J brings it back.
+        e.update(cx, |e, _| {
+            e.scroll.target_y = 0.;
+            e.scroll.y = 0.;
+        });
+        cx.run_until_parked();
+        assert!(place(cx) > 1., "out of view");
+        cx.simulate_keystrokes("cmd-j");
+        cx.run_until_parked();
+        assert!((0. ..1.).contains(&place(cx)), "in view: {}", place(cx));
+        e.update(cx, |e, _| assert_eq!(e.selection, Selection::caret(e.buffer.offset(149, 0))));
     }
 }

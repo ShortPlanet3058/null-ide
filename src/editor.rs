@@ -537,6 +537,8 @@ pub struct Editor {
     /// Set by the mouse: bring the caret into view without the keyboard's margin, so a
     /// click near an edge doesn't scroll the text under the pointer.
     pub reveal_only: bool,
+    /// The next scroll to the caret puts its line in the middle (⌃L).
+    pub center_once: bool,
     dragging: Option<DragUnit>,
     /// Where dragged text would land, shown as a caret while it's dragged.
     pub drop_at: Option<usize>,
@@ -737,6 +739,7 @@ impl Editor {
             wrap: Default::default(),
             autoscroll: false,
             reveal_only: false,
+            center_once: false,
             dragging: None,
             drop_at: None,
             font_size: px(cx.global::<Settings>().font_size),
@@ -3708,6 +3711,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::join_lines))
             .on_action(cx.listener(Self::rewrap))
             .on_action(cx.listener(Self::delete_to_line_end))
+            .on_action(cx.listener(Self::center_caret_line))
+            .on_action(cx.listener(Self::jump_to_selection))
             .on_action(cx.listener(Self::yank))
             .on_action(cx.listener(Self::transpose))
             .on_action(cx.listener(Self::open_line))
