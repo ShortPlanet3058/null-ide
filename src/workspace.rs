@@ -46,6 +46,7 @@ actions!(
         OpenInBrowser,
         FindTodos,
         RunSelectionInTerminal,
+        PasteFromHistory,
         PushBranch,
         PullBranch,
         FileHistory,
@@ -470,6 +471,8 @@ pub struct Workspace {
     git_listing: bool,
     /// The history a list shows (⌥ picking one compares the file with it), and its file.
     history: Option<(PathBuf, Vec<Past>)>,
+    /// While Paste from History is open: what its rows stand for.
+    clipboard_list: Option<Vec<gpui::ClipboardItem>>,
     /// A tab's right-click menu, while open.
     tab_menu: Option<TabMenu>,
     /// Only the code: no sidebar, tabs, status bar or terminal, the text centered.
@@ -667,6 +670,7 @@ impl Workspace {
             git_status_task: None,
             git_listing: false,
             history: None,
+            clipboard_list: None,
             pending_branches: Vec::new(),
             recent_runs: Vec::new(),
             pending_tasks: Vec::new(),
@@ -3068,6 +3072,7 @@ impl Workspace {
             (File, "Fetch".into(), Box::new(FetchBranch)),
             (Go, "Find TODOs".into(), Box::new(FindTodos)),
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
+            (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
@@ -3406,7 +3411,17 @@ impl Workspace {
                 this.view_before_preview = None;
                 // What the list was, before closing it forgets.
                 let (git_listing, history) = (this.git_listing, this.history.take());
+                let clipboard = this.clipboard_list.take();
                 this.close_palette(window, cx);
+                // A copy picked: on the clipboard again, and pasted where the caret is.
+                if let Some(item) = clipboard.and_then(|list| list.get(position.line as usize).cloned()) {
+                    cx.write_to_clipboard(item);
+                    if let Some(editor) = this.active_editor().cloned() {
+                        window.focus(&editor.focus_handle(cx));
+                        window.dispatch_action(Box::new(crate::editor::Paste), cx);
+                    }
+                    return;
+                }
                 if let Some((file, past)) = history
                     && let Some(version) = past.get(position.line as usize)
                 {
@@ -3424,6 +3439,10 @@ impl Workspace {
                 this.go_to(path, lsp_types::Range { start: position, end: position }, window, cx);
             }
             PaletteEvent::Preview(path, position) => {
+                // Copies aren't places in a file.
+                if this.clipboard_list.is_some() {
+                    return;
+                }
                 if let Some(editor) = this
                     .active_editor()
                     .filter(|e| e.read(cx).path() == Some(path.as_path()) || e.read(cx).path().is_none())
@@ -3519,6 +3538,7 @@ impl Workspace {
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.git_listing = false;
         self.history = None;
+        self.clipboard_list = None;
         // Leaving a symbol list without choosing: the view goes back to where it was.
         if let Some((editor, (line, column, top))) = self.view_before_preview.take() {
             editor.update(cx, |editor, cx| editor.restore_view(line, column, top, cx));
@@ -4549,6 +4569,39 @@ impl Workspace {
     fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let root = self.tree.read(cx).root().to_path_buf();
         self.add_terminal_in(root, window, cx)
+    }
+
+    /// The last things copied or cut in Null, newest first: ↵ pastes one (it's on the
+    /// clipboard again too).
+    fn paste_from_history(&mut self, _: &PasteFromHistory, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = crate::clipboard_history::entries(cx);
+        if entries.is_empty() {
+            return self.show_notice("Nothing copied yet.".into(), cx);
+        }
+        let now = std::time::Instant::now();
+        let locations = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (item, when))| {
+                let (first, lines) = crate::clipboard_history::preview(&item.text().unwrap_or_default());
+                let minutes = now.duration_since(*when).as_secs() / 60;
+                let ago = match minutes {
+                    0 => "just now".to_string(),
+                    1 => "1 minute ago".to_string(),
+                    m if m < 60 => format!("{m} minutes ago"),
+                    m => format!("{} h ago", m / 60),
+                };
+                let lines = if lines == 1 { String::new() } else { format!("{lines} lines · ") };
+                crate::palette::Location {
+                    path: PathBuf::new(),
+                    position: lsp_types::Position { line: i as u32, character: 0 },
+                    text: format!("{first}\t{lines}{ago}"),
+                    kind: crate::palette::LocationKind::Commit,
+                }
+            })
+            .collect();
+        self.open_locations("Paste from History".into(), locations, window, cx);
+        self.clipboard_list = Some(entries.into_iter().map(|(item, _)| item).collect());
     }
 
     /// The selected lines (or the caret's line) run in the terminal, opened if it isn't;
@@ -6352,6 +6405,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::set_changes_aside))
             .on_action(cx.listener(Self::find_todos))
             .on_action(cx.listener(Self::run_selection_in_terminal))
+            .on_action(cx.listener(Self::paste_from_history))
             .on_action(cx.listener(|this, _: &OpenInBrowser, _, cx| {
                 // Saved first: the browser reads the file.
                 if let Some(editor) = this.active_editor().cloned()
@@ -7230,6 +7284,34 @@ mod tests {
             assert!(e.in_review(), "compared with the version saved over");
             assert_eq!(e.review_base(), Some("one\n"));
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Copy two things, then Paste from History and ↵ on the older: pasted, as it was copied.
+    #[gpui::test]
+    fn an_older_copy_pastes_from_the_history(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("null-clipboard-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "alpha\nbeta\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(file.clone(), window, cx));
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+        // Copy "alpha", then "beta" (each its whole line), then go to the end.
+        cx.simulate_keystrokes("cmd-c down cmd-c cmd-down");
+        workspace.update_in(cx, |w, window, cx| w.paste_from_history(&PasteFromHistory, window, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "alpha\nbeta\nalpha\n"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
