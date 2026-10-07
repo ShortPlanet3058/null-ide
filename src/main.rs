@@ -13,6 +13,7 @@ mod dap;
 mod debugger;
 mod editor;
 mod element;
+mod emmet;
 mod encoding;
 mod file_style;
 mod file_tree;

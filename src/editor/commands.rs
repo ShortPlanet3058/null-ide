@@ -355,6 +355,37 @@ impl Editor {
         before.rfind("<!--").is_some_and(|open| before.rfind("-->").is_none_or(|close| close < open))
     }
 
+    /// ⇥ after an Emmet abbreviation in HTML (see `emmet`): its tags, as a snippet to fill
+    /// in. Not in a script or a style sheet. Returns whether it did.
+    pub(super) fn expand_abbreviation(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.language().is_some_and(|l| l.name == "HTML") || !self.selection.is_empty() {
+            return false;
+        }
+        let caret = self.selection.head;
+        let (line, column) = self.buffer.point(caret);
+        let text = self.buffer.line_text(line);
+        let before: String = text.chars().take(column).collect();
+        let indent = &text[..text.len() - text.trim_start().len()];
+        let Some((start_byte, snippet)) = crate::emmet::expand_at_end(&before, indent, &self.style.indent.unit())
+        else {
+            return false;
+        };
+        // Inside <script> or <style>, it's code.
+        let html = self.buffer.rope().slice(..caret).to_string().to_lowercase();
+        let open = |tag: &str| {
+            html.rfind(&format!("<{tag}")).is_some_and(|at| html.rfind(&format!("</{tag}")).is_none_or(|end| end < at))
+        };
+        if open("script") || open("style") {
+            return false;
+        }
+        let start = caret - before[start_byte..].chars().count();
+        let parsed = super::snippet::parse(&snippet);
+        self.edit(start..caret, &parsed.text.clone(), EditKind::Other, cx);
+        self.start_snippet(start, parsed, cx);
+        cx.notify();
+        true
+    }
+
     /// Backspace between an empty pair like `()` removes both.
     pub(super) fn empty_pair_around_caret(&self) -> bool {
         let caret = self.selection.head;
@@ -725,6 +756,40 @@ mod editor_tests {
         assert_eq!(e.read_with(cx, |e, _| e.matching_brackets()), Some((1, 11)));
         select(cx, &e, 8, 8);
         assert_eq!(e.read_with(cx, |e, _| e.matching_brackets()), Some((7, 5)));
+    }
+
+    /// ⇥ after `ul>li*2` in HTML: the tags, the first place to fill in selected, ⇥ to the
+    /// next; a plain word stays a word; in a script, ⇥ is a tab.
+    #[gpui::test]
+    fn tab_expands_abbreviations_in_html(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let typed = |cx: &mut TestAppContext, start: &str, keys: &str| {
+            let start = start.to_string();
+            let (e, cx) = cx
+                .add_window_view(|_, cx| Editor::new(Buffer::from_text(&start), Some(PathBuf::from("page.html")), cx));
+            e.update_in(cx, |e, window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(e, cx));
+                e.selection = Selection::caret(e.buffer.len_chars());
+            });
+            cx.simulate_input(keys);
+            cx.simulate_keystrokes("tab");
+            cx.simulate_input("One");
+            cx.simulate_keystrokes("tab");
+            cx.simulate_input("Two");
+            e.read_with(cx, |e, _| e.buffer.to_string())
+        };
+        assert_eq!(
+            typed(cx, "<body>\n  <p>Hi</p>\n  <div>\n    <p>There</p>\n  </div>\n  ", "ul>li*2"),
+            "<body>\n  <p>Hi</p>\n  <div>\n    <p>There</p>\n  </div>\n  <ul>\n    <li>One</li>\n    <li>Two</li>\n  </ul>"
+        );
+        // A word, or code in a script: ⇥ is a tab, no tags.
+        assert_eq!(typed(cx, "", "hello"), "hello   One Two");
+        assert_eq!(typed(cx, "<script>\n", "ul>li"), "<script>\nul>li   One Two");
     }
 
     /// Typed one key at a time, smart quotes and dashes on: curled in Markdown prose, left

@@ -1905,6 +1905,10 @@ impl Editor {
                 return self.indent_lines(cx);
             }
         }
+        // In HTML, an abbreviation before the caret (`ul>li*3`) becomes its tags.
+        if self.expand_abbreviation(cx) {
+            return;
+        }
         let range = self.selection.range();
         let text = match self.style.indent {
             IndentStyle::Tabs => "\t".to_string(),
