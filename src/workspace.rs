@@ -41,6 +41,8 @@ actions!(
         ReviewChanges,
         CommitAll,
         UndoLastCommit,
+        SetChangesAside,
+        BringBackChanges,
         PushBranch,
         PullBranch,
         FileHistory,
@@ -1022,6 +1024,7 @@ impl Workspace {
             this.pending_commands = vec![
                 command("Commit…", Box::new(CommitAll)),
                 command("Undo Last Commit", Box::new(UndoLastCommit)),
+                command("Set Changes Aside", Box::new(SetChangesAside)),
                 command("Push", Box::new(PushBranch)),
                 command("Pull", Box::new(PullBranch)),
                 command("Switch Branch…", Box::new(SwitchBranch)),
@@ -1141,6 +1144,61 @@ impl Workspace {
                         let subject = message.lines().next().unwrap_or_default().to_string();
                         this.commit_draft = Some(message);
                         this.show_notice(format!("Took back “{subject}”: its changes wait for the next Commit."), cx);
+                    }
+                    Err(error) => this.show_notice(error, cx),
+                }
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sets the changes since the last commit aside (open files saved first): the files go
+    /// back to the last commit, to work on something else, until Bring Back Changes.
+    fn set_changes_aside(&mut self, _: &SetChangesAside, _: &mut Window, cx: &mut Context<Self>) {
+        if self.branch.is_none() {
+            return self.show_notice("This folder isn't a git repository.".into(), cx);
+        }
+        self.save_named_tabs(cx);
+        let root = self.tree.read(cx).root().to_path_buf();
+        let files = match self.git_status.len() {
+            1 => "1 file's changes".to_string(),
+            n => format!("{n} files' changes"),
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::set_aside(&root) }).await;
+            this.update(cx, |this, cx| {
+                let notice = match result {
+                    Ok(()) => format!("Set {files} aside: Bring Back Changes returns them."),
+                    Err(error) => error,
+                };
+                this.show_notice(notice, cx);
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Returns the changes set aside last. Conflicts open at the first, where ⌘. resolves each.
+    fn bring_back_changes(&mut self, _: &BringBackChanges, window: &mut Window, cx: &mut Context<Self>) {
+        if self.branch.is_none() {
+            return self.show_notice("This folder isn't a git repository.".into(), cx);
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::bring_back(&root) }).await;
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(conflicts) if conflicts.is_empty() => this.show_notice("Brought the changes back.".into(), cx),
+                    Ok(conflicts) => {
+                        let n = conflicts.len();
+                        let files = if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+                        this.show_notice(format!("Brought back, with conflicts in {files}: ⌘. resolves each."), cx);
+                        if let Some(first) = conflicts.into_iter().next() {
+                            this.open_file(first, window, cx);
+                        }
                     }
                     Err(error) => this.show_notice(error, cx),
                 }
@@ -2914,6 +2972,8 @@ impl Workspace {
             ),
             (File, "Commit…".into(), Box::new(CommitAll)),
             (File, "Undo Last Commit".into(), Box::new(UndoLastCommit)),
+            (File, "Set Changes Aside".into(), Box::new(SetChangesAside)),
+            (File, "Bring Back Changes".into(), Box::new(BringBackChanges)),
             (File, "Push".into(), Box::new(PushBranch)),
             (File, "Pull".into(), Box::new(PullBranch)),
             (File, "Show File History".into(), Box::new(FileHistory)),
@@ -6152,6 +6212,8 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::revert_all_changes))
             .on_action(cx.listener(Self::undo_last_commit))
+            .on_action(cx.listener(Self::set_changes_aside))
+            .on_action(cx.listener(Self::bring_back_changes))
             .on_action(cx.listener(|this, _: &ShowWelcome, window, cx| this.show_welcome(window, cx)))
             .on_action(cx.listener(Self::install_shell_command))
             .on_action(cx.listener(Self::review_ai_task))

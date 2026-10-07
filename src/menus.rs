@@ -85,6 +85,8 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Review Changes…", crate::workspace::ReviewChanges),
                 MenuItem::action("Commit…", crate::workspace::CommitAll),
                 MenuItem::action("Undo Last Commit", crate::workspace::UndoLastCommit),
+                MenuItem::action("Set Changes Aside", crate::workspace::SetChangesAside),
+                MenuItem::action("Bring Back Changes", crate::workspace::BringBackChanges),
                 MenuItem::action("Push", crate::workspace::PushBranch),
                 MenuItem::action("Pull", crate::workspace::PullBranch),
                 MenuItem::action("Show File History", crate::workspace::FileHistory),

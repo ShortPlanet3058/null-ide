@@ -340,6 +340,36 @@ pub fn branch_name(typed: &str) -> String {
 /// What `switch_branch` says when changes here would be overwritten there.
 pub const WOULD_LOSE_CHANGES: &str = "Changes here would be lost on that branch: commit or revert them first.";
 
+/// Sets every change since the last commit aside (new files too, only under `root`): the
+/// files go back to the last commit until `bring_back` returns the changes.
+pub fn set_aside(root: &Path) -> Result<(), String> {
+    let latest_stash = || git(root, &["rev-parse", "-q", "--verify", "refs/stash"]);
+    let before = latest_stash();
+    run(root, &["stash", "push", "-q", "--include-untracked", "-m", "Null: set aside", "--", "."])
+        .map_err(|e| format!("Couldn't set the changes aside: {e}"))?;
+    if latest_stash() == before {
+        Err("Nothing to set aside: nothing changed since the last commit.".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Returns the changes set aside last (`set_aside`, or a stash made elsewhere): the files
+/// they conflict in, if any (left marked, the changes still kept aside).
+pub fn bring_back(root: &Path) -> Result<Vec<PathBuf>, String> {
+    if git(root, &["rev-parse", "-q", "--verify", "refs/stash"]).is_none() {
+        return Err("Nothing is set aside.".into());
+    }
+    match run(root, &["stash", "pop", "-q"]) {
+        Ok(_) => Ok(Vec::new()),
+        Err(error) => {
+            let conflicted: Vec<PathBuf> =
+                status(root).into_iter().filter(|(_, s)| *s == FileStatus::Conflicted).map(|(p, _)| p).collect();
+            if conflicted.is_empty() { Err(format!("Couldn't bring them back: {error}")) } else { Ok(conflicted) }
+        }
+    }
+}
+
 /// Switches to `branch` taking the changes not committed along: set aside, switched,
 /// put back. The files they conflict in, if putting them back does (they're left marked).
 pub fn switch_carrying_changes(root: &Path, branch: &Branch) -> Result<Vec<PathBuf>, String> {
@@ -822,6 +852,35 @@ mod tests {
             }
         );
         assert!(!status(&repo).iter().any(|(p, _)| p.ends_with("planned.ts")), "still staged");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Set Changes Aside, then Bring Back Changes: the files go back to the last commit,
+    /// then their changes return, new files too.
+    #[test]
+    #[cfg(unix)]
+    fn changes_set_aside_come_back() {
+        let repo = std::env::temp_dir().join(format!("null-git-set-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        if run(&repo, &["init", "-q"]).is_err() {
+            return; // No git here.
+        }
+        run(&repo, &["config", "user.name", "t"]).unwrap();
+        run(&repo, &["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(repo.join("f.txt"), "one\n").unwrap();
+        commit_all(&repo, "first").unwrap();
+        assert!(bring_back(&repo).unwrap_err().contains("Nothing is set aside"));
+        assert!(set_aside(&repo).unwrap_err().contains("Nothing to set aside"));
+        std::fs::write(repo.join("f.txt"), "two\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        set_aside(&repo).unwrap();
+        assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), "one\n");
+        assert!(!repo.join("new.txt").exists());
+        assert!(status(&repo).is_empty());
+        assert_eq!(bring_back(&repo), Ok(Vec::new()));
+        assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), "two\n");
+        assert_eq!(std::fs::read_to_string(repo.join("new.txt")).unwrap(), "new\n");
         std::fs::remove_dir_all(&repo).ok();
     }
 
