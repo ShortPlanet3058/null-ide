@@ -66,7 +66,15 @@ pub fn hunks(before: &str, after: &str) -> Vec<Hunk> {
 /// A line in pieces to compare: words (letters, digits, `_`), runs of spaces, and each
 /// other character alone (so `count;` and `quantity;` differ by the word, not the `;`).
 fn tokens(line: &str) -> Vec<&str> {
-    let kind = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c.is_whitespace() { 1 } else { 2 };
+    let kind = |c: char| {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
     let mut found = Vec::new();
     let mut start = 0;
     let mut last: Option<u8> = None;
@@ -291,12 +299,13 @@ mod tests {
     #[test]
     fn the_words_that_changed() {
         let (old, new) = changed_words("let total = price * count;", "let total = price * quantity;");
-        assert_eq!((old.as_slice(), new.as_slice()), (&[20..25][..], &[20..28][..]));
+        let ends = |v: &[Range<usize>]| v.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>();
+        assert_eq!((ends(&old), ends(&new)), (vec![(20, 25)], vec![(20, 28)]));
         // Rewritten: nothing singled out.
         assert_eq!(changed_words("fn a() {}", "struct Point { x: f32 }"), (vec![], vec![]));
         // Accented letters count as one column.
         let (_, new) = changed_words("café noir", "café crème");
-        assert_eq!(new, vec![5..10]);
+        assert_eq!(ends(&new), [(5, 10)]);
     }
 
     #[test]
@@ -335,8 +344,9 @@ mod editor_tests {
         e.update(cx, |e, cx| e.start_review("let total = price * count;\nprint(total)\n".into(), cx));
         e.read_with(cx, |e, _| {
             let words = e.word_changes(0..10);
-            assert_eq!(words.added.get(&0).map(Vec::as_slice), Some(&[20..28][..]));
-            assert_eq!(words.removed.values().map(Vec::as_slice).collect::<Vec<_>>(), [&[20..25][..]]);
+            let ends = |v: &[Range<usize>]| v.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>();
+            assert_eq!(words.added.get(&0).map(|v| ends(v)), Some(vec![(20, 28)]));
+            assert_eq!(words.removed.values().map(|v| ends(v)).collect::<Vec<_>>(), [vec![(20, 25)]]);
             assert!(!words.added.contains_key(&2), "an added line has no counterpart");
         });
     }
