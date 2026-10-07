@@ -58,6 +58,8 @@ pub enum Syntax {
     Punctuation,
     Attribute,
     Property,
+    /// A note left in a comment: TODO, FIXME, HACK, XXX.
+    Note,
 }
 
 #[derive(Clone)]
@@ -394,6 +396,7 @@ impl Theme {
             Syntax::Punctuation => self.punctuation,
             Syntax::Attribute => self.attribute,
             Syntax::Property => self.property,
+            Syntax::Note => self.caret,
         }
     }
 }

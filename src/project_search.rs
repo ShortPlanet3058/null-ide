@@ -65,6 +65,11 @@ pub struct LineMatch {
     highlights: Vec<Range<usize>>,
 }
 
+/// What Find TODOs looks for: the notes left in code, as whole words, in capitals.
+pub fn todo_query() -> SearchQuery {
+    SearchQuery { text: r"\b(TODO|FIXME|HACK|XXX)\b".into(), case_sensitive: true, whole_word: false, regex: true }
+}
+
 pub struct FileResult {
     path: PathBuf,
     relative: String,
@@ -210,6 +215,16 @@ impl ProjectSearch {
             None => input.select_all_text(cx),
         });
         window.focus(&self.input.focus_handle(cx));
+    }
+
+    /// Searches for `query` (its choices too: case, word, pattern), the field showing it.
+    pub fn search_for(&mut self, query: SearchQuery, window: &mut Window, cx: &mut Context<Self>) {
+        self.case_sensitive = query.case_sensitive;
+        self.whole_word = query.whole_word;
+        self.regex = query.regex;
+        self.input.update(cx, |input, cx| input.set_text(&query.text, cx));
+        window.focus(&self.input.focus_handle(cx));
+        self.search(cx);
     }
 
     fn search(&mut self, cx: &mut Context<Self>) {
@@ -948,6 +963,23 @@ mod tests {
             s.step(false, cx);
             assert_eq!(s.selected, Some(2));
         });
+    }
+
+    #[test]
+    fn finds_the_notes_left_in_code() {
+        let dir = std::env::temp_dir().join(format!("null-search-todos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "// TODO: split\nfn a() {} // FIXME later\n// TODOS, todo, XXXL\n").unwrap();
+        let mut lines = Vec::new();
+        search_files(&dir, &todo_query(), "", &Default::default(), &AtomicBool::new(false), |found| {
+            if let Found::Files(files) = found {
+                lines.extend(files.into_iter().flat_map(|f| f.matches.into_iter().map(|m| m.line)));
+            }
+        });
+        lines.sort();
+        assert_eq!(lines, [0, 1]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
