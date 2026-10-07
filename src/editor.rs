@@ -33,7 +33,7 @@ pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
-pub use refactor::{FindReferences, FormatDocument, FormatSelection, RenameSymbol, apply_edits};
+pub use refactor::{FindReferences, FormatDocument, FormatSelection, InsertTableOfContents, RenameSymbol, apply_edits};
 pub use review::{KeepHunk, UndoHunk};
 pub use rewrap::Rewrap;
 pub use structure::{
@@ -3409,6 +3409,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::title_case))
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::format_document))
+            .on_action(cx.listener(Self::insert_table_of_contents))
             .on_action(cx.listener(Self::format_selection))
             .on_action(cx.listener(Self::accept_ghost_word))
             .on_action(cx.listener(Self::accept_ghost_line))
@@ -4091,6 +4092,42 @@ mod tests {
             std::fs::write(&path, "theirs\n").unwrap();
             e.reload_from_disk(cx);
             assert!(e.disk_changed);
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Insert Table of Contents: at the caret first, then brought up to date in place; its
+    /// links lead somewhere.
+    #[gpui::test]
+    fn a_table_of_contents_is_inserted_then_kept_up_to_date(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = std::env::temp_dir().join(format!("null-toc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("guide.md");
+        std::fs::write(&path, "# Guide\n\n\n## Install\n## Use\n").unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(path.clone(), None, cx));
+        editor.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(e.buffer.offset(2, 0));
+            e.insert_table_of_contents(&InsertTableOfContents, window, cx);
+            assert_eq!(
+                e.buffer.to_string(),
+                "# Guide\n\n<!-- toc -->\n- [Install](#install)\n- [Use](#use)\n<!-- /toc -->\n\n## Install\n## Use\n"
+            );
+            for line in 0..e.buffer.len_lines() {
+                assert!(e.broken_links_on_line(line, &e.buffer.line_text(line)).is_empty(), "line {line}");
+            }
+            // A new heading, and again from the end: the same list, up to date.
+            let end = e.buffer.len_chars();
+            e.edit(end..end, "## Help\n", EditKind::Other, cx);
+            e.selection = Selection::caret(e.buffer.len_chars());
+            e.insert_table_of_contents(&InsertTableOfContents, window, cx);
+            let text = e.buffer.to_string();
+            assert_eq!(text.matches("<!-- toc -->").count(), 1);
+            assert!(text.contains("- [Use](#use)\n- [Help](#help)\n<!-- /toc -->"), "{text}");
         });
         std::fs::remove_dir_all(&dir).ok();
     }

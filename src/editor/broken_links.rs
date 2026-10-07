@@ -17,24 +17,7 @@ const CHOICES: usize = 5;
 
 /// The `#anchors` a Markdown text's headings make (`## Get started` → `get-started`).
 fn anchors(text: &str) -> Vec<String> {
-    let mut fence: Option<&str> = None;
-    let mut found = Vec::new();
-    for line in text.lines() {
-        let t = line.trim_start();
-        if let Some(open) = ["```", "~~~"].into_iter().find(|f| t.starts_with(f)) {
-            fence = if fence == Some(open) { None } else { fence.or(Some(open)) };
-            continue;
-        }
-        if fence.is_none()
-            && let Some(heading) = t.strip_prefix('#')
-        {
-            let heading = heading.trim_start_matches('#');
-            if heading.starts_with(' ') {
-                found.push(crate::markdown_view::slug(heading.trim().trim_end_matches('#')));
-            }
-        }
-    }
-    found
+    crate::markdown_view::headings(text).into_iter().map(|(_, _, anchor)| anchor).collect()
 }
 
 impl Editor {
@@ -209,8 +192,9 @@ mod tests {
 
     #[test]
     fn headings_make_anchors() {
-        let text = "# Null\n\n## Get started\n```\n# not a heading\n```\n### Keys & shortcuts ###\n#hashtag\n";
-        assert_eq!(anchors(text), ["null", "get-started", "keys--shortcuts"]);
+        let text =
+            "# Null\n\n## Get started\n```\n# not a heading\n```\n### Keys & shortcuts ###\n#hashtag\n## Get started\n";
+        assert_eq!(anchors(text), ["null", "get-started", "keys--shortcuts", "get-started-1"]);
     }
 
     /// A link to a file that isn't there is marked, one to a section that is isn't; ⌘. on
