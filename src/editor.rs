@@ -604,6 +604,8 @@ pub struct Editor {
     line_spacing: f32,
     /// The words in a prose file, for the revision counted.
     words: std::cell::Cell<Option<(u64, usize)>>,
+    /// The selection's words, for the revision and selection (start, end) they were counted at.
+    selected_words: std::cell::Cell<Option<(u64, usize, usize, usize)>>,
     /// Which lines are in Markdown fences, as of a version of the text (for spelling).
     fences: std::cell::RefCell<Option<(u64, Vec<bool>)>>,
     /// Whether linked files exist, and since when that's known (for broken links).
@@ -726,6 +728,8 @@ pub struct Editor {
     ghost_cache: Vec<(String, Vec<String>)>,
     renaming: Option<refactor::Renaming>,
     format_task: Option<Task<()>>,
+    /// A search to run again once typing pauses, in a big file (see `search_after_edit`).
+    search_task: Option<Task<()>>,
     /// Pasted code being formatted (Format on paste): apart, so it can't cancel a save's.
     paste_format_task: Option<Task<()>>,
     /// Rows between the lines for those, rebuilt as they change.
@@ -837,6 +841,7 @@ impl Editor {
             font_size: px(cx.global::<Settings>().font_size),
             line_spacing: cx.global::<Settings>().line_spacing.factor(),
             words: Default::default(),
+            selected_words: Default::default(),
             fences: Default::default(),
             link_targets: Default::default(),
             anchors: Default::default(),
@@ -909,6 +914,7 @@ impl Editor {
             ghost_cache: Vec::new(),
             renaming: None,
             format_task: None,
+            search_task: None,
             paste_format_task: None,
             blocks: Vec::new(),
         };
@@ -1111,7 +1117,7 @@ impl Editor {
             batch.changed = true;
             return;
         }
-        self.rehighlight();
+        self.search_after_edit(cx);
         self.folds_after_edit(cx);
         self.ai_text_changed();
         self.sync_lsp(cx);
@@ -1406,6 +1412,26 @@ impl Editor {
         self.find_scope = None;
         self.refresh_search();
         cx.notify();
+    }
+
+    /// The search's matches after an edit: found again at once in a file of ordinary
+    /// size; in a big one (each search is the whole file), once typing pauses.
+    fn search_after_edit(&mut self, cx: &mut Context<Self>) {
+        const BIG: usize = 1 << 20;
+        if self.search.is_none() {
+            return;
+        }
+        if self.buffer.rope().len_bytes() < BIG {
+            return self.refresh_search();
+        }
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(150)).await;
+            this.update(cx, |this, cx| {
+                this.refresh_search();
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn refresh_search(&mut self) {
@@ -2731,6 +2757,26 @@ impl Editor {
         let words = self.buffer.rope().chunks().fold((0, false), |(n, carried), chunk| count_words(chunk, n, carried));
         let words = words.0 + usize::from(words.1);
         self.words.set(Some((revision, words)));
+        Some(words)
+    }
+
+    /// How many words are selected (counted again only when the text or the selection
+    /// changes, from the text itself, not a copy); None for a selection too big to count.
+    pub fn selected_words(&self) -> Option<usize> {
+        let range = self.selection.range();
+        let revision = self.buffer.revision();
+        if let Some((r, start, end, words)) = self.selected_words.get()
+            && (r, start, end) == (revision, range.start, range.end)
+        {
+            return Some(words);
+        }
+        let slice = self.buffer.rope().slice(range.clone());
+        if slice.len_bytes() > WORD_COUNT_BYTES {
+            return None;
+        }
+        let (n, carried) = slice.chunks().fold((0, false), |(n, carried), chunk| count_words(chunk, n, carried));
+        let words = n + usize::from(carried);
+        self.selected_words.set(Some((revision, range.start, range.end, words)));
         Some(words)
     }
 
@@ -4631,6 +4677,7 @@ fn count_words(text: &str, mut n: usize, mut in_word: bool) -> (usize, bool) {
 }
 
 /// The words in `text`.
+#[cfg(test)]
 pub fn words_in(text: &str) -> usize {
     let (n, in_word) = count_words(text, 0, false);
     n + usize::from(in_word)

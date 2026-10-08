@@ -238,19 +238,29 @@ impl Buffer {
     }
 
     /// Column (in chars) of a UTF-16 position on `line`, as language servers count.
+    /// From the rope's own counts, not a copy of the line (a minified file's one line is
+    /// megabytes, and this runs on every caret move). Inside a surrogate pair: the char
+    /// after it, as before.
     pub fn utf16_to_column(&self, line: usize, utf16: usize) -> usize {
-        let mut units = 0;
-        for (column, c) in self.line_text(line).chars().enumerate() {
-            if units >= utf16 {
-                return column;
-            }
-            units += c.len_utf16();
+        if line >= self.len_lines() {
+            return self.line_len(line);
         }
-        self.line_len(line)
+        let start = self.text.line_to_char(line);
+        let len = self.line_len(line);
+        let start16 = self.text.char_to_utf16_cu(start);
+        let target = (start16 + utf16).min(self.text.char_to_utf16_cu(start + len));
+        let column = self.text.utf16_cu_to_char(target) - start;
+        let column = if self.text.char_to_utf16_cu(start + column) < target { column + 1 } else { column };
+        column.min(len)
     }
 
     pub fn column_to_utf16(&self, line: usize, column: usize) -> usize {
-        self.line_text(line).chars().take(column).map(char::len_utf16).sum()
+        if line >= self.len_lines() {
+            return 0;
+        }
+        let start = self.text.line_to_char(line);
+        let column = column.min(self.line_len(line));
+        self.text.char_to_utf16_cu(start + column) - self.text.char_to_utf16_cu(start)
     }
 
     pub fn char_to_utf16(&self, offset: usize) -> usize {
@@ -274,6 +284,19 @@ impl std::fmt::Display for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf16_columns_from_the_rope() {
+        let b = Buffer::from_text("a😀b\r\nxyz\n");
+        assert_eq!(b.column_to_utf16(0, 0), 0);
+        assert_eq!(b.column_to_utf16(0, 2), 3, "the emoji is two UTF-16 units");
+        assert_eq!(b.column_to_utf16(0, 9), 4, "past the end: the end, not the break");
+        assert_eq!(b.utf16_to_column(0, 3), 2);
+        assert_eq!(b.utf16_to_column(0, 2), 2, "inside the pair: the char after");
+        assert_eq!(b.utf16_to_column(0, 99), 3);
+        assert_eq!(b.utf16_to_column(1, 2), 2);
+        assert_eq!((b.utf16_to_column(9, 1), b.column_to_utf16(9, 1)), (0, 0));
+    }
 
     #[test]
     fn edits_bump_version_and_dirty() {

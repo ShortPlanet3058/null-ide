@@ -96,10 +96,15 @@ impl Editor {
     /// The misspelled words on line `line` (its text `text`), by byte range in it. The word
     /// the caret is typing at the end of waits until the caret leaves it.
     pub fn misspellings_on_line(&self, line: usize, text: &str, cx: &App) -> Vec<Range<usize>> {
+        let words = self.misspelled_words(line, text, cx);
+        // None (a long line isn't checked): nothing to find the caret in.
+        if words.is_empty() {
+            return words;
+        }
         let (caret_line, caret_col) = self.caret_point();
         let typing = (caret_line == line && self.selection.is_empty())
             .then(|| text.char_indices().nth(caret_col).map_or(text.len(), |(b, _)| b));
-        self.misspelled_words(line, text, cx).into_iter().filter(|r| typing != Some(r.end)).collect()
+        words.into_iter().filter(|r| typing != Some(r.end)).collect()
     }
 
     /// The misspelled word the caret is in (or just after), by char range, and the word.
