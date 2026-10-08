@@ -641,6 +641,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Wrap at the line guide",
+                Some("Where the project sets a line length (.editorconfig, rustfmt…), wrapped lines break there"),
+                Self::toggle("wrap-guide", s.wrap_at_guide, &theme, cx, |s| s.wrap_at_guide = !s.wrap_at_guide),
+                &theme,
+            ),
+            Self::row(
                 "Indentation",
                 Some("For new files, and files that don't show their own. Files keep theirs, and .editorconfig wins"),
                 {
@@ -1319,8 +1325,8 @@ mod tests {
                 panel.search_results(words.iter().map(|w| w.to_string()).collect(), window, cx).len()
             })
         };
-        // "wrap": two rows (code, and Markdown and text), under the Editor heading.
-        assert_eq!(count(&["wrap"], cx), 3);
+        // "wrap": three rows (code, Markdown and text, at the guide), under the Editor heading.
+        assert_eq!(count(&["wrap"], cx), 4);
         // Words found across sections: a heading for each.
         assert!(count(&["theme"], cx) >= 2);
         // A theme by its name finds the picker.

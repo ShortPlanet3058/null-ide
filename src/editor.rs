@@ -4916,6 +4916,29 @@ mod tests {
         assert_eq!(text_left("a.rs", cx), prose, "hidden in code too");
     }
 
+    /// Wrapped at the line guide when asked: a line breaks at the project's line length, not
+    /// at the window's edge.
+    #[gpui::test]
+    fn lines_wrap_at_the_guide_when_asked(cx: &mut TestAppContext) {
+        let rows = |at_guide: bool, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.set_global(Settings { word_wrap: true, wrap_at_guide: at_guide, ..Settings::default() });
+                cx.set_global(Theme::oled());
+                cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            });
+            let text = format!("{}\n", "word ".repeat(10));
+            let (e, cx) = cx.add_window_view(|_, cx| {
+                let mut e = Editor::new(Buffer::from_text(&text), Some("a.rs".into()), cx);
+                e.style.ruler = Some(20);
+                e
+            });
+            cx.run_until_parked();
+            e.read_with(cx, |e, _| e.wrap.rows())
+        };
+        assert_eq!(rows(false, cx), 2, "the window is wide: one row, and the empty last line");
+        assert_eq!(rows(true, cx), 4, "50 characters at 20 a row: three rows, and the last line");
+    }
+
     /// Dragging the selection moves it where it's dropped; with ⌥, copies it. A click in it
     /// without a drag just puts the caret there.
     #[gpui::test]
