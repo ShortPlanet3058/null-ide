@@ -328,6 +328,29 @@ impl Editor {
         self.touch(cx);
     }
 
+    /// ⌃⌘D: the occurrence just picked (⌘D) let go, and the next one picked instead, so
+    /// one that shouldn't change can be stepped over.
+    pub(super) fn skip_occurrence(&mut self, cx: &mut Context<Self>) {
+        let Some((needle, whole_word)) = self.occurrence_needle() else {
+            return self.touch(cx);
+        };
+        let skipped = self.selection.range();
+        let others: Vec<Range<usize>> = self.extra.iter().map(|c| c.selection.range()).collect();
+        let found = self.occurrences(&needle, whole_word);
+        let next = found
+            .iter()
+            .filter(|r| r.start >= skipped.end)
+            .chain(found.iter().filter(|r| r.start < skipped.start))
+            .find(|r| !others.contains(r))
+            .cloned();
+        if let Some(range) = next {
+            let mut cursors: Vec<(Cursor, bool)> = self.take_cursors().into_iter().filter(|(_, main)| !main).collect();
+            cursors.push((Cursor::new(Selection { anchor: range.start, head: range.end }), true));
+            self.set_cursors(cursors);
+        }
+        self.touch(cx);
+    }
+
     /// ⌥↵ in the find bar: a cursor on every match (the current one the main cursor), the
     /// bar closed and the keyboard back in the text.
     pub fn select_all_matches(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
@@ -533,6 +556,35 @@ mod tests {
         e.update(cx, |e, cx| e.step_history(true, cx));
         assert_eq!(text(cx, &e), "foo = foobar + foo\nfoo()\n");
         assert_eq!(cursor_count(cx, &e), 3);
+    }
+
+    /// ⌃⌘D steps over the one just picked: it's let go, the next one picked.
+    #[gpui::test]
+    fn an_occurrence_can_be_skipped(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "x = 1\nx = 2\nx = 3\nx = 4\n");
+        e.update(cx, |e, cx| {
+            e.selection = Selection::caret(0);
+            e.add_next_occurrence(cx);
+            e.add_next_occurrence(cx);
+            // The second `x` shouldn't change: the third instead.
+            e.skip_occurrence(cx);
+            assert_eq!(e.selection.range(), 12..13);
+            e.add_next_occurrence(cx);
+        });
+        assert_eq!(cursor_count(cx, &e), 3);
+        type_text(cx, &e, "y");
+        assert_eq!(text(cx, &e), "y = 1\nx = 2\ny = 3\ny = 4\n");
+    }
+
+    /// Alone, skipping moves the one selection on.
+    #[gpui::test]
+    fn skipping_the_only_one_moves_it(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "a b a\n");
+        e.update(cx, |e, cx| {
+            e.selection = Selection { anchor: 0, head: 1 };
+            e.skip_occurrence(cx);
+            assert_eq!((e.selection.range(), e.extra.len()), (4..5, 0));
+        });
     }
 
     #[gpui::test]

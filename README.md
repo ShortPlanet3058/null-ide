@@ -54,6 +54,7 @@ Getting around:
 | ⌘⇧F / ⌘⇧H | search / replace across the project (the chevron also picks which files: `*.rs, src/, !tests`; **Tabs**, only the files open) |
 | replace in lower case | each match keeps its case: `user` → `client` makes `User` `Client` and `USER` `CLIENT` (typed with capitals, it goes in as typed) |
 | ⌃- / ⌃⇧- | back / forward to where you were; ⇧⌘⌫ to the last edit |
+| ⌃Tab | the tab used before this one; hold ⌃ and press Tab again to go further back (⌃⇧Tab the other way); ⌘⇧] / ⌘⇧[ go by position |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
 | right-click a tab → Move Below | the two sides one above the other (dragged, a tab offers "Open below" too); the line between them resizes |
 | right-click a tab → Pin Tab | it stays first, out of "Close Others" and "Close All"; its pin unpins it |
@@ -84,7 +85,7 @@ doesn't need Xcode's separate Metal Toolchain download.
   sort the file's imports and drop the unused ones, where it can (TypeScript, Go, Python). **F8** goes from problem to problem.
 - Blocks fold from the gutter's arrow or ⌥⌘← / ⌥⌘→ (their first and closing lines stay);
   **Fold Level 1/2/3** (⌘K) folds every block that deep, for the file's outline.
-- Multiple cursors (⌘D, ⌘⇧-click), a box with ⌥⇧-drag, cursors at line ends (⌥⇧I);
+- Multiple cursors (⌘D, ⌃⌘D to step over the one just picked, ⌘⇧-click), a box with ⌥⇧-drag, cursors at line ends (⌥⇧I);
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
 - ⌃⌥↑ / ⌃⌥↓ step the number at the caret (or the next one on the line) up or down, by ten
   with ⇧; on a decimal's fraction, by its last place (`0.5` → `0.6`). `007`, `0x0F` and
@@ -127,7 +128,7 @@ doesn't need Xcode's separate Metal Toolchain download.
 - **Rewrap** (⌘K) refills a comment or a paragraph to the project's line length, keeping
   its `//`, `>` or list indent. The ⌃ keys of macOS text fields work too: ⌃A ⌃E, ⌃K and
   ⌃Y, ⌃T, ⌃O, ⌃L to center the caret's line, and ⌘J to bring the selection back into view;
-  ⌃⌥← → go by the parts of a name (`parse` `Http` `Request`), ⌃⌥⇧ selecting, ⌃⌥⌫ deleting.
+  ⌃⌥← → go by the parts of a name (`parse` `Http` `Request`), ⌃⌥⇧ selecting, ⌃⌥⌫ and ⌃⌥⌦ deleting.
 - Misspelled words in Markdown, text and comments get a faint wavy line, checked by the
   Mac's own speller in the languages set in System Settings (each line in the one it reads
   best in, so French and English mix); code is never marked. **⌘.** on one offers corrections.

@@ -164,6 +164,7 @@ pub fn set(cx: &mut App) {
                     items: vec![
                         // Cmd+Shift+click in the text adds (or removes) a cursor too.
                         MenuItem::action("Add Next Occurrence", AddNextOccurrence),
+                        MenuItem::action("Skip This Occurrence", crate::editor::SkipOccurrence),
                         MenuItem::action("Select All Occurrences", SelectAllOccurrences),
                         MenuItem::action("Add Cursor Above", AddCursorAbove),
                         MenuItem::action("Add Cursor Below", AddCursorBelow),
