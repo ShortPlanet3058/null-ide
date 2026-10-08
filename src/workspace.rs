@@ -531,6 +531,8 @@ pub struct Workspace {
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
     notice_task: Option<Task<()>>,
+    /// A notice for when Null comes back to the front (a command finished meanwhile).
+    notice_on_return: Option<String>,
     /// The terminal, once opened. It keeps running while the panel is hidden.
     /// The shells open in the terminal panel, and the one shown.
     terminals: Vec<(Entity<TerminalView>, Subscription)>,
@@ -703,6 +705,7 @@ impl Workspace {
             ignore_rules,
             key_prompt: None,
             notice: None,
+            notice_on_return: None,
             notice_task: None,
             focus_before_palette: None,
             _subscriptions: subscriptions,
@@ -729,6 +732,11 @@ impl Workspace {
             ._subscriptions
             .push(cx.observe_window_appearance(window, |_, _, cx| crate::settings::appearance_changed(cx)));
         workspace._subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active()
+                && let Some(message) = this.notice_on_return.take()
+            {
+                this.show_notice(message, cx);
+            }
             if !window.is_window_active() {
                 // Off to another app: files save now when they save by themselves.
                 if cx.global::<Settings>().auto_save != AutoSave::Off {
@@ -4873,6 +4881,16 @@ impl Workspace {
             TerminalEvent::TitleChanged => cx.notify(),
             // The shell exited (e.g. `exit`): its tab goes; with none left, so does the panel.
             TerminalEvent::Exited => this.remove_terminal(terminal.entity_id(), window, cx),
+            TerminalEvent::Finished(name, took) => {
+                let message = format!("{name} finished in the terminal ({})", crate::terminal_watch::took_words(*took));
+                let shown = this.terminal_open.on && this.terminal().is_some_and(|t| t == terminal);
+                if !window.is_window_active() {
+                    crate::terminal_watch::bounce_dock();
+                    this.notice_on_return = Some(message);
+                } else if !shown {
+                    this.show_notice(message, cx);
+                }
+            }
             TerminalEvent::OpenFile(path, line, column) => {
                 this.open_file(path.clone(), window, cx);
                 if let Some(editor) = this.active_editor().cloned() {
