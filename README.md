@@ -50,7 +50,7 @@ Getting around:
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
 | ⌘P `file:42:7` | open a file at a place, as compilers print it |
 | ⌘F | find in the file (with lines selected, only in them); ↑ ↓ bring back earlier searches, ⌥↵ puts a cursor on every match; ⌘E searches for the selection, ⌘G the next |
-| ⌘⇧F / ⌘⇧H | search / replace across the project (the chevron also picks which files: `*.rs, src/, !tests`) |
+| ⌘⇧F / ⌘⇧H | search / replace across the project (the chevron also picks which files: `*.rs, src/, !tests`; **Tabs**, only the files open) |
 | replace in lower case | each match keeps its case: `user` → `client` makes `User` `Client` and `USER` `CLIENT` (typed with capitals, it goes in as typed) |
 | ⌃- / ⌃⇧- | back / forward to where you were; ⇧⌘⌫ to the last edit |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
