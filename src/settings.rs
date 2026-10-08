@@ -83,6 +83,8 @@ pub struct Settings {
     pub preview_tabs: bool,
     /// Brackets coloured by how deep they are, a pair the same colour.
     pub bracket_colours: bool,
+    /// Every line's problem written at its end, faintly (otherwise only the caret's line's).
+    pub problems_at_line_ends: bool,
     /// Save files without ⌘S: never, after a pause in typing, or when leaving them.
     pub auto_save: AutoSave,
     /// Quitting (or closing the window) with unsaved changes keeps them for next time,
@@ -155,6 +157,7 @@ impl Default for Settings {
             format_on_paste: false,
             preview_tabs: true,
             bracket_colours: false,
+            problems_at_line_ends: false,
             auto_save: AutoSave::Off,
             keep_unsaved: true,
             keymap: Default::default(),

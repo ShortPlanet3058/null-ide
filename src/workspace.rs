@@ -96,6 +96,7 @@ actions!(
         ToggleSpellCheck,
         ToggleInlayHints,
         ToggleBracketColours,
+        ToggleProblemsAtLineEnds,
         ToggleFocusMode,
         RunTask,
         RunTestAtCursor,
@@ -3572,6 +3573,11 @@ impl Workspace {
                 View,
                 toggle(settings.bracket_colours, "Plain Brackets", "Colour Bracket Pairs"),
                 Box::new(ToggleBracketColours),
+            ),
+            (
+                View,
+                toggle(settings.problems_at_line_ends, "Problems Only on the Caret's Line", "Problems at Line Ends"),
+                Box::new(ToggleProblemsAtLineEnds),
             ),
             (
                 View,
@@ -7936,6 +7942,9 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|_, _: &ToggleBracketColours, _, cx| {
                 settings::update(cx, |s| s.bracket_colours = !s.bracket_colours)
+            }))
+            .on_action(cx.listener(|_, _: &ToggleProblemsAtLineEnds, _, cx| {
+                settings::update(cx, |s| s.problems_at_line_ends = !s.problems_at_line_ends)
             }))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))

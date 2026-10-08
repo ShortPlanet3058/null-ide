@@ -745,16 +745,26 @@ impl Element for EditorElement {
             }
 
             let show_blame = cx.global::<crate::settings::Settings>().line_blame;
-            // Something wrong on the caret's line: said at its end, before who changed it.
-            let caret_note = {
+            // Something wrong on the caret's line: said at its end, before who changed it; with
+            // "problems at line ends" on, on every line, fainter away from the caret.
+            let every_line = cx.global::<crate::settings::Settings>().problems_at_line_ends;
+            let line_notes: std::collections::HashMap<usize, (String, Hsla)> = {
                 let rope = editor.buffer.rope();
-                // Problems are in chars.
-                let chars = rope.line_to_char(caret_line)..rope.line_to_char((caret_line + 1).min(rope.len_lines()));
-                let chars = chars.start..chars.end.max(chars.start + 1);
-                problem_note(&editor.problems(cx), chars).map(|(note, severity)| {
-                    let color = if severity == DiagnosticSeverity::ERROR { theme.error } else { theme.warning };
-                    (format!("{BLAME_GAP}{note}"), color.opacity(0.75))
-                })
+                let problems = editor.problems(cx);
+                let noted = if every_line { lines_shown.clone() } else { caret_line..caret_line + 1 };
+                noted
+                    .filter_map(|line| {
+                        // Problems are in chars.
+                        let chars = rope.line_to_char(line.min(rope.len_lines()))
+                            ..rope.line_to_char((line + 1).min(rope.len_lines()));
+                        let chars = chars.start..chars.end.max(chars.start + 1);
+                        problem_note(&problems, chars).map(|(note, severity)| {
+                            let color = if severity == DiagnosticSeverity::ERROR { theme.error } else { theme.warning };
+                            let strength = if line == caret_line { 0.75 } else { 0.5 };
+                            (line, (format!("{BLAME_GAP}{note}"), color.opacity(strength)))
+                        })
+                    })
+                    .collect()
             };
             // A merge conflict's first line says how to resolve it, faintly.
             let conflicts = editor.conflicts();
@@ -906,9 +916,8 @@ impl Element for EditorElement {
                         (Some(run(note.len(), &font, theme.muted)), note)
                     } else if let Some(note) = tip {
                         (Some(run(note.len(), &font, theme.faint)), note)
-                    } else if let Some((note, color)) = caret_note
-                        .as_ref()
-                        .filter(|_| row.last && row.line == caret_line && !editor.is_folded(row.line))
+                    } else if let Some((note, color)) =
+                        line_notes.get(&row.line).filter(|_| row.last && !editor.is_folded(row.line))
                     {
                         (Some(run(note.len(), &font, *color)), note.clone())
                     } else if let Some(note) = blame {
