@@ -3690,7 +3690,6 @@ impl Workspace {
                 (Lines, "Indent with 4 Spaces".into(), Box::new(crate::editor::IndentWith4Spaces)),
                 (Lines, "Use LF Line Endings (macOS, Linux)".into(), Box::new(crate::editor::UseLfLineEndings)),
                 (Lines, "Use CRLF Line Endings (Windows)".into(), Box::new(crate::editor::UseCrlfLineEndings)),
-                (Lines, "Use UTF-8 Encoding".into(), Box::new(crate::editor::UseUtf8Encoding)),
                 (Lines, "Fold".into(), Box::new(crate::editor::Fold)),
                 (Lines, "Unfold".into(), Box::new(crate::editor::Unfold)),
                 (Lines, "Fold All".into(), Box::new(crate::editor::FoldAll)),
@@ -3803,6 +3802,18 @@ impl Workspace {
         // A page or a picture: open it in the browser.
         if self.active_editor().and_then(|e| e.read(cx).path()).is_some_and(crate::file_tree::opens_in_browser) {
             commands.push((File, "Open in Browser".into(), Box::new(OpenInBrowser)));
+        }
+        // The file's encoding: read again as another, or written in another.
+        if let Some(editor) = self.active_editor().filter(|e| e.read(cx).path().is_some()) {
+            let now = editor.read(cx).encoding;
+            for encoding in crate::encoding::Encoding::ALL {
+                let label = format!("Encoding: Reopen as {}", encoding.label());
+                commands.push((File, label, Box::new(crate::editor::ReopenWithEncoding { encoding })));
+            }
+            for encoding in crate::encoding::Encoding::ALL {
+                let label = format!("Encoding: Save as {}{}", encoding.label(), current(encoding == now));
+                commands.push((File, label, Box::new(crate::editor::SaveWithEncoding { encoding })));
+            }
         }
         // The file's language, to put it in another (a script without an extension).
         if let Some(editor) = self.active_editor() {

@@ -15,6 +15,10 @@ pub enum Encoding {
 }
 
 impl Encoding {
+    /// Every encoding Null reads and writes.
+    pub const ALL: [Encoding; 5] =
+        [Encoding::Utf8, Encoding::Utf8Bom, Encoding::Utf16Le, Encoding::Utf16Be, Encoding::Windows1252];
+
     pub fn label(self) -> &'static str {
         match self {
             Encoding::Utf8 => "UTF-8",
@@ -73,6 +77,24 @@ pub fn decode_as(bytes: Vec<u8>, encoding: Encoding) -> Option<String> {
     }
 }
 
+/// Bytes read as `encoding` and nothing else (its byte-order mark, if it has one, left
+/// out): None when they aren't text in it.
+pub fn decode_exactly(bytes: &[u8], encoding: Encoding) -> Option<String> {
+    let utf16 = |bytes: &[u8], mark: &[u8], unit: fn([u8; 2]) -> u16| {
+        let rest = bytes.strip_prefix(mark).unwrap_or(bytes);
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|c| unit([c[0], c[1]])).collect();
+        rest.len().is_multiple_of(2).then(|| String::from_utf16(&units).ok()).flatten()
+    };
+    match encoding {
+        Encoding::Utf8 | Encoding::Utf8Bom => {
+            String::from_utf8(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes).to_vec()).ok()
+        }
+        Encoding::Utf16Le => utf16(bytes, b"\xFF\xFE", u16::from_le_bytes),
+        Encoding::Utf16Be => utf16(bytes, b"\xFE\xFF", u16::from_be_bytes),
+        Encoding::Windows1252 => Some(decode_1252(bytes)),
+    }
+}
+
 /// Text in a single-byte encoding: no NUL, and hardly any control characters other than
 /// tabs and line breaks. Anything else (a build output, an archive) isn't text at all.
 fn looks_like_text(bytes: &[u8]) -> bool {
@@ -112,6 +134,16 @@ pub fn encode(text: &str, encoding: Encoding) -> Result<Vec<u8>, char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_read_as_one_encoding_only() {
+        assert_eq!(decode_exactly(b"\xC3\xA9", Encoding::Utf8).as_deref(), Some("é"));
+        assert_eq!(decode_exactly(b"\xC3\xA9", Encoding::Windows1252).as_deref(), Some("Ã©"));
+        assert_eq!(decode_exactly(b"\xFF\xFEh\0", Encoding::Utf16Le).as_deref(), Some("h"));
+        assert_eq!(decode_exactly(b"\0h", Encoding::Utf16Be).as_deref(), Some("h"));
+        assert_eq!(decode_exactly(b"\xE9", Encoding::Utf8), None);
+        assert_eq!(decode_exactly(b"abc", Encoding::Utf16Le), None, "an odd number of bytes");
+    }
 
     #[test]
     fn reads_and_writes_back_every_encoding() {
