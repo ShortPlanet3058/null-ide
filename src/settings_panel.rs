@@ -776,6 +776,14 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Passing tabs",
+                Some(
+                    "A file clicked once in the files takes the place of the last one so clicked, until you edit it or double-click it",
+                ),
+                Self::toggle("preview-tabs", s.preview_tabs, &theme, cx, |s| s.preview_tabs = !s.preview_tabs),
+                &theme,
+            ),
+            Self::row(
                 "Format on paste",
                 Some("Pasted code tidied by its language server, where it can do part of a file (clangd, TypeScript…)"),
                 Self::toggle("format-on-paste", s.format_on_paste, &theme, cx, |s| {

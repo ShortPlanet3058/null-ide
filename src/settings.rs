@@ -48,6 +48,9 @@ pub struct Settings {
     pub format_on_save: bool,
     /// Pasted code formatted by the language server (where it formats parts of a file).
     pub format_on_paste: bool,
+    /// A file clicked once in the files opens in a passing tab, which the next one replaces
+    /// until it's edited or double-clicked.
+    pub preview_tabs: bool,
     /// Save files without ⌘S: never, after a pause in typing, or when leaving them.
     pub auto_save: AutoSave,
     /// Quitting (or closing the window) with unsaved changes keeps them for next time,
@@ -113,6 +116,7 @@ impl Default for Settings {
             ligatures: true,
             format_on_save: false,
             format_on_paste: false,
+            preview_tabs: true,
             auto_save: AutoSave::Off,
             keep_unsaved: true,
             keymap: Default::default(),

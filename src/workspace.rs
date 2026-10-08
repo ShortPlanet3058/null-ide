@@ -468,6 +468,9 @@ struct Tab {
     side: usize,
     /// Kept at the front of its side, and out of "Close Others" and the like.
     pinned: bool,
+    /// Opened in passing (one click in the files): the next file so opened takes its place,
+    /// until it's edited, double-clicked or pinned.
+    passing: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -632,7 +635,7 @@ impl Workspace {
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) | FileTreeEvent::Created(path) => this.open_file(path.clone(), window, cx),
                 FileTreeEvent::Preview(path) => {
-                    this.open_file(path.clone(), window, cx);
+                    this.open_file_passing(path.clone(), window, cx);
                     window.focus(&this.tree.focus_handle(cx));
                 }
                 FileTreeEvent::Renamed { from, to } => this.paths_renamed(from, to, cx),
@@ -2318,17 +2321,62 @@ impl Workspace {
 
     /// Opens a file on `side`, or the side being worked in.
     fn open_file_on(&mut self, path: PathBuf, side: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file_as(path, side, false, window, cx);
+    }
+
+    /// A file looked at in passing (one click in the files): in the passing tab, which it
+    /// replaces, unless it's open already.
+    fn open_file_passing(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let passing = cx.global::<Settings>().preview_tabs;
+        self.open_file_as(path, None, passing, window, cx);
+    }
+
+    /// Opens a file (see `open_file_on`). Opened on purpose (not `passing`), it's kept: a
+    /// passing tab showing it stays.
+    fn open_file_as(
+        &mut self,
+        path: PathBuf,
+        side: Option<usize>,
+        passing: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Open on both sides: the copy on the side asked for (or being worked in).
         let wanted = side.unwrap_or_else(|| self.focused_side());
         let copies: Vec<usize> =
             (0..self.tabs.len()).filter(|&i| self.tabs[i].editor.read(cx).path() == Some(path.as_path())).collect();
         if let Some(&ix) = copies.iter().find(|&&i| self.tabs[i].side == wanted).or(copies.first()) {
+            if !passing {
+                self.tabs[ix].passing = false;
+            }
             self.activate(ix, window, cx);
             return;
         }
+        // The one passing on that side gives way (it was never edited, or it'd be kept).
+        let gives_way = passing
+            .then(|| self.tabs.iter().find(|t| t.passing && t.side == wanted && !t.pinned))
+            .flatten()
+            .filter(|t| !t.editor.read(cx).buffer.is_dirty())
+            .map(|t| t.editor.clone());
         let lsp = self.lsp.clone();
         let editor = cx.new(|cx| Editor::open(path, Some(lsp), cx));
-        self.add_tab_on(editor, side, window, cx);
+        self.add_tab_on(editor.clone(), side, window, cx);
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.editor == editor) {
+            tab.passing = passing;
+        }
+        if let Some(old) = gives_way.and_then(|old| self.tabs.iter().position(|t| t.editor == old)) {
+            self.remove_tab(old, window, cx);
+            // Only looked at: not for Reopen Closed Tab.
+            self.recently_closed.pop();
+        }
+    }
+
+    /// The tab showing `editor` kept: no longer passing.
+    fn keep_tab(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| &t.editor == editor && t.passing) {
+            tab.passing = false;
+            cx.notify();
+        }
     }
 
     /// A Markdown file's preview on the other side, kept up to date as you write in this one.
@@ -2462,6 +2510,8 @@ impl Workspace {
             }),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited => {
+                    // Edited: worth keeping.
+                    this.keep_tab(editor, cx);
                     if let Some(path) = editor.read(cx).path() {
                         let place = Place { path: path.to_path_buf(), point: editor.read(cx).caret_point() };
                         this.last_edit = Some(place);
@@ -2602,7 +2652,10 @@ impl Workspace {
         if let Some(a) = self.active.filter(|&a| a >= ix) {
             self.active = Some(a + 1);
         }
-        self.tabs.insert(ix, Tab { editor: editor.clone(), side, pinned: false, _subscriptions: subscriptions });
+        self.tabs.insert(
+            ix,
+            Tab { editor: editor.clone(), side, pinned: false, passing: false, _subscriptions: subscriptions },
+        );
         // Among pinned tabs, it goes after them: shown wherever it ended up.
         self.keep_pinned_first();
         let ix = self.tabs.iter().position(|t| t.editor == editor).unwrap_or(ix);
@@ -3208,6 +3261,8 @@ impl Workspace {
         let active = self.active.map(|a| self.tabs[a].editor.clone());
         let mut tab = self.tabs.remove(ix);
         tab.pinned = pinned;
+        // Pinned: kept, surely.
+        tab.passing &= !pinned;
         let side = tab.side;
         // After the last pinned tab of that side (or where the side starts).
         let at = self
@@ -6256,6 +6311,7 @@ impl Workspace {
                 let missing = editor.missing;
                 let group = format!("tab-{ix}");
                 let pinned = tab.pinned;
+                let passing = tab.passing;
                 let pin_editor = tab.editor.clone();
                 // Unsaved: a small dot, which turns into the close button under the pointer.
                 // Pinned: a pin in its place, which unpins.
@@ -6349,13 +6405,23 @@ impl Workspace {
                                     .min_w_0()
                                     .truncate()
                                     .when(missing, |d| d.line_through().text_color(theme.muted))
+                                    // Passing: slanted, until kept.
+                                    .when(passing, |d| d.italic())
                                     .child(name),
                             )
                             .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
                     )
                     .child(close)
                     .active(|s| s.opacity(0.7))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate(ix, window, cx)))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.activate(ix, window, cx);
+                        // A double-click keeps a passing tab.
+                        if event.click_count() >= 2
+                            && let Some(editor) = this.tabs.get(ix).map(|t| t.editor.clone())
+                        {
+                            this.keep_tab(&editor, cx);
+                        }
+                    }))
                     // Right-click: what can be done with the tab.
                     .on_mouse_down(
                         MouseButton::Right,
@@ -8862,6 +8928,58 @@ mod tests {
             assert_eq!(w.outline.as_ref().unwrap().2.len(), 4);
             w.show_files(&ShowFiles, window, cx);
             assert!(!w.sidebar_outline);
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Files clicked once in the files take the passing tab's place; one edited, opened on
+    /// purpose or double-clicked stays.
+    #[gpui::test]
+    fn files_looked_at_in_passing_share_a_tab(cx: &mut gpui::TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        let dir = crate::tools::test_dir("passing-tabs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let names =
+            |w: &Workspace, cx: &App| -> Vec<String> { w.tabs.iter().map(|t| t.editor.read(cx).file_name()).collect() };
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.txt"), window, cx);
+            // Looked at: b, then c in its place.
+            w.open_file_passing(dir.join("b.txt"), window, cx);
+            w.open_file_passing(dir.join("c.txt"), window, cx);
+            assert_eq!(names(w, cx), ["a.txt", "c.txt"]);
+            assert!(w.tabs[1].passing);
+            assert!(w.recently_closed.last().is_none_or(|p| !p.ends_with("b.txt")));
+            // Typed into: kept, so the next one looked at gets its own tab.
+            w.active_editor().unwrap().update(cx, |e, cx| e.replace_text_in_range(None, "!", window, cx));
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |w, window, cx| {
+            assert!(!w.tabs[1].passing);
+            w.open_file_passing(dir.join("d.txt"), window, cx);
+            assert_eq!(names(w, cx), ["a.txt", "c.txt", "d.txt"]);
+            // Opened on purpose while passing (a double-click in the files): kept.
+            w.open_file(dir.join("d.txt"), window, cx);
+            assert!(!w.tabs[2].passing);
+            w.open_file_passing(dir.join("e.txt"), window, cx);
+            assert_eq!(names(w, cx), ["a.txt", "c.txt", "d.txt", "e.txt"]);
+        });
+        // Turned off: every file its own tab.
+        cx.update(|_, cx| cx.global_mut::<Settings>().preview_tabs = false);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file_passing(dir.join("b.txt"), window, cx);
+            assert_eq!(names(w, cx).len(), 5);
         });
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -58,6 +58,7 @@ Getting around:
 | ⌃Tab | the tab used before this one; hold ⌃ and press Tab again to go further back (⌃⇧Tab the other way); ⌘⇧] / ⌘⇧[ go by position |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
 | right-click a tab → Move Below | the two sides one above the other (dragged, a tab offers "Open below" too); the line between them resizes |
+| one click on a file | it opens in a passing tab (its name slanted), which the next file clicked replaces; edit it or double-click it (or its tab) to keep it (Settings → Passing tabs) |
 | right-click a tab → Pin Tab | it stays first, out of "Close Others" and "Close All"; its pin unpins it |
 | ⌘⇧N / ⌥⌘O | a new window / a recent project |
 | drop from the Finder | files open; on a folder in the files, they're copied there; on the terminal, their paths are typed in |
