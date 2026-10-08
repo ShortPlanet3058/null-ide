@@ -62,6 +62,20 @@ pub fn clean_value(value: &str) -> Option<String> {
     (has_data || !type_like).then(|| value.to_string())
 }
 
+/// Why a watched expression has no value, without the debugger's own marks:
+/// `error: <user expression 4>:1:6: no member named 'len'` says `no member named 'len'`.
+fn why_not(error: &str) -> String {
+    let first = error.lines().next().unwrap_or_default().trim();
+    let first = first.strip_prefix("error:").unwrap_or(first).trim_start();
+    let message = match first.find(">:") {
+        Some(at) if first.starts_with('<') => {
+            first[at + 2..].trim_start_matches(|c: char| c.is_ascii_digit() || c == ':' || c == ' ')
+        }
+        _ => first,
+    };
+    if message.is_empty() { "not known here".to_string() } else { message.to_string() }
+}
+
 /// Whether `name` appears in `text` as a whole word.
 fn names(text: &str, name: &str) -> bool {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
@@ -135,8 +149,18 @@ pub enum DebuggerEvent {
 
 impl EventEmitter<DebuggerEvent> for Debugger {}
 
+/// An expression watched while paused, and what it came to at the last stop.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Watch {
+    pub expression: String,
+    /// Its value, or why it has none (not in scope here); None until worked out.
+    pub value: Option<Result<String, String>>,
+}
+
 pub struct Debugger {
     pub state: DebugState,
+    /// Expressions watched, from one stop to the next (and one run to the next).
+    pub watches: Vec<Watch>,
     adapter: Option<Arc<DebugAdapter>>,
     /// What the program printed, and what the debugger said.
     pub output: String,
@@ -147,7 +171,14 @@ pub struct Debugger {
 
 impl Default for Debugger {
     fn default() -> Self {
-        Self { state: DebugState::Idle, adapter: None, output: String::new(), program: None, _tasks: Vec::new() }
+        Self {
+            state: DebugState::Idle,
+            watches: Vec::new(),
+            adapter: None,
+            output: String::new(),
+            program: None,
+            _tasks: Vec::new(),
+        }
     }
 }
 
@@ -358,6 +389,7 @@ impl Debugger {
                 let stop = Stop { thread, place, reason, description, frames, frame, locals };
                 this.state = DebugState::Stopped(stop.clone());
                 cx.emit(DebuggerEvent::Stopped(stop));
+                this.evaluate_watches(cx);
                 cx.notify();
             })
             .ok();
@@ -397,8 +429,60 @@ impl Debugger {
                     stop.locals = locals;
                     let stop = stop.clone();
                     cx.emit(DebuggerEvent::Stopped(stop));
+                    this.evaluate_watches(cx);
                     cx.notify();
                 }
+            })
+            .ok();
+        }));
+    }
+
+    /// Watches `expression`: its value now if paused, and at every stop after.
+    pub fn add_watch(&mut self, expression: &str, cx: &mut Context<Self>) {
+        let expression = expression.trim();
+        if expression.is_empty() || self.watches.iter().any(|w| w.expression == expression) {
+            return;
+        }
+        self.watches.push(Watch { expression: expression.to_string(), value: None });
+        self.evaluate_watches(cx);
+        cx.notify();
+    }
+
+    pub fn remove_watch(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix < self.watches.len() {
+            self.watches.remove(ix);
+            cx.notify();
+        }
+    }
+
+    /// Works out every watch in the call looked at, while paused.
+    fn evaluate_watches(&mut self, cx: &mut Context<Self>) {
+        let (Some(adapter), DebugState::Stopped(stop)) = (self.adapter.clone(), &self.state) else { return };
+        let Some(frame) = stop.frames.get(stop.frame).map(|f| f.id) else { return };
+        let expressions: Vec<String> = self.watches.iter().map(|w| w.expression.clone()).collect();
+        if expressions.is_empty() {
+            return;
+        }
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let mut values = Vec::new();
+            for expression in &expressions {
+                let asked = json!({ "expression": expression, "frameId": frame, "context": "watch" });
+                let value = match adapter.request("evaluate", asked).await {
+                    Ok(body) => {
+                        let result = body["result"].as_str().unwrap_or_default();
+                        Ok(clean_value(result).unwrap_or_else(|| result.to_string()))
+                    }
+                    Err(error) => Err(why_not(&error)),
+                };
+                values.push((expression.clone(), value));
+            }
+            this.update(cx, |this, cx| {
+                for (expression, value) in values {
+                    if let Some(watch) = this.watches.iter_mut().find(|w| w.expression == expression) {
+                        watch.value = Some(value);
+                    }
+                }
+                cx.notify();
             })
             .ok();
         }));
@@ -472,6 +556,17 @@ mod tests {
     }
 
     #[test]
+    fn a_watch_says_why_it_has_no_value() {
+        assert_eq!(
+            why_not("error: <user expression 4>:1:6: no member named 'len' in 'str'"),
+            "no member named 'len' in 'str'"
+        );
+        assert_eq!(why_not("error: use of undeclared identifier 'x'\nmore"), "use of undeclared identifier 'x'");
+        assert_eq!(why_not("the debugger stopped"), "the debugger stopped");
+        assert_eq!(why_not(""), "not known here");
+    }
+
+    #[test]
     fn addresses_and_bare_types_are_left_out() {
         assert_eq!(clean_value("4"), Some("4".into()));
         assert_eq!(clean_value("\"is\" @ 0x7ff7bfefe558"), Some("\"is\"".into()));
@@ -539,6 +634,17 @@ mod tests {
         // Stopped only once i is 3: total is 1 + 2 by then.
         assert!(stop.locals.iter().any(|(name, value)| name == "total" && value == "3"), "{:?}", stop.locals);
         assert_eq!(stop.frames[0].name, "main");
+        // Watched expressions: worked out here, or why not.
+        debugger.update(cx, |d, cx| {
+            d.add_watch("total * 2", cx);
+            d.add_watch("nothing_called_this", cx);
+            d.add_watch("total * 2", cx);
+        });
+        assert!(wait_for(cx, &debugger, |d| d.watches.iter().all(|w| w.value.is_some())), "never worked out");
+        let watches = debugger.read_with(cx, |d, _| d.watches.clone());
+        assert_eq!(watches.len(), 2, "the same one once");
+        assert_eq!(watches[0].value, Some(Ok("6".to_string())));
+        assert!(matches!(&watches[1].value, Some(Err(_))), "{:?}", watches[1]);
         // Step over: on to the loop's next line.
         debugger.update(cx, |d, cx| d.resume("next", cx));
         assert!(wait_for(cx, &debugger, |d| matches!(&d.state, DebugState::Stopped(s) if s.reason == "step")));
