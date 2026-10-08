@@ -1700,11 +1700,26 @@ impl Workspace {
     /// pasted in Mail, Notes or Docs it keeps its headings, bold and links; in code, it's
     /// the Markdown.
     fn copy_as_rich_text(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor() else { return };
-        let e = editor.read(cx);
-        if !e.is_markdown() {
-            return self.show_notice("Copy as Rich Text is for Markdown.".into(), cx);
+        let Some(editor) = self.active_editor().cloned() else { return };
+        // Code: in its colours, as it shows here.
+        if !editor.read(cx).is_markdown() {
+            let range = editor.read(cx).selection.range();
+            let whole = range.is_empty();
+            let range = if whole { 0..editor.read(cx).buffer.len_chars() } else { range };
+            let source = editor.read(cx).buffer.slice(range.clone());
+            let html = editor.update(cx, |e, cx| e.colored_html(range, cx));
+            let item = gpui::ClipboardItem::new_string(source.clone());
+            if !crate::markdown_html::copy_rich(&source, &html) {
+                cx.write_to_clipboard(item.clone());
+            }
+            crate::clipboard_history::remember(&item, cx);
+            let what = if whole { "The file" } else { "The selection" };
+            return self.show_notice(
+                format!("{what} is copied in its colours: it pastes as it shows here in Keynote, Pages or Mail."),
+                cx,
+            );
         }
+        let e = editor.read(cx);
         let range = e.selection.range();
         let whole = range.is_empty();
         let source = if whole { e.buffer.to_string() } else { e.buffer.slice(range) };
@@ -3557,12 +3572,16 @@ impl Workspace {
         if self.active_editor().and_then(|e| e.read(cx).path()).is_some_and(crate::editor::has_counterpart) {
             commands.push((Go, "Switch Header/Source".into(), Box::new(crate::editor::SwitchSourceHeader)));
         }
+        // Markdown formatted, code in its colours: to paste into Mail, Keynote, Pages.
+        if let Some(editor) = self.active_editor() {
+            let label = if editor.read(cx).is_markdown() { "Copy as Rich Text" } else { "Copy with Colours" };
+            commands.push((Edit, label.into(), Box::new(CopyAsRichText)));
+        }
         // Markdown: a table of contents of its headings; the document as a page.
         if self.active_editor().is_some_and(|e| e.read(cx).is_markdown()) {
             commands.push((Edit, "Insert Table of Contents".into(), Box::new(crate::editor::InsertTableOfContents)));
             commands.push((Edit, "Insert Footnote".into(), Box::new(crate::editor::InsertFootnote)));
             commands.push((Edit, "Toggle Task".into(), Box::new(crate::editor::ToggleTask)));
-            commands.push((Edit, "Copy as Rich Text".into(), Box::new(CopyAsRichText)));
             commands.push((File, "Export as HTML".into(), Box::new(ExportHtml)));
         }
         // A page or a picture: open it in the browser.

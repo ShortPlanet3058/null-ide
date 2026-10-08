@@ -55,6 +55,44 @@ pub fn copy_rich(text: &str, html: &str) -> bool {
     }
 }
 
+/// A colour as CSS writes it: `#rrggbb`.
+fn css(color: gpui::Hsla) -> String {
+    let c: gpui::Rgba = color.into();
+    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
+}
+
+/// Code as a page shows it, in its colours: `text` cut into `(bytes, colour)` pieces (in
+/// order; what's between them takes `plain`), on `background`, in `font`.
+pub fn colored_code(
+    text: &str,
+    pieces: &[(std::ops::Range<usize>, gpui::Hsla)],
+    plain: gpui::Hsla,
+    background: gpui::Hsla,
+    font: &str,
+) -> String {
+    let mut out = format!(
+        "<pre style=\"font-family: '{}', Menlo, monospace; font-size: 13px; line-height: 1.5; color: {}; \
+         background: {}; padding: 12px 16px; border-radius: 8px; white-space: pre;\">",
+        escape(font),
+        css(plain),
+        css(background)
+    );
+    let mut at = 0;
+    for (range, color) in pieces {
+        let (start, end) = (range.start.max(at).min(text.len()), range.end.min(text.len()));
+        if start >= end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            continue;
+        }
+        out.push_str(&escape(&text[at..start]));
+        out.push_str(&format!("<span style=\"color: {}\">{}</span>", css(*color), escape(&text[start..end])));
+        at = end;
+    }
+    out.push_str(&escape(&text[at..]));
+    out.push_str("</pre>");
+    out
+}
+
 /// The page's title: its first heading, if it has one.
 pub fn title(source: &str) -> Option<String> {
     crate::markdown_view::parse_located(source).into_iter().find_map(|(_, block)| match block {
@@ -284,5 +322,19 @@ mod tests {
         assert!(!html.to_lowercase().contains("javascript:"), "{html}");
         assert!(html.contains("src=\"data:image/png;base64,AA\""), "{html}");
         assert!(!html.contains("data:text/html"), "{html}");
+    }
+
+    #[test]
+    fn code_is_copied_in_its_colours() {
+        let red = gpui::Hsla::from(gpui::rgb(0xff0000));
+        let white = gpui::Hsla::from(gpui::rgb(0xffffff));
+        let black = gpui::Hsla::from(gpui::rgb(0x000000));
+        let html = colored_code("let a = \"<b>\";", &[(0..3, red), (8..13, red)], white, black, "Geist Mono");
+        assert!(html.starts_with("<pre style=\"font-family: 'Geist Mono', Menlo, monospace;"));
+        assert!(html.contains("color: #ffffff; background: #000000"));
+        assert!(html.contains("<span style=\"color: #ff0000\">let</span> a = <span style=\"color: #ff0000\">&quot;&lt;b&gt;&quot;</span>;</pre>"), "{html}");
+        // A piece cut inside a character is left out (not a panic); one past the text, cut short.
+        let html = colored_code("é", &[(0..1, red), (0..9, red)], white, black, "x");
+        assert!(html.ends_with("><span style=\"color: #ff0000\">é</span></pre>"), "{html}");
     }
 }
