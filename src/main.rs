@@ -38,6 +38,7 @@ mod markdown_links;
 mod markdown_view;
 mod menus;
 mod notebook;
+mod outline;
 mod palette;
 mod preview;
 mod problem_matcher;
