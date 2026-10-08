@@ -176,6 +176,8 @@ pub struct TerminalView {
     size: GridSize,
     cell: (Pixels, Pixels),
     pub title: String,
+    /// The program running in the shell now (`cargo`), while one is.
+    pub running: Option<String>,
     selecting: bool,
     /// While a program gets the mouse: the button held down (if any), and the last cell
     /// reported, so moving within a cell sends nothing.
@@ -263,8 +265,13 @@ impl TerminalView {
                 loop {
                     cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
                     let now = watch.program();
+                    let name = now.as_ref().map(|(_, name)| name.clone());
                     let finished = crate::terminal_watch::step(&mut running, now, std::time::Instant::now());
-                    let Ok(()) = this.update(cx, |_, cx| {
+                    let Ok(()) = this.update(cx, |this, cx| {
+                        if this.running != name {
+                            this.running = name;
+                            cx.emit(TerminalEvent::TitleChanged);
+                        }
                         if let Some((name, took)) = finished {
                             cx.emit(TerminalEvent::Finished(name, took));
                         }
@@ -288,6 +295,7 @@ impl TerminalView {
             size,
             cell: (px(8.), px(16.)),
             title: String::new(),
+            running: None,
             selecting: false,
             mouse_held: None,
             mouse_cell: None,

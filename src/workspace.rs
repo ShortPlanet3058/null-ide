@@ -4971,6 +4971,14 @@ impl Workspace {
         cx.notify();
     }
 
+    /// While the terminal is hidden: the first terminal running something, and what.
+    fn terminal_busy(&self, cx: &App) -> Option<(usize, String)> {
+        if self.terminal_open.on {
+            return None;
+        }
+        self.terminals.iter().enumerate().find_map(|(ix, (t, _))| t.read(cx).running.clone().map(|name| (ix, name)))
+    }
+
     /// A terminal's tab: its shell's folder, from the title it sets ("user@host:~/a/b" → "b").
     fn terminal_label(title: &str, ix: usize) -> String {
         let name = Self::terminal_name(title);
@@ -5017,6 +5025,8 @@ impl Workspace {
         let tabs = self.terminals.iter().enumerate().map(|(ix, (t, _))| {
             let active = ix == self.active_terminal;
             let label = Self::terminal_label(&t.read(cx).title, ix);
+            // Another terminal busy with something: a dot says so.
+            let busy = !active && t.read(cx).running.is_some();
             div()
                 .id(("terminal-tab", ix))
                 .h(px(22.))
@@ -5029,7 +5039,9 @@ impl Workspace {
                 .text_color(if active { theme.foreground } else { theme.muted })
                 .when(active, |d| d.bg(theme.hairline))
                 .when(!active, |d| d.hover(|s| s.text_color(theme.foreground)))
+                .gap(px(5.))
                 .child(label)
+                .when(busy, |d| d.child(div().size(px(5.)).rounded_full().bg(theme.caret.opacity(0.7))))
                 .active(|s| s.opacity(0.7))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_terminal(ix, window, cx)))
         });
@@ -6500,6 +6512,26 @@ impl Render for Workspace {
                         })),
                 )
             })
+            // The terminal hidden while something runs in it: what, and a click shows it.
+            .children(self.terminal_busy(cx).map(|(ix, name)| {
+                div()
+                    .id("terminal-busy")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(div().size(px(5.)).rounded_full().bg(theme.caret.opacity(0.7)))
+                    .child(format!("{name} running"))
+                    .tooltip(ui::tip("Show the terminal", Some(Box::new(ToggleTerminal))))
+                    .active(|s| s.opacity(0.7))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.active_terminal = ix;
+                        this.toggle_terminal(&ToggleTerminal, window, cx);
+                    }))
+            }))
             .children(self.ai_task.as_ref().map(|run| {
                 // One line for a task: what it's at, then how many files to review.
                 let text: String = match &run.state {

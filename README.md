@@ -208,7 +208,9 @@ numbers can show everywhere, only in code, or nowhere.
   selected, or steps through a script line by line.
   A command that ran 10 seconds or more says when it's done: while you're in another app the
   Dock's icon jumps once and the note waits for your return; with the terminal hidden, a
-  line at the bottom says what finished and how long it took.
+  line at the bottom says what finished and how long it took. While the terminal is hidden
+  and something runs in it, the status bar says what (`cargo running`; a click shows it), and
+  a terminal's tab gets a dot while it's busy behind another.
 - **F5** debugs (lldb-dap, with Xcode): breakpoints with **F9**, conditions with a
   right-click, values shown faintly beside the code and in a panel.
 
