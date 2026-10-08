@@ -43,6 +43,9 @@ pub struct Settings {
     pub format_on_save: bool,
     /// Save files without ⌘S: never, after a pause in typing, or when leaving them.
     pub auto_save: AutoSave,
+    /// Quitting (or closing the window) with unsaved changes keeps them for next time,
+    /// without asking.
+    pub keep_unsaved: bool,
     /// Whose shortcuts to use: Null's own, or another editor's.
     pub keymap: crate::keymap::Keymap,
     /// Your own shortcuts over those: a key and the command it runs, or null for none.
@@ -98,6 +101,7 @@ impl Default for Settings {
             ligatures: true,
             format_on_save: false,
             auto_save: AutoSave::Off,
+            keep_unsaved: true,
             keymap: Default::default(),
             keys: Default::default(),
             welcomed: false,

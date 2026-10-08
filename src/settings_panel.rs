@@ -743,6 +743,12 @@ impl SettingsPanel {
                 Self::toggle("format-on-save", s.format_on_save, &theme, cx, |s| s.format_on_save = !s.format_on_save),
                 &theme,
             ),
+            Self::row(
+                "Keep unsaved changes when quitting",
+                Some("Quitting doesn't ask: what isn't saved comes back, still unsaved, next time"),
+                Self::toggle("keep-unsaved", s.keep_unsaved, &theme, cx, |s| s.keep_unsaved = !s.keep_unsaved),
+                &theme,
+            ),
             Self::heading("Code intelligence", &theme),
             Self::row(
                 "Suggestions while typing",
