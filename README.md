@@ -123,6 +123,8 @@ doesn't need Xcode's separate Metal Toolchain download.
   deleted shows struck through, and saving puts it back. A file changed on disk under
   unsaved edits (a pull, an AI agent) asks before a save writes over it. Saves are whole or
   not at all, and keep the file's permissions and tags.
+- **Revert to Saved** (File menu, ⌘K) takes the file back to its last save, as one step ⌘Z
+  undoes.
 - **Local history**: what each save replaced is kept for a month, git or not, and listed in
   **Show File History** with the commits, to compare with and take back.
 - In the files, typing a name goes to it, as in the Finder; a file with an error in it shows

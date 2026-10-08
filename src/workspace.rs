@@ -62,6 +62,7 @@ actions!(
         CopyAsCodeBlock,
         CopyAsRichText,
         OrganizeImports,
+        RevertToSaved,
         RevealFile,
         RenameFile,
         TrashFile,
@@ -1661,6 +1662,31 @@ impl Workspace {
         self.show_notice(format!("{what} is copied as rich text: it pastes formatted in Mail, Notes or Docs."), cx);
     }
 
+    /// Revert to Saved: the file as it was last saved, as one step ⌘Z takes back.
+    fn revert_to_saved(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let (has_file, dirty) = {
+            let e = editor.read(cx);
+            (e.path().is_some_and(|p| p.exists()), e.buffer.is_dirty())
+        };
+        if !has_file {
+            return self.show_notice("This file isn't saved anywhere yet.".into(), cx);
+        }
+        if !dirty {
+            return self.show_notice("Nothing to revert: it's as it was saved.".into(), cx);
+        }
+        editor.update(cx, |e, cx| {
+            e.revert_to_disk(cx);
+            // Changed and changed back: the same text, saved.
+            if e.buffer.is_dirty() {
+                e.buffer.mark_saved();
+                cx.emit(crate::editor::EditorEvent::Edited);
+                cx.notify();
+            }
+        });
+        self.show_notice("Back as it was saved: ⌘Z brings your changes back.".into(), cx);
+    }
+
     /// Organize Imports: the language server's own (sorted, the unused ones gone), for the
     /// whole file, as its quick fixes are applied.
     fn organize_imports(&mut self, cx: &mut Context<Self>) {
@@ -3234,6 +3260,7 @@ impl Workspace {
             commands.extend([
                 (File, "Save".into(), Box::new(Save) as Box<dyn Action>),
                 (File, "Save As…".into(), Box::new(SaveAs)),
+                (File, "Revert to Saved".into(), Box::new(RevertToSaved)),
                 (File, "Save All".into(), Box::new(SaveAll)),
                 (File, "Close Tab".into(), Box::new(CloseTab)),
                 (File, "Close All Tabs".into(), Box::new(CloseAllTabs)),
@@ -6599,6 +6626,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopyAsCodeBlock, _, cx| this.copy_as_code_block(cx)))
             .on_action(cx.listener(|this, _: &CopyAsRichText, _, cx| this.copy_as_rich_text(cx)))
             .on_action(cx.listener(|this, _: &OrganizeImports, _, cx| this.organize_imports(cx)))
+            .on_action(cx.listener(|this, _: &RevertToSaved, _, cx| this.revert_to_saved(cx)))
             .on_action(
                 cx.listener(|this, _: &CopyFilePath, _, cx| this.copy_path(this.active_path(cx).as_deref(), false, cx)),
             )
@@ -6984,6 +7012,40 @@ mod tests {
             String::from_utf8_lossy(&committed.stdout).split_whitespace().collect::<Vec<_>>(),
             ["only", "b", "b.txt"]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Revert to Saved: the saved text back, the file clean; ⌘Z brings the changes back.
+    #[gpui::test]
+    fn revert_to_saved_takes_the_file_back(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("revert-saved");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "saved\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let file = dir.join("a.txt");
+        workspace.update_in(cx, |w, window, cx| w.open_file(file, window, cx));
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        editor.update(cx, |e, cx| {
+            e.restore_unsaved("saved\nchanged\n", cx);
+            assert!(e.buffer.is_dirty());
+        });
+        workspace.update(cx, |w, cx| w.revert_to_saved(cx));
+        editor.read_with(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "saved\n");
+            assert!(!e.buffer.is_dirty());
+        });
+        editor.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
+        cx.simulate_keystrokes("cmd-z");
+        editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "saved\nchanged\n", "⌘Z brings the changes back"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

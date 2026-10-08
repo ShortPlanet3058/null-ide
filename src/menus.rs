@@ -79,6 +79,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Save", Save),
                 MenuItem::action("Save As…", SaveAs),
                 MenuItem::action("Save All", SaveAll),
+                MenuItem::action("Revert to Saved", crate::workspace::RevertToSaved),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close All Tabs", CloseAllTabs),
                 MenuItem::separator(),
