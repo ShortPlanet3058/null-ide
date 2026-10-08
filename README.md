@@ -45,6 +45,7 @@ Getting around:
 |---|---|
 | ⌘P | go to a file, recent ones first |
 | ⌘K | quick settings (theme, text size, line spacing, wrap, sidebar, terminal, AI…) changed right in the list, and every command once you type |
+| ⌘K "New Theme of Your Own…" | a theme file beside your settings (`themes/My Theme.json`), the one shown now written out: change a colour, save, and it shows; your themes are listed with Null's |
 | ⌘, | all settings |
 | ⌃G | go to a line |
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
