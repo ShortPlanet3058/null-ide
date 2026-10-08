@@ -1217,6 +1217,29 @@ impl Editor {
         found
     }
 
+    /// The text in `range` (chars) as HTML, in the colours and font it shows in: to paste
+    /// into Keynote, Pages or Mail as it looks here.
+    pub fn colored_html(&mut self, range: Range<usize>, cx: &App) -> String {
+        let rope = self.buffer.rope();
+        let (start, end) = (rope.char_to_byte(range.start), rope.char_to_byte(range.end));
+        self.highlight_bytes(start..end);
+        let spans = self.spans_with_meaning(start..end).unwrap_or_else(|| self.spans.clone());
+        let theme = cx.global::<Theme>();
+        let pieces: Vec<(Range<usize>, gpui::Hsla)> = spans
+            .iter()
+            .filter(|(r, s)| r.end > start && r.start < end && *s != crate::theme::Syntax::Plain)
+            .map(|(r, s)| (r.start.max(start) - start..r.end.min(end) - start, theme.syntax(*s)))
+            .collect();
+        let font = cx.try_global::<crate::fonts::Fonts>().map(|f| f.code.to_string()).unwrap_or_default();
+        crate::markdown_html::colored_code(
+            &self.buffer.slice(range),
+            &pieces,
+            theme.foreground,
+            theme.background,
+            &font,
+        )
+    }
+
     /// The scanner colouring this file when Null has no grammar for it (Swift, Kotlin…).
     pub fn basic_syntax(&self) -> Option<&'static crate::basic_syntax::Basic> {
         if self.highlighter.is_some() {
@@ -4917,6 +4940,35 @@ mod tests {
         assert!(prose < code, "no numbers in Markdown: {prose:?} vs {code:?}");
         cx.update(|cx| cx.set_global(Settings { line_numbers: LineNumbers::Hidden, ..Settings::default() }));
         assert_eq!(text_left("a.rs", cx), prose, "hidden in code too");
+    }
+
+    /// Code copied in its colours: the keyword in the theme's keyword colour, in a block on
+    /// the theme's background.
+    #[gpui::test]
+    fn code_copies_in_its_colours(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("fn main() {}\n"), Some("a.rs".into()), cx));
+        let html = e.update(cx, |e, cx| e.colored_html(0..12, cx));
+        let hex = |color: gpui::Hsla| {
+            let c: gpui::Rgba = color.into();
+            let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+            format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
+        };
+        let theme = Theme::oled();
+        assert!(
+            html.contains(&format!(
+                "<span style=\"color: {}\">fn</span>",
+                hex(theme.syntax(crate::theme::Syntax::Keyword))
+            )),
+            "{html}"
+        );
+        assert!(html.contains(&format!("background: {}", hex(theme.background))));
+        assert!(html.ends_with("{}</span></pre>"), "only the range asked for: {html}");
     }
 
     /// Wrapped at the line guide when asked: a line breaks at the project's line length, not
