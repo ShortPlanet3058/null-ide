@@ -140,6 +140,9 @@ pub fn set(cx: &mut App) {
                         MenuItem::action("PascalCase", crate::editor::PascalCase),
                         MenuItem::action("kebab-case", crate::editor::KebabCase),
                         MenuItem::action("Title Case", crate::editor::TitleCase),
+                        MenuItem::separator(),
+                        MenuItem::action("Increment", crate::editor::Increment),
+                        MenuItem::action("Decrement", crate::editor::Decrement),
                     ],
                 }),
                 MenuItem::submenu(Menu {
