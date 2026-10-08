@@ -122,6 +122,10 @@ doesn't need Xcode's separate Metal Toolchain download.
   colour picked there is written back the way the first was (one undo takes it back).
 - Code the language server says is unused (an import, a variable) is drawn faded, and a
   deprecated name struck through.
+- A file's language comes from its name, or else its first line: a script without an
+  extension (`#!/usr/bin/env python3`, `#!/bin/bash`), an untitled file you paste into,
+  `<?xml`, `<!DOCTYPE html>`. A click on the language's name in the status bar (or ⌘K
+  "Language: …") puts the file in another; the choice is kept with the session.
 - When the language server can say what each name is (rust-analyzer, clangd, Swift's
   sourcekit-lsp), its colours go over the grammar's: a type is coloured as a type, a call
   as a call, a macro as a macro, even where the grammar could only guess from how it's
