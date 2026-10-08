@@ -149,7 +149,8 @@ doesn't need Xcode's separate Metal Toolchain download.
   them at line ends too (where they're left by mistake), or always.
 - Faint indent guides (the caret's block's a little brighter), sticky scroll (the enclosing lines stay at the top), the other uses
   of a name tinted, and a line at the length the project keeps to (from `.editorconfig`,
-  rustfmt, Prettier, Black or Ruff). Each can be turned off.
+  rustfmt, Prettier, Black or Ruff). Each can be turned off. Wrapped lines can break at that
+  line rather than at the window's edge (Settings → Editor → Wrap at the line guide).
 - Files keep their own style: indentation, line endings, and encoding (UTF-8 with or
   without BOM, UTF-16, Windows-1252), shown in the status bar when not the usual.
 - Unsaved work survives a crash, and quitting doesn't ask about it: it's kept, and comes
