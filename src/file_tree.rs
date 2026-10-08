@@ -482,7 +482,13 @@ impl FileTree {
             let expanded = entry.is_dir && self.expanded.contains(&entry.path);
             // Open, and holding only a folder: that folder joins this row, and so on down.
             let mut chain: Option<(PathBuf, String)> = None;
+            // The folders gone through, as they really are: a link back up ends the chain.
+            let mut seen: Vec<PathBuf> = Vec::new();
             while expanded && !self.new_item_in(&entry.path) {
+                match entry.path.canonicalize() {
+                    Ok(real) if !seen.contains(&real) => seen.push(real),
+                    _ => break,
+                }
                 let inner = self
                     .children
                     .entry(entry.path.clone())
@@ -535,6 +541,17 @@ impl FileTree {
             self.selected = Some(head.clone());
         }
         self.toggle(&head, cx);
+        // Opened into a joined row: the selection goes along to it.
+        if !open && self.selected.as_deref() == Some(head.as_path()) && self.selected_ix().is_none() {
+            let joined = self.rows.iter().find_map(|r| match (&r.kind, &r.chain) {
+                (RowKind::Entry(e), Some((h, _))) if *h == head => Some(e.path.clone()),
+                _ => None,
+            });
+            if joined.is_some() {
+                self.selected = joined;
+                cx.notify();
+            }
+        }
     }
 
     /// What a row shows: a joined row's folders, then its name.
@@ -1534,9 +1551,30 @@ mod tests {
             assert_eq!(t.selected.as_deref(), Some(src.as_path()));
         });
         assert_eq!(labels(cx), ["docs", "src"]);
+        // Opened from the keyboard: the joined row is selected.
+        tree.update(cx, |t, cx| {
+            t.selected = Some(src.clone());
+            t.toggle_row(&src, cx);
+            assert_eq!(t.selected.as_deref(), Some(app.as_path()));
+        });
+        tree.update(cx, |t, cx| t.toggle_row(&app, cx));
+        // A link back up ends the chain rather than going round.
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(dir.join("loop")).unwrap();
+            std::os::unix::fs::symlink(dir.join("loop"), dir.join("loop/again")).unwrap();
+            tree.update(cx, |t, cx| {
+                t.children.clear();
+                t.toggle_row(&dir.join("loop"), cx);
+            });
+            assert!(labels(cx).contains(&"loop / again".to_string()), "{:?}", labels(cx));
+            tree.update(cx, |t, cx| t.toggle_row(&dir.join("loop"), cx));
+        }
         // A folder with two things in it isn't joined.
         tree.update(cx, |t, cx| t.toggle_row(&dir.join("docs"), cx));
-        assert_eq!(labels(cx), ["docs", "a.md", "b.md", "src"]);
+        let shown = labels(cx);
+        assert_eq!(shown[..3], ["docs", "a.md", "b.md"]);
+        assert_eq!(shown.last().map(String::as_str), Some("src"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

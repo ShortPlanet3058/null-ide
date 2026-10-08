@@ -12,6 +12,9 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("ctrl-secondary-up", SwitchSourceHeader, Some("Editor"))]);
 }
 
+/// How long clangd is waited for before looking beside the file.
+const SERVER_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 const SOURCES: &[&str] = &["c", "cc", "cpp", "cxx", "c++", "m", "mm"];
 const HEADERS: &[&str] = &["h", "hh", "hpp", "hxx", "h++", "inl", "ipp"];
 
@@ -24,8 +27,9 @@ pub fn has_counterpart(path: &Path) -> bool {
     extension(path).is_some_and(|e| SOURCES.contains(&e.as_str()) || HEADERS.contains(&e.as_str()))
 }
 
-/// The counterpart beside `path`, among the files `exists` says are there: for a source,
-/// a header of the same name; for a header, a source.
+/// The counterpart beside `path`, among the files `exists` says are there (by their exact
+/// name: the Mac's disk would say `app.H` is there for `app.h`): for a source, a header of
+/// the same name; for a header, a source.
 fn beside(path: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let ext = extension(path)?;
     let wanted = if SOURCES.contains(&ext.as_str()) { HEADERS } else { SOURCES };
@@ -45,12 +49,25 @@ impl Editor {
             return self.show_notice(at, "Header and source are for C, C++ and Objective-C files.".into(), cx);
         };
         let asked = self.served(cx).then(|| self.lsp.as_ref().map(|lsp| lsp.read(cx).counterpart(&path))).flatten();
-        self.definition_task = Some(cx.spawn(async move |this, cx| {
+        self.counterpart_task = Some(cx.spawn(async move |this, cx| {
+            // A server that doesn't answer soon: what's beside the file.
             let found = match asked {
-                Some(request) => request.await,
+                Some(request) => {
+                    let timeout = cx.background_executor().timer(SERVER_WAIT);
+                    futures::select_biased! {
+                        found = futures::FutureExt::fuse(request) => found,
+                        _ = futures::FutureExt::fuse(timeout) => None,
+                    }
+                }
                 None => None,
             };
-            let found = found.filter(|p| p.exists()).or_else(|| beside(&path, Path::exists));
+            let names: std::collections::HashSet<std::ffi::OsString> = path
+                .parent()
+                .and_then(|dir| std::fs::read_dir(dir).ok())
+                .map(|read| read.filter_map(Result::ok).map(|e| e.file_name()).collect())
+                .unwrap_or_default();
+            let listed = |p: &Path| p.file_name().is_some_and(|n| names.contains(n));
+            let found = found.filter(|p| p.exists()).or_else(|| beside(&path, listed));
             this.update(cx, |this, cx| match found {
                 Some(other) => cx.emit(EditorEvent::Open(other)),
                 None => this.show_notice(at, "No header or source found for this file.".into(), cx),

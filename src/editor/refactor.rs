@@ -315,12 +315,36 @@ impl Editor {
         self.touch(cx);
     }
 
-    /// JSON laid out by Null (see `json_format`): one undo, the caret kept on its line.
+    /// JSON laid out by Null (see `json_format`): one undo, the caret kept on its line. With
+    /// text selected, just that, lined up with where it starts.
     fn format_json(&mut self, cx: &mut Context<Self>) {
-        let text = self.buffer.to_string();
         let unit = self.style.indent.unit();
+        let newline = self.style.line_ending.text();
         let at = self.selection.head;
-        let formatted = match crate::json_format::format(&text, &unit, self.style.line_ending.text()) {
+        if !self.selection.is_empty() && self.extra.is_empty() {
+            let range = self.selection.range();
+            let selected = self.buffer.slice(range.clone());
+            let (line, _) = self.buffer.point(range.start);
+            let indent: String = self.buffer.line_text(line).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            let formatted = match crate::json_format::format(&selected, &unit, newline) {
+                Ok(formatted) => formatted.replace(newline, &format!("{newline}{indent}")),
+                Err(problem) => {
+                    let message = format!("Can't format the selection: {}.", problem.message);
+                    return self.show_notice(at, message, cx);
+                }
+            };
+            // A selection ending with its line break keeps it, not an indent after it.
+            let formatted = match formatted.strip_suffix(&indent) {
+                Some(trimmed) if selected.ends_with('\n') && !indent.is_empty() => trimmed.to_string(),
+                _ => formatted,
+            };
+            let len = formatted.chars().count();
+            self.edit(range.clone(), &formatted, EditKind::Other, cx);
+            self.selection = Selection { anchor: range.start, head: range.start + len };
+            return self.touch(cx);
+        }
+        let text = self.buffer.to_string();
+        let formatted = match crate::json_format::format(&text, &unit, newline) {
             Ok(formatted) => formatted,
             Err(problem) => {
                 let message = format!("Can't format: {} (line {}).", problem.message, problem.line + 1);
@@ -498,5 +522,19 @@ mod tests {
         });
         cx.simulate_keystrokes("alt-shift-f");
         e.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), format!("{text}]"), "broken: left alone"));
+        // A selection: just it, lined up under its line.
+        e.update(cx, |e, cx| {
+            let all = e.buffer.len_chars();
+            e.edit(0..all, "{\n    \"a\": {\"b\":[1,2]},\n    \"c\": 3\n}\n", EditKind::Other, cx);
+            let start = e.buffer.to_string().find("{\"b").unwrap();
+            e.selection = Selection { anchor: start, head: start + "{\"b\":[1,2]}".len() };
+        });
+        cx.simulate_keystrokes("alt-shift-f");
+        e.read_with(cx, |e, _| {
+            assert_eq!(
+                e.buffer.to_string(),
+                "{\n    \"a\": {\n        \"b\": [\n            1,\n            2\n        ]\n    },\n    \"c\": 3\n}\n"
+            )
+        });
     }
 }

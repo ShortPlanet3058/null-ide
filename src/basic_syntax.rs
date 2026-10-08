@@ -794,8 +794,60 @@ pub fn delimiter_of(text: &[u8], delimiter: u8) -> u8 {
         return delimiter;
     }
     let first = text.split(|&b| b == b'\n').next().unwrap_or(&[]);
-    let count = |d: u8| first.iter().filter(|&&b| b == d).count();
-    if count(b';') > count(b',') { b';' } else { b',' }
+    // Not counting what's in quotes: `"Prix, HT";"Nom"` is split by `;`.
+    let (mut commas, mut semicolons, mut quoted) = (0, 0, false);
+    for &b in first {
+        match b {
+            b'"' => quoted = !quoted,
+            b',' if !quoted => commas += 1,
+            b';' if !quoted => semicolons += 1,
+            _ => {}
+        }
+    }
+    if semicolons > commas { b';' } else { b',' }
+}
+
+/// Where the byte `at` of `text` is: its record (row, from 0) and column, quoted line
+/// breaks taken into account; and where the first record (the names) ends.
+pub fn place_in_columns(text: &[u8], at: usize, delimiter: u8) -> (usize, usize, usize) {
+    let (mut record, mut column, mut quoted, mut start, mut i) = (0, 0, false, 0, 0);
+    let mut first_end = None;
+    let mut place = None;
+    while i < text.len() {
+        if i >= at && place.is_none() {
+            place = Some((record, column));
+            if first_end.is_some() {
+                break;
+            }
+        }
+        let b = text[i];
+        if quoted {
+            if b == b'"' {
+                // `""` is a quote inside the field.
+                if text.get(i + 1) == Some(&b'"') {
+                    i += 1;
+                } else {
+                    quoted = false;
+                }
+            }
+        } else if b == b'"' && i == start {
+            quoted = true;
+        } else if b == delimiter {
+            column += 1;
+            start = i + 1;
+        } else if b == b'\n' {
+            first_end.get_or_insert(i);
+            record += 1;
+            column = 0;
+            start = i + 1;
+            if place.is_some() {
+                break;
+            }
+        }
+        i += 1;
+    }
+    let (record, column) = place.unwrap_or((record, column));
+    (record, column, first_end.unwrap_or(text.len()))
 }
 
 /// Each column of `text` in its colour, the delimiters faint. Quoted fields can hold the
@@ -1215,6 +1267,14 @@ mod tests {
     fn data_is_split_as_written() {
         assert_eq!(delimiter_of(b"a;b;c\n1,5;2;3", b','), b';', "a French spreadsheet's CSV");
         assert_eq!(delimiter_of(b"a,b;c\n", b','), b',');
+        assert_eq!(delimiter_of(b"\"Prix, HT\";\"Nom, pr\xc3\xa9nom\"\n", b','), b';', "commas in quotes don't count");
+        // A quoted line break: the line after it is still the same row.
+        let text = b"name,note,qty\n1,\"a\nb\",3\n";
+        let at = text.iter().rposition(|&b| b == b'3').unwrap();
+        assert_eq!(place_in_columns(text, at, b','), (1, 2, 13));
+        assert_eq!(place_in_columns(text, 2, b','), (0, 0, 13));
+        assert_eq!(place_in_columns(b"a,\"x\"\"y\",c", 9, b','), (0, 2, 10), "doubled quotes");
+        assert_eq!(place_in_columns(b"a,b", 3, b','), (0, 1, 3), "at the very end");
         assert_eq!(delimiter_of(b"a\tb", b'\t'), b'\t');
         let (fields, at) = fields("bread,\"1,20\",\"a \"\"b\"\"\"", b',', 8);
         assert_eq!((fields, at), (vec!["bread".to_string(), "1,20".into(), "a \"b\"".into()], 1));
