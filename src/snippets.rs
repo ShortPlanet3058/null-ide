@@ -255,7 +255,7 @@ pub fn parse(text: &str) -> Vec<Snippet> {
 }
 
 /// `text` without `//` and `/* */` comments, nor commas before a closing bracket.
-fn without_comments(text: &str) -> String {
+pub(crate) fn without_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut in_string = false;

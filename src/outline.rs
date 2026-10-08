@@ -50,6 +50,22 @@ pub fn current(items: &[Item], row: usize) -> Option<usize> {
     items.iter().rposition(|item| item.row <= row)
 }
 
+/// Where the caret on `row` is, from the outside in (`Shop`, `checkout`): the item it's
+/// in, and each one that item sits inside.
+pub fn trail(items: &[Item], row: usize) -> Vec<&str> {
+    let Some(at) = current(items, row) else { return Vec::new() };
+    let mut trail = vec![items[at].name.as_str()];
+    let mut depth = items[at].depth;
+    for item in items[..at].iter().rev() {
+        if item.depth < depth {
+            trail.push(&item.name);
+            depth = item.depth;
+        }
+    }
+    trail.reverse();
+    trail
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,6 +82,8 @@ mod tests {
         assert_eq!(current(&items, 2), Some(1), "in open");
         assert_eq!(current(&items, 5), Some(2), "in close");
         assert_eq!(current(&items, 8), Some(3));
+        assert_eq!(trail(&items, 5), ["Shop", "close"]);
+        assert_eq!(trail(&items, 8), ["main"]);
     }
 
     #[test]

@@ -48,6 +48,7 @@ Getting around:
 | ⌘, | all settings |
 | ⌃G | go to a line |
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
+| the status bar | after the file's name, where the caret is in the code: `shop.py › Shop › checkout` |
 | **Outline** (over the files) | the file's functions and types, a method inside its class (in Markdown, its headings); the one you're in is marked, a click goes there |
 | ⌘P `file:42:7` | open a file at a place, as compilers print it |
 | ⌘F | find in the file (with lines selected, only in them); ↑ ↓ bring back earlier searches, ⌥↵ puts a cursor on every match; ⌘E searches for the selection, ⌘G the next |
@@ -238,7 +239,9 @@ numbers can show everywhere, only in code, or nowhere.
 
 ## Running, testing, debugging
 
-- **⌘⇧B** runs what the project defines (Cargo, package.json scripts, Make, just, Go).
+- **⌘⇧B** runs what the project defines (Cargo, package.json scripts, Make, just, Go, the
+  tasks of a `.vscode/tasks.json`), and your own: `"tasks": { "deploy": "./deploy --prod" }`
+  in settings.json, in every project.
 - **⌥⌘T** runs the test at the caret (Rust, Go, pytest, vitest, jest), or all of a file's.
 - The terminal (**⌃\`**, more with **⌃⇧\`**; a double-click on one's name renames it, and a
   tab's menu opens one in its file's folder): ⌘-click a `file:line:col` or a link in its
