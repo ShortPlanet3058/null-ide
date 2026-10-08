@@ -1098,6 +1098,15 @@ impl SettingsPanel {
                 }),
                 &theme,
             ),
+            // Your own keys, over the preset's: written in settings.json.
+            Self::row(
+                "Your own shortcuts",
+                Some("In settings.json: \"keys\": { \"ctrl-cmd-l\": \"select all occurrences\", \"cmd-d\": null }"),
+                Self::button("own-keys", "Edit…", &theme).on_click(cx.listener(|_, _, _, cx| {
+                    cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::OpenSettingsFile)))
+                })),
+                &theme,
+            ),
         ];
         // From the keymap, not the window: Settings has focus, and the window only knows the
         // keys of what's focused (editor shortcuts would be missing).

@@ -60,7 +60,15 @@ Getting around:
 | ⌥⌘I | an AI task, reviewed change by change (with Claude Code or Codex) |
 
 Coming from another editor? Pick its shortcuts (VS Code, JetBrains, Sublime Text or Zed) on
-the welcome screen or in Settings → Keyboard.
+the welcome screen or in Settings → Keyboard. Your own go in settings.json, over those:
+
+```json
+"keys": { "ctrl-cmd-l": "select all occurrences", "cmd-d": null }
+```
+
+A command is named as ⌘K lists it (or as in the code, `editor::SelectAllOccurrences`), and
+`null` takes a shortcut away. Menus and ⌘K show your keys; one that can't be understood is
+named when settings.json is saved.
 
 Shaders are compiled when the app starts (GPUI's `runtime_shaders` feature), so the build
 doesn't need Xcode's separate Metal Toolchain download.

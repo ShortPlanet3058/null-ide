@@ -2370,6 +2370,12 @@ impl Workspace {
                     this.refresh_title(window, cx);
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
+                        // A shortcut of yours that couldn't be understood: say which.
+                        if let Some(problem) =
+                            cx.try_global::<crate::user_keys::KeyProblems>().and_then(|p| p.0.first().cloned())
+                        {
+                            this.show_notice(format!("Shortcut {problem}."), cx);
+                        }
                     }
                     cx.notify();
                 }
