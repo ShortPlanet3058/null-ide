@@ -43,6 +43,15 @@ pub struct LanguageServer {
     incremental: AtomicBool,
     /// Whether it can format part of a file, not only all of it.
     range_formatting: AtomicBool,
+    /// The names of its kinds of tokens (`function`, `struct`…) and of their modifiers,
+    /// when it can say what each name in a file is.
+    semantic_legend: Mutex<Option<Arc<SemanticLegend>>>,
+}
+
+/// What the numbers in a server's semantic tokens stand for.
+pub struct SemanticLegend {
+    pub types: Vec<String>,
+    pub modifiers: Vec<String>,
 }
 
 impl LanguageServer {
@@ -65,6 +74,31 @@ impl LanguageServer {
             None => false,
         };
         self.range_formatting.store(ranges, Ordering::Relaxed);
+        use lsp_types::SemanticTokensServerCapabilities as Tokens;
+        let options = match &capabilities.semantic_tokens_provider {
+            Some(Tokens::SemanticTokensOptions(o)) => Some(o),
+            Some(Tokens::SemanticTokensRegistrationOptions(o)) => Some(&o.semantic_tokens_options),
+            None => None,
+        };
+        let full = options.is_some_and(|o| {
+            matches!(
+                o.full,
+                Some(
+                    lsp_types::SemanticTokensFullOptions::Bool(true)
+                        | lsp_types::SemanticTokensFullOptions::Delta { .. }
+                )
+            )
+        });
+        *self.semantic_legend.lock().unwrap() = options.filter(|_| full).map(|o| {
+            Arc::new(SemanticLegend {
+                types: o.legend.token_types.iter().map(|t| t.as_str().to_string()).collect(),
+                modifiers: o.legend.token_modifiers.iter().map(|m| m.as_str().to_string()).collect(),
+            })
+        });
+    }
+
+    pub fn semantic_legend(&self) -> Option<Arc<SemanticLegend>> {
+        self.semantic_legend.lock().unwrap().clone()
     }
 
     pub fn formats_ranges(&self) -> bool {
@@ -128,6 +162,7 @@ impl LanguageServer {
             pending,
             incremental: AtomicBool::new(false),
             range_formatting: AtomicBool::new(false),
+            semantic_legend: Mutex::new(None),
         };
         Ok((server, rx))
     }

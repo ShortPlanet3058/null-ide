@@ -365,6 +365,26 @@ impl LspStore {
                     implementation: Some(Default::default()),
                     document_highlight: Some(Default::default()),
                     inlay_hint: Some(Default::default()),
+                    semantic_tokens: Some(lsp_types::SemanticTokensClientCapabilities {
+                        requests: lsp_types::SemanticTokensClientCapabilitiesRequests {
+                            range: Some(false),
+                            full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
+                        },
+                        token_types: crate::editor::SEMANTIC_TYPES
+                            .iter()
+                            .map(|t| lsp_types::SemanticTokenType::new(t))
+                            .collect(),
+                        token_modifiers: ["declaration", "readonly", "static", "deprecated", "constant"]
+                            .into_iter()
+                            .map(lsp_types::SemanticTokenModifier::new)
+                            .collect(),
+                        formats: vec![lsp_types::TokenFormat::RELATIVE],
+                        overlapping_token_support: Some(false),
+                        multiline_token_support: Some(false),
+                        // Its tokens add to the grammar's colours, they don't replace them.
+                        augments_syntax_tokens: Some(true),
+                        ..Default::default()
+                    }),
                     signature_help: Some(lsp_types::SignatureHelpClientCapabilities {
                         signature_information: Some(lsp_types::SignatureInformationSettings {
                             documentation_format: Some(vec![MarkupKind::PlainText]),
@@ -757,6 +777,31 @@ impl LspStore {
         async move {
             let Some(request) = request else { return Vec::new() };
             request.await.ok().flatten().unwrap_or_default()
+        }
+    }
+
+    /// What each name in a file is (a type, a function…), as the server sees it: its
+    /// tokens, and what their numbers stand for. None when it can't say.
+    pub fn semantic_tokens(
+        &self,
+        path: &Path,
+    ) -> impl Future<Output = Option<(Vec<lsp_types::SemanticToken>, Arc<crate::lsp::SemanticLegend>)>> + use<> {
+        let request = self.server_for(path).zip(uri_for(path)).and_then(|(server, uri)| {
+            let legend = server.semantic_legend()?;
+            let request =
+                server.request::<lsp_types::request::SemanticTokensFullRequest>(lsp_types::SemanticTokensParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                });
+            Some((request, legend))
+        });
+        async move {
+            let (request, legend) = request?;
+            match request.await.ok().flatten()? {
+                lsp_types::SemanticTokensResult::Tokens(tokens) => Some((tokens.data, legend)),
+                lsp_types::SemanticTokensResult::Partial(partial) => Some((partial.data, legend)),
+            }
         }
     }
 
