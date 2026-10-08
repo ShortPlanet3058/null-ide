@@ -1192,7 +1192,7 @@ impl FileTree {
         let base = div()
             .id(ix)
             .h(px(ROW_HEIGHT))
-            .mx(px(6.))
+            .w_full()
             .rounded(px(ui::R_ROW))
             .flex()
             .items_center()
@@ -1495,7 +1495,17 @@ impl Render for FileTree {
                             "file-tree",
                             self.rows.len(),
                             cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
-                                range.map(|ix| this.render_row(ix, window, cx)).collect()
+                                // Each row the sidebar's width, inset a little so its highlight
+                                // has rounded ends.
+                                range
+                                    .map(|ix| {
+                                        div()
+                                            .w_full()
+                                            .px(px(6.))
+                                            .child(this.render_row(ix, window, cx))
+                                            .into_any_element()
+                                    })
+                                    .collect()
                             }),
                         )
                         .track_scroll(self.scroll.clone())

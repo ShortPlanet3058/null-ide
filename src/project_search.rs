@@ -373,7 +373,7 @@ impl ProjectSearch {
         let row = div()
             .id(ix)
             .h(px(ROW_HEIGHT))
-            .mx(px(6.))
+            .w_full()
             .rounded(px(ui::R_ROW))
             .flex()
             .items_center()
@@ -904,7 +904,12 @@ impl Render for ProjectSearch {
                 uniform_list(
                     "project-search-results",
                     self.rows.len(),
-                    cx.processor(|this, range: Range<usize>, _, cx| range.map(|ix| this.render_row(ix, cx)).collect()),
+                    // Each row the panel's width, inset so its highlight has rounded ends.
+                    cx.processor(|this, range: Range<usize>, _, cx| {
+                        range
+                            .map(|ix| div().w_full().px(px(6.)).child(this.render_row(ix, cx)).into_any_element())
+                            .collect()
+                    }),
                 )
                 .track_scroll(self.scroll.clone())
                 .flex_1(),
