@@ -36,6 +36,9 @@ pub struct Settings {
     /// Follow the Mac's light and dark: `theme` in dark mode, `light_theme` in light mode.
     pub match_appearance: bool,
     pub light_theme: ThemeName,
+    /// A theme of your own (`themes/<name>.json`), shown in `theme`'s place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_theme: Option<String>,
     /// Font family for code. Any installed font works; Geist Mono ships with Null.
     pub code_font: String,
     /// Font family for menus, tabs and the palette. Instrument Sans ships with Null.
@@ -125,6 +128,7 @@ impl Default for Settings {
             theme: ThemeName::Null,
             match_appearance: false,
             light_theme: ThemeName::Paper,
+            own_theme: None,
             code_font: DEFAULT_CODE_FONT.into(),
             ui_font: DEFAULT_UI_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
@@ -382,30 +386,54 @@ impl Settings {
             self.light_theme = name;
         } else {
             self.theme = name;
+            self.own_theme = None;
         }
+    }
+
+    /// Whether the Mac's light appearance is the one followed now.
+    fn light_now(&self, cx: &App) -> bool {
+        self.match_appearance
+            && matches!(cx.window_appearance(), gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight)
     }
 
     /// The theme to show now: following the Mac's appearance, the one for it.
     pub fn shown_theme(&self, cx: &App) -> ThemeName {
-        let light =
-            matches!(cx.window_appearance(), gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight);
-        if self.match_appearance && light { self.light_theme } else { self.theme }
+        if self.light_now(cx) { self.light_theme } else { self.theme }
+    }
+
+    /// The theme of your own shown now, if one is.
+    pub fn shown_own_theme(&self, cx: &App) -> Option<&str> {
+        self.own_theme.as_deref().filter(|_| !self.light_now(cx))
+    }
+
+    /// The colours to show now: a theme of your own (if its file reads), or Null's.
+    pub fn theme_now(&self, cx: &App) -> Theme {
+        self.shown_own_theme(cx)
+            .and_then(|name| crate::theme::own::load(name).ok())
+            .map_or_else(|| Theme::named(self.shown_theme(cx)), |(theme, _)| theme)
     }
 }
 
 /// The Mac switched between light and dark: the theme follows, when it's asked to.
 pub fn appearance_changed(cx: &mut App) {
-    let shown = cx.global::<Settings>().shown_theme(cx);
-    if Theme::named(shown).background != cx.global::<Theme>().background {
-        cx.set_global(Theme::named(shown));
+    let theme = cx.global::<Settings>().theme_now(cx);
+    if theme.background != cx.global::<Theme>().background {
+        cx.set_global(theme);
         cx.refresh_windows();
     }
+}
+
+/// A theme file of your own was saved: its colours now.
+pub fn reapply_theme(cx: &mut App) {
+    let theme = cx.global::<Settings>().theme_now(cx);
+    cx.set_global(theme);
+    cx.refresh_windows();
 }
 
 pub fn init(cx: &mut App) {
     fonts::register(cx);
     let settings = Settings::load();
-    cx.set_global(Theme::named(settings.shown_theme(cx)));
+    cx.set_global(settings.theme_now(cx));
     fonts::apply(&settings.code_font, &settings.ui_font, cx);
     cx.set_global(settings);
 }
@@ -431,11 +459,11 @@ pub fn reload(cx: &mut App) {
 
 fn apply(settings: Settings, cx: &mut App) {
     let old = cx.global::<Settings>();
-    let theme_changed = settings.shown_theme(cx) != old.shown_theme(cx);
+    let theme_changed = settings.shown_theme(cx) != old.shown_theme(cx) || settings.own_theme != old.own_theme;
     let fonts_changed = settings.code_font != old.code_font || settings.ui_font != old.ui_font;
     let keymap = (settings.keymap != old.keymap || settings.keys != old.keys).then_some(settings.keymap);
     if theme_changed {
-        cx.set_global(Theme::named(settings.shown_theme(cx)));
+        cx.set_global(settings.theme_now(cx));
     }
     if fonts_changed {
         fonts::apply(&settings.code_font, &settings.ui_font, cx);

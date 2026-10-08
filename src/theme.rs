@@ -390,6 +390,44 @@ impl Theme {
         }
     }
 
+    /// The colour a theme file names (`"keyword"`, `"background"`), to read or set.
+    fn slot(&mut self, name: &str) -> Option<&mut Hsla> {
+        Some(match name {
+            "background" => &mut self.background,
+            "surface" => &mut self.surface,
+            "hairline" => &mut self.hairline,
+            "foreground" => &mut self.foreground,
+            "muted" => &mut self.muted,
+            "faint" => &mut self.faint,
+            "caret" => &mut self.caret,
+            "accent_soft" => &mut self.accent_soft,
+            "raised" => &mut self.raised,
+            "line_strong" => &mut self.line_strong,
+            "on_accent" => &mut self.on_accent,
+            "sunken" => &mut self.sunken,
+            "scrim" => &mut self.scrim,
+            "selection" => &mut self.selection,
+            "find_match" => &mut self.find_match,
+            "error" => &mut self.error,
+            "warning" => &mut self.warning,
+            "git_added" => &mut self.git_added,
+            "git_modified" => &mut self.git_modified,
+            "git_deleted" => &mut self.git_deleted,
+            "current_line" => &mut self.current_line,
+            "keyword" => &mut self.keyword,
+            "type" => &mut self.ty,
+            "function" => &mut self.function,
+            "macro" => &mut self.macro_,
+            "string" => &mut self.string,
+            "number" => &mut self.number,
+            "comment" => &mut self.comment,
+            "punctuation" => &mut self.punctuation,
+            "attribute" => &mut self.attribute,
+            "property" => &mut self.property,
+            _ => return None,
+        })
+    }
+
     pub fn syntax(&self, syntax: Syntax) -> Hsla {
         match syntax {
             Syntax::Plain => self.foreground,
@@ -425,5 +463,168 @@ mod name_tests {
         let backgrounds: std::collections::HashSet<String> =
             ThemeName::ALL.iter().map(|n| format!("{:?}", Theme::named(*n).background)).collect();
         assert_eq!(backgrounds.len(), ThemeName::ALL.len());
+    }
+}
+
+/// Themes of your own: `themes/<name>.json` beside settings.json, made from one of Null's
+/// (`"based_on"`) with the colours given changed:
+///
+/// ```json
+/// { "based_on": "null", "colors": { "caret": "#7fd1ff", "keyword": "#c792ea" } }
+/// ```
+pub mod own {
+    use super::{Theme, ThemeName};
+    use gpui::Hsla;
+    use std::path::PathBuf;
+
+    /// What a theme file may set, in the order a new one lists them.
+    pub const COLOURS: [&str; 31] = [
+        "background",
+        "surface",
+        "raised",
+        "sunken",
+        "hairline",
+        "line_strong",
+        "foreground",
+        "muted",
+        "faint",
+        "caret",
+        "accent_soft",
+        "on_accent",
+        "selection",
+        "find_match",
+        "current_line",
+        "scrim",
+        "error",
+        "warning",
+        "git_added",
+        "git_modified",
+        "git_deleted",
+        "keyword",
+        "type",
+        "function",
+        "macro",
+        "string",
+        "number",
+        "comment",
+        "punctuation",
+        "attribute",
+        "property",
+    ];
+
+    /// Where themes of your own are kept.
+    pub fn folder() -> Option<PathBuf> {
+        Some(crate::settings::Settings::path()?.parent()?.join("themes"))
+    }
+
+    /// The themes of your own, by name, in order.
+    pub fn names() -> Vec<String> {
+        let Some(entries) = folder().and_then(|f| std::fs::read_dir(f).ok()) else { return Vec::new() };
+        let mut names: Vec<String> = entries
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                if path.extension()? != "json" {
+                    return None;
+                }
+                Some(path.file_stem()?.to_string_lossy().into_owned())
+            })
+            .collect();
+        names.sort_by_key(|n| n.to_lowercase());
+        names
+    }
+
+    /// `#rgb`, `#rrggbb` or `#rrggbbaa`.
+    pub fn colour(text: &str) -> Option<Hsla> {
+        let hex = text.trim().strip_prefix('#')?;
+        let hex = match hex.len() {
+            3 => hex.chars().flat_map(|c| [c, c]).collect::<String>() + "ff",
+            6 => format!("{hex}ff"),
+            8 => hex.to_string(),
+            _ => return None,
+        };
+        Some(gpui::rgba(u32::from_str_radix(&hex, 16).ok()?).into())
+    }
+
+    fn hex(colour: Hsla) -> String {
+        let c = gpui::Rgba::from(colour);
+        let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+        let (r, g, b, a) = (byte(c.r), byte(c.g), byte(c.b), byte(c.a));
+        if a == 255 { format!("#{r:02x}{g:02x}{b:02x}") } else { format!("#{r:02x}{g:02x}{b:02x}{a:02x}") }
+    }
+
+    /// A theme from its file's text: the one it's based on, with its colours over it. What
+    /// it says that can't be read is skipped and told.
+    pub fn read(text: &str) -> Result<(Theme, Vec<String>), String> {
+        let json: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("it isn't JSON ({e})"))?;
+        let base: ThemeName = json
+            .get("based_on")
+            .map(|b| serde_json::from_value(b.clone()).map_err(|_| format!("there's no theme called {b}")))
+            .transpose()?
+            .unwrap_or(ThemeName::Null);
+        let mut theme = Theme::named(base);
+        let mut problems = Vec::new();
+        for (name, value) in json.get("colors").and_then(|c| c.as_object()).into_iter().flatten() {
+            if name == "ansi" {
+                let colours: Vec<Option<Hsla>> =
+                    value.as_array().into_iter().flatten().map(|v| v.as_str().and_then(colour)).collect();
+                match <[Option<Hsla>; 16]>::try_from(colours) {
+                    Ok(all) if all.iter().all(Option::is_some) => theme.ansi = all.map(|c| c.unwrap_or_default()),
+                    _ => problems.push("\"ansi\" takes 16 colours".to_string()),
+                }
+                continue;
+            }
+            match (theme.slot(name), value.as_str().and_then(colour)) {
+                (Some(slot), Some(c)) => *slot = c,
+                (None, _) => problems.push(format!("no colour called \"{name}\"")),
+                (_, None) => problems.push(format!("\"{name}\" isn't a colour like \"#ff8800\"")),
+            }
+        }
+        Ok((theme, problems))
+    }
+
+    /// The theme of your own called `name`, and what in it couldn't be read.
+    pub fn load(name: &str) -> Result<(Theme, Vec<String>), String> {
+        let path = folder().ok_or("no settings folder")?.join(format!("{name}.json"));
+        let text = std::fs::read_to_string(&path).map_err(|_| format!("there's no theme file {name}.json"))?;
+        read(&text)
+    }
+
+    /// A new theme file: `base`'s every colour, written out to change.
+    pub fn starter(base: ThemeName) -> String {
+        let mut theme = Theme::named(base);
+        let mut colours = serde_json::Map::new();
+        for name in COLOURS {
+            if let Some(c) = theme.slot(name) {
+                colours.insert(name.to_string(), hex(*c).into());
+            }
+        }
+        colours.insert("ansi".into(), theme.ansi.iter().map(|c| serde_json::Value::from(hex(*c))).collect());
+        let based_on = serde_json::to_value(base).unwrap_or_default();
+        let file = serde_json::json!({ "based_on": based_on, "colors": colours });
+        serde_json::to_string_pretty(&file).unwrap_or_default() + "\n"
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_theme_of_your_own_changes_what_it_says() {
+            let (theme, problems) = read(
+                r##"{ "based_on": "paper", "colors": { "caret": "#ff0000", "nope": "#fff", "keyword": "red" } }"##,
+            )
+            .unwrap();
+            assert_eq!(theme.caret, colour("#ff0000").unwrap());
+            assert_eq!(theme.background, Theme::named(ThemeName::Paper).background, "the rest is Paper's");
+            assert_eq!(problems.len(), 2, "{problems:?}");
+            assert!(read("{").is_err());
+            assert!(read(r#"{ "based_on": "neon" }"#).is_err());
+            // A new file reads back as the theme it was made from.
+            let (again, problems) = read(&starter(ThemeName::Moss)).unwrap();
+            assert!(problems.is_empty(), "{problems:?}");
+            assert_eq!(hex(again.keyword), hex(Theme::named(ThemeName::Moss).keyword));
+            assert_eq!(hex(again.ansi[9]), hex(Theme::named(ThemeName::Moss).ansi[9]));
+            assert_eq!(colour("#abc"), colour("#aabbcc"));
+        }
     }
 }

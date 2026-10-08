@@ -127,6 +127,7 @@ actions!(
         NormalLineSpacing,
         RelaxedLineSpacing,
         UseNullTheme,
+        NewOwnTheme,
         UseAshTheme,
         UseMidnightTheme,
         UseMossTheme,
@@ -2564,6 +2565,16 @@ impl Workspace {
                     }
                     this.share_unsaved(editor, cx);
                     this.refresh_title(window, cx);
+                    // A theme of yours, saved: shown as it is now, if it's the one in use.
+                    let own = crate::theme::own::folder();
+                    let theme_file = editor
+                        .read(cx)
+                        .path()
+                        .filter(|p| p.parent() == own.as_deref())
+                        .map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+                    if let Some(name) = theme_file {
+                        this.theme_saved(&name, cx);
+                    }
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
                         // A shortcut of yours that couldn't be understood: say which.
@@ -3512,7 +3523,9 @@ impl Workspace {
         let settings = cx.global::<Settings>();
         let current = |on: bool| if on { " (current)" } else { "" };
         let ai_label = |id: ProviderId| format!("Use {}{}", id.label(), current(settings.ai.provider == id));
-        let theme_label = |name: ThemeName| format!("{} Theme{}", name.label(), current(settings.theme == name));
+        let theme_label = |name: ThemeName| {
+            format!("{} Theme{}", name.label(), current(settings.theme == name && settings.own_theme.is_none()))
+        };
         let toggle = |on: bool, stop: &str, start: &str| if on { stop.to_string() } else { start.to_string() };
         let mut commands: Vec<(Category, String, Box<dyn Action>)> = vec![
             (File, "New File".into(), Box::new(NewUntitled)),
@@ -3589,6 +3602,7 @@ impl Workspace {
             (Appearance, theme_label(ThemeName::Moss), theme_action(ThemeName::Moss)),
             (Appearance, theme_label(ThemeName::Paper), theme_action(ThemeName::Paper)),
             (Appearance, theme_label(ThemeName::Dune), theme_action(ThemeName::Dune)),
+            (Appearance, "New Theme of Your Own…".into(), Box::new(NewOwnTheme)),
             (Appearance, "Bigger Text".into(), Box::new(IncreaseFontSize)),
             (Appearance, "Compact Line Spacing".into(), Box::new(CompactLineSpacing)),
             (Appearance, "Normal Line Spacing".into(), Box::new(NormalLineSpacing)),
@@ -3803,6 +3817,11 @@ impl Workspace {
         // A page or a picture: open it in the browser.
         if self.active_editor().and_then(|e| e.read(cx).path()).is_some_and(crate::file_tree::opens_in_browser) {
             commands.push((File, "Open in Browser".into(), Box::new(OpenInBrowser)));
+        }
+        // Themes of your own, beside Null's.
+        for name in crate::theme::own::names() {
+            let label = format!("{name} Theme{}", current(settings.own_theme.as_deref() == Some(name.as_str())));
+            commands.push((Appearance, label, Box::new(UseOwnTheme { name })));
         }
         // The file's encoding: read again as another, or written in another.
         if let Some(editor) = self.active_editor().filter(|e| e.read(cx).path().is_some()) {
@@ -4660,6 +4679,57 @@ impl Workspace {
         .size_full()
         .pt(px(6.))
         .into_any_element()
+    }
+
+    /// Shows the theme of your own called `name`, saying what in it couldn't be read.
+    fn use_own_theme(&mut self, name: &str, cx: &mut Context<Self>) {
+        match crate::theme::own::load(name) {
+            Err(why) => self.show_notice(format!("Couldn't use {name}: {why}"), cx),
+            Ok((_, problems)) => {
+                let name = name.to_string();
+                settings::update(cx, |s| s.own_theme = Some(name.clone()));
+                if !problems.is_empty() {
+                    self.show_notice(format!("{name}: {}", problems.join("; ")), cx);
+                }
+            }
+        }
+    }
+
+    /// A theme file of yours was saved: in use, its colours show now.
+    fn theme_saved(&mut self, name: &str, cx: &mut Context<Self>) {
+        if cx.global::<Settings>().own_theme.as_deref() != Some(name) {
+            return;
+        }
+        match crate::theme::own::load(name) {
+            Err(why) => self.show_notice(format!("The theme can't be read: {why}"), cx),
+            Ok((_, problems)) => {
+                settings::reapply_theme(cx);
+                if !problems.is_empty() {
+                    self.show_notice(problems.join("; "), cx);
+                }
+            }
+        }
+    }
+
+    /// A new theme of your own: the one shown now, every colour written out to change,
+    /// opened, and in use (saving it shows the change).
+    fn new_own_theme(&mut self, _: &NewOwnTheme, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(folder) = crate::theme::own::folder() else { return };
+        if let Err(e) = std::fs::create_dir_all(&folder) {
+            return self.show_notice(format!("Couldn't make the themes folder: {e}"), cx);
+        }
+        let name = (1..)
+            .map(|n| if n == 1 { "My Theme".to_string() } else { format!("My Theme {n}") })
+            .find(|n| !folder.join(format!("{n}.json")).exists())
+            .unwrap_or_default();
+        let path = folder.join(format!("{name}.json"));
+        let base = cx.global::<Settings>().shown_theme(cx);
+        if let Err(e) = std::fs::write(&path, crate::theme::own::starter(base)) {
+            return self.show_notice(format!("Couldn't write the theme: {e}"), cx);
+        }
+        settings::update(cx, |s| s.own_theme = Some(name.clone()));
+        self.open_file(path, window, cx);
+        self.show_notice(format!("{name}: change a colour and save to see it"), cx);
     }
 
     /// When the focused field is about to disappear (the search box when switching
@@ -6796,6 +6866,13 @@ pub fn spacing_action(spacing: crate::settings::LineSpacing) -> Box<dyn Action> 
     }
 }
 
+/// Shows a theme of your own (`themes/<name>.json`).
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct UseOwnTheme {
+    pub name: String,
+}
+
 pub fn theme_action(theme: ThemeName) -> Box<dyn Action> {
     match theme {
         ThemeName::Null => Box::new(UseNullTheme),
@@ -7915,6 +7992,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::search_project))
             .on_action(cx.listener(Self::show_files))
+            .on_action(cx.listener(Self::new_own_theme))
+            .on_action(cx.listener(|this, action: &UseOwnTheme, _, cx| this.use_own_theme(&action.name, cx)))
             .on_action(cx.listener(|this, _: &SwitchTab, window, cx| {
                 let held = window.modifiers().control;
                 this.switch_tab(false, held, window, cx)
@@ -9104,6 +9183,44 @@ mod tests {
             w.open_file_passing(dir.join("b.txt"), window, cx);
             assert_eq!(names(w, cx).len(), 5);
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A theme of your own: made from the one shown, in use at once, its saved changes shown;
+    /// one of Null's picked again puts it aside.
+    #[gpui::test]
+    fn a_theme_of_your_own(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("own-theme");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let folder = crate::theme::own::folder().unwrap();
+        let _ = std::fs::remove_dir_all(&folder);
+        workspace.update_in(cx, |w, window, cx| {
+            w.new_own_theme(&NewOwnTheme, window, cx);
+            assert_eq!(cx.global::<Settings>().own_theme.as_deref(), Some("My Theme"));
+            assert!(folder.join("My Theme.json").is_file());
+            assert_eq!(w.active_editor().unwrap().read(cx).file_name(), "My Theme.json");
+            // Its caret changed in the file, and saved: shown.
+            let text = std::fs::read_to_string(folder.join("My Theme.json")).unwrap();
+            let changed = text.replacen("\"caret\": \"#f2b35b\"", "\"caret\": \"#00ff00\"", 1);
+            assert_ne!(text, changed, "the caret is written out");
+            std::fs::write(folder.join("My Theme.json"), changed).unwrap();
+            w.theme_saved("My Theme", cx);
+            assert_eq!(cx.global::<Theme>().caret, crate::theme::own::colour("#00ff00").unwrap());
+            // Listed in ⌘K, and one of Null's picked again puts it aside.
+            assert!(w.commands(window, cx).iter().any(|c| c.label.starts_with("My Theme Theme")));
+            settings::update(cx, |s| s.pick_theme(ThemeName::Moss));
+            assert_eq!(cx.global::<Settings>().own_theme, None);
+        });
+        std::fs::remove_dir_all(&folder).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
