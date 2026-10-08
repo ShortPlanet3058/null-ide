@@ -715,6 +715,14 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Problems at line ends",
+                Some("Each line's error or warning written after it, faintly (else only the caret's line's)"),
+                Self::toggle("problems-at-line-ends", s.problems_at_line_ends, &theme, cx, |s| {
+                    s.problems_at_line_ends = !s.problems_at_line_ends
+                }),
+                &theme,
+            ),
+            Self::row(
                 "Coloured bracket pairs",
                 Some("Brackets in colour by how deep they are, both of a pair the same"),
                 Self::toggle("bracket-colours", s.bracket_colours, &theme, cx, |s| {
