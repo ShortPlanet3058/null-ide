@@ -36,6 +36,8 @@ actions!(
         NextTab,
         MoveTabRight,
         MoveTabLeft,
+        MoveTabDown,
+        MoveTabUp,
         OpenOnOtherSide,
         NewAiTask,
         ReviewChanges,
@@ -243,6 +245,10 @@ enum TabMenuItem {
     Reveal,
     OpenInTerminal,
     OtherSide,
+    MoveRight,
+    MoveDown,
+    /// Back to the first side: left, or above.
+    MoveBack,
     History,
     CopyLink,
 }
@@ -260,6 +266,9 @@ impl TabMenuItem {
             TabMenuItem::Reveal => crate::file_tree::REVEAL_LABEL,
             TabMenuItem::OpenInTerminal => "Open in Terminal",
             TabMenuItem::OtherSide => "Open on the Other Side Too",
+            TabMenuItem::MoveRight => "Move to the Right",
+            TabMenuItem::MoveDown => "Move Below",
+            TabMenuItem::MoveBack => "Move Back",
             TabMenuItem::History => "Show History",
             TabMenuItem::CopyLink => "Copy Link to Line",
         }
@@ -267,7 +276,14 @@ impl TabMenuItem {
 
     /// Items that start a group get a line above them.
     fn starts_group(self) -> bool {
-        matches!(self, TabMenuItem::Close | TabMenuItem::CopyPath | TabMenuItem::OtherSide)
+        matches!(
+            self,
+            TabMenuItem::Close
+                | TabMenuItem::CopyPath
+                | TabMenuItem::OtherSide
+                | TabMenuItem::MoveRight
+                | TabMenuItem::MoveBack
+        )
     }
 }
 
@@ -463,8 +479,10 @@ pub struct Workspace {
     active: Option<usize>,
     /// The tab each side shows.
     shown: [Option<Entity<Editor>>; 2],
-    /// How much of the width the left side takes when split.
+    /// How much of the width the left side takes when split (of the height, stacked).
     split_ratio: f32,
+    /// The two sides one above the other, rather than side by side.
+    stacked: bool,
     sidebar: Transition,
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
@@ -687,6 +705,7 @@ impl Workspace {
             tabs: Vec::new(),
             shown: [None, None],
             split_ratio: 0.5,
+            stacked: false,
             active: None,
             sidebar: Transition::new(cx.global::<Settings>().sidebar_visible),
             chrome: Transition::new(true),
@@ -823,6 +842,7 @@ impl Workspace {
             active: active.and_then(|p| tabs.iter().position(|t| t.path == p)),
             shown_right: right.and_then(|p| tabs.iter().position(|t| t.path == p)),
             split_ratio: self.is_split().then_some(self.split_ratio),
+            stacked: self.is_split() && self.stacked,
             tabs,
             expanded: self.tree.read(cx).expanded_folders(),
             recent_files: self.recent_files.iter().take(20).cloned().collect(),
@@ -886,6 +906,7 @@ impl Workspace {
         if let Some(ratio) = session.split_ratio {
             self.split_ratio = ratio.clamp(0.2, 0.8);
         }
+        self.stacked = session.stacked;
         // What the right side showed, then the tab that had the keyboard.
         if let Some(right) = session.shown_right.and_then(|i| session.tabs.get(i)) {
             self.open_file(right.path.clone(), window, cx);
@@ -2339,6 +2360,10 @@ impl Workspace {
             return self.show_notice("Save the file first to open it on both sides".into(), cx);
         }
         let other = 1 - self.tabs[ix].side.min(1);
+        // A new split (⌃⌥⌘→): side by side, however the last one was.
+        if !self.is_split() {
+            self.stacked = false;
+        }
         if let Some(twin) = self.twins_of(&source, cx).first()
             && let Some(at) = self.tabs.iter().position(|t| &t.editor == twin)
         {
@@ -2767,15 +2792,25 @@ impl Workspace {
         }
     }
 
-    /// Moves the current tab to the other side (⌃⌘→ / ⌃⌘←), opening the split when needed.
-    fn move_tab_to(&mut self, to: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Moves the current tab to the other side (⌃⌘→ / ⌃⌘←, or below and above), opening the
+    /// split when needed. `stacked`, going to the second side: whether it goes below the
+    /// first, or right of it (already there, the sides turn).
+    fn move_tab_to(&mut self, to: usize, stacked: Option<bool>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.active else { return };
         let from = self.tabs[ix].side;
         if from == to {
+            if let Some(stacked) = stacked.filter(|s| to == 1 && *s != self.stacked) {
+                self.stacked = stacked;
+                self.schedule_session_save(cx);
+                cx.notify();
+            }
             return;
         }
         if self.tabs.len() < 2 {
             return self.show_notice("Open another file to see two side by side".into(), cx);
+        }
+        if let Some(stacked) = stacked.filter(|_| to == 1) {
+            self.stacked = stacked;
         }
         self.tabs[ix].side = to;
         let left_behind = self.side_tabs(from);
@@ -3551,6 +3586,8 @@ impl Workspace {
                 (Go, "Next Tab".into(), Box::new(NextTab)),
                 (View, "Move Tab to the Right Side".into(), Box::new(MoveTabRight)),
                 (View, "Move Tab to the Left Side".into(), Box::new(MoveTabLeft)),
+                (View, "Move Tab Below".into(), Box::new(MoveTabDown)),
+                (View, "Move Tab Above".into(), Box::new(MoveTabUp)),
                 (View, "Open on the Other Side Too".into(), Box::new(OpenOnOtherSide)),
                 (Go, "Previous Tab".into(), Box::new(PreviousTab)),
             ]);
@@ -6158,6 +6195,14 @@ impl Workspace {
         if side.last() != Some(&ix) {
             items.push(CloseToTheRight);
         }
+        // To a side of its own: right of the others, or below them; or back.
+        if self.tabs.len() > 1 {
+            if self.tabs[ix].side == 0 {
+                items.extend([MoveRight, MoveDown]);
+            } else {
+                items.push(MoveBack);
+            }
+        }
         if editor.read(cx).path().is_some() {
             items.extend([CopyPath, CopyRelativePath, Reveal, OpenInTerminal, OtherSide]);
             if self.branch.is_some() {
@@ -6209,6 +6254,14 @@ impl Workspace {
             TabMenuItem::OtherSide => {
                 self.activate(ix, window, cx);
                 self.open_on_other_side(window, cx);
+            }
+            TabMenuItem::MoveRight | TabMenuItem::MoveDown | TabMenuItem::MoveBack => {
+                self.activate(ix, window, cx);
+                match item {
+                    TabMenuItem::MoveRight => self.move_tab_to(1, Some(false), window, cx),
+                    TabMenuItem::MoveDown => self.move_tab_to(1, Some(true), window, cx),
+                    _ => self.move_tab_to(0, None, window, cx),
+                }
             }
         }
         cx.notify();
@@ -6692,8 +6745,11 @@ impl Render for Workspace {
         let language =
             self.active_editor().map(|e| e.read(cx)).filter(|e| e.preview.is_none()).map(|e| e.language_name());
         let split = self.is_split();
+        let stacked = split && self.stacked;
         let tabs_left = self.render_tabs(0, cx);
-        let tabs_right = split.then(|| self.render_tabs(1, cx));
+        // The second side's tabs: in the title bar beside the first's, or over it when below.
+        let tabs_right = (split && !stacked).then(|| self.render_tabs(1, cx));
+        let tabs_below = stacked.then(|| self.render_tabs(1, cx));
         // While debugging (and after, until closed), the Debug panel takes the terminal's place.
         let debug_panel = (!self.focus_mode).then(|| self.render_debug_panel(cx)).flatten();
         let terminal_panel = match debug_panel {
@@ -6736,6 +6792,59 @@ impl Render for Workspace {
                 .flex()
                 .justify_center()
                 .child(div().h_full().w_full().max_w(px(column)).pt(px(24.)).child(pane(self, side, cx)))
+        } else if let Some(tabs_below) = tabs_below {
+            // One above the other: the lower side's tabs in a row over it.
+            let top = div().h(relative(self.split_ratio)).w_full().flex_none().child(pane(self, 0, cx));
+            let tab_row = div()
+                .h(px(34.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .px(px(8.))
+                .bg(theme_now.surface)
+                .border_b_1()
+                .border_color(theme_now.hairline)
+                .child(tabs_below);
+            let bottom = div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(tab_row)
+                .child(div().flex_1().min_h_0().child(pane(self, 1, cx)));
+            let divider = div()
+                .id("divider")
+                .h(px(7.))
+                .my(px(-3.))
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .cursor_row_resize()
+                .group("divider")
+                .on_drag(DraggedDivider, |_, _, _, cx| cx.new(|_| gpui::EmptyView))
+                .child(
+                    div()
+                        .h(px(1.))
+                        .w_full()
+                        .bg(theme_now.hairline)
+                        .group_hover("divider", |s| s.bg(theme_now.line_strong)),
+                );
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .on_drag_move::<DraggedDivider>(cx.listener(|this, event: &DragMoveEvent<DraggedDivider>, _, cx| {
+                    let y = f32::from(event.event.position.y - event.bounds.top());
+                    this.split_ratio = (y / f32::from(event.bounds.size.height)).clamp(0.2, 0.8);
+                    this.schedule_session_save(cx);
+                    cx.notify();
+                }))
+                .child(top)
+                .child(divider)
+                .child(bottom)
         } else if split {
             let left = div().w(relative(self.split_ratio)).h_full().flex_none().child(pane(self, 0, cx));
             let right = div().flex_1().min_w_0().h_full().child(pane(self, 1, cx));
@@ -6771,18 +6880,43 @@ impl Render for Workspace {
                 .child(divider)
                 .child(right)
         } else {
-            // While a tab is dragged, the right half offers to open it there.
-            // (Unsplit, the only thing Null drags is a tab.)
+            // While a tab is dragged, the right half offers to open it there, and the bottom
+            // below. (Unsplit, the only thing Null drags is a tab.)
             let dragging_tab = cx.has_active_drag() && self.tabs.len() > 1;
             div().relative().size_full().child(div().size_full().child(pane(self, 0, cx))).when(dragging_tab, |body| {
                 body.child(
+                    div()
+                        .id("drop-below")
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .w_full()
+                        .h(relative(0.35))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(ui::T_MD))
+                        .text_color(theme_now.muted)
+                        .border_t_1()
+                        .border_color(theme_now.hairline)
+                        .drag_over::<DraggedTab>({
+                            let tint = theme_now.accent_soft;
+                            move |style, _, _, _| style.bg(tint)
+                        })
+                        .child("Open below")
+                        .on_drop(cx.listener(|this, dragged: &DraggedTab, window, cx| {
+                            this.stacked = true;
+                            this.drop_tab(&dragged.editor, None, 1, window, cx)
+                        })),
+                )
+                .child(
                     div()
                         .id("drop-right")
                         .absolute()
                         .top_0()
                         .right_0()
                         .w(relative(0.5))
-                        .h_full()
+                        .h(relative(0.65))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -6796,6 +6930,7 @@ impl Render for Workspace {
                         })
                         .child("Open on the right")
                         .on_drop(cx.listener(|this, dragged: &DraggedTab, window, cx| {
+                            this.stacked = false;
                             this.drop_tab(&dragged.editor, None, 1, window, cx)
                         })),
                 )
@@ -7237,14 +7372,16 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::stop_ai_task))
             .on_action(cx.listener(Self::keep_all_task_changes))
             .on_action(cx.listener(Self::undo_all_task_changes))
-            .on_action(cx.listener(|this, _: &MoveTabRight, window, cx| this.move_tab_to(1, window, cx)))
+            .on_action(cx.listener(|this, _: &MoveTabRight, window, cx| this.move_tab_to(1, Some(false), window, cx)))
+            .on_action(cx.listener(|this, _: &MoveTabDown, window, cx| this.move_tab_to(1, Some(true), window, cx)))
+            .on_action(cx.listener(|this, _: &MoveTabUp, window, cx| this.move_tab_to(0, None, window, cx)))
             .on_action(cx.listener(|this, _: &TogglePinTab, _, cx| {
                 if let Some(tab) = this.active.and_then(|a| this.tabs.get(a)) {
                     let (editor, pinned) = (tab.editor.clone(), tab.pinned);
                     this.set_pinned(&editor, !pinned, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &MoveTabLeft, window, cx| this.move_tab_to(0, window, cx)))
+            .on_action(cx.listener(|this, _: &MoveTabLeft, window, cx| this.move_tab_to(0, None, window, cx)))
             .on_action(cx.listener(|this, _: &OpenOnOtherSide, window, cx| this.open_on_other_side(window, cx)))
             .on_action(cx.listener(Self::go_to_symbol))
             .on_action(cx.listener(Self::go_to_symbol_in_project))
@@ -8458,6 +8595,45 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A tab moved below: the sides one above the other, kept so; sent right, they turn.
+    #[gpui::test]
+    fn sides_stack_one_above_the_other(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("split-down");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            for name in ["a.txt", "b.txt"] {
+                w.open_file(dir.join(name), window, cx);
+            }
+            let b = w.active_editor().unwrap().clone();
+            assert!(w.tab_menu_items(&b, cx).contains(&TabMenuItem::MoveDown));
+            w.move_tab_to(1, Some(true), window, cx);
+            assert!(w.is_split() && w.stacked);
+            assert!(w.session(cx).stacked, "kept with the session");
+            assert!(w.tab_menu_items(&b, cx).contains(&TabMenuItem::MoveBack));
+            // Already below, sent right: side by side, the same tabs.
+            w.move_tab_to(1, Some(true), window, cx);
+            w.move_tab_to(1, Some(false), window, cx);
+            assert!(w.is_split() && !w.stacked);
+            // Back up: one side again.
+            w.move_tab_to(0, None, window, cx);
+            assert!(!w.is_split());
+            assert!(!w.session(cx).stacked);
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[gpui::test]
     fn two_sides_open_move_and_close_back_to_one(cx: &mut gpui::TestAppContext) {
         let dir = crate::tools::test_dir("split");
@@ -8482,7 +8658,7 @@ mod tests {
                 w.open_file(dir.join(name), window, cx);
             }
             // b moves right: a stays on the left.
-            w.move_tab_to(1, window, cx);
+            w.move_tab_to(1, Some(false), window, cx);
             assert!(w.is_split());
             assert_eq!((names(w, cx, 0), names(w, cx, 1)), (vec!["a.txt".into()], vec!["b.txt".into()]));
             // Files open on the side being worked in.
@@ -9120,6 +9296,8 @@ mod tests {
                     Close,
                     CloseOthers,
                     CloseToTheRight,
+                    MoveRight,
+                    MoveDown,
                     CopyPath,
                     CopyRelativePath,
                     Reveal,
