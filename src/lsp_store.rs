@@ -707,6 +707,17 @@ impl LspStore {
         }
     }
 
+    /// What the function at `position` calls: each function, where it's defined.
+    pub fn callees(&self, path: &Path, position: Position) -> impl Future<Output = Vec<lsp_types::Location>> + use<> {
+        let asked = self.server_for(path).zip(Self::position_params(path, position));
+        async move {
+            match asked {
+                Some((server, params)) => crate::lsp::callees(&server, params).await,
+                None => Vec::new(),
+            }
+        }
+    }
+
     /// The header of a source file, or the source of a header, as the server finds it (in
     /// other folders too, like `include/`).
     pub fn counterpart(&self, path: &Path) -> impl Future<Output = Option<PathBuf>> + use<> {

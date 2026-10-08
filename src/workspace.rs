@@ -3710,6 +3710,7 @@ impl Workspace {
                 (Go, "Peek Definition".into(), Box::new(crate::editor::PeekDefinition)),
                 (Go, "Find References".into(), Box::new(crate::editor::FindReferences)),
                 (Go, "Show Callers".into(), Box::new(crate::editor::ShowCallers)),
+                (Go, "Show Callees (What This Calls)".into(), Box::new(crate::editor::ShowCallees)),
                 (Go, "Go to Implementation".into(), Box::new(crate::editor::GoToImplementation)),
                 (Go, "Go to Type Definition".into(), Box::new(crate::editor::GoToTypeDefinition)),
                 (Go, "Show Problems".into(), Box::new(ShowProblems)),

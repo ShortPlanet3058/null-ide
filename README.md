@@ -321,7 +321,7 @@ bar or Settings → Languages, into its own folder rather than the system.
 
 With a server running: ⌘R (or F2) renames a symbol everywhere, right where it's written;
 ⇧F12 lists where it's used (⌘-clicking a definition does too), ⌃⌥H where a function is
-called from, ⌥F12 shows a definition where you are without going there; ⌥⇧F formats the file, and
+called from (and ⌘K "Show Callees" what it calls), ⌥F12 shows a definition where you are without going there; ⌥⇧F formats the file, and
 "Format on save" does it on ⌘S (and "Format on paste", to pasted code, where the server formats
 parts of files); ⌘⇧M, or the error count in the status bar, lists every
 problem found.

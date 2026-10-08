@@ -190,6 +190,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Go to Implementation", crate::editor::GoToImplementation),
                 MenuItem::action("Find References", crate::editor::FindReferences),
                 MenuItem::action("Show Callers", crate::editor::ShowCallers),
+                MenuItem::action("Show Callees", crate::editor::ShowCallees),
                 MenuItem::action("Rename Symbol", crate::editor::RenameSymbol),
                 MenuItem::action("Quick Fix…", crate::editor::QuickFix),
                 MenuItem::action("Format Document", crate::editor::FormatDocument),
