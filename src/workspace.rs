@@ -4452,6 +4452,31 @@ impl Workspace {
         window.focus(&editor.focus_handle(cx));
     }
 
+    /// The outline of `editor`'s file (see `crate::outline`), read again only when its text
+    /// changes; None for one longer than `longest` characters.
+    fn outline_items(
+        &mut self,
+        editor: &Entity<Editor>,
+        longest: usize,
+        cx: &App,
+    ) -> Option<std::rc::Rc<Vec<crate::outline::Item>>> {
+        let e = editor.read(cx);
+        let (id, revision) = (editor.entity_id(), e.buffer.revision());
+        if let Some((i, r, items)) = &self.outline
+            && *i == id
+            && *r == revision
+        {
+            return Some(items.clone());
+        }
+        if e.buffer.len_chars() > longest {
+            return None;
+        }
+        let path = e.path().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(e.file_name()));
+        let items = std::rc::Rc::new(crate::outline::outline(&path, &e.buffer.to_string()));
+        self.outline = Some((id, revision, items.clone()));
+        Some(items)
+    }
+
     /// The Outline view: the open file's functions and types (its headings, in Markdown),
     /// the one the caret is in marked; a click goes there.
     fn render_outline(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -4462,23 +4487,12 @@ impl Workspace {
         let Some(editor) = self.active_editor().cloned() else {
             return quiet("Open a file to see its outline".into());
         };
-        let (id, revision, row, name) = {
+        let (id, row, name) = {
             let e = editor.read(cx);
-            (editor.entity_id(), e.buffer.revision(), e.caret_point().0, e.file_name())
+            (editor.entity_id(), e.caret_point().0, e.file_name())
         };
-        let items = match &self.outline {
-            Some((i, r, items)) if *i == id && *r == revision => items.clone(),
-            _ => {
-                let e = editor.read(cx);
-                // Very long files (a log, a bundle): not read again at each keystroke.
-                if e.buffer.len_chars() > 4_000_000 {
-                    return quiet(format!("{name} is too long for an outline"));
-                }
-                let path = e.path().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(&name));
-                let items = std::rc::Rc::new(crate::outline::outline(&path, &e.buffer.to_string()));
-                self.outline = Some((id, revision, items.clone()));
-                items
-            }
+        let Some(items) = self.outline_items(&editor, 4_000_000, cx) else {
+            return quiet(format!("{name} is too long for an outline"));
         };
         if items.is_empty() {
             return quiet(format!("No functions or types in {name}"));
@@ -5268,7 +5282,8 @@ impl Workspace {
     /// ⌘⇧B: the project's tasks (the last run first), to run one in the terminal.
     fn run_task(&mut self, _: &RunTask, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
-        let mut tasks = crate::tasks::find(&root);
+        let file = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        let mut tasks = crate::tasks::find(&root, file.as_deref(), &cx.global::<Settings>().tasks);
         // Run lately: first, whether the project lists them or they were typed.
         for command in self.recent_runs.iter().rev() {
             let task = match tasks.iter().position(|t| &t.command == command) {
@@ -6888,6 +6903,16 @@ impl Render for Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         let lsp_status = self.language_status(cx);
         let conflicts = self.active_editor().map_or(0, |e| e.read(cx).conflicts().len());
+        // Where the caret is in the code, after the file's name: `Shop › checkout`.
+        let trail: Option<String> = self.active_editor().cloned().and_then(|editor| {
+            let (row, plain) = {
+                let e = editor.read(cx);
+                (e.caret_point().0, e.preview.is_none() && !e.reading && e.extra.is_empty())
+            };
+            let items = self.outline_items(&editor, 300_000, cx).filter(|_| plain)?;
+            let trail = crate::outline::trail(&items, row);
+            (!trail.is_empty()).then(|| trail.join(" › "))
+        });
         let (status_items, problems): (Vec<String>, (usize, usize)) = match self.active_editor().map(|e| e.read(cx)) {
             Some(editor) => {
                 let (line, col) = editor.caret_point();
@@ -6897,6 +6922,10 @@ impl Render for Workspace {
                 let mut path = path.map(|p| shorten_path(&p, STATUS_PATH_CHARS)).unwrap_or_else(|| "Untitled".into());
                 if editor.missing {
                     path.push_str(" · deleted on disk");
+                }
+                if let Some(trail) = &trail {
+                    path.push_str(" › ");
+                    path.push_str(trail);
                 }
                 if let Some(preview) = &editor.preview {
                     (vec![path, preview.summary()], (0, 0))

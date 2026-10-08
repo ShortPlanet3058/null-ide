@@ -58,6 +58,9 @@ pub struct Settings {
     /// Your own shortcuts over those: a key and the command it runs, or null for none.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub keys: std::collections::BTreeMap<String, Option<String>>,
+    /// Your own tasks for ⌘⇧B, in every project: a name and the command it runs.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tasks: std::collections::BTreeMap<String, String>,
     /// Set once the first-launch welcome has been seen.
     pub welcomed: bool,
     /// At the end of the caret's line, faintly: who last changed it, when, and why.
@@ -114,6 +117,7 @@ impl Default for Settings {
             keep_unsaved: true,
             keymap: Default::default(),
             keys: Default::default(),
+            tasks: Default::default(),
             welcomed: false,
             autocomplete: true,
             line_blame: true,
