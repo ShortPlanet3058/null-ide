@@ -3869,12 +3869,14 @@ impl Render for Editor {
             })
             // A file dragged from the files: linked where it lands in Markdown, opened elsewhere.
             .on_drop(cx.listener(|this, dragged: &crate::file_tree::DraggedEntry, window, cx| {
-                let path = dragged.path().to_path_buf();
+                let paths = dragged.paths();
                 if this.is_markdown() {
                     let at = this.offset_at(window.mouse_position());
-                    cx.emit(EditorEvent::FilesDropped { paths: vec![path], at });
-                } else if path.is_file() {
-                    cx.emit(EditorEvent::GoTo { path, range: Default::default() });
+                    cx.emit(EditorEvent::FilesDropped { paths, at });
+                } else {
+                    for path in paths.into_iter().filter(|p| p.is_file()) {
+                        cx.emit(EditorEvent::GoTo { path, range: Default::default() });
+                    }
                 }
             }))
             .size_full()

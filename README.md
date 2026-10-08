@@ -168,7 +168,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 - In the files, typing a name goes to it, as in the Finder; a file with an error in it shows
   red, its folders a red dot. **Find in Folder…** searches one folder from its menu.
   ⌘-click picks several files (⇧-click, all those between): their menu moves them to the
-  Trash with one question, copies their paths, or compares two files.
+  Trash with one question, copies their paths, or compares two files; dragged, they all move
+  (onto Markdown, a link each).
   Folders that each hold only the next open together, as one row (`src / main / java`):
   new files, drops and renames there go to the last of them.
 - Selected text drags to where it's dropped (⌥ copies it); a file dragged from the files
