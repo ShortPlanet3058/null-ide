@@ -176,6 +176,8 @@ pub struct TerminalView {
     size: GridSize,
     cell: (Pixels, Pixels),
     pub title: String,
+    /// A name given to it, over the one its folder gives.
+    pub name: Option<String>,
     /// The program running in the shell now (`cargo`), while one is.
     pub running: Option<String>,
     selecting: bool,
@@ -302,6 +304,7 @@ impl TerminalView {
             size,
             cell: (px(8.), px(16.)),
             title: String::new(),
+            name: None,
             running: None,
             selecting: false,
             mouse_held: None,

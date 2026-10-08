@@ -141,6 +141,9 @@ actions!(
         SaveAll,
         ReopenClosedTab,
         TogglePinTab,
+        RenameTerminal,
+        ConfirmTerminalName,
+        CancelTerminalName,
         CloseAllTabs,
         CloseOtherTabs,
         UseNvidia,
@@ -175,6 +178,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f11", StepInto, ctx),
         KeyBinding::new("shift-f11", StepOut, ctx),
         KeyBinding::new("enter", AddWatch, Some("DebugWatch")),
+        KeyBinding::new("enter", ConfirmTerminalName, Some("TerminalName")),
+        KeyBinding::new("escape", CancelTerminalName, Some("TerminalName")),
         KeyBinding::new("f8", NextProblem, ctx),
         KeyBinding::new("shift-f8", PreviousProblem, ctx),
         KeyBinding::new("ctrl-tab", NextTab, ctx),
@@ -236,6 +241,7 @@ enum TabMenuItem {
     CopyPath,
     CopyRelativePath,
     Reveal,
+    OpenInTerminal,
     OtherSide,
     History,
     CopyLink,
@@ -252,6 +258,7 @@ impl TabMenuItem {
             TabMenuItem::CopyPath => "Copy Path",
             TabMenuItem::CopyRelativePath => "Copy Relative Path",
             TabMenuItem::Reveal => crate::file_tree::REVEAL_LABEL,
+            TabMenuItem::OpenInTerminal => "Open in Terminal",
             TabMenuItem::OtherSide => "Open on the Other Side Too",
             TabMenuItem::History => "Show History",
             TabMenuItem::CopyLink => "Copy Link to Line",
@@ -511,6 +518,8 @@ pub struct Workspace {
     debug_show_output: bool,
     /// The paused call's variables the code shows, with values worth showing.
     debug_locals: Vec<(String, String)>,
+    /// The shown terminal's new name, being typed.
+    terminal_rename: Option<Entity<crate::text_input::TextInput>>,
     /// Where an expression to watch is typed, under the variables while paused.
     debug_watch: Entity<crate::text_input::TextInput>,
     /// The program to debug, when the project doesn't say (no Cargo.toml): asked once.
@@ -708,6 +717,7 @@ impl Workspace {
             debug_show_output: false,
             debug_locals: Vec::new(),
             debug_watch: cx.new(|cx| crate::text_input::TextInput::new("Watch an expression", cx)),
+            terminal_rename: None,
             debug_program: None,
             focus_mode: false,
             tab_menu: None,
@@ -3541,6 +3551,9 @@ impl Workspace {
                 commands.push((View, label, Box::new(crate::editor::SetLanguage { name })));
             }
         }
+        if !self.terminals.is_empty() {
+            commands.push((View, "Rename Terminal".into(), Box::new(RenameTerminal)));
+        }
         if let Some(tab) = self.active.and_then(|a| self.tabs.get(a)) {
             let label = if tab.pinned { "Unpin Tab" } else { "Pin Tab" };
             commands.push((View, label.into(), Box::new(TogglePinTab)));
@@ -5170,6 +5183,54 @@ impl Workspace {
         self.terminals.iter().enumerate().find_map(|(ix, (t, _))| t.read(cx).running.clone().map(|name| (ix, name)))
     }
 
+    /// Names the shown terminal: a field in place of its name.
+    fn rename_terminal(&mut self, _: &RenameTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal().cloned() else { return };
+        if !self.terminal_open.on {
+            self.terminal_open.set(true, TERMINAL_SLIDE, TERMINAL_SLIDE);
+        }
+        let current = terminal.read(cx).name.clone().unwrap_or_default();
+        let input = cx.new(|cx| {
+            let mut input = crate::text_input::TextInput::new("Name", cx);
+            input.set_text(&current, cx);
+            input
+        });
+        window.focus(&input.focus_handle(cx));
+        self.terminal_rename = Some(input);
+        cx.notify();
+    }
+
+    /// The name typed: the terminal's from now on (none: its folder's again).
+    fn confirm_terminal_name(&mut self, _: &ConfirmTerminalName, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.terminal_rename.take() else { return };
+        let name = input.read(cx).text().trim().to_string();
+        if let Some(terminal) = self.terminal().cloned() {
+            terminal.update(cx, |t, cx| {
+                t.name = (!name.is_empty()).then_some(name);
+                cx.notify();
+            });
+            window.focus(&terminal.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    fn cancel_terminal_name(&mut self, _: &CancelTerminalName, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_rename = None;
+        if let Some(terminal) = self.terminal() {
+            window.focus(&terminal.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    /// What a terminal's tab says: the name given to it, else its folder's.
+    fn terminal_tab_label(terminal: &TerminalView, ix: usize) -> String {
+        Self::named_terminal_label(terminal.name.as_deref(), &terminal.title, ix)
+    }
+
+    fn named_terminal_label(name: Option<&str>, title: &str, ix: usize) -> String {
+        name.map_or_else(|| Self::terminal_label(title, ix), str::to_string)
+    }
+
     /// A terminal's tab: its shell's folder, from the title it sets ("user@host:~/a/b" → "b").
     fn terminal_label(title: &str, ix: usize) -> String {
         let name = Self::terminal_name(title);
@@ -5211,11 +5272,24 @@ impl Workspace {
                 )
                 .active(|s| s.opacity(0.7))
         };
+        // Where a terminal's new name is typed, in place of its name.
+        let name_field = |input: Entity<crate::text_input::TextInput>| {
+            div()
+                .key_context("TerminalName")
+                .w(px(140.))
+                .px(px(4.))
+                .rounded(px(ui::R_KEY))
+                .border_1()
+                .border_color(theme.caret)
+                .text_color(theme.foreground)
+                .child(input)
+        };
         // One terminal: its name and title. More: a tab each.
         let several = self.terminals.len() > 1;
         let tabs = self.terminals.iter().enumerate().map(|(ix, (t, _))| {
             let active = ix == self.active_terminal;
-            let label = Self::terminal_label(&t.read(cx).title, ix);
+            let label = Self::terminal_tab_label(t.read(cx), ix);
+            let renaming = active.then(|| self.terminal_rename.clone()).flatten();
             // Another terminal busy with something: a dot says so.
             let busy = !active && t.read(cx).running.is_some();
             div()
@@ -5231,10 +5305,19 @@ impl Workspace {
                 .when(active, |d| d.bg(theme.hairline))
                 .when(!active, |d| d.hover(|s| s.text_color(theme.foreground)))
                 .gap(px(5.))
-                .child(label)
+                .map(|d| match renaming {
+                    Some(input) => d.child(name_field(input)),
+                    None => d.child(label),
+                })
                 .when(busy, |d| d.child(div().size(px(5.)).rounded_full().bg(theme.caret.opacity(0.7))))
                 .active(|s| s.opacity(0.7))
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_terminal(ix, window, cx)))
+                // A double-click names it.
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    this.show_terminal(ix, window, cx);
+                    if event.click_count() == 2 {
+                        this.rename_terminal(&RenameTerminal, window, cx);
+                    }
+                }))
         });
         let header = div()
             .h(px(28.))
@@ -5249,8 +5332,25 @@ impl Workspace {
                 if several {
                     bar.children(tabs).child(div().flex_1())
                 } else {
-                    bar.child(div().text_color(theme.foreground).child("Terminal"))
-                        .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(title))
+                    let named = terminal.read(cx).name.clone();
+                    bar.child(div().text_color(theme.foreground).child("Terminal")).child(
+                        match self.terminal_rename.clone() {
+                            Some(input) => div().flex_1().child(name_field(input)).into_any_element(),
+                            None => div()
+                                .id("terminal-title")
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted)
+                                .child(named.unwrap_or(title))
+                                .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                                    if event.click_count() == 2 {
+                                        this.rename_terminal(&RenameTerminal, window, cx);
+                                    }
+                                }))
+                                .into_any_element(),
+                        },
+                    )
                 }
             })
             .child(
@@ -5901,7 +6001,7 @@ impl Workspace {
             items.push(CloseToTheRight);
         }
         if editor.read(cx).path().is_some() {
-            items.extend([CopyPath, CopyRelativePath, Reveal, OtherSide]);
+            items.extend([CopyPath, CopyRelativePath, Reveal, OpenInTerminal, OtherSide]);
             if self.branch.is_some() {
                 items.extend([History, CopyLink]);
             }
@@ -5932,6 +6032,12 @@ impl Workspace {
             TabMenuItem::Reveal => {
                 if let Some(path) = path {
                     cx.reveal_path(&path);
+                }
+            }
+            // A terminal in the file's folder.
+            TabMenuItem::OpenInTerminal => {
+                if let Some(dir) = path.as_deref().and_then(Path::parent) {
+                    self.open_terminal_in(dir.to_path_buf(), window, cx);
                 }
             }
             TabMenuItem::History => {
@@ -7020,6 +7126,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::next_terminal))
+            .on_action(cx.listener(Self::rename_terminal))
+            .on_action(cx.listener(Self::confirm_terminal_name))
+            .on_action(cx.listener(Self::cancel_terminal_name))
             .on_action(cx.listener(Self::next_problem))
             .on_action(
                 cx.listener(|_, _: &ToggleSymbolMarks, _, cx| {
@@ -8710,6 +8819,9 @@ mod tests {
         assert_eq!(Workspace::terminal_label("ada@mac:~/code/null", 0), "null");
         assert_eq!(Workspace::terminal_label("ada@mac:/tmp/", 1), "tmp");
         assert_eq!(Workspace::terminal_label("", 2), "Terminal 3");
+        // A name given to it wins over its folder.
+        assert_eq!(Workspace::named_terminal_label(Some("server"), "ada@mac:~/code/null", 0), "server");
+        assert_eq!(Workspace::named_terminal_label(None, "ada@mac:~/code/null", 0), "null");
         assert_eq!(Workspace::terminal_name("ada@mac:~/code/null"), "null");
         assert_eq!(Workspace::terminal_name("cargo run"), "cargo run");
     }
@@ -8786,7 +8898,17 @@ mod tests {
             assert!(!w.tab_menu_items(&last, cx).contains(&CloseToTheRight));
             assert_eq!(
                 w.tab_menu_items(&first, cx),
-                [Pin, Close, CloseOthers, CloseToTheRight, CopyPath, CopyRelativePath, Reveal, OtherSide]
+                [
+                    Pin,
+                    Close,
+                    CloseOthers,
+                    CloseToTheRight,
+                    CopyPath,
+                    CopyRelativePath,
+                    Reveal,
+                    OpenInTerminal,
+                    OtherSide
+                ]
             );
             w.tab_menu = Some(TabMenu { editor: last.clone(), position: Default::default() });
             w.run_tab_menu_item(CopyRelativePath, window, cx);
