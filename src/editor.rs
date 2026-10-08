@@ -4142,9 +4142,9 @@ impl Editor {
 
     /// ⌘⇧V: Markdown as it reads, or back to its source.
     pub fn toggle_markdown_preview(&mut self, _: &ToggleMarkdownPreview, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_markdown() && !self.is_svg() && !self.reading {
+        if !self.is_markdown() && !self.is_svg() && !self.is_notebook() && !self.reading {
             let at = self.selection.head;
-            return self.show_notice(at, "The preview is for Markdown and SVG files.".into(), cx);
+            return self.show_notice(at, "The preview is for Markdown, SVG and notebook files.".into(), cx);
         }
         self.reading = !self.reading;
         self.close_completion(cx);
@@ -4195,6 +4195,11 @@ impl Editor {
     }
 
     /// The preview: the document drawn as it reads, in a column, scrolling.
+    /// A Jupyter notebook (`.ipynb`): its JSON read as cells in the preview.
+    pub fn is_notebook(&self) -> bool {
+        self.path.as_ref().and_then(|p| p.extension()).is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
+    }
+
     /// An SVG file: drawn by its name, whatever language it's shown in.
     pub fn is_svg(&self) -> bool {
         self.path.as_ref().and_then(|p| p.extension()).is_some_and(|e| e.eq_ignore_ascii_case("svg"))
@@ -4284,7 +4289,15 @@ impl Editor {
         let blocks = match &self.markdown {
             Some((r, blocks)) if *r == revision => blocks.clone(),
             _ => {
-                let blocks = Rc::new(crate::markdown_view::parse_located(&self.buffer.to_string()));
+                let text = self.buffer.to_string();
+                // A notebook: its cells as Markdown (or a line saying it isn't one).
+                let text = if self.is_notebook() {
+                    crate::notebook::to_markdown(&text)
+                        .unwrap_or_else(|| "*This file doesn't read as a notebook.*".to_string())
+                } else {
+                    text
+                };
+                let blocks = Rc::new(crate::markdown_view::parse_located(&text));
                 self.markdown = Some((revision, blocks.clone()));
                 blocks
             }

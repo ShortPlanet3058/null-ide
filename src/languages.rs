@@ -79,7 +79,7 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
         ),
         language!(
             "JSON",
-            ["json", "jsonc", "json5"],
+            ["json", "jsonc", "json5", "ipynb"],
             [".prettierrc", ".eslintrc"],
             tree_sitter_json::LANGUAGE,
             [tree_sitter_json::HIGHLIGHTS_QUERY],

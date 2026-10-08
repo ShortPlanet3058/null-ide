@@ -181,7 +181,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 
 ## Markdown
 
-**⌘⇧V** in an SVG shows the drawing its text makes, unsaved edits included (⎋ goes back to
+**⌘⇧V** in a Jupyter notebook (`.ipynb`) shows it as it reads: text cells, code in its
+language, and what each cell printed (a picture is mentioned, not shown). In an SVG it shows the drawing its text makes, unsaved edits included (⎋ goes back to
 the text). In Markdown, it shows the file as it reads (headings, lists, tables, code coloured, local
 images; a task's box ticks with a click, and in the text with ⌘-click or ⇧⌘X, which also
 makes lines tasks); **Open Markdown Preview to the Side** keeps it next to the source, following as you
