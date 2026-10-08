@@ -4,6 +4,24 @@
 ///
 /// Returns the score and the byte offsets of the matched characters, for
 /// highlighting. Spaces in the query are ignored.
+/// The query as `score` reads it: lower case, without spaces.
+pub fn folded(query: &str) -> Vec<char> {
+    query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect()
+}
+
+/// Whether `candidate` has the (folded) query's characters in order: what `score` needs
+/// before it can match, checked without allocating, so most of a big list is passed over
+/// quickly.
+pub fn fits(candidate: &str, folded: &[char]) -> bool {
+    let mut wanted = folded.iter().peekable();
+    for c in candidate.chars() {
+        if wanted.peek().is_some_and(|&&w| c.to_lowercase().next() == Some(w)) {
+            wanted.next();
+        }
+    }
+    wanted.peek().is_none()
+}
+
 pub fn score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
     let query: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
     if query.is_empty() {
@@ -61,6 +79,15 @@ pub fn score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quick_look_agrees_with_the_score() {
+        for (candidate, query) in
+            [("src/Main.rs", "smr"), ("src/main.rs", "rsm"), ("a/b", "ab"), ("x", "y"), ("Ä.rs", "ä")]
+        {
+            assert_eq!(fits(candidate, &folded(query)), score(candidate, query).is_some(), "{candidate} / {query}");
+        }
+    }
 
     #[test]
     fn matches_in_order_ignoring_case_and_spaces() {

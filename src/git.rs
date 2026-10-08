@@ -11,6 +11,9 @@ use std::process::Command;
 fn command(dir: &Path) -> Command {
     let mut command = Command::new("git");
     command.arg("-C").arg(dir).env("GIT_LITERAL_PATHSPECS", "1").env("GIT_TERMINAL_PROMPT", "0");
+    // Asking (status) never writes git's index: that write was seen as a change, and set
+    // every open file's committed version to be read again.
+    command.env("GIT_OPTIONAL_LOCKS", "0");
     command
 }
 

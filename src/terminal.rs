@@ -288,6 +288,10 @@ pub struct TerminalView {
     /// Whether the shell has written anything yet.
     spoke: bool,
     settle_task: Option<Task<()>>,
+    /// Output shown at most about 30 times a second (each is the whole window drawn): when
+    /// it was last, and the one waiting.
+    last_redraw: std::time::Instant,
+    redraw_task: Option<Task<()>>,
     /// Where the shell started: relative paths in its output are found from here.
     root: PathBuf,
     link: Option<HoveredLink>,
@@ -436,6 +440,8 @@ impl TerminalView {
             settled: false,
             spoke: false,
             settle_task: None,
+            last_redraw: std::time::Instant::now(),
+            redraw_task: None,
             root: cwd,
             link: None,
             find: None,
@@ -474,14 +480,38 @@ impl TerminalView {
         }));
     }
 
+    /// New output shown: now, or (a stream of it) a moment after the last time.
+    fn redraw_soon(&mut self, cx: &mut Context<Self>) {
+        const EVERY: std::time::Duration = std::time::Duration::from_millis(33);
+        if self.redraw_task.is_some() {
+            return;
+        }
+        let since = self.last_redraw.elapsed();
+        if since >= EVERY {
+            self.last_redraw = std::time::Instant::now();
+            return cx.notify();
+        }
+        self.redraw_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(EVERY - since).await;
+            this.update(cx, |this, cx| {
+                this.redraw_task = None;
+                this.last_redraw = std::time::Instant::now();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     fn handle_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         match event {
             TermEvent::Wakeup => {
                 if let Some(find) = &mut self.find
                     && find.refresh.is_none()
                 {
+                    // While output streams, its matches are found again a little after (each
+                    // look reads the whole history, under the terminal's lock).
                     find.refresh = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                        cx.background_executor().timer(std::time::Duration::from_millis(600)).await;
                         this.update(cx, |this, cx| {
                             if let Some(find) = &mut this.find {
                                 find.refresh = None;
@@ -496,7 +526,7 @@ impl TerminalView {
                     self.spoke = true;
                     self.settle_after(SETTLE_QUIET, cx);
                 }
-                cx.notify()
+                self.redraw_soon(cx)
             }
             TermEvent::CursorBlinkingChange | TermEvent::MouseCursorDirty => cx.notify(),
             TermEvent::Title(title) => {
@@ -741,8 +771,14 @@ impl TerminalView {
     /// Looks through the output (history included) for the field's text. A new search
     /// goes to the match nearest the bottom; one after new output keeps its place.
     fn search(&mut self, new: bool, cx: &mut Context<Self>) {
-        let Some(find) = &self.find else { return };
+        let Some(find) = &mut self.find else { return };
         let query = find.input.read(cx).text().to_string();
+        // Nothing to find: nothing to read.
+        if query.is_empty() {
+            find.matches.clear();
+            find.current = None;
+            return cx.notify();
+        }
         let rows: Vec<(i32, Vec<char>)> = {
             let term = self.term.lock();
             let grid = term.grid();

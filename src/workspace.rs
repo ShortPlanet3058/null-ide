@@ -541,6 +541,8 @@ pub struct Workspace {
     /// What git says changed since the last commit, and the task reading it.
     git_status: Vec<(PathBuf, git::FileStatus)>,
     git_status_task: Option<Task<()>>,
+    /// When git's status was last asked (see `refresh_git_status`).
+    git_status_at: Instant,
     /// The list of changes is open: opening a file from it shows its changes.
     git_listing: bool,
     /// The history a list shows (⌥ picking one compares the file with it), and its file.
@@ -785,6 +787,7 @@ impl Workspace {
             ai_task: None,
             git_status: Vec::new(),
             git_status_task: None,
+            git_status_at: Instant::now() - Duration::from_secs(10),
             git_listing: false,
             history: None,
             clipboard_list: None,
@@ -1058,7 +1061,8 @@ impl Workspace {
             .filter(|p| Some(*p) != active.as_ref())
             .filter_map(|p| {
                 let tab = self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(p.as_path()))?;
-                let text: String = tab.editor.read(cx).buffer.to_string().chars().take(OPEN_FILE_CHARS).collect();
+                // Its beginning, read from the rope (not a copy of the whole file first).
+                let text: String = tab.editor.read(cx).buffer.rope().chars().take(OPEN_FILE_CHARS).collect();
                 Some((p.clone(), text))
             })
             .take(OPEN_FILES)
@@ -1109,21 +1113,29 @@ impl Workspace {
             paths.into_iter().filter(|p| !p.components().any(|c| c.as_os_str() == ".git")).collect();
         self.tree.update(cx, |tree, cx| tree.refresh(&visible, cx));
         self.reindex(&visible, cx);
+        let changed: HashSet<&PathBuf> = visible.iter().collect();
         for tab in &self.tabs {
             let Some(path) = tab.editor.read(cx).path().map(Path::to_path_buf) else { continue };
-            if visible.contains(&path) {
+            if changed.contains(&path) {
                 tab.editor.update(cx, |editor, cx| editor.reload_from_disk(cx));
             } else if visible.iter().any(|v| path.starts_with(v)) {
                 // Its folder changed (deleted, renamed): only whether the file is still there.
                 tab.editor.update(cx, |editor, cx| editor.check_missing(cx));
             }
         }
-        self.follow_moves(&visible, cx);
+        // What git counts: ignored files (a build's output, node_modules) change nothing it says.
+        let root = self.tree.read(cx).root().to_path_buf();
+        let counted: Vec<PathBuf> = visible
+            .iter()
+            .filter(|p| !crate::project_index::is_ignored(&self.ignore_rules, &root, p))
+            .cloned()
+            .collect();
+        self.follow_moves(&counted, cx);
         cx.notify();
         if git_changed {
             self.refresh_git(cx);
-        } else if !visible.is_empty() {
-            self.refresh_git_status(cx);
+        } else if !counted.is_empty() {
+            self.refresh_git_status_for_changes(cx);
         }
     }
 
@@ -1146,9 +1158,23 @@ impl Workspace {
 
     /// Asks git what changed (off the main thread), for the tree and the status bar.
     fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
+        self.refresh_git_status_after(Duration::from_millis(120), cx);
+    }
+
+    /// Files changed on disk: git's status again, but no more than about once a second
+    /// while they keep changing (a build): each is a few git processes. (After Null's own
+    /// git actions it's at once: what's shown next depends on it.)
+    fn refresh_git_status_for_changes(&mut self, cx: &mut Context<Self>) {
+        let since = self.git_status_at.elapsed();
+        let wait = Duration::from_millis(120).max(Duration::from_secs(1).saturating_sub(since));
+        self.refresh_git_status_after(wait, cx);
+    }
+
+    fn refresh_git_status_after(&mut self, wait: Duration, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
         self.git_status_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(120)).await;
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, _| this.git_status_at = Instant::now()).ok();
             let (changed, sync) =
                 cx.background_executor().spawn(async move { (git::status(&root), git::ahead_behind(&root)) }).await;
             this.update(cx, |this, cx| {
@@ -2308,6 +2334,12 @@ impl Workspace {
     /// and one with the same text that appeared with it, is the same file moved. Its tab
     /// follows, with the others from its folder when the folder moved.
     fn follow_moves(&mut self, changed: &[PathBuf], cx: &mut Context<Self>) {
+        // Only for a tab whose file is gone; among a few hundred changes at most (each one
+        // looked at on disk: a checkout of thousands isn't searched through).
+        if !self.tabs.iter().any(|t| t.editor.read(cx).missing) {
+            return;
+        }
+        let changed = &changed[..changed.len().min(300)];
         let open: Vec<PathBuf> =
             self.tabs.iter().filter_map(|t| t.editor.read(cx).path().map(Path::to_path_buf)).collect();
         let moves: Vec<(PathBuf, PathBuf)> = self
