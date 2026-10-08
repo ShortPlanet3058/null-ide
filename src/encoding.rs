@@ -89,10 +89,27 @@ pub fn decode_exactly(bytes: &[u8], encoding: Encoding) -> Option<String> {
         Encoding::Utf8 | Encoding::Utf8Bom => {
             String::from_utf8(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes).to_vec()).ok()
         }
-        Encoding::Utf16Le => utf16(bytes, b"\xFF\xFE", u16::from_le_bytes),
-        Encoding::Utf16Be => utf16(bytes, b"\xFE\xFF", u16::from_be_bytes),
-        Encoding::Windows1252 => Some(decode_1252(bytes)),
+        // Nearly any bytes make UTF-16 or Windows-1252: only what reads as text is taken.
+        Encoding::Utf16Le => utf16(bytes, b"\xFF\xFE", u16::from_le_bytes).filter(|t| reads_as_text(t)),
+        Encoding::Utf16Be => utf16(bytes, b"\xFE\xFF", u16::from_be_bytes).filter(|t| reads_as_text(t)),
+        Encoding::Windows1252 => looks_like_text(bytes).then(|| decode_1252(bytes)),
     }
+}
+
+/// Characters as text has them: no NUL, hardly any control characters but tabs and breaks.
+fn reads_as_text(text: &str) -> bool {
+    let mut count = 0;
+    let mut controls = 0;
+    for c in text.chars() {
+        count += 1;
+        if c == '\0' {
+            return false;
+        }
+        if c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\u{0c}') {
+            controls += 1;
+        }
+    }
+    controls * 100 <= count
 }
 
 /// Text in a single-byte encoding: no NUL, and hardly any control characters other than
@@ -143,6 +160,10 @@ mod tests {
         assert_eq!(decode_exactly(b"\0h", Encoding::Utf16Be).as_deref(), Some("h"));
         assert_eq!(decode_exactly(b"\xE9", Encoding::Utf8), None);
         assert_eq!(decode_exactly(b"abc", Encoding::Utf16Le), None, "an odd number of bytes");
+        // A program's bytes are no encoding's text.
+        let binary = [0xCF, 0xFA, 0xED, 0xFE, 0x07, 0x00, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00];
+        assert_eq!(decode_exactly(&binary, Encoding::Windows1252), None);
+        assert_eq!(decode_exactly(&binary, Encoding::Utf16Le), None);
     }
 
     #[test]

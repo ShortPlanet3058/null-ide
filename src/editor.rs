@@ -383,6 +383,13 @@ struct Snapshot {
 
 pub enum EditorEvent {
     Edited,
+    /// The file was read again in another encoding: its other copies are too.
+    Reread {
+        encoding: crate::encoding::Encoding,
+        became_text: bool,
+    },
+    /// The file will be written in another encoding: its other copies too.
+    EncodingChanged(crate::encoding::Encoding),
     Saved,
     /// Save was asked for, but the buffer has no file yet.
     NeedsPath,
@@ -1021,6 +1028,9 @@ impl Editor {
             self.chosen_language = None;
         }
         self.highlighter = highlighter_for(self.language(), &self.buffer);
+        *self.brackets.borrow_mut() = None;
+        // Now that its language is known (name, first line, or chosen): its indentation.
+        self.indent_as_language(cx);
         self.rehighlight();
         if let Some(lsp) = lsp {
             self.attach_lsp(lsp, cx);
@@ -2738,6 +2748,7 @@ impl Editor {
         self.encoding = encoding;
         self.buffer.mark_unsaved();
         cx.emit(EditorEvent::Edited);
+        cx.emit(EditorEvent::EncodingChanged(encoding));
         cx.notify();
     }
 
@@ -2745,25 +2756,42 @@ impl Editor {
     /// garbled), or not taken for text at all (UTF-16 without its mark). Not over unsaved
     /// changes, nor when its bytes aren't text in it.
     pub fn reopen_with(&mut self, encoding: crate::encoding::Encoding, cx: &mut Context<Self>) {
-        let text_or_not = matches!(self.preview, None | Some(crate::preview::Preview::NotText { .. }));
-        let Some(path) = self.path.clone().filter(|_| text_or_not) else { return };
-        let at = self.selection.head;
-        if self.buffer.is_dirty() {
-            return self.show_notice(at, "Save or undo the changes first: this reads the file again.".into(), cx);
+        let was_text = self.preview.is_none();
+        if let Err(why) = self.reread_as(encoding, cx) {
+            return self.show_notice(self.selection.head, why, cx);
         }
-        let Ok(bytes) = std::fs::read(&path) else {
-            return self.show_notice(at, "The file couldn't be read.".into(), cx);
-        };
-        let Some(text) = crate::encoding::decode_exactly(&bytes, encoding) else {
-            return self.show_notice(at, format!("This file isn't {} text.", encoding.label()), cx);
-        };
-        // Text after all: shown as such.
-        self.preview = None;
+        // The copy on the other side reads it too; one that just became text gets what
+        // text has (its language server).
+        cx.emit(EditorEvent::Reread { encoding, became_text: !was_text });
+    }
+
+    /// The file read again as `encoding` (see `reopen_with`), or why not. Not a change that
+    /// can be undone: the text is what's on disk, the edits before it are of another.
+    pub fn reread_as(&mut self, encoding: crate::encoding::Encoding, cx: &mut Context<Self>) -> Result<(), String> {
+        let text_or_not = matches!(self.preview, None | Some(crate::preview::Preview::NotText { .. }));
+        let Some(path) = self.path.clone().filter(|_| text_or_not) else { return Ok(()) };
+        if self.buffer.is_dirty() {
+            return Err("Save or undo the changes first: this reads the file again.".into());
+        }
+        let bytes = std::fs::read(&path).map_err(|_| "The file couldn't be read.".to_string())?;
+        let text = crate::encoding::decode_exactly(&bytes, encoding)
+            .ok_or_else(|| format!("This file isn't {} text.", encoding.label()))?;
+        // Text after all: shown, and written, as text is (its line endings, its indentation).
+        if self.preview.take().is_some() {
+            self.style = crate::file_style::FileStyle::for_file(
+                Some(&path),
+                &text[..text.floor_char_boundary(200_000)],
+                cx.global::<Settings>().indent_for(self.language_name()),
+            );
+            self.reload_git_base(cx);
+        }
         self.encoding = encoding;
         self.on_disk = Some(fingerprint(&text));
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_edit = None;
         if text != self.buffer.to_string() {
             let (line, column) = self.caret_point();
-            self.record_undo(EditKind::Other);
             self.buffer.replace(0..self.buffer.len_chars(), &text);
             self.buffer.mark_saved();
             self.single_cursor();
@@ -2771,6 +2799,14 @@ impl Editor {
             self.text_changed(cx);
         }
         cx.notify();
+        Ok(())
+    }
+
+    /// Talks to the language server from now on (a file that just became text).
+    pub fn connect_lsp(&mut self, lsp: Entity<LspStore>, cx: &mut Context<Self>) {
+        if self.lsp.is_none() {
+            self.attach_lsp(lsp, cx);
+        }
     }
 
     pub fn set_line_ending(&mut self, ending: crate::file_style::LineEnding, cx: &mut Context<Self>) {
@@ -4995,6 +5031,13 @@ mod tests {
         use crate::file_style::Indent;
         assert_eq!(python.read_with(cx, |e, _| e.style.indent), Indent::Spaces(2));
         assert_eq!(rust.read_with(cx, |e, _| e.style.indent), Indent::Spaces(4));
+        // An untitled file put in Python: Python's; one already indented keeps its own.
+        let (untitled, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(""), None, cx));
+        untitled.update(cx, |e, cx| e.choose_language(language_pick::by_name("Python"), cx));
+        assert_eq!(untitled.read_with(cx, |e, _| e.style.indent), Indent::Spaces(2));
+        let (written, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("if x:\n\ty\n"), None, cx));
+        written.update(cx, |e, cx| e.choose_language(language_pick::by_name("Python"), cx));
+        assert_eq!(written.read_with(cx, |e, _| e.style.indent), Indent::Tabs);
     }
 
     /// A file taken for another encoding is read again as the right one; one is saved in
@@ -5018,6 +5061,9 @@ mod tests {
             e.reopen_with(Encoding::Utf16Le, cx);
             assert_eq!((e.buffer.to_string(), e.encoding), ("hi".to_string(), Encoding::Utf16Le));
             assert!(e.preview.is_none(), "text after all");
+            // Read, not edited: ⌘Z has nothing to take back (not the empty "isn't text").
+            e.step_history(true, cx);
+            assert_eq!(e.buffer.to_string(), "hi");
             assert!(!e.buffer.is_dirty(), "read, not changed");
             // Saved as Windows-1252 from now on, unless the text has what it can't hold.
             e.set_encoding(Encoding::Windows1252, cx);

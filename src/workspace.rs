@@ -2586,6 +2586,24 @@ impl Workspace {
                     }
                     cx.notify();
                 }
+                EditorEvent::Reread { encoding, became_text } => {
+                    let (encoding, became_text) = (*encoding, *became_text);
+                    if became_text {
+                        let lsp = this.lsp.clone();
+                        editor.update(cx, |e, cx| e.connect_lsp(lsp, cx));
+                    }
+                    // Its other copy reads it the same; neither passes the change back.
+                    for twin in this.twins_of(editor, cx) {
+                        twin.update(cx, |t, cx| t.reread_as(encoding, cx)).ok();
+                        this.twin_seen.insert(twin.entity_id(), twin.read(cx).buffer.revision());
+                    }
+                    this.twin_seen.insert(editor.entity_id(), editor.read(cx).buffer.revision());
+                }
+                EditorEvent::EncodingChanged(encoding) => {
+                    for twin in this.twins_of(editor, cx) {
+                        twin.update(cx, |t, _| t.encoding = *encoding);
+                    }
+                }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
                 EditorEvent::Reviewed => this.file_reviewed(editor, cx),
                 EditorEvent::FilesDropped { paths, at } => this.link_dropped(editor.clone(), paths, *at, cx),
@@ -3527,6 +3545,8 @@ impl Workspace {
             format!("{} Theme{}", name.label(), current(settings.theme == name && settings.own_theme.is_none()))
         };
         let toggle = |on: bool, stop: &str, start: &str| if on { stop.to_string() } else { start.to_string() };
+        // The file at hand's own settings, where its language has them.
+        let language = self.active_language(cx);
         let mut commands: Vec<(Category, String, Box<dyn Action>)> = vec![
             (File, "New File".into(), Box::new(NewUntitled)),
             (File, "New File in Project…".into(), Box::new(crate::file_tree::NewFile)),
@@ -3590,7 +3610,11 @@ impl Workspace {
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
             (View, "Show Outline".into(), Box::new(ShowOutline)),
-            (View, toggle(settings.word_wrap, "Stop Wrapping Lines", "Wrap Lines"), Box::new(ToggleWordWrap)),
+            (
+                View,
+                toggle(settings.word_wrap_for(language), "Stop Wrapping Lines", "Wrap Lines"),
+                Box::new(ToggleWordWrap),
+            ),
             (
                 View,
                 toggle(settings.fade_bars_while_typing, "Stop Fading Bars While Typing", "Fade Bars While Typing"),
@@ -3611,7 +3635,7 @@ impl Workspace {
             (Appearance, "Actual Size".into(), Box::new(ResetFontSize)),
             (
                 Edit,
-                toggle(settings.autocomplete, "Turn Off Autocomplete", "Turn On Autocomplete"),
+                toggle(settings.autocomplete_for(language), "Turn Off Autocomplete", "Turn On Autocomplete"),
                 Box::new(ToggleAutocomplete),
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
@@ -3734,7 +3758,7 @@ impl Workspace {
                 (Edit, "Format Selection".into(), Box::new(crate::editor::FormatSelection)),
                 (
                     Edit,
-                    toggle(settings.format_on_save, "Stop Formatting on Save", "Format on Save"),
+                    toggle(settings.format_on_save_for(language), "Stop Formatting on Save", "Format on Save"),
                     Box::new(ToggleFormatOnSave),
                 ),
                 (
@@ -3924,6 +3948,7 @@ impl Workspace {
             line_count: self.active_editor().map(|e| e.read(cx).buffer.len_lines()),
             terminal_open: self.terminal_open.on,
             prose_here: self.active_editor().is_some_and(|e| e.read(cx).is_prose()),
+            language_here: self.active_language(cx),
             title,
             locations,
             branches: std::mem::take(&mut self.pending_branches),
@@ -4687,6 +4712,10 @@ impl Workspace {
             Err(why) => self.show_notice(format!("Couldn't use {name}: {why}"), cx),
             Ok((_, problems)) => {
                 let name = name.to_string();
+                // Already in use: its file read again (changed elsewhere, maybe).
+                if cx.global::<Settings>().own_theme.as_deref() == Some(name.as_str()) {
+                    settings::reapply_theme(cx);
+                }
                 settings::update(cx, |s| s.own_theme = Some(name.clone()));
                 if !problems.is_empty() {
                     self.show_notice(format!("{name}: {}", problems.join("; ")), cx);
@@ -4723,13 +4752,21 @@ impl Workspace {
             .find(|n| !folder.join(format!("{n}.json")).exists())
             .unwrap_or_default();
         let path = folder.join(format!("{name}.json"));
+        // The colours on screen (one of yours, maybe), made from Null's theme under them.
         let base = cx.global::<Settings>().shown_theme(cx);
-        if let Err(e) = std::fs::write(&path, crate::theme::own::starter(base)) {
+        let starter = crate::theme::own::starter(base, cx.global::<Theme>());
+        if let Err(e) = std::fs::write(&path, starter) {
             return self.show_notice(format!("Couldn't write the theme: {e}"), cx);
         }
         settings::update(cx, |s| s.own_theme = Some(name.clone()));
         self.open_file(path, window, cx);
-        self.show_notice(format!("{name}: change a colour and save to see it"), cx);
+        let message = if cx.global::<Settings>().shown_own_theme(cx).is_none() {
+            // Following the Mac, light now: yours is the dark one.
+            format!("{name}: shown when the Mac is dark (Null follows its light and dark)")
+        } else {
+            format!("{name}: change a colour and save to see it")
+        };
+        self.show_notice(message, cx);
     }
 
     /// When the focused field is about to disappear (the search box when switching
@@ -4796,7 +4833,13 @@ impl Workspace {
         if self.active_editor().is_some_and(|e| e.read(cx).is_prose()) {
             return settings::update(cx, |s| s.wrap_prose = !s.wrap_prose);
         }
-        settings::update(cx, |s| s.word_wrap = !s.word_wrap);
+        let language = self.active_language(cx);
+        settings::update(cx, |s| s.flip(settings::PerLanguage::WordWrap, language));
+    }
+
+    /// The language of the file being worked on ("Plain Text" with none).
+    fn active_language(&self, cx: &App) -> &'static str {
+        self.active_editor().map_or("Plain Text", |e| e.read(cx).language_name())
     }
 
     fn use_ai(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
@@ -5639,7 +5682,9 @@ impl Workspace {
             TerminalEvent::Exited => this.remove_terminal(terminal.entity_id(), window, cx),
             TerminalEvent::Finished(name, took) => {
                 let message = format!("{name} finished in the terminal ({})", crate::terminal_watch::took_words(*took));
-                let shown = this.terminal_open.on && this.terminal().is_some_and(|t| t == terminal);
+                // On screen: the terminal shown, or either of two side by side.
+                let in_pair = this.shown_pair().is_some_and(|(a, b)| &a == terminal || &b == terminal);
+                let shown = this.terminal_open.on && (in_pair || this.terminal().is_some_and(|t| t == terminal));
                 if !window.is_window_active() {
                     crate::terminal_watch::bounce_dock();
                     this.notice_on_return = Some(message);
@@ -5669,9 +5714,18 @@ impl Workspace {
         if self.terminal_rename.as_ref().is_some_and(|r| r.terminal == id) {
             self.terminal_rename = None;
         }
-        // One of a pair: the other goes back to being alone.
-        if self.terminal_pair.is_some_and(|(a, b)| a == id || b == id) {
+        // One of a pair: the other goes back to being alone, and is the one shown.
+        if let Some((a, b)) = self.terminal_pair.filter(|(a, b)| *a == id || *b == id) {
             self.terminal_pair = None;
+            let partner = if a == id { b } else { a };
+            if let Some(at) = self.terminals.iter().position(|(t, _)| t.entity_id() == partner) {
+                self.active_terminal = if at > ix { at - 1 } else { at };
+                drop(self.terminals.remove(ix));
+                if let Some(next) = self.terminal().cloned().filter(|_| self.terminal_open.on) {
+                    window.focus(&next.focus_handle(cx));
+                }
+                return cx.notify();
+            }
         }
         // Its subscription goes with it.
         drop(self.terminals.remove(ix));
@@ -6014,7 +6068,8 @@ impl Workspace {
     }
 
     fn toggle_autocomplete(&mut self, _: &ToggleAutocomplete, _: &mut Window, cx: &mut Context<Self>) {
-        settings::update(cx, |s| s.autocomplete = !s.autocomplete);
+        let language = self.active_language(cx);
+        settings::update(cx, |s| s.flip(settings::PerLanguage::Autocomplete, language));
     }
 
     fn increase_font_size(&mut self, _: &IncreaseFontSize, _: &mut Window, cx: &mut Context<Self>) {
@@ -7862,8 +7917,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenOnOtherSide, window, cx| this.open_on_other_side(window, cx)))
             .on_action(cx.listener(Self::go_to_symbol))
             .on_action(cx.listener(Self::go_to_symbol_in_project))
-            .on_action(cx.listener(|_, _: &ToggleFormatOnSave, _, cx| {
-                settings::update(cx, |s| s.format_on_save = !s.format_on_save)
+            .on_action(cx.listener(|this, _: &ToggleFormatOnSave, _, cx| {
+                let language = this.active_language(cx);
+                settings::update(cx, |s| s.flip(settings::PerLanguage::FormatOnSave, language))
             }))
             .on_action(cx.listener(|this, _: &AutoSaveOff, _, cx| {
                 this.auto_saves.clear();

@@ -556,13 +556,23 @@ pub mod own {
     /// it says that can't be read is skipped and told.
     pub fn read(text: &str) -> Result<(Theme, Vec<String>), String> {
         let json: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("it isn't JSON ({e})"))?;
-        let base: ThemeName = json
-            .get("based_on")
-            .map(|b| serde_json::from_value(b.clone()).map_err(|_| format!("there's no theme called {b}")))
-            .transpose()?
-            .unwrap_or(ThemeName::Null);
+        // Named as the theme lists show it ("Paper"), or as settings.json has it ("paper").
+        let base = match json.get("based_on") {
+            None => ThemeName::Null,
+            Some(b) => {
+                let name = b.as_str().map(str::to_lowercase).unwrap_or_default();
+                serde_json::from_value(name.into()).map_err(|_| format!("there's no theme called {b}"))?
+            }
+        };
         let mut theme = Theme::named(base);
-        let mut problems = Vec::new();
+        let mut problems: Vec<String> = json
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(key, _)| key)
+            .filter(|key| !matches!(key.as_str(), "based_on" | "colors"))
+            .map(|key| format!("\"{key}\" isn't read (colours go in \"colors\")"))
+            .collect();
         for (name, value) in json.get("colors").and_then(|c| c.as_object()).into_iter().flatten() {
             if name == "ansi" {
                 let colours: Vec<Option<Hsla>> =
@@ -584,14 +594,18 @@ pub mod own {
 
     /// The theme of your own called `name`, and what in it couldn't be read.
     pub fn load(name: &str) -> Result<(Theme, Vec<String>), String> {
+        // A name, not a way out of the themes folder.
+        if name.contains(['/', '\\']) || name.starts_with('.') {
+            return Err(format!("\"{name}\" isn't a theme's name"));
+        }
         let path = folder().ok_or("no settings folder")?.join(format!("{name}.json"));
         let text = std::fs::read_to_string(&path).map_err(|_| format!("there's no theme file {name}.json"))?;
         read(&text)
     }
 
-    /// A new theme file: `base`'s every colour, written out to change.
-    pub fn starter(base: ThemeName) -> String {
-        let mut theme = Theme::named(base);
+    /// A new theme file: `theme`'s every colour (made from `base`), written out to change.
+    pub fn starter(base: ThemeName, theme: &Theme) -> String {
+        let mut theme = theme.clone();
         let mut colours = serde_json::Map::new();
         for name in COLOURS {
             if let Some(c) = theme.slot(name) {
@@ -619,8 +633,13 @@ pub mod own {
             assert_eq!(problems.len(), 2, "{problems:?}");
             assert!(read("{").is_err());
             assert!(read(r#"{ "based_on": "neon" }"#).is_err());
+            // As the lists show it; a key misspelt is said.
+            let (moss, problems) = read(r#"{ "based_on": "Moss", "colours": {} }"#).unwrap();
+            assert_eq!(moss.background, Theme::named(ThemeName::Moss).background);
+            assert_eq!(problems.len(), 1, "{problems:?}");
+            assert!(load("../../x").is_err());
             // A new file reads back as the theme it was made from.
-            let (again, problems) = read(&starter(ThemeName::Moss)).unwrap();
+            let (again, problems) = read(&starter(ThemeName::Moss, &Theme::named(ThemeName::Moss))).unwrap();
             assert!(problems.is_empty(), "{problems:?}");
             assert_eq!(hex(again.keyword), hex(Theme::named(ThemeName::Moss).keyword));
             assert_eq!(hex(again.ansi[9]), hex(Theme::named(ThemeName::Moss).ansi[9]));
