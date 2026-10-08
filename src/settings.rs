@@ -26,6 +26,8 @@ pub struct Settings {
     pub line_spacing: LineSpacing,
     /// Where the line numbers show.
     pub line_numbers: LineNumbers,
+    /// Where spaces and tabs show, as faint dots and dashes.
+    pub whitespace: ShowWhitespace,
     pub sidebar_visible: bool,
     /// Dim the title bar, sidebar and status bar while typing.
     pub fade_bars_while_typing: bool,
@@ -92,6 +94,7 @@ impl Default for Settings {
             font_size: DEFAULT_FONT_SIZE,
             line_spacing: LineSpacing::Normal,
             line_numbers: LineNumbers::Shown,
+            whitespace: ShowWhitespace::Selection,
             sidebar_visible: true,
             fade_bars_while_typing: false,
             word_wrap: false,
@@ -132,6 +135,17 @@ pub enum LineNumbers {
     Shown,
     InCode,
     Hidden,
+}
+
+/// Where spaces and tabs show: in the selection, also at the ends of lines (where they're
+/// left by mistake), or everywhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShowWhitespace {
+    #[default]
+    Selection,
+    Trailing,
+    All,
 }
 
 /// How much room there is between lines of code.

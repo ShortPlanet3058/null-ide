@@ -245,13 +245,32 @@ const OUTLINE_SWATCH: &str = "□ ";
 /// A problem's message at the end of its line is cut to this many characters.
 const PROBLEM_NOTE_CHARS: usize = 100;
 
-/// The spaces and tabs of a row's `text` (starting at char `start` of the file) that are
-/// inside one of the `selected` ranges: their columns in the row, and whether each is a tab.
-fn whitespace_marks(text: &str, start: usize, selected: &[Range<usize>]) -> Vec<(usize, bool)> {
+/// The spaces and tabs of a row's `text` (starting at char `start` of the file) to mark:
+/// those inside one of the `selected` ranges, and as `shown` says, those at the end of the
+/// line (when the row ends it) or all of them. Their columns in the row, and whether each is
+/// a tab.
+fn whitespace_marks(
+    text: &str,
+    start: usize,
+    selected: &[Range<usize>],
+    shown: crate::settings::ShowWhitespace,
+    ends_line: bool,
+) -> Vec<(usize, bool)> {
+    use crate::settings::ShowWhitespace;
+    let blank = |c: char| c == ' ' || c == '\t';
+    // Where the line's own spaces at its end start (a line of only spaces: from its start).
+    let trailing_from = match shown {
+        ShowWhitespace::Trailing if ends_line => {
+            text.chars().enumerate().filter(|(_, c)| !blank(*c)).last().map_or(0, |(last, _)| last + 1)
+        }
+        _ => usize::MAX,
+    };
     text.chars()
         .enumerate()
-        .filter(|(_, c)| *c == ' ' || *c == '\t')
-        .filter(|(i, _)| selected.iter().any(|r| r.contains(&(start + i))))
+        .filter(|(_, c)| blank(*c))
+        .filter(|(i, _)| {
+            shown == ShowWhitespace::All || *i >= trailing_from || selected.iter().any(|r| r.contains(&(start + i)))
+        })
         .map(|(i, c)| (i, c == '\t'))
         .collect()
 }
@@ -1193,14 +1212,15 @@ impl Element for EditorElement {
                 .chain(editor.extra.iter().map(|c| c.selection.range()))
                 .filter(|r| !r.is_empty())
                 .collect();
-            if !selected.is_empty() {
+            let shown_whitespace = cx.global::<Settings>().whitespace;
+            if !selected.is_empty() || shown_whitespace != crate::settings::ShowWhitespace::Selection {
                 for (i, r) in row_layouts.iter().enumerate() {
                     if r.row.block.is_some() {
                         continue;
                     }
                     let row_start = editor.buffer.line_to_char(r.row.line) + r.row.cols.start;
                     let top = row_top(visible.start + i);
-                    for (col, tab) in whitespace_marks(&r.text, row_start, &selected) {
+                    for (col, tab) in whitespace_marks(&r.text, row_start, &selected, shown_whitespace, r.row.last) {
                         let col = r.row.cols.start + col;
                         let (_, x0) = pos(r.row.line, col);
                         // The last char of a wrapped row: its end is this row's, not the next one's start.
@@ -1852,11 +1872,21 @@ mod problem_notes {
     }
 
     #[test]
-    fn whitespace_shows_only_where_selected() {
+    fn whitespace_shows_where_settings_say() {
+        use crate::settings::ShowWhitespace::{All, Selection, Trailing};
         // "\tlet a = 1;" starting at char 10 of the file, selected from its tab to "a".
-        assert_eq!(whitespace_marks("\tlet a = 1;", 10, std::slice::from_ref(&(10..16))), [(0, true), (4, false)]);
-        assert_eq!(whitespace_marks("a b", 0, &[]), []);
-        assert_eq!(whitespace_marks("a b c", 0, &[0..2, 3..4]), [(1, false), (3, false)]);
+        let marks =
+            |text, start, selected: &[Range<usize>], shown, ends| whitespace_marks(text, start, selected, shown, ends);
+        assert_eq!(marks("\tlet a = 1;", 10, &[10..16], Selection, true), [(0, true), (4, false)]);
+        assert_eq!(marks("a b", 0, &[], Selection, true), []);
+        assert_eq!(marks("a b c", 0, &[0..2, 3..4], Selection, true), [(1, false), (3, false)]);
+        // At line ends: only the spaces left after the text (and the selection's).
+        assert_eq!(marks("a b  \t", 0, &[], Trailing, true), [(3, false), (4, false), (5, true)]);
+        assert_eq!(marks("a b  ", 0, &[], Trailing, false), [], "a wrapped row that doesn't end the line");
+        assert_eq!(marks("    ", 0, &[], Trailing, true).len(), 4, "a line of only spaces");
+        assert_eq!(marks("a b ", 0, &[0..2], Trailing, true), [(1, false), (3, false)]);
+        // Always: every one.
+        assert_eq!(marks("\ta b", 0, &[], All, true), [(0, true), (2, false)]);
     }
 
     #[test]

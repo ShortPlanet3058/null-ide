@@ -556,6 +556,26 @@ impl SettingsPanel {
                 },
                 &theme,
             ),
+            Self::row(
+                "Spaces and tabs",
+                Some("Shown as faint dots and dashes; at line ends, where they're left by mistake"),
+                {
+                    use crate::settings::ShowWhitespace;
+                    Self::choices(
+                        "whitespace",
+                        vec![
+                            (ShowWhitespace::Selection, "In the selection".into()),
+                            (ShowWhitespace::Trailing, "At line ends".into()),
+                            (ShowWhitespace::All, "Always".into()),
+                        ],
+                        s.whitespace,
+                        &theme,
+                        cx,
+                        |_, shown, cx| settings::update(cx, |s| s.whitespace = shown),
+                    )
+                },
+                &theme,
+            ),
             Self::stacked_row(
                 "Code font",
                 Some("Five come with Null; fonts you install show up here too"),
