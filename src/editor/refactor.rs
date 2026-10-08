@@ -488,7 +488,8 @@ impl Editor {
 
     /// Saving from the keyboard: formats first when that's switched on.
     pub fn save_from_keyboard(&mut self, cx: &mut Context<Self>) {
-        if cx.global::<Settings>().format_on_save && self.lsp.is_some() && self.path.is_some() {
+        if cx.global::<Settings>().format_on_save_for(self.language_name()) && self.lsp.is_some() && self.path.is_some()
+        {
             self.format_then(true, cx);
         } else {
             self.save_to_disk(cx);

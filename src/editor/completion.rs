@@ -174,7 +174,7 @@ impl Editor {
             return self.close_completion(cx);
         }
         // A path being written (`./`, `src/`, `img/`): what's in that folder.
-        if (self.completion.is_some() || cx.global::<Settings>().autocomplete)
+        if (self.completion.is_some() || cx.global::<Settings>().autocomplete_for(self.language_name()))
             && (self.complete_anchor(cx) || self.complete_path(cx))
         {
             return;
@@ -190,7 +190,7 @@ impl Editor {
         if trigger.is_none() && !is_word_char(last) {
             return self.close_completion(cx);
         }
-        if self.completion.is_none() && !cx.global::<Settings>().autocomplete {
+        if self.completion.is_none() && !cx.global::<Settings>().autocomplete_for(self.language_name()) {
             return;
         }
         let word_start = if trigger.is_some() { caret } else { self.word_start_before(caret) };

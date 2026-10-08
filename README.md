@@ -159,7 +159,10 @@ doesn't need Xcode's separate Metal Toolchain download.
   rustfmt, Prettier, Black or Ruff). Each can be turned off. Wrapped lines can break at that
   line rather than at the window's edge (Settings → Editor → Wrap at the line guide).
 - Files keep their own style: indentation, line endings, and encoding (UTF-8 with or
-  without BOM, UTF-16, Windows-1252), shown in the status bar when not the usual. One read
+  without BOM, UTF-16, Windows-1252), shown in the status bar when not the usual. A new
+  file indents as its language is set to in settings.json: `"languages": { "Go": {
+  "indent_with_tabs": true }, "Python": { "word_wrap": true } }` (also `indent_size`,
+  `format_on_save`, `format_on_paste`, `autocomplete`). One read
   wrong (garbled accents, or "isn't text") is read again with ⌘K "Encoding: Reopen as…";
   "Encoding: Save as…" writes it in another.
 - Unsaved work survives a crash, and quitting doesn't ask about it: it's kept, and comes
