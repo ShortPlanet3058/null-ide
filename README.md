@@ -72,6 +72,9 @@ doesn't need Xcode's separate Metal Toolchain download.
   sort the file's imports and drop the unused ones, where it can (TypeScript, Go, Python). **F8** goes from problem to problem.
 - Multiple cursors (⌘D, ⌘⇧-click), a box with ⌥⇧-drag, cursors at line ends (⌥⇧I);
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
+- ⌃⌥↑ / ⌃⌥↓ step the number at the caret (or the next one on the line) up or down, by ten
+  with ⇧; on a decimal's fraction, by its last place (`0.5` → `0.6`). `007`, `0x0F` and
+  `1.2.3` stay written that way. On `true`, `yes` or `on`, the value flips.
 - In HTML and JSX, typing the `>` of a tag adds its closing tag, `</` finishes the one
   still open, the caret in a tag's name outlines its pair, renaming a tag renames the pair,
   and Enter between a tag and its closing one

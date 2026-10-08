@@ -3293,6 +3293,8 @@ impl Workspace {
                 (Edit, "To kebab-case".into(), Box::new(crate::editor::KebabCase)),
                 (Edit, "To Title Case".into(), Box::new(crate::editor::TitleCase)),
                 (Edit, "Lower Case".into(), Box::new(crate::editor::LowerCase)),
+                (Edit, "Increment Number or Flip Value".into(), Box::new(crate::editor::Increment)),
+                (Edit, "Decrement Number or Flip Value".into(), Box::new(crate::editor::Decrement)),
                 (Edit, "Expand Selection".into(), Box::new(crate::editor::ExpandSelection)),
                 (Edit, "Shrink Selection".into(), Box::new(crate::editor::ShrinkSelection)),
                 (Go, "Go to Matching Bracket".into(), Box::new(crate::editor::GoToMatchingBracket)),

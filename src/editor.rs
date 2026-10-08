@@ -16,6 +16,7 @@ mod intel;
 mod links;
 mod mac_keys;
 mod marks;
+mod numbers;
 mod refactor;
 mod reindent;
 mod review;
@@ -68,6 +69,7 @@ pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
+pub use numbers::{Decrement, Increment};
 pub use refactor::{
     FindReferences, FormatDocument, FormatSelection, InsertFootnote, InsertTableOfContents, RenameSymbol, apply_edits,
 };
@@ -201,6 +203,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     breakpoints::bind_keys(cx);
     bookmarks::bind_keys(cx);
     structure::bind_keys(cx);
+    numbers::bind_keys(cx);
     snippet::bind_keys(cx);
     mac_keys::bind_keys(cx);
 }
@@ -3869,6 +3872,10 @@ impl Render for Editor {
             .on_action(cx.listener(Self::pascal_case))
             .on_action(cx.listener(Self::kebab_case))
             .on_action(cx.listener(Self::title_case))
+            .on_action(cx.listener(Self::increment))
+            .on_action(cx.listener(Self::decrement))
+            .on_action(cx.listener(Self::increment_by_ten))
+            .on_action(cx.listener(Self::decrement_by_ten))
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::format_document))
             .on_action(cx.listener(Self::insert_table_of_contents))
