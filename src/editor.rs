@@ -7,6 +7,7 @@ mod color_pick;
 mod commands;
 mod completion;
 mod conflicts;
+mod counterpart;
 mod cursors;
 mod fixes;
 mod fold;
@@ -66,6 +67,7 @@ pub fn fill_snippet(snippet: &str, here: &crate::snippets::Here) -> String {
     snippet::parse_with(snippet, &|name| crate::snippets::variable(name, here)).text
 }
 pub use conflicts::{Conflict, NextConflict, PreviousConflict};
+pub use counterpart::{SwitchSourceHeader, has_counterpart};
 pub use cursors::Cursor;
 pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
@@ -208,6 +210,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     bookmarks::bind_keys(cx);
     structure::bind_keys(cx);
     numbers::bind_keys(cx);
+    counterpart::bind_keys(cx);
     snippet::bind_keys(cx);
     mac_keys::bind_keys(cx);
 }
@@ -373,6 +376,8 @@ pub enum EditorEvent {
     SaveConflict,
     /// Writing the file failed; the message says why.
     SaveFailed(String),
+    /// Open this file, where it was last read (a header's source).
+    Open(PathBuf),
     /// Go to definition landed in another file.
     GoTo {
         path: PathBuf,
@@ -3925,6 +3930,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::kebab_case))
             .on_action(cx.listener(Self::title_case))
             .on_action(cx.listener(Self::set_language))
+            .on_action(cx.listener(Self::switch_source_header))
             .on_action(cx.listener(Self::increment))
             .on_action(cx.listener(Self::decrement))
             .on_action(cx.listener(Self::increment_by_ten))
