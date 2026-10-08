@@ -541,11 +541,19 @@ impl Palette {
             }
             return;
         }
+        // The first few hundred (typing narrows them): each row is laid out on every frame.
+        const SHOWN_PLACES: usize = 500;
         for i in 0..self.locations.len() {
+            if self.rows.len() >= SHOWN_PLACES {
+                break;
+            }
+            if query.is_empty() {
+                self.push(Item::Location(i), Vec::new(), false);
+                continue;
+            }
             let location = &self.locations[i];
             let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
-            let matched = query.is_empty() || fuzzy::score(&format!("{} {file}", location.text), query).is_some();
-            if matched {
+            if fuzzy::score(&format!("{} {file}", location.text), query).is_some() {
                 let highlights = fuzzy::score(&location.text, query).map(|(_, h)| h).unwrap_or_default();
                 self.push(Item::Location(i), highlights, false);
             }
@@ -670,10 +678,14 @@ impl Palette {
             return;
         }
         let recent: HashSet<PathBuf> = self.recent_files.iter().map(|f| f.path.clone()).collect();
+        let folded = fuzzy::folded(query);
         let mut found: Vec<(i32, usize, Vec<usize>)> = self
             .files
             .iter()
             .enumerate()
+            // A quick look first: most files don't have the letters at all (a name that
+            // matches is in the path that does).
+            .filter(|(_, f)| fuzzy::fits(&f.relative, &folded))
             .filter_map(|(i, f)| {
                 // A match within the file name beats one spread across folders.
                 let in_name = fuzzy::score(&f.relative[f.name_start..], query)
@@ -693,7 +705,12 @@ impl Palette {
                 Some((score + boost, i, highlights))
             })
             .collect();
-        found.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+        // Only those shown sorted (the best first), not every match.
+        if found.len() > MAX_RESULTS {
+            found.select_nth_unstable_by_key(MAX_RESULTS, |(score, i, _)| (std::cmp::Reverse(*score), *i));
+            found.truncate(MAX_RESULTS);
+        }
+        found.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
         for (_, i, highlights) in found.into_iter().take(MAX_RESULTS) {
             self.push(Item::File(i), highlights, false);
         }
