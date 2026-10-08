@@ -761,10 +761,11 @@ impl Editor {
             _ => None,
         };
         let highlighter = highlighter_for(language, &buffer);
+        let language_name = by_name.or(first_line_language).map_or(language_pick::PLAIN, |k| k.name());
         let style = crate::file_style::FileStyle::for_file(
             path.as_deref(),
             &buffer.slice(0..buffer.len_chars().min(200_000)),
-            cx.global::<Settings>().default_indent(),
+            cx.global::<Settings>().indent_for(language_name),
         );
         let mut editor = Self {
             focus_handle: cx.focus_handle(),
@@ -1003,7 +1004,8 @@ impl Editor {
         self.style = crate::file_style::FileStyle::for_file(
             Some(&path),
             &self.buffer.slice(0..self.buffer.len_chars().min(200_000)),
-            cx.global::<Settings>().default_indent(),
+            cx.global::<Settings>()
+                .indent_for(language_pick::by_path(&path).map_or(language_pick::PLAIN, |k| k.name())),
         );
         self.path = Some(path);
         // A name that says nothing: the first line may (`run.sh` renamed `run`).
@@ -2376,7 +2378,11 @@ impl Editor {
         };
         self.paste_text(text, &kind, adjust, cx);
         // Asked for: the pasted code formatted, by the language server, just it.
-        if adjust && self.extra.is_empty() && cx.global::<Settings>().format_on_paste && !self.is_prose() {
+        if adjust
+            && self.extra.is_empty()
+            && cx.global::<Settings>().format_on_paste_for(self.language_name())
+            && !self.is_prose()
+        {
             // Where the text went (a whole line goes above the caret's, not at it): the paste's
             // one edit says.
             let pasted = self.buffer.edits_since(before).and_then(|mut edits| {
@@ -4226,7 +4232,7 @@ impl Editor {
     /// Whether long lines wrap here: prose by its setting, code by the other.
     pub fn wraps(&self, cx: &App) -> bool {
         let settings = cx.global::<Settings>();
-        if self.is_prose() { settings.wrap_prose } else { settings.word_wrap }
+        if self.is_prose() { settings.wrap_prose } else { settings.word_wrap_for(self.language_name()) }
     }
 
     pub fn is_markdown(&self) -> bool {
@@ -4968,6 +4974,27 @@ mod tests {
         });
         cx.simulate_keystrokes("enter");
         assert_eq!(code.read_with(cx, |e, _| e.buffer.to_string()), "```\n- item\n");
+    }
+
+    /// A new file indents as its language is set to (when it doesn't show its own way).
+    #[gpui::test]
+    fn a_new_file_indents_as_its_language_is_set_to(cx: &mut TestAppContext) {
+        let mut settings = Settings { indent_size: 4, ..Default::default() };
+        settings
+            .languages
+            .insert("Python".into(), crate::settings::LanguageSettings { indent_size: Some(2), ..Default::default() });
+        cx.update(|cx| {
+            cx.set_global(settings);
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (python, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(""), Some(PathBuf::from("/tmp/new.py")), cx));
+        let (rust, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(""), Some(PathBuf::from("/tmp/new.rs")), cx));
+        use crate::file_style::Indent;
+        assert_eq!(python.read_with(cx, |e, _| e.style.indent), Indent::Spaces(2));
+        assert_eq!(rust.read_with(cx, |e, _| e.style.indent), Indent::Spaces(4));
     }
 
     /// A file taken for another encoding is read again as the right one; one is saved in

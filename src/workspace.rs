@@ -7342,7 +7342,9 @@ impl Render for Workspace {
         };
         let ai_provider = cx.global::<Settings>().ai.active();
         // How the file is written, when it's not the usual: its indentation, Windows line endings.
-        let default_indent = cx.global::<Settings>().default_indent();
+        let default_indent = cx
+            .global::<Settings>()
+            .indent_for(self.active_editor().map_or("Plain Text", |e| e.read(cx).language_name()));
         let encoding =
             self.active_editor().map(|e| e.read(cx).encoding).filter(|e| *e != crate::encoding::Encoding::Utf8);
         let (indent_label, crlf) = match self.active_editor().map(|e| e.read(cx).style.clone()) {

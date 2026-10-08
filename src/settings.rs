@@ -8,6 +8,25 @@ pub const DEFAULT_FONT_SIZE: f32 = 14.;
 pub const MIN_FONT_SIZE: f32 = 9.;
 pub const MAX_FONT_SIZE: f32 = 32.;
 
+/// A language's own settings (see `Settings::languages`): each one given wins over the
+/// general one; one left out follows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LanguageSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_with_tabs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format_on_save: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format_on_paste: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub word_wrap: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autocomplete: Option<bool>,
+}
+
 /// Everything Null remembers between launches. Stored as JSON so it can be
 /// edited by hand; missing or unknown fields fall back to defaults.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -66,6 +85,10 @@ pub struct Settings {
     /// Your own tasks for ⌘⇧B, in every project: a name and the command it runs.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub tasks: std::collections::BTreeMap<String, String>,
+    /// Settings for a language over these, by its name as ⌘K's "Language:" lists it:
+    /// `"Go": { "indent_with_tabs": true }`.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub languages: std::collections::BTreeMap<String, LanguageSettings>,
     /// Set once the first-launch welcome has been seen.
     pub welcomed: bool,
     /// At the end of the caret's line, faintly: who last changed it, when, and why.
@@ -125,6 +148,7 @@ impl Default for Settings {
             keymap: Default::default(),
             keys: Default::default(),
             tasks: Default::default(),
+            languages: Default::default(),
             welcomed: false,
             autocomplete: true,
             line_blame: true,
@@ -228,6 +252,36 @@ impl Settings {
         } else {
             crate::file_style::Indent::Spaces(self.indent_size.clamp(1, 16))
         }
+    }
+
+    /// What's set for `language` (its name, in any case), if anything.
+    fn language(&self, language: &str) -> Option<&LanguageSettings> {
+        self.languages.iter().find(|(name, _)| name.eq_ignore_ascii_case(language)).map(|(_, set)| set)
+    }
+
+    /// The indentation for a new `language` file (one that doesn't show its own).
+    pub fn indent_for(&self, language: &str) -> crate::file_style::Indent {
+        let set = self.language(language);
+        let tabs = set.and_then(|s| s.indent_with_tabs).unwrap_or(self.indent_with_tabs);
+        let size = set.and_then(|s| s.indent_size).unwrap_or(self.indent_size);
+        if tabs { crate::file_style::Indent::Tabs } else { crate::file_style::Indent::Spaces(size.clamp(1, 16)) }
+    }
+
+    pub fn format_on_save_for(&self, language: &str) -> bool {
+        self.language(language).and_then(|s| s.format_on_save).unwrap_or(self.format_on_save)
+    }
+
+    pub fn format_on_paste_for(&self, language: &str) -> bool {
+        self.language(language).and_then(|s| s.format_on_paste).unwrap_or(self.format_on_paste)
+    }
+
+    /// Whether long lines wrap in `language` code (prose goes by `wrap_prose`).
+    pub fn word_wrap_for(&self, language: &str) -> bool {
+        self.language(language).and_then(|s| s.word_wrap).unwrap_or(self.word_wrap)
+    }
+
+    pub fn autocomplete_for(&self, language: &str) -> bool {
+        self.language(language).and_then(|s| s.autocomplete).unwrap_or(self.autocomplete)
     }
 
     /// `~/.config/null/settings.json` on macOS and Linux (or `$XDG_CONFIG_HOME/null`),
@@ -398,6 +452,25 @@ fn apply(settings: Settings, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A language's own settings win; what it leaves out follows the general ones.
+    #[test]
+    fn a_language_has_its_own() {
+        let settings = Settings::parse(
+            r#"{ "indent_size": 4, "format_on_save": true,
+                 "languages": { "python": { "indent_size": 2, "word_wrap": true }, "Go": { "indent_with_tabs": true, "format_on_save": false } } }"#,
+        )
+        .unwrap();
+        use crate::file_style::Indent;
+        assert_eq!(settings.indent_for("Python"), Indent::Spaces(2), "named in any case");
+        assert_eq!(settings.indent_for("Go"), Indent::Tabs);
+        assert_eq!(settings.indent_for("Rust"), Indent::Spaces(4));
+        assert!(settings.word_wrap_for("Python") && !settings.word_wrap_for("Rust"));
+        assert!(!settings.format_on_save_for("Go") && settings.format_on_save_for("Python"));
+        // Written back as given, nothing added.
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""python":{"indent_size":2,"word_wrap":true}"#), "{json}");
+    }
 
     #[test]
     fn missing_fields_use_defaults() {
