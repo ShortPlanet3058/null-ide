@@ -164,6 +164,10 @@ pub struct Debugger {
     adapter: Option<Arc<DebugAdapter>>,
     /// What the program printed, and what the debugger said.
     pub output: String,
+    /// Looking at where it stopped (its calls, its variables).
+    stop_task: Option<Task<()>>,
+    /// Working out the watches.
+    watch_task: Option<Task<()>>,
     /// The program being debugged, for the panel.
     pub program: Option<PathBuf>,
     _tasks: Vec<Task<()>>,
@@ -176,6 +180,8 @@ impl Default for Debugger {
             watches: Vec::new(),
             adapter: None,
             output: String::new(),
+            stop_task: None,
+            watch_task: None,
             program: None,
             _tasks: Vec::new(),
         }
@@ -363,7 +369,8 @@ impl Debugger {
     fn locate_stop(&mut self, thread: i64, reason: String, description: Option<String>, cx: &mut Context<Self>) {
         let Some(adapter) = self.adapter.clone() else { return };
         let stack = adapter.request("stackTrace", json!({ "threadId": thread, "startFrame": 0, "levels": FRAMES }));
-        self._tasks.push(cx.spawn(async move |this, cx| {
+        // The latest stop is the one that counts: one before it, still being looked at, goes.
+        self.stop_task = Some(cx.spawn(async move |this, cx| {
             let frames: Vec<Frame> = stack
                 .await
                 .ok()
@@ -420,10 +427,13 @@ impl Debugger {
     pub fn select_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
         let (Some(adapter), DebugState::Stopped(stop)) = (self.adapter.clone(), &self.state) else { return };
         let Some(id) = stop.frames.get(frame).map(|f| f.id) else { return };
-        self._tasks.push(cx.spawn(async move |this, cx| {
+        self.stop_task = Some(cx.spawn(async move |this, cx| {
             let locals = Self::locals_of(&adapter, id).await;
             this.update(cx, |this, cx| {
-                if let DebugState::Stopped(stop) = &mut this.state {
+                // Still the same stop (not a new one, with other calls, since).
+                if let DebugState::Stopped(stop) = &mut this.state
+                    && stop.frames.get(frame).is_some_and(|f| f.id == id)
+                {
                     stop.frame = frame;
                     stop.place = stop.frames[frame].place.clone();
                     stop.locals = locals;
@@ -463,7 +473,8 @@ impl Debugger {
         if expressions.is_empty() {
             return;
         }
-        self._tasks.push(cx.spawn(async move |this, cx| {
+        // A newer stop works them all out again: the one before isn't needed.
+        self.watch_task = Some(cx.spawn(async move |this, cx| {
             let mut values = Vec::new();
             for expression in &expressions {
                 let asked = json!({ "expression": expression, "frameId": frame, "context": "watch" });

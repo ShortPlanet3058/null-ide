@@ -68,8 +68,9 @@ the welcome screen or in Settings → Keyboard. Your own go in settings.json, ov
 ```
 
 A command is named as ⌘K lists it (or as in the code, `editor::SelectAllOccurrences`), and
-`null` takes a shortcut away. Menus and ⌘K show your keys; one that can't be understood is
-named when settings.json is saved.
+`null` takes a shortcut away, everywhere in the window (the terminal and the files too).
+Menus and ⌘K show your keys; one that can't be understood, or that would type a character
+(`x`, a space), is named when settings.json is saved.
 
 Shaders are compiled when the app starts (GPUI's `runtime_shaders` feature), so the build
 doesn't need Xcode's separate Metal Toolchain download.

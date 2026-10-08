@@ -6,11 +6,12 @@
 //!
 //! A command is named as Null calls it in the code (`editor::SelectAllOccurrences`), without
 //! the part before `::`, or in words, as ⌘K lists it; `null` takes a shortcut away. They hold
-//! in the code and everywhere else in the window, and come last, so they win.
+//! everywhere in the window (bound with no context, they match as deep as anything focused)
+//! and come last, so they win. A key that types something (`x`, `⇧X`, a space) can't be one:
+//! it would stop typing.
 
-use gpui::{Action, App, Global, KeyBinding, KeyBindingContextPredicate, NoAction};
+use gpui::{Action, App, Global, KeyBinding, Keystroke, NoAction};
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
 /// What was wrong with the shortcuts last read, for the person to see.
 #[derive(Default)]
@@ -18,8 +19,16 @@ pub struct KeyProblems(pub Vec<String>);
 
 impl Global for KeyProblems {}
 
-/// The contexts a shortcut of yours holds in: the code, and the rest of the window.
-const CONTEXTS: [&str; 2] = ["Workspace", "Editor"];
+/// Whether `keystrokes` start with a key that types a character: a letter, a digit, a sign
+/// or a space, with no modifier or only ⇧.
+fn types_something(keystrokes: &str) -> bool {
+    let Some(first) = keystrokes.split_whitespace().next().and_then(|k| Keystroke::parse(k).ok()) else {
+        return false;
+    };
+    let m = first.modifiers;
+    let plain = !(m.platform || m.control || m.alt || m.function);
+    plain && (first.key.chars().count() == 1 || first.key == "space")
+}
 
 /// A name as written, for comparing: letters and digits, in lower case.
 fn plain(name: &str) -> String {
@@ -57,16 +66,13 @@ pub fn bindings(keys: &BTreeMap<String, Option<String>>, cx: &App) -> (Vec<KeyBi
                 }
             },
         };
-        for context in CONTEXTS {
-            let predicate = KeyBindingContextPredicate::parse(context).ok().map(Rc::new);
-            match KeyBinding::load(keystrokes, action.boxed_clone(), predicate, false, None, &gpui::DummyKeyboardMapper)
-            {
-                Ok(binding) => bindings.push(binding),
-                Err(_) => {
-                    problems.push(format!("\"{keystrokes}\" isn't a shortcut (like \"cmd-shift-l\")"));
-                    break;
-                }
-            }
+        if types_something(keystrokes) {
+            problems.push(format!("\"{keystrokes}\" types a character: add cmd, ctrl or alt"));
+            continue;
+        }
+        match KeyBinding::load(keystrokes, action, None, false, None, &gpui::DummyKeyboardMapper) {
+            Ok(binding) => bindings.push(binding),
+            Err(_) => problems.push(format!("\"{keystrokes}\" isn't a shortcut (like \"cmd-shift-l\")")),
         }
     }
     (bindings, problems)
@@ -83,6 +89,14 @@ pub fn register(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_that_type_are_refused() {
+        assert!(types_something("x") && types_something("shift-x") && types_something("space"));
+        assert!(types_something("5") && types_something("shift-/"));
+        assert!(!types_something("cmd-x") && !types_something("ctrl-x") && !types_something("alt-x"));
+        assert!(!types_something("f5") && !types_something("escape") && !types_something("up"));
+    }
 
     #[test]
     fn commands_are_found_however_they_re_named() {
@@ -108,6 +122,7 @@ mod tests {
                 ("cmd-d".to_string(), None),
                 ("cmd-alt-9".to_string(), Some("launch rockets".to_string())),
                 ("cmd-shiftt-x".to_string(), Some("Copy".to_string())),
+                ("x".to_string(), Some("toggle terminal".to_string())),
             ]);
             cx.set_global(crate::settings::Settings { keys, ..Default::default() });
             cx.set_global(crate::theme::Theme::oled());
@@ -115,9 +130,10 @@ mod tests {
             crate::keymap::register(crate::keymap::Keymap::Null, cx);
         });
         let problems = cx.update(|cx| cx.global::<KeyProblems>().0.clone());
-        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(problems[0].contains("cmd-alt-9") && problems[0].contains("launch rockets"));
         assert!(problems[1].contains("cmd-shiftt-x"));
+        assert!(problems[2].contains("types a character"), "a plain letter would stop typing");
         let (e, cx) =
             cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("a b a b a\n"), Some("x.txt".into()), cx));
         e.update_in(cx, |e, window, cx| {
