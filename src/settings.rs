@@ -45,6 +45,9 @@ pub struct Settings {
     pub auto_save: AutoSave,
     /// Whose shortcuts to use: Null's own, or another editor's.
     pub keymap: crate::keymap::Keymap,
+    /// Your own shortcuts over those: a key and the command it runs, or null for none.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub keys: std::collections::BTreeMap<String, Option<String>>,
     /// Set once the first-launch welcome has been seen.
     pub welcomed: bool,
     /// At the end of the caret's line, faintly: who last changed it, when, and why.
@@ -96,6 +99,7 @@ impl Default for Settings {
             format_on_save: false,
             auto_save: AutoSave::Off,
             keymap: Default::default(),
+            keys: Default::default(),
             welcomed: false,
             autocomplete: true,
             line_blame: true,
@@ -339,7 +343,7 @@ fn apply(settings: Settings, cx: &mut App) {
     let old = cx.global::<Settings>();
     let theme_changed = settings.shown_theme(cx) != old.shown_theme(cx);
     let fonts_changed = settings.code_font != old.code_font || settings.ui_font != old.ui_font;
-    let keymap = (settings.keymap != old.keymap).then_some(settings.keymap);
+    let keymap = (settings.keymap != old.keymap || settings.keys != old.keys).then_some(settings.keymap);
     if theme_changed {
         cx.set_global(Theme::named(settings.shown_theme(cx)));
     }

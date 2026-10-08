@@ -149,6 +149,8 @@ pub fn register(keymap: Keymap, cx: &mut App) {
     crate::palette::bind_keys(cx);
     cx.bind_keys(keymap.overrides());
     crate::menus::bind_keys(cx);
+    // Yours, last: they win.
+    crate::user_keys::register(cx);
 }
 
 #[cfg(test)]
