@@ -95,6 +95,7 @@ actions!(
         ToggleLineBlame,
         ToggleSpellCheck,
         ToggleInlayHints,
+        ToggleBracketColours,
         ToggleFocusMode,
         RunTask,
         RunTestAtCursor,
@@ -3534,6 +3535,11 @@ impl Workspace {
                 Box::new(ToggleLineBlame),
             ),
             (View, toggle(settings.inlay_hints, "Hide Type Hints", "Show Type Hints"), Box::new(ToggleInlayHints)),
+            (
+                View,
+                toggle(settings.bracket_colours, "Plain Brackets", "Colour Bracket Pairs"),
+                Box::new(ToggleBracketColours),
+            ),
             (
                 View,
                 toggle(settings.spell_check, "Hide Spelling Mistakes", "Show Spelling Mistakes"),
@@ -7781,6 +7787,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|_, _: &ToggleInlayHints, _, cx| settings::update(cx, |s| s.inlay_hints = !s.inlay_hints)),
             )
+            .on_action(cx.listener(|_, _: &ToggleBracketColours, _, cx| {
+                settings::update(cx, |s| s.bracket_colours = !s.bracket_colours)
+            }))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))

@@ -65,6 +65,8 @@ pub enum Syntax {
     Property,
     /// A note left in a comment: TODO, FIXME, HACK, XXX.
     Note,
+    /// A bracket, by how deep it is (0, 1, 2, then round again): coloured bracket pairs.
+    Bracket(u8),
 }
 
 #[derive(Clone)]
@@ -402,6 +404,8 @@ impl Theme {
             Syntax::Attribute => self.attribute,
             Syntax::Property => self.property,
             Syntax::Note => self.caret,
+            // Three of the theme's own colours, so pairs stand apart and still belong.
+            Syntax::Bracket(depth) => [self.keyword, self.function, self.ty][depth as usize % 3],
         }
     }
 }

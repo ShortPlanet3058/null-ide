@@ -684,7 +684,7 @@ impl Element for EditorElement {
             }
             editor.ensure_meaning(cx);
             // The server's colours over the grammar's, when it has said what names are.
-            let meant = editor.spans_with_meaning(shown_bytes.unwrap_or_default());
+            let meant = editor.spans_to_draw(shown_bytes.unwrap_or_default(), cx.global::<Settings>().bracket_colours);
             // The lines that can fold, needed only while the mouse is over the gutter.
             let over_gutter = editor.mouse_position.is_some_and(|p| {
                 p.x >= bounds.left() && p.x < text_bounds.left() && p.y >= bounds.top() && p.y < bounds.bottom()
