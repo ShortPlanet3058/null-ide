@@ -237,7 +237,9 @@ numbers can show everywhere, only in code, or nowhere.
   tab's menu opens one in its file's folder): ⌘-click a `file:line:col` or a link in its
   output to open it, **⌘F** searches it. **Run Selection in Terminal** (⌘K) runs the lines
   selected, or steps through a script line by line.
-  A command that ran 10 seconds or more says when it's done: while you're in another app the
+  A command's errors and warnings (a compiler's `file:line:col: error`, rustc's, TypeScript's,
+  pytest's, a Python traceback) join the Problems list (⌘⇧M) and F8 when it ends, in files that
+  exist, until the next command. A command that ran 10 seconds or more says when it's done: while you're in another app the
   Dock's icon jumps once and the note waits for your return; with the terminal hidden, a
   line at the bottom says what finished and how long it took. While the terminal is hidden
   and something runs in it, the status bar says what (`cargo running`; a click shows it), and
