@@ -516,8 +516,9 @@ pub struct Editor {
     /// Markdown shown as it reads (⌘⇧V) instead of its source, or an SVG drawn.
     pub reading: bool,
     /// The SVG drawn (and its size in points), for the revision and screen scale it's of.
-    #[allow(clippy::type_complexity)]
-    svg_image: Option<(u64, f32, Option<(std::sync::Arc<gpui::RenderImage>, (f32, f32))>)>,
+    svg_image: Option<(u64, f32, Option<crate::svg_image::Drawn>)>,
+    /// Drawing it again for a newer text, in the background, and for which.
+    svg_task: Option<(u64, f32, Task<()>)>,
     /// The parsed document for the preview, and the revision it's of.
     #[allow(clippy::type_complexity)]
     markdown: Option<(u64, Rc<Vec<(usize, crate::markdown_view::Block)>>)>,
@@ -761,6 +762,7 @@ impl Editor {
             viewport_height: None,
             reading: false,
             svg_image: None,
+            svg_task: None,
             markdown: None,
             followed_line: None,
             reading_scroll: gpui::ScrollHandle::new(),
@@ -2914,7 +2916,7 @@ impl Editor {
                     .flex_col()
                     .gap(px(6.))
                     .child(
-                        gpui::img(crate::svg_image::source(&path))
+                        crate::svg_image::image(&path)
                             .max_w(px(320.))
                             .max_h(px(220.))
                             .object_fit(gpui::ObjectFit::ScaleDown)
@@ -3830,6 +3832,10 @@ impl Render for Editor {
         if self.reading && self.is_svg() {
             return self.render_svg(window, cx);
         }
+        // Out of the SVG's preview: its drawing's place on the GPU goes.
+        if let Some((_, _, Some((image, _)))) = self.svg_image.take() {
+            window.drop_image(image).ok();
+        }
         if self.reading {
             return self.render_reading(cx);
         }
@@ -4188,17 +4194,38 @@ impl Editor {
 
     /// ⌘⇧V on an SVG: the drawing its text makes now (unsaved edits too), on a light card
     /// so black strokes show on a dark theme; ⎋ or ⌘⇧V goes back to the text.
-    fn render_svg(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_svg(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let revision = self.buffer.revision();
         let scale = window.scale_factor();
-        let drawn = match &self.svg_image {
-            Some((r, s, drawn)) if *r == revision && *s == scale => drawn.clone(),
-            _ => {
-                let drawn = crate::svg_image::draw(self.buffer.to_string().as_bytes(), scale);
-                self.svg_image = Some((revision, scale, drawn.clone()));
-                drawn
-            }
-        };
+        let current = self.svg_image.as_ref().is_some_and(|(r, s, _)| *r == revision && *s == scale);
+        let asked = self.svg_task.as_ref().is_some_and(|(r, s, _)| *r == revision && *s == scale);
+        // A newer text: drawn again in the background once typing pauses, the drawing
+        // before it shown meanwhile (and its place on the GPU let go once replaced).
+        if !current && !asked {
+            let bytes = self.buffer.to_string().into_bytes();
+            let dir = self.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf);
+            let first = self.svg_image.is_none();
+            let task = cx.spawn_in(window, async move |this, cx| {
+                if !first {
+                    cx.background_executor().timer(std::time::Duration::from_millis(120)).await;
+                }
+                let drawn = cx
+                    .background_executor()
+                    .spawn(async move { crate::svg_image::draw(&bytes, scale, dir.as_deref()) })
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    if let Some((_, _, Some((old, _)))) = this.svg_image.replace((revision, scale, drawn)) {
+                        window.drop_image(old).ok();
+                    }
+                    this.svg_task = None;
+                    cx.notify();
+                })
+                .ok();
+            });
+            self.svg_task = Some((revision, scale, task));
+        }
+        let drawn = self.svg_image.as_ref().and_then(|(_, _, drawn)| drawn.clone());
+        let drawing = self.svg_image.is_none();
         let theme = cx.global::<Theme>();
         let (muted, hairline) = (theme.muted, theme.hairline);
         let mut context = KeyContext::new_with_defaults();
@@ -4237,7 +4264,7 @@ impl Editor {
                         None => div()
                             .text_size(px(crate::ui::T_MD))
                             .text_color(muted)
-                            .child("This SVG doesn't draw yet")
+                            .child(if drawing { "Drawing…" } else { "This SVG doesn't draw yet" })
                             .into_any_element(),
                     }),
             )

@@ -16,10 +16,14 @@ static FONTS: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
     Arc::new(fonts)
 });
 
-/// `svg` drawn `scale` times (2 on a Retina screen), and its size in points. None when it
-/// isn't an SVG that draws.
-pub fn draw(svg: &[u8], scale: f32) -> Option<(Arc<RenderImage>, (f32, f32))> {
-    let options = usvg::Options { fontdb: FONTS.clone(), ..Default::default() };
+/// What an SVG drawn is: the image, and its size in points.
+pub type Drawn = (Arc<RenderImage>, (f32, f32));
+
+/// `svg` drawn `scale` times (2 on a Retina screen), and its size in points; files it names
+/// are found from `dir` (its folder). None when it isn't an SVG that draws.
+pub fn draw(svg: &[u8], scale: f32, dir: Option<&std::path::Path>) -> Option<Drawn> {
+    let options =
+        usvg::Options { fontdb: FONTS.clone(), resources_dir: dir.map(|d| d.to_path_buf()), ..Default::default() };
     let tree = usvg::Tree::from_data(svg, &options).ok()?;
     let (width, height) = (tree.size().width(), tree.size().height());
     let scale = scale.min(MAX_PIXELS / width.max(height).max(1.));
@@ -28,30 +32,43 @@ pub fn draw(svg: &[u8], scale: f32) -> Option<(Arc<RenderImage>, (f32, f32))> {
     Some((Arc::new(RenderImage::new(vec![image::Frame::new(bgra(&pixmap)?)])), (width, height)))
 }
 
-/// SVG files drawn lately, by path, with the time they were changed.
+/// SVG files drawn lately (or found not to draw), by path, with the time they were changed.
 #[allow(clippy::type_complexity)]
-static DRAWN: LazyLock<std::sync::Mutex<Vec<(std::path::PathBuf, std::time::SystemTime, Arc<RenderImage>)>>> =
+static DRAWN: LazyLock<std::sync::Mutex<Vec<(std::path::PathBuf, std::time::SystemTime, Option<Drawn>)>>> =
     LazyLock::new(Default::default);
 
-/// What to show for an image file: an SVG drawn here (in its colours, sharp on a Retina
-/// screen), anything else as gpui shows it.
-pub fn source(path: &std::path::Path) -> gpui::ImageSource {
+/// An image file shown: an SVG drawn here (in its colours, sharp on a Retina screen, at its
+/// own size in points), anything else as gpui shows it.
+pub fn image(path: &std::path::Path) -> gpui::Img {
+    use gpui::Styled;
     let svg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
     let changed = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    let (true, Some(changed)) = (svg, changed) else { return path.to_path_buf().into() };
-    let mut drawn = DRAWN.lock().unwrap();
-    if let Some((_, _, image)) = drawn.iter().find(|(p, t, _)| p == path && *t == changed) {
-        return gpui::ImageSource::Render(image.clone());
-    }
-    let Some((image, _)) = std::fs::read(path).ok().and_then(|bytes| draw(&bytes, 2.)) else {
-        return path.to_path_buf().into();
+    let (true, Some(changed)) = (svg, changed) else { return gpui::img(path.to_path_buf()) };
+    let found = DRAWN
+        .lock()
+        .ok()
+        .and_then(|drawn| drawn.iter().find(|(p, t, _)| p == path && *t == changed).map(|(_, _, d)| d.clone()));
+    let drawn = match found {
+        Some(drawn) => drawn,
+        None => {
+            // Drawn with the cache let go: one drawing doesn't hold up the others.
+            let drawn = std::fs::read(path).ok().and_then(|bytes| draw(&bytes, 2., path.parent()));
+            if let Ok(mut cache) = DRAWN.lock() {
+                cache.retain(|(p, _, _)| p != path);
+                if cache.len() >= 32 {
+                    cache.remove(0);
+                }
+                cache.push((path.to_path_buf(), changed, drawn.clone()));
+            }
+            drawn
+        }
     };
-    drawn.retain(|(p, _, _)| p != path);
-    if drawn.len() >= 32 {
-        drawn.remove(0);
+    match drawn {
+        Some((image, (width, height))) => {
+            gpui::img(gpui::ImageSource::Render(image)).w(gpui::px(width)).h(gpui::px(height))
+        }
+        None => gpui::img(path.to_path_buf()),
     }
-    drawn.push((path.to_path_buf(), changed, image.clone()));
-    gpui::ImageSource::Render(image)
 }
 
 /// tiny-skia's pixels (red first, alpha multiplied in) in gpui's order: blue first, plain.
@@ -71,13 +88,13 @@ mod tests {
     #[test]
     fn an_svg_is_drawn_in_its_colours() {
         let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="5"><rect width="10" height="5" fill="#f2a33a"/></svg>"##;
-        let (image, size) = draw(svg, 2.).expect("drawn");
+        let (image, size) = draw(svg, 2., None).expect("drawn");
         assert_eq!(size, (10., 5.));
         let pixels = image.as_bytes(0).unwrap();
         assert_eq!(pixels.len(), 20 * 10 * 4, "twice as many pixels each way");
         // Blue, green, red, alpha: the orange stays orange.
         assert_eq!(&pixels[..4], &[0x3a, 0xa3, 0xf2, 0xff]);
-        assert!(draw(b"<svg", 2.).is_none(), "not an SVG that draws");
+        assert!(draw(b"<svg", 2., None).is_none(), "not an SVG that draws");
     }
 
     #[test]
@@ -86,17 +103,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let svg = dir.join("a.svg");
         std::fs::write(&svg, r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#).unwrap();
-        assert!(matches!(source(&svg), gpui::ImageSource::Render(_)));
-        assert!(matches!(source(&dir.join("b.png")), gpui::ImageSource::Resource(_)));
+        let drawn = |path: &std::path::Path| {
+            image(path);
+            DRAWN.lock().unwrap().iter().find(|(p, _, _)| p == path).map(|(_, _, d)| d.is_some())
+        };
+        assert_eq!(drawn(&svg), Some(true));
+        assert_eq!(drawn(&dir.join("b.png")), None, "not an SVG: left to gpui");
         std::fs::write(&svg, "<svg").unwrap();
-        assert!(!matches!(source(&svg), gpui::ImageSource::Render(_)), "broken: left to gpui's fallback");
+        assert_eq!(drawn(&svg), Some(false), "broken: kept as such, not read again each frame");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_huge_svg_is_drawn_smaller() {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="20000" height="100"/>"#;
-        let (image, _) = draw(svg, 2.).expect("drawn");
+        let (image, _) = draw(svg, 2., None).expect("drawn");
         assert!(image.size(0).width.0 <= 4096);
     }
 }

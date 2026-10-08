@@ -275,6 +275,39 @@ fn whitespace_marks(
         .collect()
 }
 
+/// Where each of `marks` (columns of the row's text, and whether a tab) starts and ends in
+/// the row as shown (after a hint shown before it), in one walk along the row's characters
+/// and one along its glyphs: per frame, on every visible row.
+fn whitespace_xs(r: &RowLayout, marks: &[(usize, bool)]) -> Vec<(Pixels, Pixels, bool)> {
+    let mut indices = Vec::with_capacity(marks.len() * 2);
+    let mut chars = r.text.char_indices().enumerate();
+    let mut gaps = r.gaps.iter().peekable();
+    let mut before = 0; // extra shown for gaps before the byte reached
+    for &(col, _) in marks {
+        let Some((_, (byte, c))) = chars.by_ref().find(|(i, _)| *i == col) else { break };
+        while gaps.peek().is_some_and(|g| g.byte < byte) {
+            before += gaps.next().map_or(0, |g| g.extra);
+        }
+        // A hint shown before this character: the mark goes after it.
+        let hint: usize = r.gaps.iter().filter(|g| g.byte == byte && g.hint).map(|g| g.extra).sum();
+        let at: usize = r.gaps.iter().filter(|g| g.byte == byte).map(|g| g.extra).sum();
+        indices.push(byte + before + hint);
+        indices.push(byte + c.len_utf8() + before + at);
+    }
+    // The x of each index: the first glyph at or past it.
+    let mut glyphs = r.shaped.runs.iter().flat_map(|run| run.glyphs.iter()).peekable();
+    let xs: Vec<Pixels> = indices
+        .iter()
+        .map(|&i| {
+            while glyphs.peek().is_some_and(|g| g.index < i) {
+                glyphs.next();
+            }
+            glyphs.peek().map_or(r.shaped.width, |g| g.position.x)
+        })
+        .collect();
+    marks.iter().zip(xs.chunks(2)).map(|(&(_, tab), x)| (x[0], x[1], tab)).collect()
+}
+
 /// The note at the end of the caret's line when something's wrong there: the most serious
 /// problem starting on it (`chars` of the text), its first line, cut short.
 fn problem_note(problems: &[crate::editor::Problem], chars: Range<usize>) -> Option<(String, DiagnosticSeverity)> {
@@ -1225,16 +1258,21 @@ impl Element for EditorElement {
                     }
                     let row_start = editor.buffer.line_to_char(r.row.line) + r.row.cols.start;
                     let top = row_top(visible.start + i);
-                    for (col, tab) in whitespace_marks(&r.text, row_start, &selected, shown_whitespace, r.row.last) {
-                        let col = r.row.cols.start + col;
-                        let (_, x0) = pos(r.row.line, col);
-                        // The last char of a wrapped row: its end is this row's, not the next one's start.
-                        let x1 = if col + 1 == r.row.cols.end && !r.row.last {
-                            r.x + r.shaped.width
-                        } else {
-                            pos(r.row.line, col + 1).1
-                        };
-                        let mid = origin.x + (x0 + x1) / 2.;
+                    // A wrapped row ends the line's text when all that's after it is blank.
+                    let ends_line = r.row.last
+                        || (shown_whitespace == crate::settings::ShowWhitespace::Trailing
+                            && editor
+                                .buffer
+                                .line_text(r.row.line)
+                                .chars()
+                                .skip(r.row.cols.end)
+                                .all(|c| c == ' ' || c == '\t'));
+                    let marks = whitespace_marks(&r.text, row_start, &selected, shown_whitespace, ends_line);
+                    if marks.is_empty() {
+                        continue;
+                    }
+                    for (x0, x1, tab) in whitespace_xs(r, &marks) {
+                        let mid = origin.x + r.x + (x0 + x1) / 2.;
                         let y = top + line_height / 2.;
                         whitespace.push(if tab {
                             let half = (x1 - x0) * 0.35;

@@ -544,21 +544,30 @@ fn search_files(
     mut report: impl FnMut(Found),
 ) {
     let Ok(regex) = query.build() else { return };
-    let mut walk = ignore::WalkBuilder::new(root);
-    if let Some(only) = file_filter(root, files_wanted) {
-        walk.overrides(only);
-    }
-    let mut files: Vec<PathBuf> = walk
-        .hidden(false)
-        .filter_entry(|e| e.file_name() != ".git")
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-        .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_FILE_SIZE))
-        .map(|e| e.into_path())
-        // Asked for the open files only: those.
-        .filter(|path| only.is_none_or(|only| only.contains(path)))
-        .collect();
+    let wanted = file_filter(root, files_wanted);
+    let mut files: Vec<PathBuf> = match only {
+        // The open files themselves: ignored by git (`.env`) or outside the project too.
+        Some(only) => only
+            .iter()
+            .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() <= MAX_FILE_SIZE))
+            .filter(|p| wanted.as_ref().is_none_or(|w| !w.matched(p, false).is_ignore()))
+            .cloned()
+            .collect(),
+        None => {
+            let mut walk = ignore::WalkBuilder::new(root);
+            if let Some(wanted) = wanted {
+                walk.overrides(wanted);
+            }
+            walk.hidden(false)
+                .filter_entry(|e| e.file_name() != ".git")
+                .build()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+                .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_FILE_SIZE))
+                .map(|e| e.into_path())
+                .collect()
+        }
+    };
     files.sort();
 
     let mut batch = Vec::new();
@@ -1091,6 +1100,13 @@ mod tests {
         assert_eq!(found(None), ["a.txt", "b.txt", "c.txt"]);
         let open = std::collections::HashSet::from([dir.join("b.txt")]);
         assert_eq!(found(Some(&open)), ["b.txt"]);
+        // An open file git ignores is searched too.
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".gitignore"), ".env\n").unwrap();
+        std::fs::write(dir.join(".env"), "needle=1\n").unwrap();
+        assert!(!found(None).contains(&".env".to_string()), "a project search leaves it out");
+        let open = std::collections::HashSet::from([dir.join(".env"), dir.join("a.txt")]);
+        assert_eq!(found(Some(&open)), [".env", "a.txt"]);
         assert!(found(Some(&Default::default())).is_empty(), "no tabs: nothing");
         std::fs::remove_dir_all(&dir).ok();
     }
