@@ -21,7 +21,7 @@ impl Global for KeyProblems {}
 
 /// Whether `keystrokes` start with a key that types a character: a letter, a digit, a sign
 /// or a space, with no modifier or only ⇧.
-fn types_something(keystrokes: &str) -> bool {
+pub(crate) fn types_something(keystrokes: &str) -> bool {
     let Some(first) = keystrokes.split_whitespace().next().and_then(|k| Keystroke::parse(k).ok()) else {
         return false;
     };

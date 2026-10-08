@@ -118,6 +118,13 @@ pub struct SettingsPanel {
     fields_for: ProviderId,
     /// Whether that provider's key is set. Checked once, since it reads the keychain.
     has_key: Option<bool>,
+    /// Waiting for new keys for shortcut `ix` (Keyboard): the next keystroke, caught before
+    /// anything else sees it, becomes its shortcut.
+    recording: Option<(usize, Subscription)>,
+    /// What came of the keys last pressed, said under that command.
+    key_note: Option<(usize, String)>,
+    /// Which shortcuts can be given keys: commands known by their name alone.
+    bindable: Vec<bool>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -175,10 +182,14 @@ impl SettingsPanel {
         let installed_fonts = cx.global::<InstalledFonts>().0.clone();
         let search = cx.new(|cx| TextInput::new("Search settings", cx));
         subscriptions.push(cx.subscribe(&search, |_, _, TextInputEvent::Changed, cx| cx.notify()));
+        let bindable = shortcuts.iter().map(|s| cx.build_action(s.action.name(), None).is_ok()).collect();
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
             lsp,
             section: Section::Appearance,
+            recording: None,
+            key_note: None,
+            bindable,
             shortcuts,
             installed_fonts,
             model,
@@ -1149,6 +1160,86 @@ impl SettingsPanel {
         rows
     }
 
+    /// The keys shortcut `ix` has now (as settings.json writes them: "cmd-shift-l").
+    fn keys_now(&self, ix: usize, cx: &App) -> Vec<String> {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let mut keys: Vec<String> = keymap
+            .bindings_for_action(self.shortcuts[ix].action.as_ref())
+            .map(|b| b.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>().join(" "))
+            .collect();
+        keys.dedup();
+        keys
+    }
+
+    /// Waits for the keys for shortcut `ix`.
+    fn record_keys(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let panel = cx.entity().downgrade();
+        let caught = cx.intercept_keystrokes(move |event, _, cx| {
+            let keys = event.keystroke.clone();
+            if panel.update(cx, |panel, cx| panel.keys_pressed(keys, cx)).is_ok() {
+                cx.stop_propagation();
+            }
+        });
+        self.recording = Some((ix, caught));
+        self.key_note = None;
+        cx.notify();
+    }
+
+    /// The keys pressed while waiting: the command's shortcut now (its old one let go), or
+    /// none (⌫), or nothing changed (Esc). Written to settings.json's `"keys"`.
+    fn keys_pressed(&mut self, pressed: gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some((ix, _)) = self.recording.take() else { return };
+        cx.notify();
+        let m = pressed.modifiers;
+        let bare = !(m.platform || m.control || m.alt || m.function || m.shift);
+        if bare && pressed.key == "escape" {
+            return;
+        }
+        let name = self.shortcuts[ix].action.name().to_string();
+        let now = self.keys_now(ix, cx);
+        let mut keys = cx.global::<Settings>().keys.clone();
+        // A key of yours for it goes; one of the preset's is taken away (null).
+        let let_go = |keys: &mut std::collections::BTreeMap<String, Option<String>>, key: &str| {
+            if keys.get(key) == Some(&Some(name.clone())) {
+                keys.remove(key);
+            } else {
+                keys.insert(key.to_string(), None);
+            }
+        };
+        if bare && pressed.key == "backspace" {
+            for key in &now {
+                let_go(&mut keys, key);
+            }
+            self.key_note = Some((ix, "No key now".into()));
+            return settings::update(cx, |s| s.keys = keys);
+        }
+        let typed = pressed.unparse();
+        if crate::user_keys::types_something(&typed) {
+            self.key_note = Some((ix, "That key types: add ⌘, ⌃ or ⌥".into()));
+            return;
+        }
+        let shown = gpui::KeyBinding::new(&typed, gpui::NoAction, None);
+        let shown = crate::palette::format_keys(&shown);
+        // Another command's key until now: it loses it (yours win).
+        let before = (0..self.shortcuts.len())
+            .filter(|&i| i != ix)
+            .find(|&i| self.keys_now(i, cx).contains(&typed))
+            .map(|i| self.shortcuts[i].label.clone());
+        for key in now.iter().filter(|k| **k != typed) {
+            let_go(&mut keys, key);
+        }
+        keys.insert(typed, Some(name));
+        self.key_note = Some((
+            ix,
+            match before {
+                Some(other) => format!("{shown} now, no longer {other}"),
+                None => format!("{shown} now"),
+            },
+        ));
+        settings::update(cx, |s| s.keys = keys);
+    }
+
     fn keyboard(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.global::<Theme>().clone();
         let current = cx.global::<Settings>().keymap;
@@ -1177,29 +1268,79 @@ impl SettingsPanel {
         // keys of what's focused (editor shortcuts would be missing).
         let _ = window;
         let keys_of = |s: &Shortcut| crate::palette::shortcut(s.action.as_ref(), cx);
+        rows.push(div().pt(px(8.)).text_size(px(12.)).text_color(theme.faint).child(
+            "A click on a command's keys, then the new ones: they're written to settings.json. Esc keeps them; ⌫ takes them away.",
+        ).into_any_element());
         for category in Category::ALL {
-            let members: Vec<(&Shortcut, String)> = self
-                .shortcuts
-                .iter()
-                .filter(|s| s.category == category)
-                .filter_map(|s| Some((s, keys_of(s)?)))
+            // Those with keys, and those that can be given some.
+            let members: Vec<(usize, Option<String>)> = (0..self.shortcuts.len())
+                .filter(|&i| self.shortcuts[i].category == category)
+                .filter_map(|i| {
+                    let keys = keys_of(&self.shortcuts[i]);
+                    (keys.is_some() || self.bindable[i]).then_some((i, keys))
+                })
                 .collect();
             if members.is_empty() {
                 continue;
             }
             rows.push(Self::heading(category.label(), &theme));
-            for (shortcut, keys) in members {
+            for (ix, keys) in members {
+                let shortcut = &self.shortcuts[ix];
+                let waiting = self.recording.as_ref().is_some_and(|(r, _)| *r == ix);
+                let note = self.key_note.as_ref().filter(|(n, _)| *n == ix).map(|(_, note)| note.clone());
+                let bindable = self.bindable[ix];
                 // Searchable by its name and its keys ("save" finds ⌘S).
-                rows.push(shown_row(&shortcut.label, Some(&format!("shortcut key {keys}")), || {
+                let detail = format!("shortcut key {}", keys.clone().unwrap_or_default());
+                rows.push(shown_row(&shortcut.label, Some(&detail), || {
+                    let keys_shown = if waiting {
+                        div()
+                            .px(px(8.))
+                            .h(px(22.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(ui::R_KEY))
+                            .border_1()
+                            .border_color(theme.caret)
+                            .text_size(px(12.))
+                            .text_color(theme.foreground)
+                            .child("Press the keys…")
+                            .into_any_element()
+                    } else {
+                        match keys {
+                            Some(keys) => ui::key_cap(keys, &theme).into_any_element(),
+                            None => {
+                                div().text_size(px(12.)).text_color(theme.faint).child("Add keys").into_any_element()
+                            }
+                        }
+                    };
                     div()
-                        .flex()
-                        .justify_between()
                         .py(px(7.))
                         .border_b_1()
                         .border_color(theme.hairline)
                         .text_size(px(13.))
-                        .child(div().text_color(theme.foreground).child(shortcut.label.clone()))
-                        .child(ui::key_cap(keys, &theme))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .child(div().text_color(theme.foreground).child(shortcut.label.clone()))
+                                .child(
+                                    div()
+                                        .id(("keys", ix))
+                                        .when(bindable, |d| {
+                                            d.cursor_pointer()
+                                                .rounded(px(ui::R_KEY))
+                                                .hover(|s| s.opacity(0.75))
+                                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                                    this.record_keys(ix, cx)
+                                                }))
+                                        })
+                                        .child(keys_shown),
+                                ),
+                        )
+                        .children(
+                            note.map(|note| div().pt(px(3.)).text_size(px(12.)).text_color(theme.muted).child(note)),
+                        )
                         .into_any_element()
                 }));
             }
@@ -1374,6 +1515,52 @@ mod tests {
             panel.close(&CloseSettings, window, cx);
             assert!(panel.search.read(cx).text().is_empty());
         });
+    }
+
+    /// A click on a command's keys, then new ones: written as yours, the old ones let go;
+    /// a key that types is refused; ⌫ takes them away.
+    #[gpui::test]
+    fn keys_are_recorded(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(Keymap::Null, cx);
+        });
+        let shortcuts = vec![
+            Shortcut {
+                category: Category::Edit,
+                label: "Select All Occurrences".into(),
+                action: Box::new(crate::editor::SelectAllOccurrences),
+            },
+            Shortcut { category: Category::File, label: "Save".into(), action: Box::new(crate::editor::Save) },
+        ];
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let lsp = cx.new(|_| crate::lsp_store::LspStore::new(std::path::PathBuf::from("/tmp")));
+            SettingsPanel::new(shortcuts, lsp, cx)
+        });
+        let before = panel.read_with(cx, |p, cx| p.keys_now(0, cx));
+        assert!(!before.is_empty(), "Select All Occurrences has a key in the preset");
+        panel.update(cx, |p, cx| p.record_keys(0, cx));
+        cx.simulate_keystrokes("ctrl-cmd-l");
+        let keys = cx.update(|_, cx| cx.global::<Settings>().keys.clone());
+        assert_eq!(keys.get("ctrl-cmd-l"), Some(&Some("editor::SelectAllOccurrences".to_string())));
+        assert!(before.iter().all(|k| keys.get(k) == Some(&None)), "the old keys let go: {keys:?}");
+        assert_eq!(panel.read_with(cx, |p, cx| p.keys_now(0, cx)), ["ctrl-cmd-l"]);
+        // Save's ⌘S, taken: it says whose it was.
+        panel.update(cx, |p, cx| p.record_keys(0, cx));
+        cx.simulate_keystrokes("cmd-s");
+        let note = panel.read_with(cx, |p, _| p.key_note.clone().unwrap().1);
+        assert!(note.contains("no longer Save"), "{note}");
+        // A plain letter types: refused, nothing written.
+        panel.update(cx, |p, cx| p.record_keys(0, cx));
+        cx.simulate_keystrokes("x");
+        assert!(!cx.update(|_, cx| cx.global::<Settings>().keys.contains_key("x")));
+        // ⌫: no keys at all.
+        panel.update(cx, |p, cx| p.record_keys(0, cx));
+        cx.simulate_keystrokes("backspace");
+        assert!(panel.read_with(cx, |p, cx| p.keys_now(0, cx)).is_empty());
+        assert!(panel.read_with(cx, |p, _| p.recording.is_none()));
     }
 
     #[gpui::test]

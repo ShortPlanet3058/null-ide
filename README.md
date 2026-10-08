@@ -67,7 +67,9 @@ Getting around:
 | ⌥⌘I | an AI task, reviewed change by change (with Claude Code or Codex) |
 
 Coming from another editor? Pick its shortcuts (VS Code, JetBrains, Sublime Text or Zed) on
-the welcome screen or in Settings → Keyboard. Your own go in settings.json, over those:
+the welcome screen or in Settings → Keyboard. There, a click on a command's keys and then
+the new ones gives it yours (Esc keeps them, ⌫ takes them away). They're written in
+settings.json, over the preset's, where you can also write them:
 
 ```json
 "keys": { "ctrl-cmd-l": "select all occurrences", "cmd-d": null }
