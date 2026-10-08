@@ -5953,6 +5953,13 @@ fn position_label(editor: &Editor, line: usize, col: usize) -> String {
             }
         };
     }
+    // Data in columns: which one the caret's in, by its name in the first line.
+    if let Some((column, name)) = editor.data_column().filter(|_| range.is_empty()) {
+        return match name {
+            Some(name) => format!("{place} · {name} (column {column})"),
+            None => format!("{place} · column {column}"),
+        };
+    }
     if range.is_empty() {
         return place;
     }

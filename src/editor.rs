@@ -1165,6 +1165,21 @@ impl Editor {
         self.spans_for = Some((revision, range));
     }
 
+    /// In a CSV or TSV file: the column the caret is in (from 1), and its name from the
+    /// first line, when it has one.
+    pub fn data_column(&self) -> Option<(usize, Option<String>)> {
+        let delimiter = self.basic_syntax()?.delimiter?;
+        let first = self.buffer.line_text(0);
+        let delimiter = crate::basic_syntax::delimiter_of(first.as_bytes(), delimiter);
+        let (line, col) = self.caret_point();
+        let text = self.buffer.line_text(line);
+        let at = text.char_indices().nth(col).map_or(text.len(), |(i, _)| i);
+        let (_, column) = crate::basic_syntax::fields(&text, delimiter, at);
+        let (header, _) = crate::basic_syntax::fields(&first, delimiter, 0);
+        let name = header.get(column).map(|n| n.trim().to_string()).filter(|n| !n.is_empty() && line > 0);
+        Some((column + 1, name))
+    }
+
     /// The scanner colouring this file when Null has no grammar for it (Swift, Kotlin…).
     pub fn basic_syntax(&self) -> Option<&'static crate::basic_syntax::Basic> {
         if self.highlighter.is_some() {

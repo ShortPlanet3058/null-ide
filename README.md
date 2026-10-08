@@ -9,8 +9,8 @@ without ever making it the center of the room.
 > Status: **pre-alpha**, used daily on macOS. An editor with language servers, git, a
 > terminal, tests and a debugger, syntax highlighting for Rust, Python, JavaScript,
 > TypeScript, JSON, TOML, Markdown, HTML, CSS, Go, C, C++, YAML and shell scripts (and basic
-> colouring for Swift, Kotlin, Java, C#, Dart, Ruby, PHP, Lua, SQL, Dockerfiles, Makefiles and XML), and AI
-> that stays out of the way until called.
+> colouring for Swift, Kotlin, Java, C#, Dart, Ruby, PHP, Lua, SQL, Dockerfiles, Makefiles, XML,
+> and CSV/TSV by column), and AI that stays out of the way until called.
 
 ## Building
 
@@ -122,6 +122,9 @@ doesn't need Xcode's separate Metal Toolchain download.
   colour picked there is written back the way the first was (one undo takes it back).
 - Code the language server says is unused (an import, a variable) is drawn faded, and a
   deprecated name struck through.
+- CSV and TSV files: each column in a colour of its own, so one can be followed down the
+  rows (quoted fields, `;` from a French spreadsheet, line breaks in quotes understood), and
+  the status bar names the caret's column from the first line (`price (column 3)`).
 - A file's language comes from its name, or else its first line: a script without an
   extension (`#!/usr/bin/env python3`, `#!/bin/bash`), an untitled file you paste into,
   `<?xml`, `<!DOCTYPE html>`. A click on the language's name in the status bar (or ⌘K
