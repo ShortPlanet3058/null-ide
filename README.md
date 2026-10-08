@@ -225,7 +225,8 @@ numbers can show everywhere, only in code, or nowhere.
 
 - **⌘⇧B** runs what the project defines (Cargo, package.json scripts, Make, just, Go).
 - **⌥⌘T** runs the test at the caret (Rust, Go, pytest, vitest, jest), or all of a file's.
-- The terminal (**⌃\`**, more with **⌃⇧\`**): ⌘-click a `file:line:col` or a link in its
+- The terminal (**⌃\`**, more with **⌃⇧\`**; a double-click on one's name renames it, and a
+  tab's menu opens one in its file's folder): ⌘-click a `file:line:col` or a link in its
   output to open it, **⌘F** searches it. **Run Selection in Terminal** (⌘K) runs the lines
   selected, or steps through a script line by line.
   A command that ran 10 seconds or more says when it's done: while you're in another app the
