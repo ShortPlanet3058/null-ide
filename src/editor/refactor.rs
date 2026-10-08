@@ -455,6 +455,9 @@ impl Editor {
             }
             return;
         };
+        // A paste still being formatted: the whole file's formatting covers it (and its
+        // answer, landing first, would make this one look out of date).
+        self.paste_format_task = None;
         let revision = self.buffer.revision();
         let request = lsp.read(cx).format(
             &path,

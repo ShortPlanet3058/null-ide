@@ -552,8 +552,9 @@ pub struct Workspace {
     compare_from: Option<Entity<Editor>>,
     /// Where the last edit was made, in any file: Go to Last Edit goes back there.
     last_edit: Option<Place>,
-    /// Commands run from ⌘⇧B, the last first.
-    recent_runs: Vec<String>,
+    /// Commands run from ⌘⇧B, the last first, and the task each was (by name): a task
+    /// naming the file comes back for the file at hand, not the one it ran on.
+    recent_runs: Vec<(String, Option<String>)>,
     /// The debugger, and its panel (shown while debugging, and after, until closed).
     debugger: Entity<crate::debugger::Debugger>,
     debug_panel_open: bool,
@@ -701,6 +702,9 @@ impl Workspace {
         cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_git(cx);
+            } else {
+                // ⌃ let go elsewhere (another Space, Mission Control): the tab reached stays.
+                this.settle_switch();
             }
         })
         .detach();
@@ -2220,7 +2224,8 @@ impl Workspace {
                 }));
                 // Still possible (another move, dropped together, may have taken the name since)?
                 // If not, nothing that names it changes either.
-                if !from.exists() || (to != from && to.exists()) {
+                // (A new case for the same name, on a disk that ignores case, is the same file.)
+                if !from.exists() || (to != from && to.exists() && !crate::fs_ops::same_file(&from, &to)) {
                     let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     return this.show_notice(format!("Couldn't move it: {name} is taken there"), cx);
                 }
@@ -2272,6 +2277,10 @@ impl Workspace {
                 moved_to(path, print, changed, &open)
             })
             .collect();
+        // Nothing moved: the files' selection (what's picked in them) stays as it is.
+        if moves.is_empty() {
+            return;
+        }
         for (from, to) in moves {
             // An earlier move (its folder's) may have taken this one along already.
             if self.tabs.iter().any(|t| t.editor.read(cx).path().is_some_and(|p| p.starts_with(&from))) {
@@ -2354,9 +2363,12 @@ impl Workspace {
         }
         // The one passing on that side gives way (it was never edited, or it'd be kept).
         let gives_way = passing
-            .then(|| self.tabs.iter().find(|t| t.passing && t.side == wanted && !t.pinned))
+            .then(|| {
+                self.tabs
+                    .iter()
+                    .find(|t| t.passing && t.side == wanted && !t.pinned && !t.editor.read(cx).buffer.is_dirty())
+            })
             .flatten()
-            .filter(|t| !t.editor.read(cx).buffer.is_dirty())
             .map(|t| t.editor.clone());
         let lsp = self.lsp.clone();
         let editor = cx.new(|cx| Editor::open(path, Some(lsp), cx));
@@ -2510,8 +2522,11 @@ impl Workspace {
             }),
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 EditorEvent::Edited => {
-                    // Edited: worth keeping.
+                    // Edited: worth keeping, and its copy on the other side too.
                     this.keep_tab(editor, cx);
+                    for twin in this.twins_of(editor, cx) {
+                        this.keep_tab(&twin, cx);
+                    }
                     if let Some(path) = editor.read(cx).path() {
                         let place = Place { path: path.to_path_buf(), point: editor.read(cx).caret_point() };
                         this.last_edit = Some(place);
@@ -2894,6 +2909,8 @@ impl Workspace {
             self.stacked = stacked;
         }
         self.tabs[ix].side = to;
+        // Moved on purpose: kept.
+        self.tabs[ix].passing = false;
         let left_behind = self.side_tabs(from);
         let neighbour = left_behind.iter().find(|&&i| i >= ix).or(left_behind.last());
         self.shown[from] = neighbour.map(|&i| self.tabs[i].editor.clone());
@@ -3444,6 +3461,15 @@ impl Workspace {
         if self.used.len() < 2 {
             return;
         }
+        // Still switching, but another tab was shown meanwhile (a click): start from it.
+        let active = self.active_editor().map(|e| e.entity_id());
+        if self.switching.is_some_and(|at| self.used.get(at).copied() != active) {
+            self.settle_switch();
+            if let Some(id) = active {
+                self.used.retain(|u| *u != id);
+                self.used.insert(0, id);
+            }
+        }
         let at = self.switching.unwrap_or(0) as isize;
         let next = (at + if back { -1 } else { 1 }).rem_euclid(self.used.len() as isize) as usize;
         self.switching = Some(next);
@@ -3878,10 +3904,10 @@ impl Workspace {
                 this.close_palette(window, cx);
                 this.open_paths(vec![path], window, cx);
             }
-            PaletteEvent::RunCommand(command) => {
-                let command = command.clone();
+            PaletteEvent::RunCommand(command, task) => {
+                let (command, task) = (command.clone(), task.clone());
                 this.close_palette(window, cx);
-                this.run_in_terminal(command, window, cx);
+                this.run_in_terminal(command, task, window, cx);
             }
             PaletteEvent::CreateBranch(name) => {
                 let name = name.clone();
@@ -4546,7 +4572,7 @@ impl Workspace {
             let e = editor.read(cx);
             (editor.entity_id(), e.caret_point().0, e.file_name())
         };
-        let Some(items) = self.outline_items(&editor, 4_000_000, cx) else {
+        let Some(items) = self.outline_items(&editor, 1_000_000, cx) else {
             return quiet(format!("{name} is too long for an outline"));
         };
         if items.is_empty() {
@@ -5340,8 +5366,9 @@ impl Workspace {
         let file = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let mut tasks = crate::tasks::find(&root, file.as_deref(), &cx.global::<Settings>().tasks);
         // Run lately: first, whether the project lists them or they were typed.
-        for command in self.recent_runs.iter().rev() {
-            let task = match tasks.iter().position(|t| &t.command == command) {
+        for (command, name) in self.recent_runs.iter().rev() {
+            let same_task = name.as_ref().and_then(|name| tasks.iter().position(|t| &t.label == name));
+            let task = match same_task.or_else(|| tasks.iter().position(|t| &t.command == command)) {
                 Some(i) => tasks.remove(i),
                 None => {
                     crate::tasks::ProjectTask { label: command.clone(), command: command.clone(), source: "run lately" }
@@ -5368,13 +5395,13 @@ impl Workspace {
             }
         }
         self.show_notice(format!("Running {}", run.name), cx);
-        self.run_in_terminal(run.command, window, cx);
+        self.run_in_terminal(run.command, None, window, cx);
     }
 
     /// Types `command` into the terminal (opening it first if needed) and runs it.
-    fn run_in_terminal(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.recent_runs.retain(|c| c != &command);
-        self.recent_runs.insert(0, command.clone());
+    fn run_in_terminal(&mut self, command: String, task: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.recent_runs.retain(|(c, t)| c != &command && (task.is_none() || t != &task));
+        self.recent_runs.insert(0, (command.clone(), task));
         self.recent_runs.truncate(10);
         if !self.terminal_open.on {
             self.toggle_terminal(&ToggleTerminal, window, cx);
@@ -6311,7 +6338,7 @@ impl Workspace {
                 let missing = editor.missing;
                 let group = format!("tab-{ix}");
                 let pinned = tab.pinned;
-                let passing = tab.passing;
+                let passing = tab.passing && cx.global::<Settings>().preview_tabs;
                 let pin_editor = tab.editor.clone();
                 // Unsaved: a small dot, which turns into the close button under the pointer.
                 // Pinned: a pin in its place, which unpins.
@@ -6960,7 +6987,8 @@ impl Render for Workspace {
         let switch = self.render_sidebar_switch(cx);
         let sidebar_content = if self.sidebar_search.on {
             div().flex_1().min_h_0().pt(px(6.)).child(self.project_search.clone())
-        } else if self.sidebar_outline {
+        } else if self.sidebar_outline && sidebar_width > 0.5 {
+            // (Read only while it shows.)
             div().flex_1().min_h_0().child(self.render_outline(cx))
         } else {
             div().flex_1().min_h_0().child(self.tree.clone())
@@ -6975,7 +7003,10 @@ impl Render for Workspace {
                 let e = editor.read(cx);
                 (e.caret_point().0, e.preview.is_none() && !e.reading && e.extra.is_empty())
             };
-            let items = self.outline_items(&editor, 300_000, cx).filter(|_| plain)?;
+            if !plain {
+                return None;
+            }
+            let items = self.outline_items(&editor, 300_000, cx)?;
             let trail = crate::outline::trail(&items, row);
             (!trail.is_empty()).then(|| trail.join(" › "))
         });
@@ -7157,7 +7188,8 @@ impl Render for Workspace {
                 .child(right)
         } else {
             // While a tab is dragged, the right half offers to open it there, and the bottom
-            // below. (Unsplit, the only thing Null drags is a tab.)
+            // below: each shows itself with the tab over it (files dragged from the tree, or
+            // the Finder, pass through unseen).
             let dragging_tab = cx.has_active_drag() && self.tabs.len() > 1;
             div().relative().size_full().child(div().size_full().child(pane(self, 0, cx))).when(dragging_tab, |body| {
                 body.child(
@@ -7172,12 +7204,12 @@ impl Render for Workspace {
                         .items_center()
                         .justify_center()
                         .text_size(px(ui::T_MD))
-                        .text_color(theme_now.muted)
+                        .text_color(gpui::transparent_black())
                         .border_t_1()
-                        .border_color(theme_now.hairline)
+                        .border_color(gpui::transparent_black())
                         .drag_over::<DraggedTab>({
-                            let tint = theme_now.accent_soft;
-                            move |style, _, _, _| style.bg(tint)
+                            let (tint, text, line) = (theme_now.accent_soft, theme_now.muted, theme_now.hairline);
+                            move |style, _, _, _| style.bg(tint).text_color(text).border_color(line)
                         })
                         .child("Open below")
                         .on_drop(cx.listener(|this, dragged: &DraggedTab, window, cx| {
@@ -7197,12 +7229,12 @@ impl Render for Workspace {
                         .items_center()
                         .justify_center()
                         .text_size(px(ui::T_MD))
-                        .text_color(theme_now.muted)
+                        .text_color(gpui::transparent_black())
                         .border_l_1()
-                        .border_color(theme_now.hairline)
+                        .border_color(gpui::transparent_black())
                         .drag_over::<DraggedTab>({
-                            let tint = theme_now.accent_soft;
-                            move |style, _, _, _| style.bg(tint)
+                            let (tint, text, line) = (theme_now.accent_soft, theme_now.muted, theme_now.hairline);
+                            move |style, _, _, _| style.bg(tint).text_color(text).border_color(line)
                         })
                         .child("Open on the right")
                         .on_drop(cx.listener(|this, dragged: &DraggedTab, window, cx| {

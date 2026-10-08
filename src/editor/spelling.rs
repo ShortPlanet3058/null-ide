@@ -18,25 +18,25 @@ const GUESSES: usize = 5;
 
 /// Which lines of a Markdown text are inside fences (``` or ~~~): code, not prose.
 fn fenced_lines(rope: &ropey::Rope) -> Vec<bool> {
-    let mut fence: Option<char> = None;
+    // The fence a block opened with, while in one: only a run as long closes it.
+    let mut fence: Option<String> = None;
     // The text once, its lines as the editor counts them: no copy of each line.
     let text = rope.to_string();
     crate::markdown_view::buffer_lines(&text)
         .into_iter()
         .map(|line| {
             let start = line.trim_start_matches(' ');
-            let opens = [('`', "```"), ('~', "~~~")].into_iter().find(|(_, f)| start.starts_with(f)).map(|(c, _)| c);
-            match (fence, opens) {
-                (Some(open), Some(c)) if c == open => {
-                    fence = None;
+            match &fence {
+                Some(open) => {
+                    if crate::markdown_view::closes(start, open) {
+                        fence = None;
+                    }
                     true
                 }
-                (Some(_), _) => true,
-                (None, Some(c)) => {
-                    fence = Some(c);
-                    true
+                None => {
+                    fence = crate::markdown_view::fence_of(start).map(str::to_string);
+                    fence.is_some()
                 }
-                (None, None) => false,
             }
         })
         .collect()

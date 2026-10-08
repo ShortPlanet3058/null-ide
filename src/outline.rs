@@ -21,28 +21,37 @@ fn indent_of(line: &str) -> usize {
 }
 
 /// The outline of `text` (the file at `path`): what ⌘⇧O lists, nested by indentation (a
-/// method inside its class), or for Markdown by the headings' levels.
+/// method inside its class), or for Markdown by the headings' levels. An item is left at
+/// the first line after it indented no deeper (its closing `}`, the next statement), so
+/// what follows isn't taken to be inside it.
 pub fn outline(path: &Path, text: &str) -> Vec<Item> {
-    let definitions = crate::project_index::definitions_in(path, text);
-    let lines: Vec<&str> = text.lines().collect();
+    let mut definitions = crate::project_index::definitions_in(path, text).into_iter().peekable();
+    let mut items = Vec::new();
     // The indents of the items it's inside, deepest last.
     let mut around: Vec<usize> = Vec::new();
-    definitions
-        .into_iter()
-        .map(|d| {
-            let depth = if d.kind.starts_with('#') {
-                d.kind.len() - 1
-            } else {
-                let indent = lines.get(d.row).map_or(0, |l| indent_of(l));
+    for (row, line) in text.lines().enumerate() {
+        let Some(d) = definitions.next_if(|d| d.row == row) else {
+            if !line.trim().is_empty() && !around.is_empty() {
+                let indent = indent_of(line);
                 while around.last().is_some_and(|&a| a >= indent) {
                     around.pop();
                 }
-                around.push(indent);
-                around.len() - 1
-            };
-            Item { name: d.name, kind: d.kind, row: d.row, depth }
-        })
-        .collect()
+            }
+            continue;
+        };
+        let depth = if d.kind.starts_with('#') {
+            d.kind.len() - 1
+        } else {
+            let indent = indent_of(line);
+            while around.last().is_some_and(|&a| a >= indent) {
+                around.pop();
+            }
+            around.push(indent);
+            around.len() - 1
+        };
+        items.push(Item { name: d.name, kind: d.kind, row: d.row, depth });
+    }
+    items
 }
 
 /// The item the caret on `row` is in: the last one starting at or above it.
@@ -84,6 +93,18 @@ mod tests {
         assert_eq!(current(&items, 8), Some(3));
         assert_eq!(trail(&items, 5), ["Shop", "close"]);
         assert_eq!(trail(&items, 8), ["main"]);
+    }
+
+    /// Rust's methods sit in an `impl`, which isn't an item: not inside what came before it.
+    #[test]
+    fn what_ends_isn_t_a_parent() {
+        let rust = "fn helper() {}\n\nstruct Shop;\n\nimpl Shop {\n    fn open(&self) {}\n}\n\nfn main() {\n    let x = 1;\n}\n";
+        let items = outline(Path::new("shop.rs"), rust);
+        assert_eq!(short(&items), [("helper", 0, 0), ("Shop", 2, 0), ("open", 5, 0), ("main", 8, 0)]);
+        assert_eq!(trail(&items, 5), ["open"]);
+        // A class's own lines between its methods don't end it.
+        let python = "class A:\n    x = 1\n    def f(self):\n        pass\n";
+        assert_eq!(short(&outline(Path::new("a.py"), python)), [("A", 0, 0), ("f", 2, 1)]);
     }
 
     #[test]

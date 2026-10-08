@@ -2129,8 +2129,17 @@ impl Editor {
         let before: String = line_text.chars().take(col).collect();
         let Some((next, empty)) = crate::markdown_view::continuation(&before) else { return false };
         // Inside a fenced code block, Enter is just Enter.
-        let fences = (0..line).filter(|&l| self.buffer.line_text(l).trim_start().starts_with("```")).count();
-        if fences % 2 == 1 {
+        let mut fence: Option<String> = None;
+        for l in 0..line {
+            let text = self.buffer.line_text(l);
+            let text = text.trim_start();
+            match &fence {
+                Some(open) if crate::markdown_view::closes(text, open) => fence = None,
+                Some(_) => {}
+                None => fence = crate::markdown_view::fence_of(text).map(str::to_string),
+            }
+        }
+        if fence.is_some() {
             return false;
         }
         let start = self.buffer.line_to_char(line);
