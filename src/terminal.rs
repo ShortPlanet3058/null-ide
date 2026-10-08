@@ -153,6 +153,8 @@ pub enum TerminalEvent {
     OpenFile(PathBuf, Option<u32>, Option<u32>),
     /// A command that ran a while finished: its name, and how long it took.
     Finished(String, std::time::Duration),
+    /// A command finished: its name, and what it printed.
+    Ran(String, String),
 }
 
 /// A link the mouse is over while ⌘ is held: its row (as the grid counts, history
@@ -178,6 +180,8 @@ pub struct TerminalView {
     pub title: String,
     /// A name given to it, over the one its folder gives.
     pub name: Option<String>,
+    /// Where the output of the command running began (see `output_mark`).
+    run_mark: Option<usize>,
     /// The program running in the shell now (`cargo`), while one is.
     pub running: Option<String>,
     selecting: bool,
@@ -267,7 +271,7 @@ impl TerminalView {
             cx.spawn(async move |this, cx| {
                 let mut running = None;
                 loop {
-                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                    cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
                     let now = watch.program();
                     let name = now.as_ref().map(|(_, name)| name.clone());
                     let finished = crate::terminal_watch::step(
@@ -278,6 +282,16 @@ impl TerminalView {
                     );
                     let Ok(()) = this.update(cx, |this, cx| {
                         if this.running != name {
+                            // Started: where its output begins. Ended: what it printed.
+                            match (this.running.take(), &name) {
+                                (None, Some(_)) => this.run_mark = Some(this.output_mark()),
+                                (Some(ran), None) => {
+                                    if let Some(mark) = this.run_mark.take() {
+                                        cx.emit(TerminalEvent::Ran(ran, this.output_since(mark)));
+                                    }
+                                }
+                                _ => {}
+                            }
                             this.running = name;
                             cx.emit(TerminalEvent::TitleChanged);
                         }
@@ -305,6 +319,7 @@ impl TerminalView {
             cell: (px(8.), px(16.)),
             title: String::new(),
             name: None,
+            run_mark: None,
             running: None,
             selecting: false,
             mouse_held: None,
@@ -513,6 +528,40 @@ impl TerminalView {
         self.find = None;
         window.focus(&self.focus_handle);
         cx.notify();
+    }
+
+    /// The folder the shell started in: relative paths in its output are from here.
+    pub fn folder(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Where the output stands: the line the cursor's on, counted from the top of the
+    /// history (so it keeps its place as lines scroll into it).
+    fn output_mark(&self) -> usize {
+        let term = self.term.lock();
+        let grid = term.grid();
+        grid.history_size() + grid.cursor.point.line.0.max(0) as usize
+    }
+
+    /// The text from line `mark` (see `output_mark`) to the cursor: a row wrapped onto the
+    /// next joined to it, the last 5,000 lines at most.
+    fn output_since(&self, mark: usize) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let history = grid.history_size() as i32;
+        let (first, last) = ((mark as i32 - history).max(-history), grid.cursor.point.line.0);
+        let first = first.max(last - 5000);
+        let mut out = String::new();
+        for line in first..=last {
+            let row = &grid[Line(line)];
+            let text: String = (0..grid.columns()).map(|c| row[Column(c)].c).collect();
+            let wrapped = row[Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE);
+            out.push_str(if wrapped { &text } else { text.trim_end() });
+            if !wrapped {
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// Looks through the output (history included) for the field's text. A new search

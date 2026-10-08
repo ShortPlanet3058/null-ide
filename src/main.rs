@@ -39,6 +39,7 @@ mod markdown_view;
 mod menus;
 mod palette;
 mod preview;
+mod problem_matcher;
 mod project_index;
 mod project_search;
 mod punctuation;

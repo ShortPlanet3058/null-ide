@@ -525,6 +525,8 @@ pub struct Workspace {
     debug_show_output: bool,
     /// The paused call's variables the code shows, with values worth showing.
     debug_locals: Vec<(String, String)>,
+    /// The problems the last command in the terminal reported (a build's errors).
+    reported: Vec<(PathBuf, lsp_types::Diagnostic)>,
     /// The shown terminal's new name, being typed.
     terminal_rename: Option<TerminalRename>,
     /// Where an expression to watch is typed, under the variables while paused.
@@ -725,6 +727,7 @@ impl Workspace {
             debug_locals: Vec::new(),
             debug_watch: cx.new(|cx| crate::text_input::TextInput::new("Watch an expression", cx)),
             terminal_rename: None,
+            reported: Vec::new(),
             debug_program: None,
             focus_mode: false,
             tab_menu: None,
@@ -4491,6 +4494,53 @@ impl Workspace {
 
     /// Every problem the servers report, where it is now: open files say where their
     /// problems moved to while editing.
+    /// What a command in the terminal printed: its errors and warnings join the Problems
+    /// list and F8 (the previous command's go), and a line says how many.
+    fn read_reported(&mut self, name: &str, output: &str, folder: &Path, cx: &mut Context<Self>) {
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+        let root = self.tree.read(cx).root().to_path_buf();
+        let resolve = |file: &str| {
+            let path = Path::new(file);
+            [path.to_path_buf(), folder.join(path), root.join(path)]
+                .into_iter()
+                .find(|p| p.is_absolute() && p.is_file())
+        };
+        let reported: Vec<(PathBuf, Diagnostic)> = crate::problem_matcher::problems(output)
+            .into_iter()
+            .filter_map(|p| {
+                let path = resolve(&p.file)?;
+                let at = Position::new(p.line.saturating_sub(1), p.column.saturating_sub(1));
+                let severity = if p.error { DiagnosticSeverity::ERROR } else { DiagnosticSeverity::WARNING };
+                let diagnostic = Diagnostic {
+                    range: Range::new(at, at),
+                    severity: Some(severity),
+                    source: Some(name.to_string()),
+                    message: p.message,
+                    ..Default::default()
+                };
+                Some((path, diagnostic))
+            })
+            .collect();
+        let had = !self.reported.is_empty();
+        self.reported = reported;
+        if self.reported.is_empty() {
+            if had {
+                cx.notify();
+            }
+            return;
+        }
+        let errors = self.reported.iter().filter(|(_, d)| d.severity == Some(DiagnosticSeverity::ERROR)).count();
+        let warnings = self.reported.len() - errors;
+        let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+        let counted = match (errors, warnings) {
+            (e, 0) => plural(e, "error"),
+            (0, w) => plural(w, "warning"),
+            (e, w) => format!("{}, {}", plural(e, "error"), plural(w, "warning")),
+        };
+        let keys = crate::palette::shortcut(&ShowProblems, cx).unwrap_or_default();
+        self.show_notice(format!("{name}: {counted} · {keys} lists them"), cx);
+    }
+
     fn problem_places(&self, cx: &App) -> Vec<(PathBuf, lsp_types::Diagnostic)> {
         let mut open: Vec<(PathBuf, Vec<lsp_types::Diagnostic>)> = Vec::new();
         for tab in &self.tabs {
@@ -4511,6 +4561,17 @@ impl Workspace {
             .collect();
         for (path, list) in open {
             found.extend(list.into_iter().map(|d| (path.clone(), d)));
+        }
+        // What the last command in the terminal reported, unless a server says it too.
+        for (path, reported) in &self.reported {
+            let known = found.iter().any(|(p, d)| {
+                p == path
+                    && d.range.start.line == reported.range.start.line
+                    && d.message.eq_ignore_ascii_case(&reported.message)
+            });
+            if !known {
+                found.push((path.clone(), reported.clone()));
+            }
         }
         found
     }
@@ -5139,6 +5200,10 @@ impl Workspace {
                 } else if !shown {
                     this.show_notice(message, cx);
                 }
+            }
+            TerminalEvent::Ran(name, output) => {
+                let folder = terminal.read(cx).folder().to_path_buf();
+                this.read_reported(name, output, &folder, cx);
             }
             TerminalEvent::OpenFile(path, line, column) => {
                 this.open_file(path.clone(), window, cx);
@@ -8888,6 +8953,38 @@ mod tests {
         assert_eq!(Workspace::named_terminal_label(None, "ada@mac:~/code/null", 0), "null");
         assert_eq!(Workspace::terminal_name("ada@mac:~/code/null"), "null");
         assert_eq!(Workspace::terminal_name("cargo run"), "cargo run");
+    }
+
+    /// A command's output in the terminal: its problems in files that exist join the list
+    /// F8 and ⌘⇧M go through; the next command's replace them.
+    #[gpui::test]
+    fn problems_printed_in_the_terminal_are_listed(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("terminal-problems");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.c"), "int main() { return x; }\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update(cx, |w, cx| {
+            let output = "src/main.c:1:21: error: use of undeclared identifier 'x'\ngone.c:3:1: error: not here\n";
+            w.read_reported("make", output, &dir, cx);
+            let places = w.problem_places(cx);
+            assert_eq!(places.len(), 1, "only files that exist: {places:?}");
+            let (path, d) = &places[0];
+            assert_eq!(path, &dir.join("src/main.c"));
+            assert_eq!((d.range.start.line, d.range.start.character), (0, 20));
+            assert_eq!(d.source.as_deref(), Some("make"));
+            // The next command, clean: they go.
+            w.read_reported("make", "nothing to be done\n", &dir, cx);
+            assert!(w.problem_places(cx).is_empty());
+        });
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A pinned tab goes first, stays through "Close Others" and "Close All", and is kept
