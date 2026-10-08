@@ -26,6 +26,9 @@ pub struct Basic {
     any_case: bool,
     /// Capitalised names are types (most languages here).
     capital_types: bool,
+    /// Data in columns (CSV, TSV), split by this: each column in a colour of its own. A comma
+    /// stands for a semicolon too, when the first line has more of those.
+    pub delimiter: Option<u8>,
 }
 
 const SWIFT: &[&str] = &[
@@ -568,6 +571,7 @@ static BASICS: &[Basic] = &[
         keywords: SWIFT,
         any_case: false,
         capital_types: true,
+        delimiter: None,
     },
     Basic {
         name: "Kotlin",
@@ -581,6 +585,7 @@ static BASICS: &[Basic] = &[
         keywords: KOTLIN,
         any_case: false,
         capital_types: true,
+        delimiter: None,
     },
     Basic {
         name: "Java",
@@ -594,6 +599,7 @@ static BASICS: &[Basic] = &[
         keywords: JAVA,
         any_case: false,
         capital_types: true,
+        delimiter: None,
     },
     Basic {
         name: "C#",
@@ -607,6 +613,7 @@ static BASICS: &[Basic] = &[
         keywords: CSHARP,
         any_case: false,
         capital_types: true,
+        delimiter: None,
     },
     Basic {
         name: "Dart",
@@ -620,6 +627,7 @@ static BASICS: &[Basic] = &[
         keywords: DART,
         any_case: false,
         capital_types: true,
+        delimiter: None,
     },
     Basic {
         name: "Ruby",
@@ -633,6 +641,7 @@ static BASICS: &[Basic] = &[
         keywords: RUBY,
         any_case: false,
         capital_types: true,
+        delimiter: None,
     },
     Basic {
         name: "PHP",
@@ -646,6 +655,7 @@ static BASICS: &[Basic] = &[
         keywords: PHP,
         any_case: false,
         capital_types: true,
+        delimiter: None,
     },
     Basic {
         name: "Lua",
@@ -659,6 +669,7 @@ static BASICS: &[Basic] = &[
         keywords: LUA,
         any_case: false,
         capital_types: false,
+        delimiter: None,
     },
     Basic {
         name: "SQL",
@@ -672,6 +683,7 @@ static BASICS: &[Basic] = &[
         keywords: SQL,
         any_case: true,
         capital_types: false,
+        delimiter: None,
     },
     Basic {
         name: "Dockerfile",
@@ -685,6 +697,7 @@ static BASICS: &[Basic] = &[
         keywords: DOCKERFILE,
         any_case: true,
         capital_types: false,
+        delimiter: None,
     },
     Basic {
         name: "Makefile",
@@ -698,6 +711,7 @@ static BASICS: &[Basic] = &[
         keywords: &["ifeq", "ifneq", "ifdef", "ifndef", "else", "endif", "include", "define", "endef", "export"],
         any_case: false,
         capital_types: false,
+        delimiter: None,
     },
     Basic {
         name: "XML",
@@ -711,10 +725,38 @@ static BASICS: &[Basic] = &[
         keywords: &[],
         any_case: false,
         capital_types: false,
+        delimiter: None,
+    },
+    Basic {
+        name: "CSV",
+        extensions: &["csv"],
+        file_names: &[],
+        line_comment: &[],
+        block_comment: None,
+        quotes: b"",
+        long_string: None,
+        escapes: false,
+        keywords: &[],
+        any_case: false,
+        capital_types: false,
+        delimiter: Some(b','),
+    },
+    Basic {
+        name: "TSV",
+        extensions: &["tsv", "tab"],
+        file_names: &[],
+        line_comment: &[],
+        block_comment: None,
+        quotes: b"",
+        long_string: None,
+        escapes: false,
+        keywords: &[],
+        any_case: false,
+        capital_types: false,
+        delimiter: Some(b'\t'),
     },
 ];
 
-/// The scanner for a file Null has no grammar for, if it knows its language.
 impl Basic {
     /// The extension a new file in this language gets (`swift`), if it has one.
     pub fn extension(&self) -> Option<&'static str> {
@@ -732,6 +774,7 @@ pub fn all() -> &'static [Basic] {
     BASICS
 }
 
+/// The scanner for a file Null has no grammar for, if it knows its language.
 pub fn for_path(path: &Path) -> Option<&'static Basic> {
     let name = path.file_name()?.to_str()?;
     if let Some(basic) = BASICS.iter().find(|b| b.file_names.contains(&name)) {
@@ -741,12 +784,112 @@ pub fn for_path(path: &Path) -> Option<&'static Basic> {
     BASICS.iter().find(|b| b.extensions.contains(&ext.as_str()))
 }
 
+/// The colours columns take in turn, so one can be followed down the rows.
+const COLUMN_COLOURS: [Syntax; 6] =
+    [Syntax::Plain, Syntax::Type, Syntax::Function, Syntax::String, Syntax::Keyword, Syntax::Property];
+
+/// What splits the columns: a CSV from a spreadsheet set to French (or German…) uses `;`.
+pub fn delimiter_of(text: &[u8], delimiter: u8) -> u8 {
+    if delimiter != b',' {
+        return delimiter;
+    }
+    let first = text.split(|&b| b == b'\n').next().unwrap_or(&[]);
+    let count = |d: u8| first.iter().filter(|&&b| b == d).count();
+    if count(b';') > count(b',') { b';' } else { b',' }
+}
+
+/// Each column of `text` in its colour, the delimiters faint. Quoted fields can hold the
+/// delimiter, `""` and line breaks.
+fn column_spans(text: &[u8], wanted: Range<usize>, delimiter: u8) -> Vec<Span> {
+    let mut found: Vec<Span> = Vec::new();
+    let (mut column, mut start, mut quoted, mut i) = (0usize, 0usize, false, 0usize);
+    let field_end = |found: &mut Vec<Span>, start: usize, end: usize, column: usize| {
+        if start < end && end > wanted.start && start < wanted.end {
+            found.push((start..end, COLUMN_COLOURS[column % COLUMN_COLOURS.len()]));
+        }
+    };
+    while i < text.len() {
+        let b = text[i];
+        if quoted {
+            if b == b'"' {
+                if text.get(i + 1) == Some(&b'"') {
+                    i += 1;
+                } else {
+                    quoted = false;
+                }
+            }
+        } else if b == b'"' && i == start {
+            quoted = true;
+        } else if b == delimiter || b == b'\n' {
+            // A line's `\r` isn't the field's.
+            let end = if b == b'\n' && i > start && text[i - 1] == b'\r' { i - 1 } else { i };
+            field_end(&mut found, start, end, column);
+            if b == delimiter {
+                if i >= wanted.start && i < wanted.end {
+                    found.push((i..i + 1, Syntax::Punctuation));
+                }
+                column += 1;
+            } else {
+                column = 0;
+                // Past what's wanted: done.
+                if i >= wanted.end {
+                    return found;
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    field_end(&mut found, start, text.len(), column);
+    found
+}
+
+/// The fields of one line of data (quotes taken off, `""` made `"`), and the field the
+/// byte `at` is in.
+pub fn fields(line: &str, delimiter: u8, at: usize) -> (Vec<String>, usize) {
+    let (mut fields, mut field, mut quoted, mut column) = (Vec::new(), String::new(), false, None);
+    let mut chars = line.char_indices().peekable();
+    let mut fresh = true;
+    while let Some((i, c)) = chars.next() {
+        if i >= at && column.is_none() {
+            column = Some(fields.len());
+        }
+        if quoted {
+            if c == '"' {
+                if chars.peek().is_some_and(|(_, n)| *n == '"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                }
+            } else {
+                field.push(c);
+            }
+        } else if c == '"' && fresh {
+            quoted = true;
+        } else if c as u32 == u32::from(delimiter) {
+            fields.push(std::mem::take(&mut field));
+            fresh = true;
+            continue;
+        } else if c != '\r' {
+            field.push(c);
+        }
+        fresh = false;
+    }
+    fields.push(field);
+    let column = column.unwrap_or(fields.len() - 1);
+    (fields, column)
+}
+
 /// Past this size, a file isn't scanned (the scan runs from its start).
 pub const MAX_BYTES: usize = 1024 * 1024;
 
 /// The coloured spans of `text` (bytes) that touch `wanted`, in order. The scan starts at the
 /// top, so comments and strings spanning lines are known.
 pub fn spans(text: &[u8], wanted: Range<usize>, basic: &Basic) -> Vec<Span> {
+    if let Some(delimiter) = basic.delimiter {
+        return column_spans(text, wanted, delimiter_of(text, delimiter));
+    }
     let mut found: Vec<Span> = Vec::new();
     let mut push = |range: Range<usize>, syntax: Syntax| {
         if range.end > wanted.start && range.start < wanted.end {
@@ -1037,5 +1180,45 @@ mod tests {
         assert!(coloured("a.php", "$list = [];\n").is_empty());
         assert!(coloured("a.xml", "<s>Don't save</s>\n").is_empty());
         assert!(!coloured("a.rb", "x=begin\ny\n").iter().any(|(_, s)| *s == Syntax::Comment));
+    }
+
+    #[test]
+    fn columns_take_colours_in_turn() {
+        let text = b"name,price,\"note, with comma\"\r\nbread,1.20,\"say \"\"hi\"\"\nthere\"\nwine,9,x\n";
+        let csv = for_path(std::path::Path::new("a.csv")).unwrap();
+        let spans = spans(text, 0..text.len(), csv);
+        let shown: Vec<(&str, Syntax)> =
+            spans.iter().map(|(r, s)| (std::str::from_utf8(&text[r.clone()]).unwrap(), *s)).collect();
+        assert_eq!(
+            shown,
+            [
+                ("name", Syntax::Plain),
+                (",", Syntax::Punctuation),
+                ("price", Syntax::Type),
+                (",", Syntax::Punctuation),
+                ("\"note, with comma\"", Syntax::Function),
+                ("bread", Syntax::Plain),
+                (",", Syntax::Punctuation),
+                ("1.20", Syntax::Type),
+                (",", Syntax::Punctuation),
+                ("\"say \"\"hi\"\"\nthere\"", Syntax::Function),
+                ("wine", Syntax::Plain),
+                (",", Syntax::Punctuation),
+                ("9", Syntax::Type),
+                (",", Syntax::Punctuation),
+                ("x", Syntax::Function),
+            ]
+        );
+    }
+
+    #[test]
+    fn data_is_split_as_written() {
+        assert_eq!(delimiter_of(b"a;b;c\n1,5;2;3", b','), b';', "a French spreadsheet's CSV");
+        assert_eq!(delimiter_of(b"a,b;c\n", b','), b',');
+        assert_eq!(delimiter_of(b"a\tb", b'\t'), b'\t');
+        let (fields, at) = fields("bread,\"1,20\",\"a \"\"b\"\"\"", b',', 8);
+        assert_eq!((fields, at), (vec!["bread".to_string(), "1,20".into(), "a \"b\"".into()], 1));
+        assert_eq!(super::fields("a,b", b',', 3).1, 1, "at the end: the last column");
+        assert_eq!(super::fields("é,b", b',', 3).1, 1);
     }
 }
