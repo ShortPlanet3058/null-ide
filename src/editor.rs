@@ -121,6 +121,20 @@ actions!(
     [IndentWithTabs, IndentWith2Spaces, IndentWith4Spaces, UseLfLineEndings, UseCrlfLineEndings, UseUtf8Encoding]
 );
 
+/// Reads the file again as this encoding (one taken for another shows its accents garbled).
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = file_style, no_json)]
+pub struct ReopenWithEncoding {
+    pub encoding: crate::encoding::Encoding,
+}
+
+/// Writes the file in this encoding, from the next save.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = file_style, no_json)]
+pub struct SaveWithEncoding {
+    pub encoding: crate::encoding::Encoding,
+}
+
 actions!(
     editor,
     [
@@ -2701,12 +2715,55 @@ impl Editor {
 
     /// Saves the file as UTF-8 from now on: the text stays, its bytes change on the next save.
     pub fn use_utf8(&mut self, cx: &mut Context<Self>) {
-        if self.encoding != crate::encoding::Encoding::Utf8 && self.preview.is_none() {
-            self.encoding = crate::encoding::Encoding::Utf8;
-            self.buffer.mark_unsaved();
-            cx.emit(EditorEvent::Edited);
-            cx.notify();
+        self.set_encoding(crate::encoding::Encoding::Utf8, cx);
+    }
+
+    /// Saves the file in `encoding` from now on: the text stays, its bytes change on the
+    /// next save. Not when the text has a character the encoding can't hold.
+    pub fn set_encoding(&mut self, encoding: crate::encoding::Encoding, cx: &mut Context<Self>) {
+        if self.encoding == encoding || self.preview.is_some() {
+            return;
         }
+        if let Err(c) = crate::encoding::encode(&self.buffer.to_string(), encoding) {
+            let message = format!("{} can't hold “{c}”: the file stays {}.", encoding.label(), self.encoding.label());
+            return self.show_notice(self.selection.head, message, cx);
+        }
+        self.encoding = encoding;
+        self.buffer.mark_unsaved();
+        cx.emit(EditorEvent::Edited);
+        cx.notify();
+    }
+
+    /// Reads the file again as `encoding`, for one taken for another (its accents
+    /// garbled), or not taken for text at all (UTF-16 without its mark). Not over unsaved
+    /// changes, nor when its bytes aren't text in it.
+    pub fn reopen_with(&mut self, encoding: crate::encoding::Encoding, cx: &mut Context<Self>) {
+        let text_or_not = matches!(self.preview, None | Some(crate::preview::Preview::NotText { .. }));
+        let Some(path) = self.path.clone().filter(|_| text_or_not) else { return };
+        let at = self.selection.head;
+        if self.buffer.is_dirty() {
+            return self.show_notice(at, "Save or undo the changes first: this reads the file again.".into(), cx);
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            return self.show_notice(at, "The file couldn't be read.".into(), cx);
+        };
+        let Some(text) = crate::encoding::decode_exactly(&bytes, encoding) else {
+            return self.show_notice(at, format!("This file isn't {} text.", encoding.label()), cx);
+        };
+        // Text after all: shown as such.
+        self.preview = None;
+        self.encoding = encoding;
+        self.on_disk = Some(fingerprint(&text));
+        if text != self.buffer.to_string() {
+            let (line, column) = self.caret_point();
+            self.record_undo(EditKind::Other);
+            self.buffer.replace(0..self.buffer.len_chars(), &text);
+            self.buffer.mark_saved();
+            self.single_cursor();
+            self.selection = Selection::caret(self.buffer.offset(line, column));
+            self.text_changed(cx);
+        }
+        cx.notify();
     }
 
     pub fn set_line_ending(&mut self, ending: crate::file_style::LineEnding, cx: &mut Context<Self>) {
@@ -3968,6 +4025,8 @@ impl Render for Editor {
                 this.set_line_ending(crate::file_style::LineEnding::Crlf, cx)
             }))
             .on_action(cx.listener(|this, _: &UseUtf8Encoding, _, cx| this.use_utf8(cx)))
+            .on_action(cx.listener(|this, a: &ReopenWithEncoding, _, cx| this.reopen_with(a.encoding, cx)))
+            .on_action(cx.listener(|this, a: &SaveWithEncoding, _, cx| this.set_encoding(a.encoding, cx)))
             .on_action(cx.listener(Self::toggle_markdown_preview))
             .on_action(cx.listener(Self::keep_hunk))
             .on_action(cx.listener(Self::undo_hunk))
@@ -4415,6 +4474,7 @@ impl Editor {
         let theme = cx.global::<Theme>();
         let (muted, faint) = (theme.muted, theme.faint);
         let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+        let commands = crate::palette::shortcut(&crate::workspace::ShowCommands, cx).unwrap_or_else(|| "⌘K".into());
         let note = move |text: String| {
             div()
                 .flex()
@@ -4439,13 +4499,22 @@ impl Editor {
                     .child(div().text_size(px(crate::ui::T_SM)).text_color(faint).child(preview.summary()))
                     .into_any_element()
             }
+            // Text in another encoding, maybe (UTF-16 without its mark): ⌘K says how.
             _ => note(format!("{} isn't text", name.unwrap_or_else(|| "This file".into())))
                 .child(div().text_size(px(crate::ui::T_SM)).text_color(faint).child(preview.summary()))
+                .child(
+                    div()
+                        .text_size(px(crate::ui::T_SM))
+                        .text_color(faint)
+                        .child(format!("If it's text in another encoding: {commands}, “Encoding: Reopen as…”")),
+                )
                 .into_any_element(),
         };
         div()
             .key_context("Preview")
             .track_focus(&self.focus_handle)
+            // Read as text in the encoding it's in, if it's text after all.
+            .on_action(cx.listener(|this, a: &ReopenWithEncoding, _, cx| this.reopen_with(a.encoding, cx)))
             .size_full()
             .flex()
             .items_center()
@@ -4897,6 +4966,43 @@ mod tests {
         });
         cx.simulate_keystrokes("enter");
         assert_eq!(code.read_with(cx, |e, _| e.buffer.to_string()), "```\n- item\n");
+    }
+
+    /// A file taken for another encoding is read again as the right one; one is saved in
+    /// another only when it can hold the text.
+    #[gpui::test]
+    fn a_file_is_read_again_in_another_encoding(cx: &mut TestAppContext) {
+        use crate::encoding::Encoding;
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = crate::tools::test_dir("encodings");
+        std::fs::create_dir_all(&dir).unwrap();
+        // UTF-16 without its mark: NULs between the letters, so not taken for text.
+        let path = dir.join("names.txt");
+        std::fs::write(&path, b"h\0i\0").unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(path.clone(), None, cx));
+        editor.update(cx, |e, cx| {
+            assert!(matches!(e.preview, Some(crate::preview::Preview::NotText { .. })));
+            e.reopen_with(Encoding::Utf16Le, cx);
+            assert_eq!((e.buffer.to_string(), e.encoding), ("hi".to_string(), Encoding::Utf16Le));
+            assert!(e.preview.is_none(), "text after all");
+            assert!(!e.buffer.is_dirty(), "read, not changed");
+            // Saved as Windows-1252 from now on, unless the text has what it can't hold.
+            e.set_encoding(Encoding::Windows1252, cx);
+            assert_eq!(e.encoding, Encoding::Windows1252);
+            e.buffer.replace(0..2, "日");
+            e.set_encoding(Encoding::Windows1252, cx);
+            e.set_encoding(Encoding::Utf8, cx);
+            e.set_encoding(Encoding::Windows1252, cx);
+            assert_eq!(e.encoding, Encoding::Utf8, "1252 can't hold 日");
+            // With unsaved changes, it isn't read again.
+            e.reopen_with(Encoding::Utf16Le, cx);
+            assert_eq!(e.buffer.to_string(), "日");
+        });
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[gpui::test]
