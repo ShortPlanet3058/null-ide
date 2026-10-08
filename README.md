@@ -48,6 +48,7 @@ Getting around:
 | ⌘, | all settings |
 | ⌃G | go to a line |
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
+| **Outline** (over the files) | the file's functions and types, a method inside its class (in Markdown, its headings); the one you're in is marked, a click goes there |
 | ⌘P `file:42:7` | open a file at a place, as compilers print it |
 | ⌘F | find in the file (with lines selected, only in them); ↑ ↓ bring back earlier searches, ⌥↵ puts a cursor on every match; ⌘E searches for the selection, ⌘G the next |
 | ⌘⇧F / ⌘⇧H | search / replace across the project (the chevron also picks which files: `*.rs, src/, !tests`; **Tabs**, only the files open) |

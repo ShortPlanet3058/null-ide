@@ -19,8 +19,9 @@ use crate::ui;
 use crate::welcome::{Welcome, WelcomeEvent};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, SharedString,
-    Subscription, Task, Window, WindowControlArea, actions, div, prelude::*, px, relative, svg,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, ScrollStrategy,
+    SharedString, Subscription, Task, UniformListScrollHandle, Window, WindowControlArea, actions, div, prelude::*, px,
+    relative, svg, uniform_list,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -131,6 +132,7 @@ actions!(
         SearchProject,
         ReplaceInProject,
         ShowFiles,
+        ShowOutline,
         ToggleAutocomplete,
         ToggleTerminal,
         NewTerminal,
@@ -474,6 +476,13 @@ pub struct Workspace {
     project_search: Entity<ProjectSearch>,
     /// On while the sidebar shows project search instead of files.
     sidebar_search: Transition,
+    /// The sidebar shows the open file's outline instead of the files (when not searching).
+    sidebar_outline: bool,
+    /// The outline last read: whose (an editor), at which revision of its text.
+    outline: Option<(gpui::EntityId, u64, std::rc::Rc<Vec<crate::outline::Item>>)>,
+    outline_scroll: UniformListScrollHandle,
+    /// The item the caret was in when last drawn: the list follows it to another.
+    outline_followed: Option<(gpui::EntityId, usize)>,
     tabs: Vec<Tab>,
     /// The tab with the keyboard: the one shown on the side being worked in.
     active: Option<usize>,
@@ -702,6 +711,10 @@ impl Workspace {
             lsp,
             project_search,
             sidebar_search: Transition::new(false),
+            sidebar_outline: false,
+            outline: None,
+            outline_scroll: UniformListScrollHandle::new(),
+            outline_followed: None,
             tabs: Vec::new(),
             shown: [None, None],
             split_ratio: 0.5,
@@ -3420,6 +3433,7 @@ impl Workspace {
             (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
+            (View, "Show Outline".into(), Box::new(ShowOutline)),
             (View, toggle(settings.word_wrap, "Stop Wrapping Lines", "Wrap Lines"), Box::new(ToggleWordWrap)),
             (
                 View,
@@ -4361,10 +4375,119 @@ impl Workspace {
     }
 
     fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_outline = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
         cx.notify();
+    }
+
+    fn show_outline(&mut self, _: &ShowOutline, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_outline = true;
+        self.outline_followed = None;
+        self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        self.leave_hidden_focus(window, cx);
+        cx.notify();
+    }
+
+    /// Goes to line `row` of the open file from its outline, the text taking the keys.
+    fn go_to_outline_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let here = self.here(cx);
+        self.remember_place(here);
+        editor.update(cx, |e, cx| e.go_to_line(row + 1, cx));
+        window.focus(&editor.focus_handle(cx));
+    }
+
+    /// The Outline view: the open file's functions and types (its headings, in Markdown),
+    /// the one the caret is in marked; a click goes there.
+    fn render_outline(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.global::<Theme>().clone();
+        let quiet = |text: String| {
+            div().px(px(18.)).pt(px(14.)).text_size(px(ui::T_MD)).text_color(theme.faint).child(text).into_any_element()
+        };
+        let Some(editor) = self.active_editor().cloned() else {
+            return quiet("Open a file to see its outline".into());
+        };
+        let (id, revision, row, name) = {
+            let e = editor.read(cx);
+            (editor.entity_id(), e.buffer.revision(), e.caret_point().0, e.file_name())
+        };
+        let items = match &self.outline {
+            Some((i, r, items)) if *i == id && *r == revision => items.clone(),
+            _ => {
+                let e = editor.read(cx);
+                // Very long files (a log, a bundle): not read again at each keystroke.
+                if e.buffer.len_chars() > 4_000_000 {
+                    return quiet(format!("{name} is too long for an outline"));
+                }
+                let path = e.path().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(&name));
+                let items = std::rc::Rc::new(crate::outline::outline(&path, &e.buffer.to_string()));
+                self.outline = Some((id, revision, items.clone()));
+                items
+            }
+        };
+        if items.is_empty() {
+            return quiet(format!("No functions or types in {name}"));
+        }
+        let current = crate::outline::current(&items, row);
+        // The caret went into another: the list brings it into view.
+        if let Some(ix) = current
+            && self.outline_followed != Some((id, ix))
+        {
+            self.outline_followed = Some((id, ix));
+            self.outline_scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        }
+        uniform_list(
+            "outline",
+            items.len(),
+            cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
+                let theme = cx.global::<Theme>().clone();
+                range
+                    .map(|ix| {
+                        let item = &items[ix];
+                        let here = current == Some(ix);
+                        let heading = item.kind.starts_with('#');
+                        let row = item.row;
+                        // The sidebar's width, inset a little so the highlight has rounded ends.
+                        let line = div()
+                            .id(("outline-row", ix))
+                            .w_full()
+                            .h(px(ui::ROW))
+                            .pl(px(12. + 14. * item.depth.min(8) as f32))
+                            .pr(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .rounded(px(ui::R_ROW))
+                            .cursor_pointer()
+                            .text_size(px(ui::T_MD))
+                            .text_color(if here { theme.foreground } else { theme.muted })
+                            .when(here, |r| r.bg(theme.hairline))
+                            .when(!here, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                            // Code by its name in the code's font, the word defining it beside it;
+                            // a heading as written, its depth saying its level.
+                            .child(
+                                div().min_w_0().truncate().when(!heading, |d| d.code_font(cx)).child(item.name.clone()),
+                            )
+                            .when(!heading, |r| {
+                                r.child(
+                                    div().flex_none().text_size(px(ui::T_SM)).text_color(theme.faint).child(item.kind),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.go_to_outline_row(row, window, cx)
+                            }));
+                        div().w_full().px(px(6.)).child(line).into_any_element()
+                    })
+                    .collect()
+            }),
+        )
+        .track_scroll(self.outline_scroll.clone())
+        .size_full()
+        .pt(px(6.))
+        .into_any_element()
     }
 
     /// When the focused field is about to disappear (the search box when switching
@@ -4388,6 +4511,7 @@ impl Workspace {
     fn render_sidebar_switch(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>();
         let searching = self.sidebar_search.on;
+        let outlining = !searching && self.sidebar_outline;
         let tab = |id: &'static str, label: &'static str, on: bool| {
             ui::segment(on, theme)
                 .id(id)
@@ -4403,8 +4527,11 @@ impl Workspace {
             .pt(px(10.))
             .child(
                 ui::segmented(theme)
-                    .child(tab("files", "Files", !searching).active(|s| s.opacity(0.7)).on_click(
+                    .child(tab("files", "Files", !searching && !outlining).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
+                    ))
+                    .child(tab("outline", "Outline", outlining).active(|s| s.opacity(0.7)).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_outline(&ShowOutline, window, cx)),
                     ))
                     .child(tab("search", "Search", searching).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
@@ -6700,6 +6827,8 @@ impl Render for Workspace {
         let switch = self.render_sidebar_switch(cx);
         let sidebar_content = if self.sidebar_search.on {
             div().flex_1().min_h_0().pt(px(6.)).child(self.project_search.clone())
+        } else if self.sidebar_outline {
+            div().flex_1().min_h_0().child(self.render_outline(cx))
         } else {
             div().flex_1().min_h_0().child(self.tree.clone())
         };
@@ -7511,6 +7640,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::search_project))
             .on_action(cx.listener(Self::show_files))
+            .on_action(cx.listener(Self::show_outline))
             .on_action(cx.listener(Self::quit))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             // In Focus mode, only a strip to drag the window by.
@@ -8592,6 +8722,53 @@ mod tests {
         cx.simulate_keystrokes("enter");
         settle(cx);
         assert_eq!(git(&["branch", "--show-current"]).unwrap(), "fix-typo");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Outline view: the open file's functions and types, read again only when it
+    /// changes; one picked takes the caret there.
+    #[gpui::test]
+    fn the_outline_follows_the_file(cx: &mut gpui::TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        let dir = crate::tools::test_dir("outline");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shop.py"),
+            "class Shop:\n    def open(self):\n        pass\n\ndef main():\n    pass\n",
+        )
+        .unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("shop.py"), window, cx);
+            w.show_outline(&ShowOutline, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |w, window, cx| {
+            let names: Vec<(String, usize)> =
+                w.outline.as_ref().unwrap().2.iter().map(|i| (i.name.clone(), i.depth)).collect();
+            assert_eq!(names, [("Shop".into(), 0), ("open".into(), 1), ("main".into(), 0)]);
+            w.go_to_outline_row(4, window, cx);
+            assert_eq!(w.active_editor().unwrap().read(cx).caret_point(), (4, 0));
+            // Typed into: read again.
+            w.active_editor().unwrap().update(cx, |e, cx| {
+                e.set_caret_point((5, 0), cx);
+                e.replace_text_in_range(None, "\ndef stop():\n    pass\n", window, cx);
+            });
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |w, window, cx| {
+            assert_eq!(w.outline.as_ref().unwrap().2.len(), 4);
+            w.show_files(&ShowFiles, window, cx);
+            assert!(!w.sidebar_outline);
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 
