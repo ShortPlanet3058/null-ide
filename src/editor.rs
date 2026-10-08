@@ -513,8 +513,11 @@ pub struct Editor {
     pub encoding: crate::encoding::Encoding,
     /// The view's height when last drawn, to keep the caret in view as it shrinks.
     pub viewport_height: Option<f32>,
-    /// Markdown shown as it reads (⌘⇧V) instead of its source.
+    /// Markdown shown as it reads (⌘⇧V) instead of its source, or an SVG drawn.
     pub reading: bool,
+    /// The SVG drawn (and its size in points), for the revision and screen scale it's of.
+    #[allow(clippy::type_complexity)]
+    svg_image: Option<(u64, f32, Option<(std::sync::Arc<gpui::RenderImage>, (f32, f32))>)>,
     /// The parsed document for the preview, and the revision it's of.
     #[allow(clippy::type_complexity)]
     markdown: Option<(u64, Rc<Vec<(usize, crate::markdown_view::Block)>>)>,
@@ -757,6 +760,7 @@ impl Editor {
             encoding: Default::default(),
             viewport_height: None,
             reading: false,
+            svg_image: None,
             markdown: None,
             followed_line: None,
             reading_scroll: gpui::ScrollHandle::new(),
@@ -2910,7 +2914,7 @@ impl Editor {
                     .flex_col()
                     .gap(px(6.))
                     .child(
-                        gpui::img(path)
+                        gpui::img(crate::svg_image::source(&path))
                             .max_w(px(320.))
                             .max_h(px(220.))
                             .object_fit(gpui::ObjectFit::ScaleDown)
@@ -3819,9 +3823,12 @@ impl EntityInputHandler for Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(preview) = &self.preview {
             return self.render_preview(preview, cx);
+        }
+        if self.reading && self.is_svg() {
+            return self.render_svg(window, cx);
         }
         if self.reading {
             return self.render_reading(cx);
@@ -4121,9 +4128,9 @@ impl Editor {
 
     /// ⌘⇧V: Markdown as it reads, or back to its source.
     pub fn toggle_markdown_preview(&mut self, _: &ToggleMarkdownPreview, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_markdown() && !self.reading {
+        if !self.is_markdown() && !self.is_svg() && !self.reading {
             let at = self.selection.head;
-            return self.show_notice(at, "The preview is for Markdown files.".into(), cx);
+            return self.show_notice(at, "The preview is for Markdown and SVG files.".into(), cx);
         }
         self.reading = !self.reading;
         self.close_completion(cx);
@@ -4174,6 +4181,69 @@ impl Editor {
     }
 
     /// The preview: the document drawn as it reads, in a column, scrolling.
+    /// An SVG file: drawn by its name, whatever language it's shown in.
+    pub fn is_svg(&self) -> bool {
+        self.path.as_ref().and_then(|p| p.extension()).is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+    }
+
+    /// ⌘⇧V on an SVG: the drawing its text makes now (unsaved edits too), on a light card
+    /// so black strokes show on a dark theme; ⎋ or ⌘⇧V goes back to the text.
+    fn render_svg(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let revision = self.buffer.revision();
+        let scale = window.scale_factor();
+        let drawn = match &self.svg_image {
+            Some((r, s, drawn)) if *r == revision && *s == scale => drawn.clone(),
+            _ => {
+                let drawn = crate::svg_image::draw(self.buffer.to_string().as_bytes(), scale);
+                self.svg_image = Some((revision, scale, drawn.clone()));
+                drawn
+            }
+        };
+        let theme = cx.global::<Theme>();
+        let (muted, hairline) = (theme.muted, theme.hairline);
+        let mut context = KeyContext::new_with_defaults();
+        context.add("Editor");
+        context.add("MarkdownPreview");
+        div()
+            .key_context(context)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::toggle_markdown_preview))
+            .on_action(cx.listener(Self::save))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(32.))
+            .font_family(cx.global::<Fonts>().ui.clone())
+            .child(
+                div()
+                    .max_w_full()
+                    .max_h_full()
+                    .p(px(24.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(hairline)
+                    .bg(gpui::white())
+                    .child(match drawn {
+                        // At its own size in points (drawn at the screen's scale: sharp), smaller
+                        // to fit.
+                        Some((image, (width, height))) => gpui::img(gpui::ImageSource::Render(image))
+                            .w(px(width))
+                            .h(px(height))
+                            .max_w_full()
+                            .max_h_full()
+                            .object_fit(gpui::ObjectFit::Contain)
+                            .into_any_element(),
+                        None => div()
+                            .text_size(px(crate::ui::T_MD))
+                            .text_color(muted)
+                            .child("This SVG doesn't draw yet")
+                            .into_any_element(),
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn render_reading(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let revision = self.buffer.revision();
         let blocks = match &self.markdown {

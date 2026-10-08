@@ -1578,7 +1578,7 @@ fn image(alt: &str, url: &str, style: &Style) -> AnyElement {
     if local && file.is_file() {
         let alt = alt.to_string();
         let faint = theme.faint;
-        return img(file)
+        return img(crate::svg_image::source(&file))
             .max_w_full()
             .with_fallback(move || div().text_color(faint).child(alt.clone()).into_any_element())
             .into_any_element();
