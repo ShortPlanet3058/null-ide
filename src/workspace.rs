@@ -140,6 +140,7 @@ actions!(
         SaveAs,
         SaveAll,
         ReopenClosedTab,
+        TogglePinTab,
         CloseAllTabs,
         CloseOtherTabs,
         UseNvidia,
@@ -227,6 +228,8 @@ pub fn bind_keys(cx: &mut App) {
 /// What a tab's right-click menu offers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TabMenuItem {
+    Pin,
+    Unpin,
     Close,
     CloseOthers,
     CloseToTheRight,
@@ -241,6 +244,8 @@ enum TabMenuItem {
 impl TabMenuItem {
     fn label(self) -> &'static str {
         match self {
+            TabMenuItem::Pin => "Pin Tab",
+            TabMenuItem::Unpin => "Unpin Tab",
             TabMenuItem::Close => "Close",
             TabMenuItem::CloseOthers => "Close Others",
             TabMenuItem::CloseToTheRight => "Close Tabs to the Right",
@@ -255,7 +260,7 @@ impl TabMenuItem {
 
     /// Items that start a group get a line above them.
     fn starts_group(self) -> bool {
-        matches!(self, TabMenuItem::CopyPath | TabMenuItem::OtherSide)
+        matches!(self, TabMenuItem::Close | TabMenuItem::CopyPath | TabMenuItem::OtherSide)
     }
 }
 
@@ -427,6 +432,8 @@ struct Tab {
     editor: Entity<Editor>,
     /// Which side it's on: 0 left (or the only one), 1 right.
     side: usize,
+    /// Kept at the front of its side, and out of "Close Others" and the like.
+    pinned: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -775,6 +782,7 @@ impl Workspace {
                     conditions: editor.breakpoint_conditions.clone(),
                     bookmarks: editor.bookmarks.clone(),
                     language: editor.chosen_language().map(str::to_string),
+                    pinned: tab.pinned,
                 })
             })
             .collect::<Vec<_>>();
@@ -833,6 +841,11 @@ impl Workspace {
                     }
                     editor.restore_view(tab.line, tab.column, tab.top_line, cx)
                 });
+            }
+            if tab.pinned
+                && let Some(a) = self.active
+            {
+                self.tabs[a].pinned = true;
             }
         }
         if let Some(ratio) = session.split_ratio {
@@ -2486,7 +2499,8 @@ impl Workspace {
         if let Some(a) = self.active.filter(|&a| a >= ix) {
             self.active = Some(a + 1);
         }
-        self.tabs.insert(ix, Tab { editor, side, _subscriptions: subscriptions });
+        self.tabs.insert(ix, Tab { editor, side, pinned: false, _subscriptions: subscriptions });
+        self.keep_pinned_first();
         self.activate(ix, window, cx);
     }
 
@@ -2715,6 +2729,9 @@ impl Workspace {
             }
             self.shown = [None, None];
         }
+        let moved = self.tabs[ix].editor.clone();
+        self.keep_pinned_first();
+        let ix = self.tabs.iter().position(|t| t.editor == moved).unwrap_or(ix);
         self.show_tab(ix, true, window, cx);
     }
 
@@ -2753,6 +2770,9 @@ impl Workspace {
             }
             self.shown = [None, None];
         }
+        // Dropped among the pinned ones: it goes after them (they stay first).
+        self.keep_pinned_first();
+        let at = self.tabs.iter().position(|t| &t.editor == editor).unwrap_or(at);
         self.show_tab(at, true, window, cx);
     }
 
@@ -3033,14 +3053,62 @@ impl Workspace {
     }
 
     fn close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
-        let editors = self.tabs.iter().map(|t| t.editor.clone()).collect();
+        let editors = self.unpinned().collect();
         self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
     }
 
     fn close_other_tabs(&mut self, _: &CloseOtherTabs, window: &mut Window, cx: &mut Context<Self>) {
         let active = self.active_editor().cloned();
-        let editors = self.tabs.iter().map(|t| t.editor.clone()).filter(|e| Some(e) != active.as_ref()).collect();
+        let editors = self.unpinned().filter(|e| Some(e) != active.as_ref()).collect();
         self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
+    }
+
+    /// The tabs that aren't pinned: what closing "all" or "the others" means.
+    fn unpinned(&self) -> impl Iterator<Item = Entity<Editor>> + '_ {
+        self.tabs.iter().filter(|t| !t.pinned).map(|t| t.editor.clone())
+    }
+
+    /// Pins a tab (to the front of its side, after the other pinned ones) or unpins it
+    /// (just after them).
+    fn set_pinned(&mut self, editor: &Entity<Editor>, pinned: bool, cx: &mut Context<Self>) {
+        let Some(ix) = self.tabs.iter().position(|t| &t.editor == editor) else { return };
+        if self.tabs[ix].pinned == pinned {
+            return;
+        }
+        let active = self.active.map(|a| self.tabs[a].editor.clone());
+        let mut tab = self.tabs.remove(ix);
+        tab.pinned = pinned;
+        let side = tab.side;
+        // After the last pinned tab of that side (or where the side starts).
+        let at = self
+            .tabs
+            .iter()
+            .rposition(|t| t.side == side && t.pinned)
+            .map(|i| i + 1)
+            .or_else(|| self.tabs.iter().position(|t| t.side == side))
+            .unwrap_or(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.active = active.and_then(|a| self.tabs.iter().position(|t| t.editor == a));
+        self.schedule_session_save(cx);
+        cx.notify();
+    }
+
+    /// Pinned tabs first on each side, the order otherwise kept (after a tab is added,
+    /// moved or dropped among them). Each side keeps its own places in the list.
+    fn keep_pinned_first(&mut self) {
+        let active = self.active.map(|a| self.tabs[a].editor.clone());
+        let mut slots: Vec<Option<Tab>> = std::mem::take(&mut self.tabs).into_iter().map(Some).collect();
+        for side in 0..2 {
+            let places: Vec<usize> =
+                (0..slots.len()).filter(|&i| slots[i].as_ref().is_some_and(|t| t.side == side)).collect();
+            let mut tabs: Vec<Tab> = places.iter().filter_map(|&i| slots[i].take()).collect();
+            tabs.sort_by_key(|t| !t.pinned);
+            for (place, tab) in places.into_iter().zip(tabs) {
+                slots[place] = Some(tab);
+            }
+        }
+        self.tabs = slots.into_iter().flatten().collect();
+        self.active = active.and_then(|a| self.tabs.iter().position(|t| t.editor == a));
     }
 
     fn reopen_closed_tab(&mut self, _: &ReopenClosedTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -3472,6 +3540,10 @@ impl Workspace {
                 let label = format!("Language: {name}{}", current(name == now));
                 commands.push((View, label, Box::new(crate::editor::SetLanguage { name })));
             }
+        }
+        if let Some(tab) = self.active.and_then(|a| self.tabs.get(a)) {
+            let label = if tab.pinned { "Unpin Tab" } else { "Pin Tab" };
+            commands.push((View, label.into(), Box::new(TogglePinTab)));
         }
         commands.push((App, "Welcome to Null…".into(), Box::new(ShowWelcome)));
         commands.push((App, "Quit Null".into(), Box::new(Quit)));
@@ -5694,10 +5766,18 @@ impl Workspace {
                 let dirty = editor.buffer.is_dirty();
                 let missing = editor.missing;
                 let group = format!("tab-{ix}");
+                let pinned = tab.pinned;
                 // Unsaved: a small dot, which turns into the close button under the pointer.
+                // Pinned: a pin in its place, which unpins.
                 let close = div()
                     .id(("close", ix))
-                    .tooltip(ui::tip("Close", Some(Box::new(CloseTab))))
+                    .map(|d| {
+                        if pinned {
+                            d.tooltip(ui::tip("Unpin", None))
+                        } else {
+                            d.tooltip(ui::tip("Close", Some(Box::new(CloseTab))))
+                        }
+                    })
                     .relative()
                     .size(px(16.))
                     .flex_none()
@@ -5721,14 +5801,24 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .when(dirty || !active, |d| d.invisible())
+                            .when(dirty || (!active && !pinned), |d| d.invisible())
                             .group_hover(group.clone(), |s| s.visible())
-                            .child(svg().path("icons/x.svg").size(px(10.)).text_color(theme.muted)),
+                            .child(
+                                svg()
+                                    .path(if pinned { "icons/pin.svg" } else { "icons/x.svg" })
+                                    .size(px(if pinned { 11. } else { 10. }))
+                                    .text_color(theme.muted),
+                            ),
                     )
                     .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
-                        this.close_tab_at(ix, window, cx);
+                        if pinned {
+                            let editor = this.tabs[ix].editor.clone();
+                            this.set_pinned(&editor, false, cx);
+                        } else {
+                            this.close_tab_at(ix, window, cx);
+                        }
                     }));
                 let (name, folder) = labels[ix].clone();
                 let dragged = DraggedTab { editor: tab.editor.clone(), label: name.clone().into() };
@@ -5802,7 +5892,7 @@ impl Workspace {
     fn tab_menu_items(&self, editor: &Entity<Editor>, cx: &App) -> Vec<TabMenuItem> {
         use TabMenuItem::*;
         let Some(ix) = self.tabs.iter().position(|t| &t.editor == editor) else { return Vec::new() };
-        let mut items = vec![Close];
+        let mut items = vec![if self.tabs[ix].pinned { Unpin } else { Pin }, Close];
         if self.tabs.len() > 1 {
             items.push(CloseOthers);
         }
@@ -5825,15 +5915,16 @@ impl Workspace {
         let Some(ix) = self.tabs.iter().position(|t| t.editor == editor) else { return };
         let path = editor.read(cx).path().map(Path::to_path_buf);
         match item {
+            TabMenuItem::Pin | TabMenuItem::Unpin => self.set_pinned(&editor, item == TabMenuItem::Pin, cx),
             TabMenuItem::Close => self.close_tab_at(ix, window, cx),
             TabMenuItem::CloseOthers => {
-                let others = self.tabs.iter().map(|t| t.editor.clone()).filter(|e| *e != editor).collect();
+                let others = self.unpinned().filter(|e| *e != editor).collect();
                 self.confirm_unsaved(CloseAction::CloseTabs(others), window, cx);
             }
             TabMenuItem::CloseToTheRight => {
                 let side = self.side_tabs(self.tabs[ix].side);
                 let after = side.iter().skip_while(|&&i| i != ix).skip(1);
-                let editors = after.map(|&i| self.tabs[i].editor.clone()).collect();
+                let editors = after.filter(|&&i| !self.tabs[i].pinned).map(|&i| self.tabs[i].editor.clone()).collect();
                 self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
             }
             TabMenuItem::CopyPath => self.copy_path(path.as_deref(), false, cx),
@@ -6877,6 +6968,12 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::keep_all_task_changes))
             .on_action(cx.listener(Self::undo_all_task_changes))
             .on_action(cx.listener(|this, _: &MoveTabRight, window, cx| this.move_tab_to(1, window, cx)))
+            .on_action(cx.listener(|this, _: &TogglePinTab, _, cx| {
+                if let Some(tab) = this.active.and_then(|a| this.tabs.get(a)) {
+                    let (editor, pinned) = (tab.editor.clone(), tab.pinned);
+                    this.set_pinned(&editor, !pinned, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &MoveTabLeft, window, cx| this.move_tab_to(0, window, cx)))
             .on_action(cx.listener(|this, _: &OpenOnOtherSide, window, cx| this.open_on_other_side(window, cx)))
             .on_action(cx.listener(Self::go_to_symbol))
@@ -8617,6 +8714,52 @@ mod tests {
         assert_eq!(Workspace::terminal_name("cargo run"), "cargo run");
     }
 
+    /// A pinned tab goes first, stays through "Close Others" and "Close All", and is kept
+    /// pinned with the session.
+    #[gpui::test]
+    fn pinned_tabs_stay(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("pinned-tabs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let names =
+            |w: &Workspace, cx: &App| -> Vec<String> { w.tabs.iter().map(|t| t.editor.read(cx).file_name()).collect() };
+        workspace.update_in(cx, |w, window, cx| {
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                w.open_file(dir.join(name), window, cx);
+            }
+            let c = w.tabs[2].editor.clone();
+            assert!(w.tab_menu_items(&c, cx).contains(&TabMenuItem::Pin));
+            w.tab_menu = Some(TabMenu { editor: c.clone(), position: Default::default() });
+            w.run_tab_menu_item(TabMenuItem::Pin, window, cx);
+            assert_eq!(names(w, cx), ["c.txt", "a.txt", "b.txt"], "first");
+            assert!(w.tab_menu_items(&c, cx).contains(&TabMenuItem::Unpin));
+            assert_eq!(w.active_editor(), Some(&c), "still the one shown");
+            // A tab opened next to it goes after it.
+            w.open_file(dir.join("d.txt"), window, cx);
+            assert_eq!(names(w, cx), ["c.txt", "d.txt", "a.txt", "b.txt"]);
+            let a = w.tabs[2].editor.clone();
+            w.tab_menu = Some(TabMenu { editor: a, position: Default::default() });
+            w.run_tab_menu_item(TabMenuItem::CloseOthers, window, cx);
+            assert_eq!(names(w, cx), ["c.txt", "a.txt"], "the pinned one stays");
+            let session = w.session(cx);
+            assert_eq!(session.tabs.iter().map(|t| t.pinned).collect::<Vec<_>>(), [true, false]);
+            w.close_all_tabs(&CloseAllTabs, window, cx);
+            assert_eq!(names(w, cx), ["c.txt"]);
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[gpui::test]
     fn a_tab_s_menu_closes_to_the_right_and_copies_its_path(cx: &mut gpui::TestAppContext) {
         let dir = crate::tools::test_dir("tab-menu");
@@ -8643,7 +8786,7 @@ mod tests {
             assert!(!w.tab_menu_items(&last, cx).contains(&CloseToTheRight));
             assert_eq!(
                 w.tab_menu_items(&first, cx),
-                [Close, CloseOthers, CloseToTheRight, CopyPath, CopyRelativePath, Reveal, OtherSide]
+                [Pin, Close, CloseOthers, CloseToTheRight, CopyPath, CopyRelativePath, Reveal, OtherSide]
             );
             w.tab_menu = Some(TabMenu { editor: last.clone(), position: Default::default() });
             w.run_tab_menu_item(CopyRelativePath, window, cx);

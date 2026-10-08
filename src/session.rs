@@ -43,6 +43,8 @@ pub struct TabState {
     pub bookmarks: Vec<usize>,
     /// The language chosen for the file, when it isn't the one its name says.
     pub language: Option<String>,
+    /// Pinned: kept first, and out of "Close Others".
+    pub pinned: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
