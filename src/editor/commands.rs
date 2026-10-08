@@ -963,16 +963,32 @@ mod editor_tests {
     #[gpui::test]
     fn saving_tidies_as_the_file_asks(cx: &mut TestAppContext) {
         let e = editor(cx, "a  \r\nb\nc", "x.txt");
+        // Written with both breaks, and nothing saying which: each kept as it is.
+        assert!(e.read_with(cx, |e, _| e.style.mixed_endings));
+        e.update(cx, |e, cx| {
+            e.style.line_ending = crate::file_style::LineEnding::Crlf;
+            e.tidy_for_save(false, cx);
+        });
+        assert_eq!(text(cx, &e), "a  \r\nb\nc");
+        // As .editorconfig asks: spaces, final break, and every break "\r\n".
         e.update(cx, |e, cx| {
             e.style.trim_trailing = true;
             e.style.final_newline = Some(true);
-            e.style.line_ending = crate::file_style::LineEnding::Crlf;
-            e.tidy_for_save(cx);
+            e.style.mixed_endings = false;
+            e.tidy_for_save(false, cx);
         });
         assert_eq!(text(cx, &e), "a\r\nb\r\nc\r\n");
         // One undo step takes it all back.
         e.update(cx, |e, cx| e.step_history(true, cx));
         assert_eq!(text(cx, &e), "a  \r\nb\nc");
+        // Saved by itself (auto save): the line being typed on keeps its space.
+        let e = editor(cx, "return \nx  \n", "x.txt");
+        e.update(cx, |e, cx| {
+            e.style.trim_trailing = true;
+            e.selection = super::super::Selection::caret(7);
+            e.tidy_for_save(true, cx);
+        });
+        assert_eq!(text(cx, &e), "return \nx\n");
     }
 
     #[gpui::test]

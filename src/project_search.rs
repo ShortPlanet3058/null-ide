@@ -672,7 +672,9 @@ pub fn expand(regex: Option<&regex::Regex>, matched: &str, replacement: &str, ke
 }
 
 /// The replacements to make in `text`: byte ranges and their new text, first to last,
-/// only on line `only_line` (zero-based) when given.
+/// only on line `only_line` (zero-based) when given. Line by line, as the search found
+/// them: what the preview showed is what changes (a regex like `\s+$` never takes a line
+/// break, which would join lines or drop the blank ones).
 pub fn replacements(
     text: &str,
     query: &SearchQuery,
@@ -680,33 +682,29 @@ pub fn replacements(
     only_line: Option<usize>,
 ) -> Vec<(Range<usize>, String)> {
     let Ok(regex) = query.build() else { return Vec::new() };
-    let span = match only_line {
-        Some(line) => {
-            let start: usize = text.split_inclusive('\n').take(line).map(str::len).sum();
-            let len = text[start.min(text.len())..].split_inclusive('\n').next().map_or(0, str::len);
-            start..start + len
-        }
-        None => 0..text.len(),
-    };
-    regex
-        .captures_iter(text)
-        .filter_map(|caps| {
-            let m = caps.get(0)?;
-            if m.is_empty() || m.start() < span.start || m.end() > span.end {
-                return None;
+    let mut out = Vec::new();
+    let mut line_start = 0;
+    for (n, piece) in text.split_inclusive('\n').enumerate() {
+        // The line as `str::lines` gives it to the search: without its break.
+        let line = piece.strip_suffix('\n').map_or(piece, |l| l.strip_suffix('\r').unwrap_or(l));
+        if only_line.is_none_or(|only| only == n) {
+            for caps in regex.captures_iter(line) {
+                let Some(m) = caps.get(0).filter(|m| !m.is_empty()) else { continue };
+                let new = if query.regex {
+                    let mut new = String::new();
+                    caps.expand(replacement, &mut new);
+                    new
+                } else if query.keeps_case(replacement) {
+                    crate::search::in_case_of(m.as_str(), replacement)
+                } else {
+                    replacement.to_string()
+                };
+                out.push((line_start + m.start()..line_start + m.end(), new));
             }
-            let new = if query.regex {
-                let mut out = String::new();
-                caps.expand(replacement, &mut out);
-                out
-            } else if query.keeps_case(replacement) {
-                crate::search::in_case_of(m.as_str(), replacement)
-            } else {
-                replacement.to_string()
-            };
-            Some((m.range(), new))
-        })
-        .collect()
+        }
+        line_start += piece.len();
+    }
+    out
 }
 
 /// A preview line as a replace would leave it: each match kept (to be struck through)
@@ -964,6 +962,20 @@ mod tests {
         assert_eq!(found[1].1, "new(2, 0)");
         // In a plain search, "$1" is just text.
         assert_eq!(replacements(text, &plain, "$1", Some(0))[0].1, "$1");
+        // A regex never takes a line break: stripping trailing spaces leaves blank lines be,
+        // in a Windows file too.
+        let trailing = SearchQuery { text: r"\s+$".into(), regex: true, ..Default::default() };
+        let apply = |text: &str| {
+            let mut out = text.to_string();
+            for (range, new) in replacements(text, &trailing, "", None).into_iter().rev() {
+                out.replace_range(range, &new);
+            }
+            out
+        };
+        assert_eq!(apply("foo  \n\nbar \n"), "foo\n\nbar\n");
+        assert_eq!(apply("a \r\n\r\nb\r\n"), "a\r\n\r\nb\r\n");
+        let commas = SearchQuery { text: r",\s*".into(), regex: true, ..Default::default() };
+        assert_eq!(replacements("a,\nb", &commas, ";", None), vec![(1..2, ";".into())]);
     }
 
     #[test]

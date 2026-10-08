@@ -61,6 +61,9 @@ pub struct FileStyle {
     pub trim_trailing: bool,
     /// The line length the project keeps to, when it says (a faint guide shows it).
     pub ruler: Option<usize>,
+    /// Written with both "\r\n" and "\n" breaks, and no `.editorconfig` saying which (a
+    /// spreadsheet's CSV, "\n" inside its cells): saving leaves each as it is.
+    pub mixed_endings: bool,
 }
 
 impl Default for FileStyle {
@@ -71,6 +74,7 @@ impl Default for FileStyle {
             final_newline: None,
             trim_trailing: false,
             ruler: None,
+            mixed_endings: false,
         }
     }
 }
@@ -91,6 +95,7 @@ impl FileStyle {
             final_newline: config.final_newline,
             trim_trailing: config.trim_trailing.unwrap_or(false),
             ruler: config.max_line_length.or_else(|| path.and_then(formatter_width)),
+            mixed_endings: config.line_ending.is_none() && has_mixed_endings(text),
         }
     }
 }
@@ -193,6 +198,12 @@ pub fn detect_indent(text: &str) -> Option<Indent> {
 }
 
 /// CRLF when most line breaks are, else LF.
+/// Both kinds of line break in `text`: "\r\n", and "\n" alone.
+fn has_mixed_endings(text: &str) -> bool {
+    let crlf = text.matches("\r\n").count();
+    crlf > 0 && text.matches('\n').count() > crlf
+}
+
 pub fn detect_line_ending(text: &str) -> LineEnding {
     let total = text.matches('\n').count();
     let crlf = text.matches("\r\n").count();

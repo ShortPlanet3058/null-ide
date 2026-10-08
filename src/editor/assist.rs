@@ -389,6 +389,13 @@ impl Editor {
         }
         let lines = prompt.lines.clone();
         let range = self.line_range_chars(&lines);
+        // The lines asked about changed meanwhile (typed into, moved by an edit above, read
+        // again from disk): the answer isn't written over what's there now.
+        if self.buffer.slice(range.clone()) != prompt.original {
+            let failed = "The code changed while the answer came. Ask again.";
+            self.prompt = Some(Prompting { writing: false, failed: Some(failed.into()), task: None, ..prompt });
+            return cx.notify();
+        }
         self.record_undo(EditKind::Other);
         self.buffer.replace(range.clone(), &text);
 
@@ -896,6 +903,13 @@ mod tests {
             e.undo_change(&UndoChange, window, cx);
             assert_eq!(e.buffer.to_string(), "def f(x):\n    return x / 0\n\nprint(f(1))\n");
             assert!(e.blocks.is_empty());
+            // A line added above while the answer came: it isn't written over the wrong lines.
+            e.selection = Selection::caret(2);
+            e.open_inline_assist(false, window, cx);
+            e.buffer.replace(0..0, "import os\n");
+            e.apply_change("def f(x):\n    return x / 2\n".into(), "halve".into(), cx);
+            assert_eq!(e.buffer.to_string(), "import os\ndef f(x):\n    return x / 0\n\nprint(f(1))\n");
+            assert!(e.prompt.as_ref().is_some_and(|p| p.failed.is_some()), "said, not applied");
         });
     }
 

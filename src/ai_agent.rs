@@ -56,7 +56,8 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
     ]
 }
 
-/// A path the model gave, inside the project; None when it would leave it.
+/// A path the model gave, inside the project; None when it would leave it, by `..` or
+/// through a link (a linked folder pointing elsewhere).
 fn inside(root: &Path, path: &str) -> Option<PathBuf> {
     let relative = Path::new(path.trim().trim_start_matches("./"));
     let relative = relative.strip_prefix(root).unwrap_or(relative);
@@ -64,7 +65,11 @@ fn inside(root: &Path, path: &str) -> Option<PathBuf> {
     {
         return None;
     }
-    Some(root.join(relative))
+    let path = root.join(relative);
+    // Where it really is: the deepest part that exists, links followed.
+    let real_root = root.canonicalize().ok()?;
+    let existing = path.ancestors().find(|p| p.exists())?;
+    existing.canonicalize().ok()?.starts_with(&real_root).then_some(path)
 }
 
 fn cut(mut text: String) -> String {
@@ -385,6 +390,18 @@ mod tests {
         // Never outside the project.
         assert!(run("read_file", json!({ "path": "../../etc/passwd" }), &mut on_event).contains("outside"));
         assert!(run("write_file", json!({ "path": "/tmp/x", "content": "" }), &mut on_event).contains("outside"));
+        // Nor through a linked folder that leads elsewhere.
+        let elsewhere = crate::tools::test_dir("agent-elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&elsewhere, root.join("linked")).unwrap();
+            assert!(
+                run("write_file", json!({ "path": "linked/x.rs", "content": "x" }), &mut on_event).contains("outside")
+            );
+            assert!(!elsewhere.join("x.rs").exists());
+        }
+        std::fs::remove_dir_all(&elsewhere).ok();
         assert_eq!(std::fs::read_to_string(root.join("src/a.rs")).unwrap(), "fn sum() {}\nfn other() {}\n");
         assert_eq!(seen, vec!["src/a.rs".to_string(), "src/new/b.rs".to_string()]);
         std::fs::remove_dir_all(&root).ok();

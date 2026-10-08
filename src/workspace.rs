@@ -1591,7 +1591,7 @@ impl Workspace {
         let e = editor.read(cx);
         // Not over a file that changed on disk: that waits for a save that asks.
         if e.buffer.is_dirty() && e.path().is_some() && !e.disk_changed {
-            editor.update(cx, |editor, cx| editor.save_to_disk(cx));
+            editor.update(cx, |editor, cx| editor.save_by_itself(cx));
         }
     }
 
@@ -2553,14 +2553,38 @@ impl Workspace {
                     cx.notify();
                 }
                 // Hand edits to the settings file take effect when saved.
+                EditorEvent::ReadFromDisk => {
+                    // Its other copy has what's on disk too (reloaded itself, or given it now):
+                    // the read isn't replayed on it as an edit (that doubled its end).
+                    let (text, saved) = {
+                        let e = editor.read(cx);
+                        (e.buffer.rope().clone(), !e.buffer.is_dirty())
+                    };
+                    for twin in this.twins_of(editor, cx) {
+                        if *twin.read(cx).buffer.rope() != text {
+                            twin.update(cx, |t, cx| t.apply_twin_edits(None, &text, saved, cx));
+                        }
+                        this.twin_seen.insert(twin.entity_id(), twin.read(cx).buffer.revision());
+                    }
+                    this.twin_seen.insert(editor.entity_id(), editor.read(cx).buffer.revision());
+                }
                 EditorEvent::Saved => {
                     this.schedule_backup(cx);
                     this.refresh_git_status(cx);
                     // Saving (and tidying) one copy saves the other: same text, same file.
                     this.sync_twins(editor, cx);
+                    let (text, on_disk) = {
+                        let e = editor.read(cx);
+                        (e.buffer.rope().clone(), e.on_disk)
+                    };
                     for twin in this.twins_of(editor, cx) {
                         twin.update(cx, |twin, cx| {
-                            twin.buffer.mark_saved();
+                            // Saved only if it reads the same: what's on disk now is this.
+                            if *twin.buffer.rope() == text {
+                                twin.buffer.mark_saved();
+                                twin.on_disk = on_disk;
+                                twin.disk_changed = false;
+                            }
                             cx.notify();
                         });
                     }
@@ -2578,6 +2602,13 @@ impl Workspace {
                     }
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
+                        // Not readable as written: said, and nothing saved over it meanwhile.
+                        if let Some(why) = Settings::unreadable() {
+                            this.show_notice(
+                                format!("settings.json can't be read ({why}): nothing changes until it's put right"),
+                                cx,
+                            );
+                        }
                         // A shortcut of yours that couldn't be understood: say which.
                         if let Some(problem) =
                             cx.try_global::<crate::user_keys::KeyProblems>().and_then(|p| p.0.first().cloned())
@@ -10435,6 +10466,15 @@ mod tests {
         cx.run_until_parked();
         assert!(!right.read_with(cx, |e, _| e.buffer.is_dirty()));
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "zero\none\ntwo\nthree\n");
+        // Made longer by another program (a pull): both read it, and typing on one isn't
+        // replayed on the other with the read (that doubled its end).
+        std::fs::write(dir.join("a.txt"), "zero\none\ntwo\nthree\nfour\nfive\n").unwrap();
+        workspace.update(cx, |w, cx| w.files_changed(vec![dir.join("a.txt")], cx));
+        cx.run_until_parked();
+        left.update(cx, |e, cx| e.type_text_for_test(0, "!", cx));
+        cx.run_until_parked();
+        assert_eq!(text(cx, &right), "!zero\none\ntwo\nthree\nfour\nfive\n");
+        assert_eq!(text(cx, &left), text(cx, &right));
         // Closing the first copy: the other one takes over the language server.
         workspace.update_in(cx, |w, window, cx| {
             let ix = w.side_tabs(0)[0];
