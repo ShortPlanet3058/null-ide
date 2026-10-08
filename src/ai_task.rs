@@ -32,6 +32,11 @@ pub struct FileChange {
     pub removed: usize,
     /// The text before the task (empty for an added file).
     pub before: String,
+    /// The text the task left (empty for a deleted file): undoing leaves the file alone
+    /// if it reads otherwise by then (edited since).
+    pub after: String,
+    /// Saved by you while the task ran: its change isn't the task's alone.
+    pub yours_too: bool,
 }
 
 /// The project's files, respecting .gitignore (hidden files included, .git not).
@@ -75,7 +80,15 @@ impl Snapshot {
                 None => (ChangeKind::Added, ""),
             };
             let (added, removed) = line_counts(before, after);
-            changes.push(FileChange { path: path.clone(), kind, added, removed, before: before.to_string() });
+            changes.push(FileChange {
+                path: path.clone(),
+                kind,
+                added,
+                removed,
+                before: before.to_string(),
+                after: after.clone(),
+                yours_too: false,
+            });
         }
         for (path, before) in &self.files {
             // Gone from the walk and from the disk (not merely ignored now).
@@ -87,6 +100,8 @@ impl Snapshot {
                     added: 0,
                     removed,
                     before: before.clone(),
+                    after: String::new(),
+                    yours_too: false,
                 });
             }
         }

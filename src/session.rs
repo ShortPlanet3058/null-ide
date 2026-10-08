@@ -133,13 +133,54 @@ pub fn disk_fingerprint(path: &Path) -> Option<u64> {
     Some(hasher.finish())
 }
 
-fn backups_file(root: &Path) -> Option<PathBuf> {
+/// The project's backups of each Null running it (a build and the app at once, say):
+/// `<project>.<pid>.json`, so one leaving doesn't remove the other's. (`<project>.json`
+/// is how they were kept before: read as one left by a Null that's gone.)
+fn backups_base(root: &Path) -> Option<PathBuf> {
     Some(file_in(&crate::tools::data_dir()?.join("backups"), root))
 }
 
-/// Keeps `backups` as the project's unsaved work; none removes the file.
+fn own_backups_file(root: &Path) -> Option<PathBuf> {
+    Some(backups_base(root)?.with_extension(format!("{}.json", std::process::id())))
+}
+
+/// The project's backup files, and the process that keeps each (None: from before).
+fn backup_files(root: &Path) -> Vec<(PathBuf, Option<u32>)> {
+    let Some(base) = backups_base(root) else { return Vec::new() };
+    let (Some(dir), Some(stem)) = (base.parent(), base.file_stem().map(|s| s.to_string_lossy().into_owned())) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let rest = name.strip_prefix(&stem)?.strip_suffix(".json")?;
+            match rest {
+                "" => Some((path, None)),
+                _ => Some((path.clone(), Some(rest.strip_prefix('.')?.parse().ok()?))),
+            }
+        })
+        .collect()
+}
+
+/// Whether process `pid` is running.
+fn running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // Signal 0 only asks: there, or there but someone else's.
+        unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Keeps `backups` as this Null's unsaved work in the project; none removes its file.
 pub fn save_backups(root: &Path, backups: &[Backup]) {
-    let Some(file) = backups_file(root) else { return };
+    let Some(file) = own_backups_file(root) else { return };
     if backups.is_empty() {
         std::fs::remove_file(&file).ok();
         return;
@@ -158,10 +199,36 @@ pub fn save_backups(root: &Path, backups: &[Backup]) {
     }
 }
 
-/// The unsaved work left from last time (a crash, or a forced quit).
+/// The unsaved work left from last time (a crash, or a forced quit): this Null's, and
+/// that of any that's gone, taken over (kept in this one's file first, then theirs
+/// removed). A Null still running keeps its own.
 pub fn load_backups(root: &Path) -> Vec<Backup> {
-    let Some(file) = backups_file(root) else { return Vec::new() };
-    std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    let own = std::process::id();
+    let mut files: Vec<PathBuf> = backup_files(root)
+        .into_iter()
+        .filter(|(_, pid)| pid.is_none_or(|pid| pid == own || !running(pid)))
+        .map(|(file, _)| file)
+        .collect();
+    // Newest first: of two kept for one file, the later is the one.
+    files.sort_by_key(|f| std::cmp::Reverse(std::fs::metadata(f).and_then(|m| m.modified()).ok()));
+    let mut backups: Vec<Backup> = Vec::new();
+    for file in &files {
+        let read: Vec<Backup> =
+            std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        for backup in read {
+            if backup.path.is_none() || !backups.iter().any(|b| b.path == backup.path) {
+                backups.push(backup);
+            }
+        }
+    }
+    let own_file = own_backups_file(root);
+    if files.iter().any(|f| Some(f) != own_file.as_ref()) {
+        save_backups(root, &backups);
+        for file in files.iter().filter(|f| Some(*f) != own_file.as_ref()) {
+            std::fs::remove_file(file).ok();
+        }
+    }
+    backups
 }
 
 fn last_project_file() -> Option<PathBuf> {
@@ -221,6 +288,34 @@ pub fn last_project() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two Nulls on one project keep their own unsaved work: one's file isn't the other's,
+    /// and only that of a Null that's gone is taken over (and kept before its file goes).
+    #[test]
+    fn each_null_keeps_its_own_backups() {
+        let root = crate::tools::test_dir("backups-two").join("project");
+        let base = backups_base(&root).unwrap();
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        let backup = |name: &str| Backup { path: Some(root.join(name)), text: name.into(), disk: None };
+        let write =
+            |file: &Path, backups: &[Backup]| std::fs::write(file, serde_json::to_string(backups).unwrap()).unwrap();
+        // One kept the old way, one by a Null that's gone, one by a Null still running (launchd).
+        write(&base, &[backup("old.txt")]);
+        let gone = base.with_extension("999999.json");
+        write(&gone, &[backup("gone.txt")]);
+        let running = base.with_extension("1.json");
+        write(&running, &[backup("running.txt")]);
+        let mut taken: Vec<String> = load_backups(&root).into_iter().map(|b| b.text).collect();
+        taken.sort();
+        assert_eq!(taken, ["gone.txt", "old.txt"]);
+        assert!(!base.exists() && !gone.exists(), "taken over");
+        assert!(running.exists(), "the running one's left alone");
+        assert_eq!(load_backups(&root).len(), 2, "kept in this one's own file");
+        // This one has nothing unsaved: its file goes, not the other's.
+        save_backups(&root, &[]);
+        assert!(running.exists() && load_backups(&root).is_empty());
+        std::fs::remove_file(&running).ok();
+    }
 
     #[test]
     fn recent_projects_go_first_once_each() {
