@@ -435,6 +435,13 @@ impl Render for TabGhost {
 #[derive(Clone)]
 struct DraggedDivider;
 
+/// A terminal being named: which one, the field, and the watch on the field losing focus.
+struct TerminalRename {
+    terminal: gpui::EntityId,
+    input: Entity<crate::text_input::TextInput>,
+    _blur: Subscription,
+}
+
 struct Tab {
     editor: Entity<Editor>,
     /// Which side it's on: 0 left (or the only one), 1 right.
@@ -519,7 +526,7 @@ pub struct Workspace {
     /// The paused call's variables the code shows, with values worth showing.
     debug_locals: Vec<(String, String)>,
     /// The shown terminal's new name, being typed.
-    terminal_rename: Option<Entity<crate::text_input::TextInput>>,
+    terminal_rename: Option<TerminalRename>,
     /// Where an expression to watch is typed, under the variables while paused.
     debug_watch: Entity<crate::text_input::TextInput>,
     /// The program to debug, when the project doesn't say (no Cargo.toml): asked once.
@@ -852,12 +859,17 @@ impl Workspace {
                     editor.restore_view(tab.line, tab.column, tab.top_line, cx)
                 });
             }
+            // The tab opened for it (a file gone since opens none: nothing to pin).
             if tab.pinned
-                && let Some(a) = self.active
+                && let Some(opened) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.side == side && t.editor.read(cx).path() == Some(tab.path.as_path()))
             {
-                self.tabs[a].pinned = true;
+                opened.pinned = true;
             }
         }
+        self.keep_pinned_first();
         if let Some(ratio) = session.split_ratio {
             self.split_ratio = ratio.clamp(0.2, 0.8);
         }
@@ -2509,8 +2521,10 @@ impl Workspace {
         if let Some(a) = self.active.filter(|&a| a >= ix) {
             self.active = Some(a + 1);
         }
-        self.tabs.insert(ix, Tab { editor, side, pinned: false, _subscriptions: subscriptions });
+        self.tabs.insert(ix, Tab { editor: editor.clone(), side, pinned: false, _subscriptions: subscriptions });
+        // Among pinned tabs, it goes after them: shown wherever it ended up.
         self.keep_pinned_first();
+        let ix = self.tabs.iter().position(|t| t.editor == editor).unwrap_or(ix);
         self.activate(ix, window, cx);
     }
 
@@ -2858,6 +2872,10 @@ impl Workspace {
             let Ok(choice) = answer.await else { return };
             this.update_in(cx, |this, window, cx| {
                 if choice == 2 {
+                    // Quitting called off: the windows that were done asking ask again next time.
+                    if matches!(action, CloseAction::Quit) {
+                        cx.defer(crate::quit_cancelled);
+                    }
                     return;
                 }
                 if choice == 1 {
@@ -2894,7 +2912,12 @@ impl Workspace {
         let answer = cx.prompt_for_new_path(&root, Some(&name));
         let lsp = self.lsp.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(path))) = answer.await else { return };
+            let Ok(Ok(Some(path))) = answer.await else {
+                if matches!(action, CloseAction::Quit) {
+                    cx.update(|_, cx| cx.defer(crate::quit_cancelled)).ok();
+                }
+                return;
+            };
             this.update_in(cx, |this, window, cx| {
                 let saved = editor.update(cx, |editor, cx| {
                     editor.set_path(path, Some(lsp), cx);
@@ -5112,6 +5135,10 @@ impl Workspace {
 
     fn remove_terminal(&mut self, id: gpui::EntityId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.terminals.iter().position(|(t, _)| t.entity_id() == id) else { return };
+        // Being named: the name goes with it.
+        if self.terminal_rename.as_ref().is_some_and(|r| r.terminal == id) {
+            self.terminal_rename = None;
+        }
         // Its subscription goes with it.
         drop(self.terminals.remove(ix));
         if self.active_terminal > ix || self.active_terminal >= self.terminals.len() {
@@ -5196,20 +5223,28 @@ impl Workspace {
             input
         });
         window.focus(&input.focus_handle(cx));
-        self.terminal_rename = Some(input);
+        // Clicking away keeps what was typed, as in the Finder.
+        let blur = cx.on_blur(&input.focus_handle(cx), window, |this, window, cx| {
+            this.confirm_terminal_name(&ConfirmTerminalName, window, cx)
+        });
+        self.terminal_rename = Some(TerminalRename { terminal: terminal.entity_id(), input, _blur: blur });
         cx.notify();
     }
 
     /// The name typed: the terminal's from now on (none: its folder's again).
     fn confirm_terminal_name(&mut self, _: &ConfirmTerminalName, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(input) = self.terminal_rename.take() else { return };
-        let name = input.read(cx).text().trim().to_string();
-        if let Some(terminal) = self.terminal().cloned() {
+        let Some(rename) = self.terminal_rename.take() else { return };
+        let name = rename.input.read(cx).text().trim().to_string();
+        // The terminal it was opened for, wherever it is now.
+        let named = self.terminals.iter().find(|(t, _)| t.entity_id() == rename.terminal).map(|(t, _)| t.clone());
+        if let Some(terminal) = named {
             terminal.update(cx, |t, cx| {
                 t.name = (!name.is_empty()).then_some(name);
                 cx.notify();
             });
-            window.focus(&terminal.focus_handle(cx));
+            if rename.input.focus_handle(cx).is_focused(window) {
+                window.focus(&terminal.focus_handle(cx));
+            }
         }
         cx.notify();
     }
@@ -5289,7 +5324,8 @@ impl Workspace {
         let tabs = self.terminals.iter().enumerate().map(|(ix, (t, _))| {
             let active = ix == self.active_terminal;
             let label = Self::terminal_tab_label(t.read(cx), ix);
-            let renaming = active.then(|| self.terminal_rename.clone()).flatten();
+            let renaming =
+                self.terminal_rename.as_ref().filter(|r| r.terminal == t.entity_id()).map(|r| r.input.clone());
             // Another terminal busy with something: a dot says so.
             let busy = !active && t.read(cx).running.is_some();
             div()
@@ -5334,7 +5370,7 @@ impl Workspace {
                 } else {
                     let named = terminal.read(cx).name.clone();
                     bar.child(div().text_color(theme.foreground).child("Terminal")).child(
-                        match self.terminal_rename.clone() {
+                        match self.terminal_rename.as_ref().map(|r| r.input.clone()) {
                             Some(input) => div().flex_1().child(name_field(input)).into_any_element(),
                             None => div()
                                 .id("terminal-title")
@@ -5867,6 +5903,7 @@ impl Workspace {
                 let missing = editor.missing;
                 let group = format!("tab-{ix}");
                 let pinned = tab.pinned;
+                let pin_editor = tab.editor.clone();
                 // Unsaved: a small dot, which turns into the close button under the pointer.
                 // Pinned: a pin in its place, which unpins.
                 let close = div()
@@ -5914,8 +5951,7 @@ impl Workspace {
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         if pinned {
-                            let editor = this.tabs[ix].editor.clone();
-                            this.set_pinned(&editor, false, cx);
+                            this.set_pinned(&pin_editor, false, cx);
                         } else {
                             this.close_tab_at(ix, window, cx);
                         }
@@ -8868,6 +8904,16 @@ mod tests {
             assert_eq!(session.tabs.iter().map(|t| t.pinned).collect::<Vec<_>>(), [true, false]);
             w.close_all_tabs(&CloseAllTabs, window, cx);
             assert_eq!(names(w, cx), ["c.txt"]);
+            // Two pinned, the first shown: a file opened goes after them, and is the one shown.
+            w.open_file(dir.join("a.txt"), window, cx);
+            let a = w.active_editor().unwrap().clone();
+            w.set_pinned(&a, true, cx);
+            let first = w.tabs[0].editor.clone();
+            let ix = w.tabs.iter().position(|t| t.editor == first).unwrap();
+            w.activate(ix, window, cx);
+            w.open_file(dir.join("b.txt"), window, cx);
+            assert_eq!(names(w, cx), ["c.txt", "a.txt", "b.txt"]);
+            assert_eq!(w.active_editor().map(|e| e.read(cx).file_name()), Some("b.txt".to_string()));
         });
         std::fs::remove_dir_all(&dir).ok();
     }

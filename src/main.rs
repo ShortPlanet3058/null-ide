@@ -275,6 +275,13 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::
 
 /// Quitting: the next window with unsaved changes asks about them; once none is left,
 /// Null quits.
+/// Quitting was called off in one window: none of them counts as done asking any more.
+pub(crate) fn quit_cancelled(cx: &mut gpui::App) {
+    for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
+        handle.update(cx, |workspace, _, _| workspace.quitting = false).ok();
+    }
+}
+
 pub(crate) fn quit_next(cx: &mut gpui::App) {
     let waiting = cx
         .windows()

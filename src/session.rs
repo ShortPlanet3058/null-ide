@@ -146,8 +146,11 @@ pub fn save_backups(root: &Path, backups: &[Backup]) {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).ok();
     }
-    // Write then rename: a crash mid-write mustn't lose the backup it replaces.
-    let temp = file.with_extension("json.tmp");
+    // Write then rename: a crash mid-write mustn't lose the backup it replaces. A file of
+    // its own for each write, so two at once (typing, and quitting) can't mix.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = file.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
     if std::fs::write(&temp, text).is_ok() {
         std::fs::rename(&temp, &file).ok();
     }
