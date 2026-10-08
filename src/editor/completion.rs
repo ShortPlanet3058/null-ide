@@ -481,6 +481,21 @@ impl Editor {
     }
 
     /// Inserts the chosen suggestion, plus any edits it brings along (like an import).
+    /// The selected suggestion is just the word as it's typed: taking it changes nothing.
+    pub(super) fn completion_adds_nothing(&self) -> bool {
+        let Some(menu) = &self.completion else { return false };
+        let Some(&(ix, _)) = menu.shown.get(menu.selected) else { return false };
+        let s = &menu.suggestions[ix];
+        let caret = self.selection.head;
+        let after_word = self.buffer.char_at(caret).is_none_or(|c| !is_word_char(c));
+        !s.snippet
+            && s.extra_edits.is_empty()
+            && s.unresolved.is_none()
+            && after_word
+            && menu.word_start <= caret
+            && s.insert == self.buffer.slice(menu.word_start..caret)
+    }
+
     pub(super) fn accept_completion(&mut self, shown_ix: usize, cx: &mut Context<Self>) {
         let Some(menu) = self.completion.take() else { return };
         self.completion_task = None;

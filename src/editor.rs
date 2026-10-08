@@ -649,6 +649,8 @@ pub struct Editor {
     over_change_mark: bool,
     /// A color being picked in the Mac's color panel.
     color_pick: Option<color_pick::ColorPick>,
+    /// The line just moved out for a word like `end` (see `outdent_word`).
+    word_outdent: Option<commands::WordOutdent>,
     pub git_hunks: Vec<crate::git::Hunk>,
     git_base_task: Option<Task<()>>,
     /// Who last changed the caret's line, once it rests there.
@@ -808,6 +810,7 @@ impl Editor {
             git_base: None,
             over_change_mark: false,
             color_pick: None,
+            word_outdent: None,
             git_hunks: Vec::new(),
             git_base_task: None,
             blame: None,
@@ -1924,6 +1927,12 @@ impl Editor {
             }
             // The indentation up to the caret only: Enter inside it doesn't double it.
             let indent: String = line_text.chars().take(col).take_while(|c| *c == ' ' || *c == '\t').collect();
+            // YAML: the next key of a `- key: value` item goes under the first.
+            let indent = match this.language_name() {
+                "YAML" => crate::word_blocks::yaml_item_indent(&line_text.chars().take(col).collect::<String>())
+                    .unwrap_or(indent),
+                _ => indent,
+            };
             // On a line of only spaces, those spaces don't stay behind.
             if line_text.chars().take(col).all(|c| c == ' ' || c == '\t') && col > 0 {
                 range.start = this.buffer.line_to_char(line);
@@ -1940,7 +1949,10 @@ impl Editor {
                     let head: String = line_text.chars().take(col).collect();
                     head.rfind('<').is_some_and(|lt| !head[lt..].starts_with("</") && !head.ends_with("/>"))
                 };
-            let opens = matches!(before, Some('{' | '(' | '[')) || python_block || between_tags;
+            // Ruby, Lua, the shell, YAML: `do`, `then`, `key:`…
+            let word_block =
+                crate::word_blocks::opens(this.language_name(), &line_text.chars().take(col).collect::<String>());
+            let opens = matches!(before, Some('{' | '(' | '[')) || python_block || between_tags || word_block;
             // Python: after `return`, `pass`, `break`, `continue` or `raise`, the block is over.
             let ends_block = this.language_name() == "Python" && {
                 let word =
@@ -3230,6 +3242,11 @@ impl Editor {
         if let Some(menu) = &self.fix_menu {
             return self.accept_fix(menu.selected, window, cx);
         }
+        // The word is already written as suggested (`end`): ↩ and ⇥ do what they'd do.
+        if self.completion_adds_nothing() {
+            self.close_completion(cx);
+            return cx.propagate();
+        }
         let selected = self.completion.as_ref().map_or(0, |m| m.selected);
         self.accept_completion(selected, cx);
     }
@@ -3613,6 +3630,7 @@ impl EntityInputHandler for Editor {
             "/" => self.finish_closing_tag(cx),
             "}" | ")" | "]" => self.outdent_closer(cx),
             ":" if self.language_name() == "Python" => self.outdent_python_clause(cx),
+            _ if crate::word_blocks::has_words(self.language_name()) => self.outdent_word(cx),
             _ => {}
         }
         self.completion_after_typing(text, cx);
