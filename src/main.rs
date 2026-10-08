@@ -49,6 +49,7 @@ mod settings;
 mod settings_panel;
 mod snippets;
 mod spell;
+mod svg_image;
 mod tasks;
 mod terminal;
 mod terminal_links;
