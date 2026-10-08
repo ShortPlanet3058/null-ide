@@ -200,9 +200,12 @@ impl Editor {
 
     /// ⌥⇧F: the file, or with some text selected, just that.
     pub(super) fn format_document(&mut self, _: &FormatDocument, _: &mut Window, cx: &mut Context<Self>) {
-        // Markdown without a server: its tables lined up.
+        // Markdown without a server: its tables lined up. JSON: laid out by Null itself.
         if self.is_markdown() && !self.served(cx) {
             return self.align_markdown_tables(cx);
+        }
+        if self.language_name() == "JSON" && !self.served(cx) {
+            return self.format_json(cx);
         }
         if let Some(message) = self.not_ready_message(cx) {
             return self.show_notice(self.selection.head, message, cx);
@@ -309,6 +312,40 @@ impl Editor {
         self.selection = Selection::caret(self.buffer.offset(line, column.min(self.buffer.line_len(line))));
         self.text_changed(cx);
         cx.emit(EditorEvent::Edited);
+        self.touch(cx);
+    }
+
+    /// JSON laid out by Null (see `json_format`): one undo, the caret kept on its line.
+    fn format_json(&mut self, cx: &mut Context<Self>) {
+        let text = self.buffer.to_string();
+        let unit = self.style.indent.unit();
+        let at = self.selection.head;
+        let formatted = match crate::json_format::format(&text, &unit, self.style.line_ending.text()) {
+            Ok(formatted) => formatted,
+            Err(problem) => {
+                let message = format!("Can't format: {} (line {}).", problem.message, problem.line + 1);
+                return self.show_notice(at, message, cx);
+            }
+        };
+        if formatted == text {
+            return self.show_notice(at, "Already formatted.".into(), cx);
+        }
+        // Only what changed is replaced, so marks and folds before and after stay put.
+        let prefix = text.chars().zip(formatted.chars()).take_while(|(a, b)| a == b).count();
+        let (old_len, new_len) = (text.chars().count(), formatted.chars().count());
+        let suffix = text
+            .chars()
+            .rev()
+            .zip(formatted.chars().rev())
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(old_len - prefix)
+            .min(new_len - prefix);
+        let middle: String = formatted.chars().skip(prefix).take(new_len - prefix - suffix).collect();
+        let (line, column) = self.buffer.point(at);
+        self.edit(prefix..old_len - suffix, &middle, EditKind::Other, cx);
+        let line = line.min(self.buffer.len_lines().saturating_sub(1));
+        self.selection = Selection::caret(self.buffer.offset(line, column.min(self.buffer.line_len(line))));
         self.touch(cx);
     }
 
@@ -433,5 +470,33 @@ mod tests {
         // An edit after it leaves it alone; one around it gives up.
         assert_eq!(caret_after(caret, &edit_ranges(&buffer, &[edit(2, 0, 2, 1, "}}")])), Some(caret));
         assert_eq!(caret_after(caret, &edit_ranges(&buffer, &[edit(0, 0, 3, 0, "")])), None);
+    }
+
+    /// JSON with no server to format it: Null lays it out, in one undo; broken JSON is left
+    /// as it is, with where it's broken.
+    #[gpui::test]
+    fn json_is_formatted_without_a_server(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let text = "{\"a\":[1,2],\n\"b\":{}}\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some("a.json".into()), cx));
+        e.update_in(cx, |e, window, cx| window.focus(&gpui::Focusable::focus_handle(e, cx)));
+        cx.simulate_keystrokes("alt-shift-f");
+        e.read_with(cx, |e, _| {
+            assert_eq!(e.buffer.to_string(), "{\n    \"a\": [\n        1,\n        2\n    ],\n    \"b\": {}\n}\n");
+        });
+        cx.simulate_keystrokes("cmd-z");
+        e.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), text, "one undo"));
+        e.update(cx, |e, cx| {
+            let end = e.buffer.len_chars();
+            e.edit(end..end, "]", EditKind::Other, cx);
+        });
+        cx.simulate_keystrokes("alt-shift-f");
+        e.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), format!("{text}]"), "broken: left alone"));
     }
 }

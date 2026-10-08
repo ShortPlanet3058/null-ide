@@ -25,6 +25,7 @@ mod fuzzy;
 mod git;
 mod highlight;
 mod html_markdown;
+mod json_format;
 mod key_prompt;
 mod keymap;
 mod languages;
