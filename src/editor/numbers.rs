@@ -200,7 +200,17 @@ impl Editor {
     fn step_numbers(&mut self, delta: i64, cx: &mut Context<Self>) {
         self.for_each_cursor(cx, |this, cx| {
             if !this.selection.is_empty() {
-                let range = this.selection.range();
+                let mut range = this.selection.range();
+                // A number selected without its sign (`-5`, double-clicked): the sign goes with it.
+                let at = |i: usize| this.buffer.char_at(i);
+                let glued = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | ')' | ']'));
+                if range.start > 0
+                    && at(range.start - 1) == Some('-')
+                    && at(range.start).is_some_and(|c| c.is_ascii_digit())
+                    && !(range.start > 1 && glued(at(range.start - 2)))
+                {
+                    range.start -= 1;
+                }
                 let Some(text) = step_all(&this.buffer.slice(range.clone()), delta) else { return };
                 let len = text.chars().count();
                 this.edit(range.clone(), &text, EditKind::Other, cx);
@@ -215,18 +225,22 @@ impl Editor {
             let chars = |bytes: Range<usize>| {
                 start + text[..bytes.start].chars().count()..start + text[..bytes.end].chars().count()
             };
-            if let Some((bytes, new, ahead)) = step_at(&text, caret_byte, delta) {
+            // A value to flip right at the caret comes before a number further on the line.
+            let word = this.word_at(caret);
+            let flip = flipped(&this.buffer.slice(word.clone()));
+            if let Some((bytes, new, ahead)) = step_at(&text, caret_byte, delta).filter(|s| !(s.2 && flip.is_some())) {
                 let range = chars(bytes);
+                let range_start = range.start;
                 // The caret stays on the same digit, counted from the right; on a number found
                 // further on, it goes to its end.
                 let from_end = if ahead { 0 } else { range.end - caret };
                 let end = range.start + new.chars().count();
                 this.edit(range, &new, EditKind::Other, cx);
-                this.selection = Selection::caret(end.saturating_sub(from_end).max(start));
+                // On it still, however much shorter it got (`10` → `9`).
+                this.selection = Selection::caret(end.saturating_sub(from_end).max(range_start));
                 return;
             }
-            let word = this.word_at(caret);
-            if let Some(flip) = flipped(&this.buffer.slice(word.clone())) {
+            if let Some(flip) = flip {
                 this.edit(word.clone(), flip, EditKind::Other, cx);
                 this.selection = Selection::caret((word.start + flip.chars().count()).min(caret.max(word.start)));
             }
@@ -306,9 +320,26 @@ mod tests {
         cx.simulate_keystrokes("ctrl-alt-shift-down ctrl-alt-shift-down");
         assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(0)), "let n = -10;");
         e.update(cx, |e, _| e.selection = Selection::caret(e.buffer.to_string().find("true").unwrap() + 1));
+        // `true` under the caret flips, though a number follows on the line.
+        e.update(cx, |e, cx| {
+            let at = e.buffer.line_to_char(1);
+            e.buffer.replace(at..at + e.buffer.line_len(1), "let on = true; // level 2");
+            e.text_changed(cx);
+        });
         cx.simulate_keystrokes("ctrl-alt-down");
-        assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(1)), "let on = false;");
-        cx.simulate_keystrokes("cmd-z");
-        assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(1)), "let on = true;");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(1)), "let on = false; // level 2");
+        // `10` down to `9`: the caret stays on it.
+        e.update(cx, |e, _| e.selection = Selection::caret(8));
+        cx.simulate_keystrokes("ctrl-alt-up ctrl-alt-up");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(0)), "let n = -8;");
+        e.update(cx, |e, _| e.selection = Selection::caret(9));
+        cx.simulate_keystrokes("ctrl-alt-shift-up");
+        assert_eq!(e.read_with(cx, |e, _| (e.buffer.line_text(0), e.selection.head)), ("let n = 2;".into(), 8));
+        // `5` selected without its sign: `-5` steps.
+        cx.simulate_keystrokes("ctrl-alt-shift-down ctrl-alt-shift-down");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(0)), "let n = -18;");
+        e.update(cx, |e, _| e.selection = Selection { anchor: 9, head: 11 });
+        cx.simulate_keystrokes("ctrl-alt-up");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(0)), "let n = -17;");
     }
 }

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 pub const LONG: Duration = Duration::from_secs(10);
 
 /// Looks at the shell's terminal for the program it's running.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct Foreground {
     #[cfg(unix)]
     fd: std::os::fd::OwnedFd,
@@ -63,8 +64,47 @@ pub struct Running {
     since: Instant,
 }
 
+/// Whether any process of `group` is still there: a job suspended with ⌃Z is, one that
+/// finished isn't.
+pub fn group_alive(group: i32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks; nothing is sent.
+        unsafe { libc::kill(-group, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = group;
+        false
+    }
+}
+
+/// The user's own shell, from the account, when `$SHELL` doesn't say.
+pub fn account_shell() -> Option<String> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getpwuid's record is read at once, before any other call could reuse it.
+        unsafe {
+            let entry = libc::getpwuid(libc::getuid());
+            if entry.is_null() || (*entry).pw_shell.is_null() {
+                return None;
+            }
+            let shell = std::ffi::CStr::from_ptr((*entry).pw_shell).to_string_lossy().into_owned();
+            (!shell.is_empty()).then_some(shell)
+        }
+    }
+    #[cfg(not(unix))]
+    None
+}
+
 /// What changed since last look: a long command that just finished, its name and time.
-pub fn step(running: &mut Option<Running>, now: Option<(i32, String)>, at: Instant) -> Option<(String, Duration)> {
+/// `alive` says whether a process group is still there (a suspended job hasn't finished).
+pub fn step(
+    running: &mut Option<Running>,
+    now: Option<(i32, String)>,
+    at: Instant,
+    alive: impl Fn(i32) -> bool,
+) -> Option<(String, Duration)> {
     match (running.as_mut(), now) {
         (None, Some((group, name))) => {
             *running = Some(Running { group, name, since: at });
@@ -78,7 +118,7 @@ pub fn step(running: &mut Option<Running>, now: Option<(i32, String)>, at: Insta
         (Some(_), None) => {
             let r = running.take()?;
             let took = at.saturating_duration_since(r.since);
-            (took >= LONG).then_some((r.name, took))
+            (took >= LONG && !alive(r.group)).then_some((r.name, took))
         }
         (None, None) => None,
     }
@@ -115,14 +155,19 @@ mod tests {
         let start = Instant::now();
         let at = |s: u64| start + Duration::from_secs(s);
         let mut running = None;
-        assert_eq!(step(&mut running, Some((50, "cargo".into())), at(0)), None);
+        let gone = |_| false;
+        assert_eq!(step(&mut running, Some((50, "cargo".into())), at(0), gone), None);
         // The next command of the line: still one run, named after the first.
-        assert_eq!(step(&mut running, Some((51, "cargo".into())), at(30)), None);
-        assert_eq!(step(&mut running, None, at(75)), Some(("cargo".into(), Duration::from_secs(75))));
+        assert_eq!(step(&mut running, Some((51, "cargo".into())), at(30), gone), None);
+        assert_eq!(step(&mut running, None, at(75), gone), Some(("cargo".into(), Duration::from_secs(75))));
         assert!(running.is_none());
         // A short one: nothing to say.
-        step(&mut running, Some((60, "ls".into())), at(80));
-        assert_eq!(step(&mut running, None, at(81)), None);
+        step(&mut running, Some((60, "ls".into())), at(80), gone);
+        assert_eq!(step(&mut running, None, at(81), gone), None);
+        // Suspended with ⌃Z: still there, not finished.
+        step(&mut running, Some((70, "vim".into())), at(100), gone);
+        assert_eq!(step(&mut running, None, at(200), |group| group == 70), None);
+        assert!(running.is_none());
     }
 
     #[test]

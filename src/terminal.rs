@@ -217,7 +217,9 @@ pub struct Shell {
 impl Shell {
     /// Starts the user's shell in `cwd`.
     pub fn start(cwd: PathBuf) -> std::io::Result<Self> {
-        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty());
+        // Without `$SHELL` (an app started oddly), the account's own shell rather than a
+        // `login` wrapper, so the shell is the process watched for its prompt.
+        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell);
         let mut env = HashMap::from([
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -266,7 +268,12 @@ impl TerminalView {
                     cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
                     let now = watch.program();
                     let name = now.as_ref().map(|(_, name)| name.clone());
-                    let finished = crate::terminal_watch::step(&mut running, now, std::time::Instant::now());
+                    let finished = crate::terminal_watch::step(
+                        &mut running,
+                        now,
+                        std::time::Instant::now(),
+                        crate::terminal_watch::group_alive,
+                    );
                     let Ok(()) = this.update(cx, |this, cx| {
                         if this.running != name {
                             this.running = name;

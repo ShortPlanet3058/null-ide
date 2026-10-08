@@ -867,8 +867,10 @@ impl Editor {
     }
 
     /// The file as it is on disk now, unsaved edits or not (after they were discarded).
-    pub fn revert_to_disk(&mut self, cx: &mut Context<Self>) {
+    /// False when it couldn't be read: the text stays as it was.
+    pub fn revert_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
         self.reload(true, cx);
+        self.on_disk == Some(fingerprint(&self.buffer.to_string()))
     }
 
     fn reload(&mut self, discard_edits: bool, cx: &mut Context<Self>) {
