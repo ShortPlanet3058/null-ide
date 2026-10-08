@@ -46,7 +46,11 @@ pub fn targets(text: &str) -> Vec<Target<'_>> {
     let mut fence: Option<&str> = None;
     for (line, l) in crate::markdown_view::buffer_lines(text).into_iter().enumerate() {
         if let Some(open) = crate::markdown_view::fence_of(l.trim_start()) {
-            fence = if fence == Some(open) { None } else { fence.or(Some(open)) };
+            fence = match fence {
+                Some(f) if crate::markdown_view::closes(l.trim_start(), f) => None,
+                Some(f) => Some(f),
+                None => Some(open),
+            };
             continue;
         }
         if fence.is_some() {

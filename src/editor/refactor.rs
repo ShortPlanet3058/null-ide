@@ -392,18 +392,20 @@ impl Editor {
             return;
         }
         let range = lsp_types::Range { start: self.lsp_position(pasted.start), end: self.lsp_position(pasted.end) };
-        let version = self.buffer.version();
+        // The revision, not the version: an undo takes the version back, so the same number
+        // could stand for other text.
+        let revision = self.buffer.revision();
         let request = lsp.read(cx).format_part(
             &path,
             Some(range),
             self.style.indent.width() as u32,
             self.style.indent != crate::file_style::Indent::Tabs,
         );
-        self.format_task = Some(cx.spawn(async move |this, cx| {
+        self.paste_format_task = Some(cx.spawn(async move |this, cx| {
             let edits = request.await;
             this.update(cx, |this, cx| {
-                // Typed on since: the paste stays as it is.
-                if this.buffer.version() == version && !edits.is_empty() {
+                // Typed on (or undone) since: the paste stays as it is.
+                if this.buffer.revision() == revision && !edits.is_empty() {
                     this.apply_lsp_edits(&edits, cx);
                 }
             })
@@ -422,7 +424,7 @@ impl Editor {
         }
         let selected = self.selection.range();
         let range = lsp_types::Range { start: self.lsp_position(selected.start), end: self.lsp_position(selected.end) };
-        let version = self.buffer.version();
+        let revision = self.buffer.revision();
         let request = lsp.read(cx).format_part(
             &path,
             Some(range),
@@ -432,7 +434,7 @@ impl Editor {
         self.format_task = Some(cx.spawn(async move |this, cx| {
             let edits = request.await;
             this.update(cx, |this, cx| {
-                if this.buffer.version() != version {
+                if this.buffer.revision() != revision {
                     return;
                 }
                 if edits.is_empty() {
@@ -453,7 +455,7 @@ impl Editor {
             }
             return;
         };
-        let version = self.buffer.version();
+        let revision = self.buffer.revision();
         let request = lsp.read(cx).format(
             &path,
             self.style.indent.width() as u32,
@@ -467,7 +469,7 @@ impl Editor {
             };
             this.update(cx, |this, cx| {
                 // Typing since the request started wins over the server's view of the text.
-                if let Some(edits) = edits.filter(|_| this.buffer.version() == version) {
+                if let Some(edits) = edits.filter(|_| this.buffer.revision() == revision) {
                     if !save && edits.is_empty() {
                         this.show_notice(this.selection.head, "Already formatted.".into(), cx);
                     }

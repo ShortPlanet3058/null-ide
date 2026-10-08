@@ -32,6 +32,8 @@ static PY_FRAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^\s*File "([^"
 static PY_ERROR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt)\b.*)$").unwrap());
 
+static PY_WARNING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Z]\w*Warning\b").unwrap());
+
 /// The problems in `output`, in order, each once.
 pub fn problems(output: &str) -> Vec<Reported> {
     let mut found: Vec<Reported> = Vec::new();
@@ -58,7 +60,13 @@ pub fn problems(output: &str) -> Vec<Reported> {
             continue;
         }
         if let Some(c) = PY_FRAME.captures(line) {
-            frame = Some((c[1].to_string(), c[2].parse().unwrap_or(1)));
+            // The innermost frame in your own code: not a library's, nor `<frozen …>`.
+            let file = &c[1];
+            let library = file.starts_with('<')
+                || ["site-packages", "dist-packages", "/lib/python"].iter().any(|l| file.contains(l));
+            if !library || frame.is_none() {
+                frame = Some((file.to_string(), c[2].parse().unwrap_or(1)));
+            }
             continue;
         }
         if let (Some(c), Some((file, at))) = (PY_ERROR.captures(line), &frame) {
@@ -93,7 +101,11 @@ pub fn problems(output: &str) -> Vec<Reported> {
                 continue;
             }
             let column = c.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or(1);
-            let error = kind != Some("warning");
+            // Python's `app.py:12: DeprecationWarning: …` is a warning too.
+            let error = match kind {
+                Some(kind) => kind != "warning",
+                None => !PY_WARNING.is_match(&message),
+            };
             push(
                 &mut found,
                 Reported { file: c[1].trim().to_string(), line: c[2].parse().unwrap_or(1), column, error, message },
@@ -155,6 +167,13 @@ mod tests {
             short("tests/test_a.py:12: AssertionError\n"),
             [("tests/test_a.py".into(), 12, 1, true, "AssertionError".into())]
         );
+        assert_eq!(
+            short("app.py:4: DeprecationWarning: old\n"),
+            [("app.py".into(), 4, 1, false, "DeprecationWarning: old".into())]
+        );
+        // Raised inside a library: the line of yours that called it.
+        let library = "Traceback (most recent call last):\n  File \"/p/app.py\", line 7, in <module>\n    get(url)\n  File \"/usr/lib/python3/site-packages/requests/api.py\", line 73, in get\n    raise ValueError(url)\nValueError: bad url\n";
+        assert_eq!(short(library), [("/p/app.py".into(), 7, 1, true, "ValueError: bad url".into())]);
     }
 
     #[test]
