@@ -16,6 +16,9 @@ futures = "0.3"
 # Shaders are compiled when the app starts, so building doesn't need Xcode's
 # separate Metal Toolchain download. Release builds can switch to precompiled shaders.
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+# Already in the build (0.22, through gpui's deps): pictures written into a page (a
+# notebook's charts, `data:` images in Markdown).
+base64 = "0.22"
 ignore = "0.4"
 # Already in the build through gpui: SVGs drawn here, in the right colours and sharp
 # (gpui's own path swaps red and blue, at 1×).

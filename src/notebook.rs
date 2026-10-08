@@ -1,6 +1,6 @@
 //! Jupyter notebooks (`.ipynb`) as they read: their JSON turned into Markdown for the
 //! preview (⌘⇧V). Text cells as written, code in its language, and what each cell printed
-//! below it (an error's message without the terminal's colours; a picture said, not shown).
+//! below it (an error's message without the terminal's colours, a chart as its picture).
 
 use serde_json::Value;
 
@@ -84,8 +84,13 @@ pub fn to_markdown(json: &str) -> Option<String> {
                         }
                         Some("execute_result" | "display_data") => {
                             let data = &output["data"];
-                            if data.get("image/png").is_some() || data.get("image/jpeg").is_some() {
-                                out.push_str("*(a picture)*\n\n");
+                            // A chart: shown, from the picture the notebook keeps.
+                            if let Some((kind, picture)) = ["png", "jpeg", "gif"]
+                                .iter()
+                                .find_map(|kind| Some((kind, text_of(data.get(format!("image/{kind}").as_str())?))))
+                            {
+                                let picture: String = picture.chars().filter(|c| !c.is_whitespace()).collect();
+                                out.push_str(&format!("![output](data:image/{kind};base64,{picture})\n\n"));
                                 continue;
                             }
                             text_of(&data["text/plain"])
@@ -93,7 +98,7 @@ pub fn to_markdown(json: &str) -> Option<String> {
                         _ => continue,
                     };
                     if !shown.trim().is_empty() {
-                        out.push_str(&code_block("text", &plain(&shown)));
+                        out.push_str(&code_block("output", &plain(&shown)));
                     }
                 }
             }
@@ -120,7 +125,7 @@ mod tests {
               {"output_type": "stream", "name": "stdout", "text": ["7\n"]}
             ]},
             {"cell_type": "code", "source": ["df.plot()"], "outputs": [
-              {"output_type": "display_data", "data": {"image/png": "iVBOR...", "text/plain": ["<Figure>"]}}
+              {"output_type": "display_data", "data": {"image/png": "iVBOR\nw0=", "text/plain": ["<Figure>"]}}
             ]},
             {"cell_type": "code", "source": ["1/0"], "outputs": [
               {"output_type": "error", "ename": "ZeroDivisionError", "evalue": "division by zero",
@@ -131,7 +136,7 @@ mod tests {
         let markdown = to_markdown(json).unwrap();
         assert_eq!(
             markdown,
-            "# Sales\nBy *month*.\n\n```python\ntotal = 3 + 4\nprint(total)\n```\n\n```text\n7\n```\n\n```python\ndf.plot()\n```\n\n*(a picture)*\n\n```python\n1/0\n```\n\n```text\nZeroDivisionError: division by zero\n```\n\n"
+            "# Sales\nBy *month*.\n\n```python\ntotal = 3 + 4\nprint(total)\n```\n\n```output\n7\n```\n\n```python\ndf.plot()\n```\n\n![output](data:image/png;base64,iVBORw0=)\n\n```python\n1/0\n```\n\n```output\nZeroDivisionError: division by zero\n```\n\n"
         );
     }
 

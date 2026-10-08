@@ -1432,6 +1432,21 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
             }
             div().child(rich(text, style, id, color, FontWeight::NORMAL)).into_any_element()
         }
+        // What a notebook's cell printed: quieter than code, beside a faint line.
+        Block::Code { language, text, .. } if language == "output" => div()
+            .id(("output", id))
+            .pl(px(14.))
+            .py(px(2.))
+            .border_l_2()
+            .border_color(theme.hairline)
+            .overflow_x_scroll()
+            .code_font_as(style.code_font.clone(), style.code_features.clone())
+            .text_size(px(13.))
+            .line_height(px(20.))
+            .whitespace_nowrap()
+            .text_color(theme.muted)
+            .child(text.clone())
+            .into_any_element(),
         Block::Code { text, colours, .. } => {
             let mut highlights: Vec<(Range<usize>, HighlightStyle)> = colours
                 .iter()
@@ -1571,8 +1586,53 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
     }
 }
 
+/// A picture written into the page (`data:image/png;base64,…`, as notebooks keep their
+/// charts), read once and kept by what it holds.
+fn written_image(url: &str) -> Option<std::sync::Arc<gpui::Image>> {
+    use base64::Engine as _;
+    use std::sync::{Arc, LazyLock, Mutex};
+    /// Pictures read, by what they hold (a hash of the text).
+    type Kept = Vec<(u64, Arc<gpui::Image>)>;
+    static READ: LazyLock<Mutex<Kept>> = LazyLock::new(Default::default);
+    let rest = url.strip_prefix("data:image/")?;
+    let (kind, data) = rest.split_once(";base64,")?;
+    let format = match kind {
+        "png" => gpui::ImageFormat::Png,
+        "jpeg" | "jpg" => gpui::ImageFormat::Jpeg,
+        "gif" => gpui::ImageFormat::Gif,
+        "webp" => gpui::ImageFormat::Webp,
+        _ => return None,
+    };
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        url.hash(&mut hasher);
+        hasher.finish()
+    };
+    if let Some((_, image)) = READ.lock().ok()?.iter().find(|(k, _)| *k == key) {
+        return Some(image.clone());
+    }
+    let data: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+    let image = Arc::new(gpui::Image::from_bytes(format, bytes));
+    if let Ok(mut read) = READ.lock() {
+        if read.len() >= 64 {
+            read.remove(0);
+        }
+        read.push((key, image.clone()));
+    }
+    Some(image)
+}
+
 fn image(alt: &str, url: &str, style: &Style) -> AnyElement {
     let theme = &style.theme;
+    if let Some(picture) = written_image(url) {
+        let (alt, faint) = (alt.to_string(), theme.faint);
+        return gpui::img(gpui::ImageSource::Image(picture))
+            .max_w_full()
+            .with_fallback(move || div().text_color(faint).child(alt.clone()).into_any_element())
+            .into_any_element();
+    }
     let local = !url.starts_with("http://") && !url.starts_with("https://");
     let file = style.base.join(url);
     if local && file.is_file() {
@@ -2212,5 +2272,19 @@ mod continuation_tests {
         assert_eq!(continuation("-dash"), None);
         assert_eq!(continuation("---"), None);
         assert_eq!(continuation("2026 was a year"), None);
+    }
+
+    #[test]
+    fn pictures_written_into_the_page_are_read() {
+        let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let image = super::written_image(png).expect("read");
+        assert_eq!(image.format(), gpui::ImageFormat::Png);
+        assert!(
+            super::written_image(png).is_some_and(|again| std::sync::Arc::ptr_eq(&again, &image)),
+            "kept, not read again"
+        );
+        assert!(super::written_image("data:image/png;base64,***").is_none());
+        assert!(super::written_image("data:image/tiff;base64,AAAA").is_none());
+        assert!(super::written_image("picture.png").is_none());
     }
 }
