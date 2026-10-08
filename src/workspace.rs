@@ -604,6 +604,13 @@ impl Workspace {
                 FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
                 FileTreeEvent::OpenTerminal(dir) => this.open_terminal_in(dir.clone(), window, cx),
                 FileTreeEvent::FindInFolder(dir) => this.find_in_folder(dir, window, cx),
+                // Two files picked in the tree: the first opened, compared with the second.
+                FileTreeEvent::Compare(first, second) => {
+                    this.open_file(first.clone(), window, cx);
+                    if let Some(editor) = this.active_editor().cloned() {
+                        this.compare_with_file(&editor, second, cx);
+                    }
+                }
                 FileTreeEvent::DiscardChanges(path, status) => this.discard_changes(path.clone(), *status, window, cx),
                 FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),
             }),

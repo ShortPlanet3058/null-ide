@@ -131,6 +131,8 @@ impl Render for EntryGhost {
 pub enum FileTreeEvent {
     /// Open and move to the file (double-click, Enter).
     Open(PathBuf),
+    /// Two files picked, compared: the first against the second.
+    Compare(PathBuf, PathBuf),
     /// Show the file but keep the keyboard in the tree (single click, arrows),
     /// so shortcuts like rename and delete act on the tree.
     Preview(PathBuf),
@@ -252,6 +254,10 @@ enum MenuItem {
     DiscardChanges,
     CollapseAll,
     Trash,
+    /// With several picked: their paths, a line each.
+    CopyPaths,
+    /// With two files picked: one against the other.
+    Compare,
 }
 
 impl MenuItem {
@@ -271,6 +277,8 @@ impl MenuItem {
             MenuItem::DiscardChanges => "Discard Changes…",
             MenuItem::CollapseAll => "Collapse All Folders",
             MenuItem::Trash => "Move to Trash",
+            MenuItem::CopyPaths => "Copy Paths",
+            MenuItem::Compare => "Compare the Two",
         }
     }
 
@@ -309,6 +317,8 @@ pub struct FileTree {
     active: Option<PathBuf>,
     /// What keyboard actions and the menu apply to.
     selected: Option<PathBuf>,
+    /// Picked along with it: ⌘-click adds one, ⇧-click the ones in between.
+    also: Vec<PathBuf>,
     edit: Option<Edit>,
     menu: Option<Menu>,
     scroll: UniformListScrollHandle,
@@ -341,6 +351,7 @@ impl FileTree {
             rows: Vec::new(),
             active: None,
             selected: None,
+            also: Vec::new(),
             edit: None,
             menu: None,
             ask_before_renaming: false,
@@ -606,8 +617,40 @@ impl FileTree {
         cx.notify();
     }
 
-    fn click(&mut self, ix: usize, click_count: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn click(
+        &mut self,
+        ix: usize,
+        click_count: usize,
+        modifiers: gpui::Modifiers,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(entry) = self.entry_at(ix).cloned() else { return };
+        // ⌘-click picks one more (or lets one go); ⇧-click, all from the one picked to here.
+        if modifiers.platform || modifiers.shift {
+            self.menu = None;
+            window.focus(&self.focus_handle);
+            if modifiers.shift {
+                let anchor = self.selected_ix().unwrap_or(ix);
+                let (from, to) = (anchor.min(ix), anchor.max(ix));
+                self.also = (from..=to)
+                    .filter(|&i| i != anchor)
+                    .filter_map(|i| self.entry_at(i).map(|e| e.path.clone()))
+                    .collect();
+                if self.selected.is_none() {
+                    self.selected = Some(entry.path);
+                }
+            } else if self.selected.as_ref() == Some(&entry.path) {
+                self.selected = self.also.pop();
+            } else if let Some(i) = self.also.iter().position(|p| *p == entry.path) {
+                self.also.remove(i);
+            } else {
+                self.also.extend(self.selected.take());
+                self.selected = Some(entry.path);
+            }
+            return cx.notify();
+        }
+        self.also.clear();
         self.selected = Some(entry.path.clone());
         self.menu = None;
         window.focus(&self.focus_handle);
@@ -660,6 +703,7 @@ impl FileTree {
     }
 
     fn select_offset(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.also.clear();
         let entries: Vec<usize> = (0..self.rows.len()).filter(|&i| self.entry_at(i).is_some()).collect();
         if entries.is_empty() {
             return;
@@ -907,7 +951,23 @@ impl FileTree {
         }
     }
 
+    /// What's picked: the selected row and those picked with it, in the order shown; a
+    /// file or folder inside a picked folder goes with it, so isn't counted again.
+    fn picked(&self) -> Vec<Entry> {
+        let chosen = |p: &PathBuf| self.selected.as_ref() == Some(p) || self.also.contains(p);
+        let all: Vec<Entry> =
+            (0..self.rows.len()).filter_map(|i| self.entry_at(i)).filter(|e| chosen(&e.path)).cloned().collect();
+        all.iter()
+            .filter(|e| !all.iter().any(|o| o.is_dir && o.path != e.path && e.path.starts_with(&o.path)))
+            .cloned()
+            .collect()
+    }
+
     pub fn trash(&mut self, _: &Trash, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = self.picked();
+        if picked.len() > 1 {
+            return self.trash_picked(picked, window, cx);
+        }
         let Some(entry) = self.selected_entry() else { return };
         let what = if entry.is_dir { "folder" } else { "file" };
         let answer = window.prompt(
@@ -922,6 +982,48 @@ impl FileTree {
                 return;
             }
             this.update_in(cx, |this, window, cx| this.trash_now(&entry, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Several picked: one question for them all, then each to the Trash.
+    fn trash_picked(&mut self, picked: Vec<Entry>, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &format!("Move these {} items to the Trash?", picked.len()),
+            Some("You can restore them from the Trash."),
+            &["Move to Trash", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                let first =
+                    this.rows.iter().position(|r| matches!(&r.kind, RowKind::Entry(e) if e.path == picked[0].path));
+                let mut moved = 0;
+                for entry in &picked {
+                    match fs_ops::move_to_trash(&entry.path) {
+                        Ok(()) => {
+                            moved += 1;
+                            if let Some(parent) = entry.path.parent() {
+                                this.children.remove(parent);
+                            }
+                            cx.emit(FileTreeEvent::Trashed(entry.path.clone()));
+                        }
+                        Err(message) => cx.emit(FileTreeEvent::Notice(message)),
+                    }
+                }
+                this.also.clear();
+                this.rebuild();
+                let next = first.unwrap_or(0).min(this.rows.len().saturating_sub(1));
+                this.selected = this.entry_at(next).map(|e| e.path.clone());
+                window.focus(&this.focus_handle);
+                cx.emit(FileTreeEvent::Notice(format!("Moved {moved} items to the Trash")));
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -1015,6 +1117,19 @@ impl FileTree {
         cx: &mut Context<Self>,
     ) {
         use MenuItem::*;
+        // Right-clicked among several picked: what can be done with them all.
+        let picked = self.picked();
+        if picked.len() > 1 && target.as_ref().is_some_and(|t| picked.iter().any(|p| p.path == t.path)) {
+            let mut items = vec![CopyPaths];
+            if picked.len() == 2 && picked.iter().all(|e| !e.is_dir) {
+                items.insert(0, Compare);
+            }
+            items.push(Trash);
+            self.menu = Some(Menu { target, position, items, selected: None });
+            window.focus(&self.focus_handle);
+            return cx.notify();
+        }
+        self.also.clear();
         let items = match &target {
             Some(e) if e.is_dir => {
                 vec![
@@ -1062,8 +1177,20 @@ impl FileTree {
 
     fn run_menu_item(&mut self, item: MenuItem, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.menu.take().and_then(|m| m.target);
-        self.selected = target.as_ref().map(|e| e.path.clone());
+        // With several picked, they stay picked for what the item does.
+        if self.also.is_empty() {
+            self.selected = target.as_ref().map(|e| e.path.clone());
+        }
         match item {
+            MenuItem::CopyPaths => {
+                let paths: Vec<String> = self.picked().iter().map(|e| e.path.display().to_string()).collect();
+                cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
+            }
+            MenuItem::Compare => {
+                if let [a, b] = self.picked().as_slice() {
+                    cx.emit(FileTreeEvent::Compare(a.path.clone(), b.path.clone()));
+                }
+            }
             MenuItem::Open => {
                 if let Some(entry) = target {
                     cx.emit(FileTreeEvent::Open(entry.path));
@@ -1210,8 +1337,8 @@ impl FileTree {
             }
             RowKind::Entry(entry) => {
                 let active = self.active.as_ref() == Some(&entry.path);
-                let selected =
-                    self.selected.as_ref() == Some(&entry.path) && self.focus_handle.contains_focused(window, cx);
+                let picked = self.selected.as_ref() == Some(&entry.path) || self.also.contains(&entry.path);
+                let selected = picked && self.focus_handle.contains_focused(window, cx);
                 let head = row.chain.as_ref().map_or(entry.path.as_path(), |(head, _)| head.as_path());
                 let (turn, turning) = self.chevron_turn(head, row.expanded);
                 if turning {
@@ -1286,7 +1413,7 @@ impl FileTree {
                             this.copy_in(dropped.paths(), &drop_dir, cx);
                         }))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                            this.click(ix, event.click_count(), window, cx)
+                            this.click(ix, event.click_count(), event.modifiers(), window, cx)
                         }))
                         .on_mouse_down(
                             MouseButton::Right,
@@ -1522,6 +1649,62 @@ mod tests {
 
     /// Typing with the files focused goes to a name starting with what's typed; the same
     /// letter again, to the next one with it.
+    /// ⌘-click and ⇧-click pick several; their menu copies their paths, compares two files,
+    /// and moves them all to the Trash with one question.
+    #[gpui::test]
+    fn several_files_are_picked_together(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("tree-picked");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            bind_keys(cx);
+        });
+        let root = dir.clone();
+        let (tree, cx) = cx.add_window_view(|_, cx| FileTree::new(root, cx));
+        let names = |t: &FileTree| t.picked().iter().map(|e| e.name.to_string()).collect::<Vec<_>>();
+        let cmd = gpui::Modifiers { platform: true, ..Default::default() };
+        let shift = gpui::Modifiers { shift: true, ..Default::default() };
+        tree.update_in(cx, |t, window, cx| {
+            let ix = |t: &FileTree, name: &str| {
+                (0..t.rows.len()).find(|&i| t.entry_at(i).is_some_and(|e| e.name.as_ref() == name)).unwrap()
+            };
+            t.click(ix(t, "a.txt"), 1, Default::default(), window, cx);
+            t.click(ix(t, "c.txt"), 1, cmd, window, cx);
+            assert_eq!(names(t), ["a.txt", "c.txt"]);
+            // Two files: Compare, Copy Paths, Trash.
+            let c = t.entry_at(ix(t, "c.txt")).cloned();
+            t.open_menu(c, Default::default(), window, cx);
+            assert!(
+                t.menu.as_ref().is_some_and(|m| m.items == [MenuItem::Compare, MenuItem::CopyPaths, MenuItem::Trash])
+            );
+            t.run_menu_item(MenuItem::CopyPaths, window, cx);
+            let copied = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+            assert_eq!(copied.lines().count(), 2);
+            // ⌘-click again lets it go; ⇧-click picks the ones between.
+            t.click(ix(t, "c.txt"), 1, cmd, window, cx);
+            assert_eq!(names(t), ["a.txt"]);
+            t.click(ix(t, "c.txt"), 1, shift, window, cx);
+            assert_eq!(names(t), ["a.txt", "b.txt", "c.txt"]);
+            t.trash(&Trash, window, cx);
+        });
+        cx.simulate_prompt_answer("Move to Trash");
+        cx.run_until_parked();
+        assert!(!dir.join("a.txt").exists() && !dir.join("b.txt").exists() && !dir.join("c.txt").exists());
+        assert!(dir.join("d.txt").exists());
+        // A plain click: one again.
+        tree.update_in(cx, |t, window, cx| {
+            t.click(0, 1, Default::default(), window, cx);
+            assert_eq!(t.picked().len(), 1);
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Folders that each hold only the next show as one row, which opens and closes as one.
     #[gpui::test]
     fn single_folders_join_into_one_row(cx: &mut gpui::TestAppContext) {
