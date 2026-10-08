@@ -139,6 +139,7 @@ actions!(
         ToggleTerminal,
         NewTerminal,
         NextTerminal,
+        SplitTerminal,
         GoToLine,
         GoToSymbol,
         GoToSymbolInProject,
@@ -229,6 +230,8 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("ctrl-r", OpenRecent, ctx),
             KeyBinding::new("ctrl-shift--", GoForward, ctx),
             KeyBinding::new("ctrl-_", GoForward, ctx),
+            // As in iTerm: in the terminal, another beside it.
+            KeyBinding::new("cmd-d", SplitTerminal, Some("Terminal")),
         ]);
     } else {
         keys.extend([KeyBinding::new("alt-left", GoBack, ctx), KeyBinding::new("alt-right", GoForward, ctx)]);
@@ -608,6 +611,8 @@ pub struct Workspace {
     /// The shells open in the terminal panel, and the one shown.
     terminals: Vec<(Entity<TerminalView>, Subscription)>,
     active_terminal: usize,
+    /// Two terminals side by side (left, right), shown while one of them is the current.
+    terminal_pair: Option<(gpui::EntityId, gpui::EntityId)>,
     terminal_open: Transition,
     /// The current git branch of the project, if it's a repository.
     branch: Option<String>,
@@ -749,6 +754,7 @@ impl Workspace {
             branch_task: None,
             terminals: Vec::new(),
             active_terminal: 0,
+            terminal_pair: None,
             terminal_open: Transition::new(false),
             recently_closed: Vec::new(),
             recent_files: Vec::new(),
@@ -3628,6 +3634,7 @@ impl Workspace {
             (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
             (View, "New Terminal".into(), Box::new(NewTerminal)),
             (View, "Next Terminal".into(), Box::new(NextTerminal)),
+            (View, "Split Terminal".into(), Box::new(SplitTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
         ];
         if self.active.is_some() {
@@ -5574,6 +5581,10 @@ impl Workspace {
         if self.terminal_rename.as_ref().is_some_and(|r| r.terminal == id) {
             self.terminal_rename = None;
         }
+        // One of a pair: the other goes back to being alone.
+        if self.terminal_pair.is_some_and(|(a, b)| a == id || b == id) {
+            self.terminal_pair = None;
+        }
         // Its subscription goes with it.
         drop(self.terminals.remove(ix));
         if self.active_terminal > ix || self.active_terminal >= self.terminals.len() {
@@ -5610,6 +5621,35 @@ impl Workspace {
             }
             cx.notify();
         }
+    }
+
+    /// ⌘D in the terminal: another one beside it, both shown.
+    fn split_terminal(&mut self, _: &SplitTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(left) = self.terminal().map(|t| t.entity_id()) else {
+            return self.new_terminal(&NewTerminal, window, cx);
+        };
+        // Already two side by side: the new one pairs with the current instead.
+        if !self.add_terminal(window, cx) {
+            return;
+        }
+        let right = self.terminal().map(|t| t.entity_id()).unwrap_or(left);
+        self.terminal_pair = Some((left, right));
+        self.terminal_open.set(true, TERMINAL_SLIDE, TERMINAL_SLIDE);
+        if let Some(terminal) = self.terminal() {
+            window.focus(&terminal.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    /// The two terminals shown side by side now, if the current one is of a pair.
+    fn shown_pair(&self) -> Option<(Entity<TerminalView>, Entity<TerminalView>)> {
+        let (left, right) = self.terminal_pair?;
+        let current = self.terminal()?.entity_id();
+        if current != left && current != right {
+            return None;
+        }
+        let find = |id| self.terminals.iter().find(|(t, _)| t.entity_id() == id).map(|(t, _)| t.clone());
+        Some((find(left)?, find(right)?))
     }
 
     fn next_terminal(&mut self, _: &NextTerminal, window: &mut Window, cx: &mut Context<Self>) {
@@ -5825,6 +5865,13 @@ impl Workspace {
                 }
             })
             .child(
+                icon_button("split-terminal", "icons/split.svg")
+                    .tooltip(ui::tip("Split the terminal", Some(Box::new(SplitTerminal))))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.split_terminal(&SplitTerminal, window, cx)),
+                    ),
+            )
+            .child(
                 icon_button("new-terminal", "icons/plus.svg")
                     .tooltip(ui::tip("New terminal", Some(Box::new(NewTerminal))))
                     .on_click(
@@ -5846,14 +5893,34 @@ impl Workspace {
                 .border_t_1()
                 .border_color(theme.hairline)
                 .bg(theme.background)
-                .child(
-                    div()
-                        .h(px(TERMINAL_HEIGHT))
-                        .flex()
-                        .flex_col()
-                        .child(header)
-                        .child(div().flex_1().min_h_0().child(terminal.clone())),
-                )
+                .child(div().h(px(TERMINAL_HEIGHT)).flex().flex_col().child(header).child(match self.shown_pair() {
+                    // Two side by side, a click in one making it the current.
+                    Some((left, right)) => {
+                        let pane = |terminal: Entity<TerminalView>| {
+                            let id = terminal.entity_id();
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .capture_any_mouse_down(cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    if let Some(ix) = this.terminals.iter().position(|(t, _)| t.entity_id() == id) {
+                                        this.active_terminal = ix;
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(terminal)
+                        };
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .child(pane(left))
+                            .child(div().w(px(1.)).h_full().flex_none().bg(theme.hairline))
+                            .child(pane(right))
+                            .into_any_element()
+                    }
+                    None => div().flex_1().min_h_0().child(terminal.clone()).into_any_element(),
+                }))
                 .into_any_element(),
         )
     }
@@ -7740,6 +7807,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::next_terminal))
+            .on_action(cx.listener(Self::split_terminal))
             .on_action(cx.listener(Self::rename_terminal))
             .on_action(cx.listener(Self::confirm_terminal_name))
             .on_action(cx.listener(Self::cancel_terminal_name))

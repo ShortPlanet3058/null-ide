@@ -244,7 +244,7 @@ numbers can show everywhere, only in code, or nowhere.
   tasks of a `.vscode/tasks.json`), and your own: `"tasks": { "deploy": "./deploy --prod" }`
   in settings.json, in every project.
 - **⌥⌘T** runs the test at the caret (Rust, Go, pytest, vitest, jest), or all of a file's.
-- The terminal (**⌃\`**, more with **⌃⇧\`**; a double-click on one's name renames it, and a
+- The terminal (**⌃\`**, more with **⌃⇧\`**, two side by side with **⌘D** in it; a double-click on one's name renames it, and a
   tab's menu opens one in its file's folder): ⌘-click a `file:line:col` or a link in its
   output to open it, **⌘F** searches it. **Run Selection in Terminal** (⌘K) runs the lines
   selected, or steps through a script line by line.
