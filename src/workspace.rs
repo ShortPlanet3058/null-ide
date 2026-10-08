@@ -5986,6 +5986,16 @@ impl Workspace {
         Self::named_terminal_label(terminal.name.as_deref(), &terminal.title, ix)
     }
 
+    /// Labels told apart: a second "qa" is "qa 2" (two terminals in one folder).
+    fn distinct_labels(labels: Vec<String>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(labels.len());
+        for (i, label) in labels.iter().enumerate() {
+            let before = labels[..i].iter().filter(|l| *l == label).count();
+            out.push(if before == 0 { label.clone() } else { format!("{label} {}", before + 1) });
+        }
+        out
+    }
+
     fn named_terminal_label(name: Option<&str>, title: &str, ix: usize) -> String {
         name.map_or_else(|| Self::terminal_label(title, ix), str::to_string)
     }
@@ -6045,9 +6055,12 @@ impl Workspace {
         };
         // One terminal: its name and title. More: a tab each.
         let several = self.terminals.len() > 1;
+        let labels = Self::distinct_labels(
+            self.terminals.iter().enumerate().map(|(ix, (t, _))| Self::terminal_tab_label(t.read(cx), ix)).collect(),
+        );
         let tabs = self.terminals.iter().enumerate().map(|(ix, (t, _))| {
             let active = ix == self.active_terminal;
-            let label = Self::terminal_tab_label(t.read(cx), ix);
+            let label = labels[ix].clone();
             let renaming =
                 self.terminal_rename.as_ref().filter(|r| r.terminal == t.entity_id()).map(|r| r.input.clone());
             // Another terminal busy with something: a dot says so.
@@ -10061,6 +10074,8 @@ mod tests {
         assert_eq!(Workspace::named_terminal_label(None, "ada@mac:~/code/null", 0), "null");
         assert_eq!(Workspace::terminal_name("ada@mac:~/code/null"), "null");
         assert_eq!(Workspace::terminal_name("cargo run"), "cargo run");
+        let labels = Workspace::distinct_labels(vec!["qa".into(), "api".into(), "qa".into(), "qa".into()]);
+        assert_eq!(labels, ["qa", "api", "qa 2", "qa 3"]);
     }
 
     /// A command's output in the terminal: its problems in files that exist join the list
