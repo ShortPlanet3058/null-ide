@@ -125,7 +125,9 @@ doesn't need Xcode's separate Metal Toolchain download.
 - A file's language comes from its name, or else its first line: a script without an
   extension (`#!/usr/bin/env python3`, `#!/bin/bash`), an untitled file you paste into,
   `<?xml`, `<!DOCTYPE html>`. A click on the language's name in the status bar (or ⌘K
-  "Language: …") puts the file in another; the choice is kept with the session.
+  "Language: …") puts the file in another; the choice is kept with the session. Saving an
+  untitled file suggests a name from it: a note's first heading (`Trip to Lyon.md`), prose's
+  first words, `untitled.py` for code.
 - When the language server can say what each name is (rust-analyzer, clangd, Swift's
   sourcekit-lsp), its colours go over the grammar's: a type is coloured as a type, a call
   as a call, a macro as a macro, even where the grammar could only guess from how it's

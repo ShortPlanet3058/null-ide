@@ -2827,7 +2827,8 @@ impl Workspace {
             self.activate(ix, window, cx);
         }
         let root = self.tree.read(cx).root().to_path_buf();
-        let answer = cx.prompt_for_new_path(&root, None);
+        let name = editor.read(cx).suggested_name();
+        let answer = cx.prompt_for_new_path(&root, Some(&name));
         let lsp = self.lsp.clone();
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(path))) = answer.await else { return };
@@ -3082,8 +3083,12 @@ impl Workspace {
             .and_then(|p| p.parent())
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.tree.read(cx).root().to_path_buf());
-        let name = current.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-        let answer = cx.prompt_for_new_path(&dir, name.as_deref());
+        // Untitled: a name from what it holds (`Trip to Lyon.md`, `untitled.py`).
+        let name = match current.as_ref().and_then(|p| p.file_name()) {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => editor.read(cx).suggested_name(),
+        };
+        let answer = cx.prompt_for_new_path(&dir, Some(&name));
         let lsp = self.lsp.clone();
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(path))) = answer.await else { return };

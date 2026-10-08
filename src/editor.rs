@@ -962,6 +962,12 @@ impl Editor {
             cx.global::<Settings>().default_indent(),
         );
         self.path = Some(path);
+        // Chosen while untitled, and now what its name says: nothing left to remember.
+        if self.chosen_language.is_some()
+            && self.chosen_language == self.path.as_deref().and_then(language_pick::by_path)
+        {
+            self.chosen_language = None;
+        }
         self.highlighter = highlighter_for(self.language(), &self.buffer);
         self.rehighlight();
         if let Some(lsp) = lsp {
