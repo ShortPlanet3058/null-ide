@@ -70,7 +70,7 @@ pub use conflicts::{Conflict, NextConflict, PreviousConflict};
 pub use counterpart::{SwitchSourceHeader, has_counterpart};
 pub use cursors::Cursor;
 pub use fixes::QuickFix;
-pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
+pub use fold::{Fold, FoldAll, FoldLevel1, FoldLevel2, FoldLevel3, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
 pub use language_pick::{SetLanguage, by_name as language_by_name, names as language_names};
@@ -3900,6 +3900,9 @@ impl Render for Editor {
             .on_action(cx.listener(Self::fold))
             .on_action(cx.listener(Self::unfold))
             .on_action(cx.listener(Self::fold_all))
+            .on_action(cx.listener(Self::fold_level_1))
+            .on_action(cx.listener(Self::fold_level_2))
+            .on_action(cx.listener(Self::fold_level_3))
             .on_action(cx.listener(Self::unfold_all))
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::expand_macro))

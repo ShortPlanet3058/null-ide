@@ -6,7 +6,24 @@ use super::Editor;
 use gpui::{App, Context, KeyBinding, Window, actions};
 use std::ops::Range;
 
-actions!(fold, [Fold, Unfold, FoldAll, UnfoldAll]);
+actions!(fold, [Fold, Unfold, FoldAll, UnfoldAll, FoldLevel1, FoldLevel2, FoldLevel3]);
+
+/// How deep each of `regions` (sorted by start) is: 0 for one inside no other.
+fn depths(regions: &[Range<usize>]) -> Vec<usize> {
+    let mut open: Vec<Range<usize>> = Vec::new();
+    regions
+        .iter()
+        .map(|r| {
+            // Those it isn't inside any more (they ended before it, or don't hold it) close.
+            while open.last().is_some_and(|o| !(o.start <= r.start && r.end <= o.end)) {
+                open.pop();
+            }
+            let depth = open.len();
+            open.push(r.clone());
+            depth
+        })
+        .collect()
+}
 
 pub fn bind_keys(cx: &mut App) {
     let editor = Some("Editor");
@@ -124,6 +141,28 @@ impl Editor {
 
     pub(super) fn fold_all(&mut self, _: &FoldAll, _: &mut Window, cx: &mut Context<Self>) {
         self.folds.folded = self.foldable().to_vec();
+        self.fold_moves_caret_out();
+        self.apply_folds(cx);
+    }
+
+    pub(super) fn fold_level_1(&mut self, _: &FoldLevel1, _: &mut Window, cx: &mut Context<Self>) {
+        self.fold_level(1, cx);
+    }
+
+    pub(super) fn fold_level_2(&mut self, _: &FoldLevel2, _: &mut Window, cx: &mut Context<Self>) {
+        self.fold_level(2, cx);
+    }
+
+    pub(super) fn fold_level_3(&mut self, _: &FoldLevel3, _: &mut Window, cx: &mut Context<Self>) {
+        self.fold_level(3, cx);
+    }
+
+    /// Every block `level` deep folded (1: the outermost ones), every other one open: the
+    /// file's outline at that depth.
+    fn fold_level(&mut self, level: usize, cx: &mut Context<Self>) {
+        let regions = self.foldable().to_vec();
+        let depths = depths(&regions);
+        self.folds.folded = regions.into_iter().zip(depths).filter(|(_, d)| d + 1 == level).map(|(r, _)| r).collect();
         self.fold_moves_caret_out();
         self.apply_folds(cx);
     }
@@ -250,5 +289,34 @@ mod tests {
     fn nested_folds_hide_the_outer_lines_once() {
         assert_eq!(hidden_lines(&[0..10, 2..5, 12..14]), vec![1..10, 13..14]);
         assert_eq!(hidden_lines(&[3..4]), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn blocks_know_how_deep_they_are() {
+        // impl { fn { if {} } fn {} } fn {}
+        assert_eq!(depths(&[0..10, 1..5, 2..4, 6..9, 12..14]), [0, 1, 2, 1, 0]);
+        // Ending on the same line as the one around it: still inside.
+        assert_eq!(depths(&[0..5, 2..5]), [0, 1]);
+        assert_eq!(depths(&[]), Vec::<usize>::new());
+    }
+
+    /// Fold Level 2: the methods inside an impl folded, the impl itself open.
+    #[gpui::test]
+    fn a_level_folds_its_blocks_only(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let text =
+            "impl A {\n    fn a() {\n        1;\n    }\n    fn b() {\n        2;\n    }\n}\nfn c() {\n    3;\n}\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some("a.rs".into()), cx));
+        e.update_in(cx, |e, window, cx| {
+            e.fold_level_2(&FoldLevel2, window, cx);
+            assert_eq!(e.folds.folded, [1..3, 4..6]);
+            e.fold_level_1(&FoldLevel1, window, cx);
+            assert_eq!(e.folds.folded, [0..7, 8..10]);
+        });
     }
 }
