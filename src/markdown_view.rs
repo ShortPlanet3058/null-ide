@@ -100,6 +100,22 @@ pub enum Align {
     Right,
 }
 
+/// A picture written into the page (see `written_image`).
+#[derive(Clone)]
+pub struct Written(pub std::sync::Arc<gpui::Image>);
+
+impl PartialEq for Written {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for Written {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Written")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Inline {
     Text(String),
@@ -114,6 +130,9 @@ pub enum Inline {
     Image {
         alt: String,
         url: String,
+        /// The picture itself, when the page holds it (`data:image/png;base64,…`): read
+        /// once, with the page, not each time it's drawn.
+        written: Option<Written>,
     },
     Break,
     /// A footnote reference (`[^label]`): its number once the document is read.
@@ -314,7 +333,7 @@ fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
             let language = trimmed[fence.len()..].split_whitespace().next().unwrap_or("").to_string();
             let mut code = Vec::new();
             i += 1;
-            while i < lines.len() && !lines[i].trim_start().starts_with(fence) {
+            while i < lines.len() && !closes(lines[i].trim_start(), fence) {
                 code.push(lines[i].get(indent.min(lines[i].len() - lines[i].trim_start().len())..).unwrap_or(""));
                 i += 1;
             }
@@ -504,14 +523,16 @@ fn colours_for_extension(extension: &str, text: &str) -> Vec<(Range<usize>, Synt
     highlighter.spans(buffer.rope(), 0..text.len())
 }
 
-pub(crate) fn fence_of(trimmed: &str) -> Option<&'static str> {
-    if trimmed.starts_with("```") {
-        Some("```")
-    } else if trimmed.starts_with("~~~") {
-        Some("~~~")
-    } else {
-        None
-    }
+pub(crate) fn fence_of(trimmed: &str) -> Option<&str> {
+    let sign = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let run = trimmed.len() - trimmed.trim_start_matches(sign).len();
+    (run >= 3).then(|| &trimmed[..run])
+}
+
+/// Whether `trimmed` ends the code block fence `open` began: a run of its sign at least as
+/// long, with nothing after it (so a block in four backticks can hold three).
+pub(crate) fn closes(trimmed: &str, open: &str) -> bool {
+    fence_of(trimmed).is_some_and(|run| run.starts_with(open) && trimmed[run.len()..].trim().is_empty())
 }
 
 fn heading(trimmed: &str) -> Option<(u8, &str)> {
@@ -689,7 +710,7 @@ pub fn aligned_tables(source: &str) -> Vec<(Range<usize>, Vec<String>)> {
     while i < lines.len() {
         let trimmed = lines[i].trim_start();
         if let Some(open) = fence {
-            if trimmed.starts_with(open) {
+            if closes(trimmed, open) {
                 fence = None;
             }
             i += 1;
@@ -936,7 +957,8 @@ pub fn inlines(text: &str) -> Vec<Inline> {
             '!' if rest.starts_with("![") => {
                 if let Some((alt, url, len)) = bracketed(&chars, i + 1) {
                     flush(&mut plain, &mut out);
-                    out.push(Inline::Image { alt, url });
+                    let written = written_image(&url).map(Written);
+                    out.push(Inline::Image { alt, url, written });
                     i += 1 + len;
                     continue;
                 }
@@ -1168,7 +1190,11 @@ pub fn headings(source: &str) -> Vec<(u8, String, String)> {
         }
         let t = line.trim_start();
         if let Some(open) = fence_of(t) {
-            fence = if fence == Some(open) { None } else { fence.or(Some(open)) };
+            fence = match fence {
+                Some(f) if closes(t, f) => None,
+                Some(f) => Some(f),
+                None => Some(open),
+            };
             continue;
         }
         if fence.is_some() {
@@ -1290,7 +1316,7 @@ pub fn task_lines(source: &str) -> Vec<usize> {
         let trimmed = text.trim_start();
         match fence {
             Some(open) => {
-                if trimmed.starts_with(open) {
+                if closes(trimmed, open) {
                     fence = None;
                 }
                 continue;
@@ -1425,7 +1451,7 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
                     .flex_wrap()
                     .gap(px(8.))
                     .children(text.iter().filter_map(|i| match i {
-                        Inline::Image { alt, url } => Some(image(alt, url, style)),
+                        Inline::Image { alt, url, written } => Some(image(alt, url, written.as_ref(), style)),
                         _ => None,
                     }))
                     .into_any_element();
@@ -1587,12 +1613,13 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
 }
 
 /// A picture written into the page (`data:image/png;base64,…`, as notebooks keep their
-/// charts), read once and kept by what it holds.
+/// charts), read once and kept by what it holds (so reading the page again after an edit
+/// elsewhere doesn't decode it again); one that can't be read is remembered too.
 fn written_image(url: &str) -> Option<std::sync::Arc<gpui::Image>> {
     use base64::Engine as _;
     use std::sync::{Arc, LazyLock, Mutex};
     /// Pictures read, by what they hold (a hash of the text).
-    type Kept = Vec<(u64, Arc<gpui::Image>)>;
+    type Kept = Vec<(u64, Option<Arc<gpui::Image>>)>;
     static READ: LazyLock<Mutex<Kept>> = LazyLock::new(Default::default);
     let rest = url.strip_prefix("data:image/")?;
     let (kind, data) = rest.split_once(";base64,")?;
@@ -1610,25 +1637,27 @@ fn written_image(url: &str) -> Option<std::sync::Arc<gpui::Image>> {
         hasher.finish()
     };
     if let Some((_, image)) = READ.lock().ok()?.iter().find(|(k, _)| *k == key) {
-        return Some(image.clone());
+        return image.clone();
     }
     let data: String = data.chars().filter(|c| !c.is_whitespace()).collect();
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
-    let image = Arc::new(gpui::Image::from_bytes(format, bytes));
+    let image = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()
+        .map(|bytes| Arc::new(gpui::Image::from_bytes(format, bytes)));
     if let Ok(mut read) = READ.lock() {
         if read.len() >= 64 {
             read.remove(0);
         }
         read.push((key, image.clone()));
     }
-    Some(image)
+    image
 }
 
-fn image(alt: &str, url: &str, style: &Style) -> AnyElement {
+fn image(alt: &str, url: &str, written: Option<&Written>, style: &Style) -> AnyElement {
     let theme = &style.theme;
-    if let Some(picture) = written_image(url) {
+    if let Some(Written(picture)) = written {
         let (alt, faint) = (alt.to_string(), theme.faint);
-        return gpui::img(gpui::ImageSource::Image(picture))
+        return gpui::img(gpui::ImageSource::Image(picture.clone()))
             .max_w_full()
             .with_fallback(move || div().text_color(faint).child(alt.clone()).into_any_element())
             .into_any_element();
@@ -1759,7 +1788,7 @@ fn flatten(
                 flatten(label, theme, style, text, highlights, links, code);
                 links.push((start..text.len(), url.clone()));
             }
-            Inline::Image { alt, url } => {
+            Inline::Image { alt, url, .. } => {
                 // In the middle of text, an image is its description, linked.
                 text.push_str(if alt.is_empty() { url } else { alt });
                 let style = HighlightStyle { color: Some(theme.muted), ..around };
@@ -1991,7 +2020,7 @@ mod tests {
         );
         assert_eq!(
             inlines("![logo](assets/logo.png)"),
-            vec![Inline::Image { alt: "logo".into(), url: "assets/logo.png".into() }]
+            vec![Inline::Image { alt: "logo".into(), url: "assets/logo.png".into(), written: None }]
         );
         assert_eq!(inlines(r"not \*emphasis\*"), vec![text("not *emphasis*")]);
         assert_eq!(inlines("***both***"), vec![Inline::Strong(vec![Inline::Emphasis(vec![text("both")])])]);
@@ -2127,7 +2156,11 @@ fn lists_around(lines: &[String], at: usize) -> Vec<Items> {
             continue;
         }
         if let Some(mark) = fence_of(line.trim_start()) {
-            fence = if fence == Some(mark) { None } else { fence.or(Some(mark)) };
+            fence = match fence {
+                Some(f) if closes(line.trim_start(), f) => None,
+                Some(f) => Some(f),
+                None => Some(mark),
+            };
             continue;
         }
         if fence.is_some() {

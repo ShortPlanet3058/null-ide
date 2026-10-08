@@ -392,6 +392,7 @@ impl FileTree {
         self.children.clear();
         self.active = None;
         self.selected = None;
+        self.also.clear();
         self.edit = None;
         self.menu = None;
         self.rebuild();
@@ -402,6 +403,10 @@ impl FileTree {
     pub fn set_active(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
         if let Some(path) = &path {
             self.expand_to(path);
+            // Another file shown: the one picked now (not along with others picked before).
+            if self.selected.as_ref() != Some(path) {
+                self.also.clear();
+            }
             self.selected = Some(path.clone());
         }
         self.active = path;
@@ -697,6 +702,7 @@ impl FileTree {
             .map(|i| (start + i) % rows.max(1))
             .find(|&ix| self.row_label(ix).is_some_and(|label| label.to_lowercase().starts_with(prefix)));
         if let Some(ix) = found {
+            self.also.clear();
             self.selected = self.entry_at(ix).map(|e| e.path.clone());
             self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
             cx.stop_propagation();
@@ -746,7 +752,8 @@ impl FileTree {
         if entry.is_dir && self.folder_row(&entry.path).1 {
             self.toggle_row(&entry.path, cx);
         } else if let Some(parent) = entry.path.parent().filter(|p| *p != self.root) {
-            // On a file or closed folder, Left goes up to the parent folder.
+            // On a file or closed folder, Left goes up to the parent folder (alone).
+            self.also.clear();
             self.selected = Some(parent.to_path_buf());
             self.reveal_selected();
             cx.notify();
@@ -879,8 +886,15 @@ impl FileTree {
     /// A file or folder dropped on a folder: it moves there (through the workspace, which
     /// lets language servers update the code naming it).
     fn drop_into(&mut self, dragged: &DraggedEntry, dir: PathBuf, cx: &mut Context<Self>) {
+        let paths = dragged.paths();
+        // Two with one name (`a/index.ts`, `b/index.ts`) can't both go there: none go.
+        let mut names = HashSet::new();
+        if let Some(twice) = paths.iter().filter_map(|p| p.file_name()).find(|name| !names.insert(*name)) {
+            let message = format!("Two of these are called {}: they can't share a folder", twice.to_string_lossy());
+            return cx.emit(FileTreeEvent::Notice(message));
+        }
         // Each of what's dragged: those already there stay.
-        for path in dragged.paths() {
+        for path in paths {
             if path.parent() == Some(dir.as_path()) {
                 continue;
             }
@@ -925,6 +939,8 @@ impl FileTree {
         let to = fs_ops::move_path(from, to)?;
         self.children.clear();
         self.expand_to(&to);
+        // Picked ones keep their paths only while they're where they were: a moved one's go.
+        self.also.retain(|p| !p.starts_with(from));
         self.selected = Some(to.clone());
         self.rebuild();
         self.reveal_selected();
@@ -958,13 +974,11 @@ impl FileTree {
     /// What's picked: the selected row and those picked with it, in the order shown; a
     /// file or folder inside a picked folder goes with it, so isn't counted again.
     fn picked(&self) -> Vec<Entry> {
-        let chosen = |p: &PathBuf| self.selected.as_ref() == Some(p) || self.also.contains(p);
-        let all: Vec<Entry> =
-            (0..self.rows.len()).filter_map(|i| self.entry_at(i)).filter(|e| chosen(&e.path)).cloned().collect();
-        all.iter()
-            .filter(|e| !all.iter().any(|o| o.is_dir && o.path != e.path && e.path.starts_with(&o.path)))
-            .cloned()
-            .collect()
+        let chosen: HashSet<&PathBuf> = self.also.iter().chain(&self.selected).collect();
+        let all: Vec<&Entry> =
+            (0..self.rows.len()).filter_map(|i| self.entry_at(i)).filter(|e| chosen.contains(&e.path)).collect();
+        let folders: HashSet<&Path> = all.iter().filter(|e| e.is_dir).map(|e| e.path.as_path()).collect();
+        all.into_iter().filter(|e| !e.path.ancestors().skip(1).any(|a| folders.contains(a))).cloned().collect()
     }
 
     pub fn trash(&mut self, _: &Trash, window: &mut Window, cx: &mut Context<Self>) {
@@ -1007,6 +1021,7 @@ impl FileTree {
                 let first =
                     this.rows.iter().position(|r| matches!(&r.kind, RowKind::Entry(e) if e.path == picked[0].path));
                 let mut moved = 0;
+                let mut problems = Vec::new();
                 for entry in &picked {
                     match fs_ops::move_to_trash(&entry.path) {
                         Ok(()) => {
@@ -1016,7 +1031,7 @@ impl FileTree {
                             }
                             cx.emit(FileTreeEvent::Trashed(entry.path.clone()));
                         }
-                        Err(message) => cx.emit(FileTreeEvent::Notice(message)),
+                        Err(message) => problems.push(message),
                     }
                 }
                 this.also.clear();
@@ -1024,7 +1039,19 @@ impl FileTree {
                 let next = first.unwrap_or(0).min(this.rows.len().saturating_sub(1));
                 this.selected = this.entry_at(next).map(|e| e.path.clone());
                 window.focus(&this.focus_handle);
-                cx.emit(FileTreeEvent::Notice(format!("Moved {moved} items to the Trash")));
+                // One line says it all (a second would replace the first).
+                let mut notice = match moved {
+                    0 => String::new(),
+                    1 => "Moved 1 item to the Trash".to_string(),
+                    n => format!("Moved {n} items to the Trash"),
+                };
+                if !problems.is_empty() {
+                    if !notice.is_empty() {
+                        notice.push_str(" · ");
+                    }
+                    notice.push_str(&problems.join("; "));
+                }
+                cx.emit(FileTreeEvent::Notice(notice));
                 cx.notify();
             })
             .ok();
@@ -1272,7 +1299,21 @@ impl FileTree {
 
     // ---------- drawing ----------
 
-    fn render_row(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// What's picked, worked out once for all the rows drawn: every row picked, and what
+    /// goes along in a drag (see `picked`).
+    fn picked_group(&self) -> (HashSet<PathBuf>, Vec<PathBuf>) {
+        let chosen = self.also.iter().chain(&self.selected).cloned().collect();
+        let along = if self.also.is_empty() { Vec::new() } else { self.picked().into_iter().map(|e| e.path).collect() };
+        (chosen, along)
+    }
+
+    fn render_row(
+        &self,
+        ix: usize,
+        (chosen, group): &(HashSet<PathBuf>, Vec<PathBuf>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = cx.global::<Theme>();
         let row = &self.rows[ix];
         // Rows sit inset from the sidebar's edges, so their highlight has rounded ends.
@@ -1341,7 +1382,7 @@ impl FileTree {
             }
             RowKind::Entry(entry) => {
                 let active = self.active.as_ref() == Some(&entry.path);
-                let picked = self.selected.as_ref() == Some(&entry.path) || self.also.contains(&entry.path);
+                let picked = chosen.contains(&entry.path);
                 let selected = picked && self.focus_handle.contains_focused(window, cx);
                 let head = row.chain.as_ref().map_or(entry.path.as_path(), |(head, _)| head.as_path());
                 let (turn, turning) = self.chevron_turn(head, row.expanded);
@@ -1376,15 +1417,17 @@ impl FileTree {
                 } else {
                     entry.path.parent().map(Path::to_path_buf).unwrap_or_default()
                 };
-                // One of several picked: they all go along.
-                let along: Vec<PathBuf> = if picked && !self.also.is_empty() {
-                    self.picked().into_iter().map(|e| e.path).filter(|p| *p != entry.path).collect()
-                } else {
-                    Vec::new()
+                // One of several picked: they all go along (held by a picked folder it's in, if
+                // it is, so it isn't moved out of it).
+                let (held, along) = match group.iter().find(|p| entry.path.starts_with(p)) {
+                    Some(head) if picked && group.len() > 1 => {
+                        (head.clone(), group.iter().filter(|p| *p != head).cloned().collect())
+                    }
+                    _ => (entry.path.clone(), Vec::new()),
                 };
                 let name: SharedString =
                     if along.is_empty() { entry.name.clone() } else { format!("{} items", along.len() + 1).into() };
-                let dragged = DraggedEntry { path: entry.path.clone(), name, also: along };
+                let dragged = DraggedEntry { path: held, name, also: along };
                 let tint = theme.accent_soft;
                 let row_el = base
                     // Tests find a row by its path (no cost outside them).
@@ -1634,6 +1677,7 @@ impl Render for FileTree {
                             "file-tree",
                             self.rows.len(),
                             cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
+                                let picked = this.picked_group();
                                 // Each row the sidebar's width, inset a little so its highlight
                                 // has rounded ends.
                                 range
@@ -1641,7 +1685,7 @@ impl Render for FileTree {
                                         div()
                                             .w_full()
                                             .px(px(6.))
-                                            .child(this.render_row(ix, window, cx))
+                                            .child(this.render_row(ix, &picked, window, cx))
                                             .into_any_element()
                                     })
                                     .collect()
@@ -1720,6 +1764,21 @@ mod tests {
             t.drop_into(&dragged, dir.join("dest"), cx);
         });
         assert!(dir.join("dest/d.txt").exists() && dir.join("dest/e.txt").exists());
+        // Two with one name can't share a folder: neither moves.
+        std::fs::create_dir_all(dir.join("x")).unwrap();
+        std::fs::create_dir_all(dir.join("y")).unwrap();
+        std::fs::write(dir.join("x/index.ts"), "x").unwrap();
+        std::fs::write(dir.join("y/index.ts"), "y").unwrap();
+        tree.update(cx, |t, cx| {
+            let dragged = DraggedEntry {
+                path: dir.join("x/index.ts"),
+                name: "2 items".into(),
+                also: vec![dir.join("y/index.ts")],
+            };
+            t.drop_into(&dragged, dir.join("dest"), cx);
+        });
+        assert!(dir.join("x/index.ts").exists() && dir.join("y/index.ts").exists());
+        assert!(!dir.join("dest/index.ts").exists());
         // A plain click: one again.
         tree.update_in(cx, |t, window, cx| {
             t.click(0, 1, Default::default(), window, cx);

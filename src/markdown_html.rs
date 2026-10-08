@@ -244,7 +244,7 @@ fn inlines(content: &[Inline]) -> String {
             Inline::Emphasis(inner) => format!("<em>{}</em>", inlines(inner)),
             Inline::Strike(inner) => format!("<del>{}</del>", inlines(inner)),
             Inline::Link { text, url } => format!("<a href=\"{}\">{}</a>", escape(safe_url(url, false)), inlines(text)),
-            Inline::Image { alt, url } => {
+            Inline::Image { alt, url, .. } => {
                 format!("<img src=\"{}\" alt=\"{}\">", escape(safe_url(url, true)), escape(alt))
             }
             Inline::Break => "<br>\n".to_string(),

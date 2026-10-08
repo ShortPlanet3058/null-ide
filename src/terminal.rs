@@ -153,8 +153,86 @@ pub enum TerminalEvent {
     OpenFile(PathBuf, Option<u32>, Option<u32>),
     /// A command that ran a while finished: its name, and how long it took.
     Finished(String, std::time::Duration),
-    /// A command finished: its name, and what it printed.
-    Ran(String, String),
+    /// A command finished: what it was, and what it printed.
+    Ran(Ran),
+}
+
+/// A command that finished in the shell.
+#[derive(Clone, Debug)]
+pub struct Ran {
+    /// What to call it: the program (`cargo`).
+    pub name: String,
+    /// The line typed for it (`cargo build`), without the prompt: the same command run again
+    /// has the same.
+    pub command: String,
+    /// The shell's folder when it began: relative paths in its output are from there.
+    pub folder: PathBuf,
+    pub output: String,
+}
+
+/// Where a command began: its line (see `output_mark`), and that line's text to find it
+/// by once the history is full and lines no longer count up; the shell's folder then;
+/// when; and whether the program was seen running.
+struct RunStart {
+    mark: usize,
+    line: String,
+    folder: PathBuf,
+    at: std::time::Instant,
+    seen: bool,
+}
+
+/// A command too quick to be seen running is taken as done this long after Return.
+const QUICK_RUN: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A row's text as it reads: a wide character once (not followed by its spacer), with the
+/// marks drawn over it.
+fn row_text(grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>, line: Line) -> String {
+    let row = &grid[line];
+    let mut text = String::new();
+    for column in 0..grid.columns() {
+        let cell = &row[Column(column)];
+        if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            continue;
+        }
+        text.push(cell.c);
+        text.extend(cell.zerowidth().into_iter().flatten());
+    }
+    text
+}
+
+/// The command typed on a prompt's line (`me@mac app % make test` → `make test`): what
+/// follows the prompt's first `% `, `$ `, `# `, `> `, `❯ ` or `➜ `, from its first word
+/// that's a program (`➜  app git:(main) make` → `make`), or the whole line.
+fn typed_command(line: &str) -> &str {
+    let end = ["% ", "$ ", "# ", "> ", "❯ ", "➜ "]
+        .iter()
+        .filter_map(|sign| line.find(sign).map(|at| at + sign.len()))
+        .min()
+        .unwrap_or(0);
+    let typed = line[end..].trim();
+    let paths: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let program = |word: &str| {
+        word.contains('=')
+            || word.starts_with("./")
+            || word.starts_with("../")
+            || (word.starts_with('/') && std::path::Path::new(word).is_file())
+            || (!word.contains('/') && paths.iter().any(|dir| dir.join(word).is_file()))
+    };
+    let mut at = 0;
+    for word in typed.split_whitespace() {
+        let start = typed[at..].find(word).map_or(at, |i| at + i);
+        if program(word) {
+            return &typed[start..];
+        }
+        at = start + word.len();
+    }
+    typed
+}
+
+/// The program a typed command runs (`FOO=1 ./build.sh -v` → `build.sh`).
+fn program_of(command: &str) -> &str {
+    let word = command.split_whitespace().find(|w| !w.contains('=')).unwrap_or("");
+    word.rsplit('/').next().unwrap_or(word)
 }
 
 /// A link the mouse is over while ⌘ is held: its row (as the grid counts, history
@@ -180,8 +258,8 @@ pub struct TerminalView {
     pub title: String,
     /// A name given to it, over the one its folder gives.
     pub name: Option<String>,
-    /// Where the output of the command running began (see `output_mark`).
-    run_mark: Option<usize>,
+    /// Where the command running (or just typed) began.
+    run: Option<RunStart>,
     /// The program running in the shell now (`cargo`), while one is.
     pub running: Option<String>,
     selecting: bool,
@@ -282,18 +360,32 @@ impl TerminalView {
                     );
                     let Ok(()) = this.update(cx, |this, cx| {
                         if this.running != name {
-                            // Started: where its output begins. Ended: what it printed.
+                            // Started: where its output begins (from Return, if it was seen).
+                            // Ended: what it printed.
                             match (this.running.take(), &name) {
-                                (None, Some(_)) => this.run_mark = Some(this.output_mark()),
+                                (None, Some(_)) => {
+                                    if this.run.is_none() {
+                                        this.run = Some(this.run_start());
+                                    }
+                                    if let Some(run) = &mut this.run {
+                                        run.seen = true;
+                                    }
+                                }
                                 (Some(ran), None) => {
-                                    if let Some(mark) = this.run_mark.take() {
-                                        cx.emit(TerminalEvent::Ran(ran, this.output_since(mark)));
+                                    if let Some(run) = this.run.take() {
+                                        this.report_run(Some(ran), run, cx);
                                     }
                                 }
                                 _ => {}
                             }
                             this.running = name;
                             cx.emit(TerminalEvent::TitleChanged);
+                        } else if this.running.is_none()
+                            && this.run.as_ref().is_some_and(|r| !r.seen && r.at.elapsed() >= QUICK_RUN)
+                            && let Some(run) = this.run.take()
+                        {
+                            // Done before it could be seen (a quick `gcc`): it ran all the same.
+                            this.report_run(None, run, cx);
                         }
                         if let Some((name, took)) = finished {
                             cx.emit(TerminalEvent::Finished(name, took));
@@ -319,7 +411,7 @@ impl TerminalView {
             cell: (px(8.), px(16.)),
             title: String::new(),
             name: None,
-            run_mark: None,
+            run: None,
             running: None,
             selecting: false,
             mouse_held: None,
@@ -342,6 +434,9 @@ impl TerminalView {
     /// once it has.
     pub fn run_command(&mut self, command: &str, cx: &mut Context<Self>) {
         if self.settled {
+            if self.running.is_none() {
+                self.run = Some(self.run_start());
+            }
             return self.write(format!("{command}\r").into_bytes());
         }
         self.queued.push(command.to_string());
@@ -466,6 +561,10 @@ impl TerminalView {
         }
         let app_cursor = self.term.lock().mode().contains(TermMode::APP_CURSOR);
         if let Some(bytes) = key_to_bytes(&event.keystroke, app_cursor) {
+            // Return at the shell's prompt: a command begins here.
+            if bytes == b"\r" && self.running.is_none() {
+                self.run = Some(self.run_start());
+            }
             // Typing jumps back to the prompt if the view was scrolled up.
             self.term.lock().scroll_display(Scroll::Bottom);
             self.term.lock().selection = None;
@@ -530,31 +629,57 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// The folder the shell started in: relative paths in its output are from here.
-    pub fn folder(&self) -> &std::path::Path {
-        &self.root
+    /// The shell's folder now, as its title shows it ("me@mac:~/code/app"), or the one
+    /// it started in.
+    fn shell_folder(&self) -> PathBuf {
+        let shown = self.title.rsplit(':').next().map(str::trim).unwrap_or("");
+        let shown = match (shown.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+            _ => PathBuf::from(shown),
+        };
+        if shown.is_absolute() && shown.is_dir() { shown } else { self.root.clone() }
     }
 
-    /// Where the output stands: the line the cursor's on, counted from the top of the
-    /// history (so it keeps its place as lines scroll into it).
-    fn output_mark(&self) -> usize {
-        let term = self.term.lock();
-        let grid = term.grid();
-        grid.history_size() + grid.cursor.point.line.0.max(0) as usize
+    /// A command beginning now, at the cursor's line.
+    fn run_start(&self) -> RunStart {
+        let (mark, line) = {
+            let term = self.term.lock();
+            let grid = term.grid();
+            let at = grid.cursor.point.line;
+            (grid.history_size() + at.0.max(0) as usize, row_text(grid, at))
+        };
+        let line = line.trim_end().to_string();
+        RunStart { mark, line, folder: self.shell_folder(), at: std::time::Instant::now(), seen: false }
     }
 
-    /// The text from line `mark` (see `output_mark`) to the cursor: a row wrapped onto the
-    /// next joined to it, the last 5,000 lines at most.
-    fn output_since(&self, mark: usize) -> String {
+    /// Tells what a finished command printed (unless nothing was typed: a bare Return).
+    fn report_run(&self, program: Option<String>, run: RunStart, cx: &mut Context<Self>) {
+        let output = self.output_since(&run);
+        let command = typed_command(output.lines().next().unwrap_or("")).to_string();
+        let name = program.unwrap_or_else(|| program_of(&command).to_string());
+        if name.is_empty() {
+            return;
+        }
+        cx.emit(TerminalEvent::Ran(Ran { name, command, folder: run.folder, output }));
+    }
+
+    /// The text from where `run` began to the cursor: a row wrapped onto the next joined to
+    /// it, the last 5,000 lines at most.
+    fn output_since(&self, run: &RunStart) -> String {
         let term = self.term.lock();
         let grid = term.grid();
         let history = grid.history_size() as i32;
-        let (first, last) = ((mark as i32 - history).max(-history), grid.cursor.point.line.0);
-        let first = first.max(last - 5000);
+        let last = grid.cursor.point.line.0;
+        let lowest = (-history).max(last - 5000);
+        let mut first = run.mark as i32 - history;
+        // A full history no longer counts lines up: the line it began on, by its text.
+        if grid.history_size() >= SCROLLBACK && !run.line.is_empty() {
+            first = (lowest..=last).rev().find(|&l| row_text(grid, Line(l)).starts_with(&run.line)).unwrap_or(first);
+        }
         let mut out = String::new();
-        for line in first..=last {
+        for line in first.max(lowest)..=last {
             let row = &grid[Line(line)];
-            let text: String = (0..grid.columns()).map(|c| row[Column(c)].c).collect();
+            let text = row_text(grid, Line(line));
             let wrapped = row[Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE);
             out.push_str(if wrapped { &text } else { text.trim_end() });
             if !wrapped {
@@ -1400,6 +1525,19 @@ fn shell_words(paths: &[std::path::PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_command_typed_on_a_prompt() {
+        assert_eq!(typed_command("ada@mac app % ls -la"), "ls -la");
+        assert_eq!(typed_command("➜  app git:(main) ✗ ls src"), "ls src", "the prompt's words aren't the command");
+        assert_eq!(typed_command("~/code/app (main) $ cargo build 2> err.log"), "cargo build 2> err.log");
+        assert_eq!(typed_command("❯ npm test"), "npm test");
+        assert_eq!(typed_command("➜  ~/code/app ./build.sh"), "./build.sh");
+        assert_eq!(typed_command("ada@mac app % "), "");
+        assert_eq!(typed_command("make"), "make");
+        assert_eq!(program_of("FOO=1 ./scripts/build.sh -v"), "build.sh");
+        assert_eq!(program_of(""), "");
+    }
 
     #[test]
     fn dropped_paths_are_quoted_for_the_shell() {

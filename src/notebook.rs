@@ -32,6 +32,42 @@ fn plain(text: &str) -> String {
     out
 }
 
+/// What a progress bar left: each line as it was last rewritten (`\r` goes back to its
+/// start).
+fn last_drawn(text: &str) -> String {
+    let lines: Vec<&str> = text
+        .split('\n')
+        .map(|line| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            line.rsplit('\r').next().unwrap_or(line)
+        })
+        .collect();
+    lines.join("\n")
+}
+
+/// A text cell, closed: a code block or comment it leaves open would take in the cells
+/// after it, which Jupyter keeps apart.
+fn closed(text: &str) -> String {
+    let mut text = text.trim_end().to_string();
+    let mut fence: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim_start();
+        match &fence {
+            Some(open) if crate::markdown_view::closes(line, open) => fence = None,
+            Some(_) => {}
+            None => fence = crate::markdown_view::fence_of(line).map(str::to_string),
+        }
+    }
+    if let Some(open) = fence {
+        text.push('\n');
+        text.push_str(&open);
+    }
+    if text.rfind("<!--").is_some_and(|open| !text[open..].contains("-->")) {
+        text.push_str(" -->");
+    }
+    text
+}
+
 /// A fence that the text inside can't close: longer than any run of backticks in it.
 fn fence(text: &str) -> String {
     let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
@@ -59,7 +95,7 @@ pub fn to_markdown(json: &str) -> Option<String> {
         let source = text_of(&cell["source"]);
         match cell["cell_type"].as_str() {
             Some("markdown") => {
-                out.push_str(source.trim_end());
+                out.push_str(&closed(&source));
                 out.push_str("\n\n");
             }
             Some("code") => {
@@ -98,7 +134,7 @@ pub fn to_markdown(json: &str) -> Option<String> {
                         _ => continue,
                     };
                     if !shown.trim().is_empty() {
-                        out.push_str(&code_block("output", &plain(&shown)));
+                        out.push_str(&code_block("output", &last_drawn(&plain(&shown))));
                     }
                 }
             }
@@ -141,9 +177,33 @@ mod tests {
     }
 
     #[test]
+    fn cells_stay_apart() {
+        let json = r#"{"metadata": {}, "cells": [
+            {"cell_type": "markdown", "source": "```python\nnot closed"},
+            {"cell_type": "markdown", "source": "<!-- nor this"},
+            {"cell_type": "code", "source": "x", "outputs": [
+              {"output_type": "stream", "text": "10%\r50%\r100%\ndone\r\n"}
+            ]}
+        ]}"#;
+        let markdown = to_markdown(json).unwrap();
+        assert!(markdown.starts_with("```python\nnot closed\n```\n\n<!-- nor this -->\n\n"), "{markdown}");
+        assert!(markdown.ends_with("```output\n100%\ndone\n```\n\n"), "{markdown}");
+        // As the preview reads it: the code cell is code, not part of the comment.
+        let blocks = crate::markdown_view::parse(&markdown);
+        assert_eq!(blocks.len(), 3, "{blocks:?}");
+    }
+
+    #[test]
     fn code_holding_backticks_keeps_its_fence() {
         let json = r#"{"metadata": {}, "cells": [{"cell_type": "code", "source": "s = '```'", "outputs": []}]}"#;
-        assert_eq!(to_markdown(json).unwrap(), "````python\ns = '```'\n````\n\n");
+        let markdown = to_markdown(json).unwrap();
+        assert_eq!(markdown, "````python\ns = '```'\n````\n\n");
+        // As the preview reads it: Python, all of it.
+        let blocks = crate::markdown_view::parse(&markdown);
+        assert!(
+            matches!(&blocks[..], [crate::markdown_view::Block::Code { language, text, .. }] if language == "python" && text == "s = '```'"),
+            "{blocks:?}"
+        );
         assert_eq!(to_markdown("{\"not\": 1}"), None);
         assert_eq!(to_markdown("not json"), None);
     }

@@ -525,8 +525,10 @@ pub struct Workspace {
     debug_show_output: bool,
     /// The paused call's variables the code shows, with values worth showing.
     debug_locals: Vec<(String, String)>,
-    /// The problems the last command in the terminal reported (a build's errors).
+    /// The problems the last command in the terminal reported (a build's errors), and
+    /// that command (`cargo build`).
     reported: Vec<(PathBuf, lsp_types::Diagnostic)>,
+    reported_by: String,
     /// The shown terminal's new name, being typed.
     terminal_rename: Option<TerminalRename>,
     /// Where an expression to watch is typed, under the variables while paused.
@@ -735,6 +737,7 @@ impl Workspace {
             debug_watch: cx.new(|cx| crate::text_input::TextInput::new("Watch an expression", cx)),
             terminal_rename: None,
             reported: Vec::new(),
+            reported_by: String::new(),
             debug_program: None,
             focus_mode: false,
             tab_menu: None,
@@ -2169,6 +2172,12 @@ impl Workspace {
                     }
                     edit
                 }));
+                // Still possible (another move, dropped together, may have taken the name since)?
+                // If not, nothing that names it changes either.
+                if !from.exists() || (to != from && to.exists()) {
+                    let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    return this.show_notice(format!("Couldn't move it: {name} is taken there"), cx);
+                }
                 // What every server asked for, as one: the files changed and those that couldn't be.
                 let changed = (!edits.is_empty()).then(|| {
                     edits.into_iter().map(|edit| this.apply_edit_to_files(edit, cx)).fold(
@@ -4501,18 +4510,35 @@ impl Workspace {
 
     /// Every problem the servers report, where it is now: open files say where their
     /// problems moved to while editing.
-    /// What a command in the terminal printed: its errors and warnings join the Problems
-    /// list and F8 (the previous command's go), and a line says how many.
-    fn read_reported(&mut self, name: &str, output: &str, folder: &Path, cx: &mut Context<Self>) {
+    /// What a command in the terminal printed: its errors and warnings in the project's
+    /// files join the Problems list and F8, and a line says how many. They stay until the
+    /// same command runs again, or another reports problems of its own.
+    fn read_reported(&mut self, ran: &crate::terminal::Ran, cx: &mut Context<Self>) {
         use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+        // What searches and shows files prints `file:line: text` too: not problems.
+        const NOT_BUILDS: [&str; 16] = [
+            "grep", "egrep", "rg", "ag", "ack", "git", "cat", "bat", "less", "more", "head", "tail", "sed", "awk",
+            "find", "fd",
+        ];
+        let program = |name: &str| name.rsplit('/').next().unwrap_or(name).to_string();
+        let first_word = ran.command.split_whitespace().next().map(program).unwrap_or_default();
+        if NOT_BUILDS.contains(&program(&ran.name).as_str()) || NOT_BUILDS.contains(&first_word.as_str()) {
+            return;
+        }
+        let name = ran.name.as_str();
         let root = self.tree.read(cx).root().to_path_buf();
+        let real_root = root.canonicalize().unwrap_or(root.clone());
+        // Where it is, as one path (`build/../src/a.c` is `src/a.c`) written from the project's
+        // folder as tabs have it, if it's a project file.
         let resolve = |file: &str| {
             let path = Path::new(file);
-            [path.to_path_buf(), folder.join(path), root.join(path)]
+            let real = [path.to_path_buf(), ran.folder.join(path), root.join(path)]
                 .into_iter()
-                .find(|p| p.is_absolute() && p.is_file())
+                .filter(|p| p.is_absolute() && p.is_file())
+                .find_map(|p| p.canonicalize().ok())?;
+            Some(root.join(real.strip_prefix(&real_root).ok()?))
         };
-        let reported: Vec<(PathBuf, Diagnostic)> = crate::problem_matcher::problems(output)
+        let reported: Vec<(PathBuf, Diagnostic)> = crate::problem_matcher::problems(&ran.output)
             .into_iter()
             .filter_map(|p| {
                 let path = resolve(&p.file)?;
@@ -4528,8 +4554,13 @@ impl Workspace {
                 Some((path, diagnostic))
             })
             .collect();
+        // Something else run since (`git status`, an editor) leaves the build's problems be.
+        if reported.is_empty() && ran.command != self.reported_by {
+            return;
+        }
         let had = !self.reported.is_empty();
         self.reported = reported;
+        self.reported_by = ran.command.clone();
         if self.reported.is_empty() {
             if had {
                 cx.notify();
@@ -5208,10 +5239,7 @@ impl Workspace {
                     this.show_notice(message, cx);
                 }
             }
-            TerminalEvent::Ran(name, output) => {
-                let folder = terminal.read(cx).folder().to_path_buf();
-                this.read_reported(name, output, &folder, cx);
-            }
+            TerminalEvent::Ran(ran) => this.read_reported(ran, cx),
             TerminalEvent::OpenFile(path, line, column) => {
                 this.open_file(path.clone(), window, cx);
                 if let Some(editor) = this.active_editor().cloned() {
@@ -8978,17 +9006,28 @@ mod tests {
         });
         let root = dir.clone();
         let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let ran = |command: &str, output: &str| crate::terminal::Ran {
+            name: command.split(' ').next().unwrap().to_string(),
+            command: command.to_string(),
+            folder: dir.join("src"),
+            output: output.to_string(),
+        };
         workspace.update(cx, |w, cx| {
-            let output = "src/main.c:1:21: error: use of undeclared identifier 'x'\ngone.c:3:1: error: not here\n";
-            w.read_reported("make", output, &dir, cx);
+            // From where it ran, the way back up included; outside the project, not listed.
+            let output = "../src/main.c:1:21: error: use of undeclared identifier 'x'\ngone.c:3:1: error: not here\n/etc/hosts:1:1: error: elsewhere\n";
+            w.read_reported(&ran("make", output), cx);
             let places = w.problem_places(cx);
             assert_eq!(places.len(), 1, "only files that exist: {places:?}");
             let (path, d) = &places[0];
             assert_eq!(path, &dir.join("src/main.c"));
             assert_eq!((d.range.start.line, d.range.start.character), (0, 20));
             assert_eq!(d.source.as_deref(), Some("make"));
-            // The next command, clean: they go.
-            w.read_reported("make", "nothing to be done\n", &dir, cx);
+            // Another command, or a search, leaves them be.
+            w.read_reported(&ran("ls -la", "main.c\n"), cx);
+            w.read_reported(&ran("grep -rn x .", "./main.c:1:int main() { return x; }\n"), cx);
+            assert_eq!(w.problem_places(cx).len(), 1);
+            // The same command again, clean: they go.
+            w.read_reported(&ran("make", "nothing to be done\n"), cx);
             assert!(w.problem_places(cx).is_empty());
         });
         std::fs::remove_dir_all(&dir).ok();

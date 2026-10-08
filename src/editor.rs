@@ -695,6 +695,8 @@ pub struct Editor {
     ghost_cache: Vec<(String, Vec<String>)>,
     renaming: Option<refactor::Renaming>,
     format_task: Option<Task<()>>,
+    /// Pasted code being formatted (Format on paste): apart, so it can't cancel a save's.
+    paste_format_task: Option<Task<()>>,
     /// Rows between the lines for those, rebuilt as they change.
     pub blocks: Vec<Block>,
 }
@@ -873,6 +875,7 @@ impl Editor {
             ghost_cache: Vec::new(),
             renaming: None,
             format_task: None,
+            paste_format_task: None,
             blocks: Vec::new(),
         };
         editor.rehighlight();
@@ -2335,7 +2338,7 @@ impl Editor {
             return self.edit(self.selection.range(), &markdown, EditKind::Other, cx);
         }
         let kind = item.metadata().cloned().unwrap_or_default();
-        let pasted_at = self.selection.range().start;
+        let before = self.buffer.revision();
         // Pasted line breaks become the file's own.
         let text = text.replace("\r\n", "\n");
         let text = match self.style.line_ending {
@@ -2345,8 +2348,16 @@ impl Editor {
         self.paste_text(text, &kind, adjust, cx);
         // Asked for: the pasted code formatted, by the language server, just it.
         if adjust && self.extra.is_empty() && cx.global::<Settings>().format_on_paste && !self.is_prose() {
-            let end = self.selection.head;
-            self.format_pasted(pasted_at..end, cx);
+            // Where the text went (a whole line goes above the caret's, not at it): the paste's
+            // one edit says.
+            let pasted = self.buffer.edits_since(before).and_then(|mut edits| {
+                let edit = edits.next()?;
+                edits.next().is_none().then_some((edit.start_byte, edit.new_end_byte))
+            });
+            if let Some((start, end)) = pasted {
+                let rope = self.buffer.rope();
+                self.format_pasted(rope.byte_to_char(start)..rope.byte_to_char(end), cx);
+            }
         }
     }
 
