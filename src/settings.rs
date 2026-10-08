@@ -46,6 +46,8 @@ pub struct Settings {
     pub ligatures: bool,
     /// Format the file with its language server when saving with ⌘S.
     pub format_on_save: bool,
+    /// Pasted code formatted by the language server (where it formats parts of a file).
+    pub format_on_paste: bool,
     /// Save files without ⌘S: never, after a pause in typing, or when leaving them.
     pub auto_save: AutoSave,
     /// Quitting (or closing the window) with unsaved changes keeps them for next time,
@@ -107,6 +109,7 @@ impl Default for Settings {
             indent_with_tabs: false,
             ligatures: true,
             format_on_save: false,
+            format_on_paste: false,
             auto_save: AutoSave::Off,
             keep_unsaved: true,
             keymap: Default::default(),

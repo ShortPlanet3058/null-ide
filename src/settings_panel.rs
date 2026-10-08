@@ -775,6 +775,14 @@ impl SettingsPanel {
                 Self::toggle("keep-unsaved", s.keep_unsaved, &theme, cx, |s| s.keep_unsaved = !s.keep_unsaved),
                 &theme,
             ),
+            Self::row(
+                "Format on paste",
+                Some("Pasted code tidied by its language server, where it can do part of a file (clangd, TypeScript…)"),
+                Self::toggle("format-on-paste", s.format_on_paste, &theme, cx, |s| {
+                    s.format_on_paste = !s.format_on_paste
+                }),
+                &theme,
+            ),
             Self::heading("Code intelligence", &theme),
             Self::row(
                 "Suggestions while typing",

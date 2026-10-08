@@ -2335,6 +2335,7 @@ impl Editor {
             return self.edit(self.selection.range(), &markdown, EditKind::Other, cx);
         }
         let kind = item.metadata().cloned().unwrap_or_default();
+        let pasted_at = self.selection.range().start;
         // Pasted line breaks become the file's own.
         let text = text.replace("\r\n", "\n");
         let text = match self.style.line_ending {
@@ -2342,6 +2343,11 @@ impl Editor {
             crate::file_style::LineEnding::Lf => text,
         };
         self.paste_text(text, &kind, adjust, cx);
+        // Asked for: the pasted code formatted, by the language server, just it.
+        if adjust && self.extra.is_empty() && cx.global::<Settings>().format_on_paste && !self.is_prose() {
+            let end = self.selection.head;
+            self.format_pasted(pasted_at..end, cx);
+        }
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {

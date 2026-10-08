@@ -384,6 +384,33 @@ impl Editor {
     }
 
     /// Formats the selected code, if the language server can format part of a file.
+    /// Pasted code formatted (Format on paste), quietly: by a server that formats ranges,
+    /// before anything else is typed.
+    pub(super) fn format_pasted(&mut self, pasted: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else { return };
+        if pasted.is_empty() || !lsp.read(cx).formats_ranges(&path) {
+            return;
+        }
+        let range = lsp_types::Range { start: self.lsp_position(pasted.start), end: self.lsp_position(pasted.end) };
+        let version = self.buffer.version();
+        let request = lsp.read(cx).format_part(
+            &path,
+            Some(range),
+            self.style.indent.width() as u32,
+            self.style.indent != crate::file_style::Indent::Tabs,
+        );
+        self.format_task = Some(cx.spawn(async move |this, cx| {
+            let edits = request.await;
+            this.update(cx, |this, cx| {
+                // Typed on since: the paste stays as it is.
+                if this.buffer.version() == version && !edits.is_empty() {
+                    this.apply_lsp_edits(&edits, cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
     fn format_selection_now(&mut self, cx: &mut Context<Self>) {
         let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else { return };
         let at = self.selection.head;
