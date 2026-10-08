@@ -35,6 +35,18 @@ pub struct LanguageSettings {
     pub autocomplete: Option<bool>,
 }
 
+/// How the settings file read last time: why it couldn't be at all, or the keys it had
+/// that couldn't be (kept as written when saving).
+#[derive(Clone, Debug, Default)]
+struct FileState {
+    path: Option<PathBuf>,
+    unreadable: Option<String>,
+    skipped: Vec<String>,
+}
+
+static FILE: std::sync::Mutex<FileState> =
+    std::sync::Mutex::new(FileState { path: None, unreadable: None, skipped: Vec::new() });
+
 /// Everything Null remembers between launches. Stored as JSON so it can be
 /// edited by hand; missing or unknown fields fall back to defaults.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -341,26 +353,45 @@ impl Settings {
         Some(dir.join("settings.json"))
     }
 
-    fn load() -> Self {
-        let Some(path) = Self::path() else { return Self::default() };
-        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
-        match Self::parse_lenient(&text) {
+    /// The settings in the file: None when it can't be read as JSON at all (then nothing
+    /// is saved over it until it can: see `FILE`).
+    fn load() -> Option<Self> {
+        match Self::path() {
+            Some(path) => Self::load_from(&path),
+            None => Some(Self::default()),
+        }
+    }
+
+    fn load_from(path: &std::path::Path) -> Option<Self> {
+        let path = path.to_path_buf();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            *FILE.lock().unwrap_or_else(|e| e.into_inner()) = FileState { path: Some(path), ..Default::default() };
+            return Some(Self::default());
+        };
+        // Comments and trailing commas, as other editors' settings allow.
+        match Self::parse_lenient(&crate::snippets::without_comments(&text)) {
             Ok((settings, skipped)) => {
                 if !skipped.is_empty() {
                     eprintln!("null: {}: kept the defaults for {}", path.display(), skipped.join(", "));
                 }
-                settings
+                *FILE.lock().unwrap_or_else(|e| e.into_inner()) =
+                    FileState { path: Some(path), unreadable: None, skipped };
+                Some(settings)
             }
-            // Not JSON at all: a copy is kept before anything is saved over it.
+            // Not JSON at all: left as it is, and not written over, until it's put right.
             Err(err) => {
-                eprintln!("null: ignoring {}: {err}", path.display());
-                let copy = path.with_extension("unreadable.json");
-                if !copy.exists() {
-                    std::fs::copy(&path, &copy).ok();
-                }
-                Self::default()
+                eprintln!("null: can't read {}: {err}", path.display());
+                std::fs::copy(&path, path.with_extension("unreadable.json")).ok();
+                *FILE.lock().unwrap_or_else(|e| e.into_inner()) =
+                    FileState { path: Some(path), unreadable: Some(err.to_string()), skipped: Vec::new() };
+                None
             }
         }
+    }
+
+    /// Why the settings file can't be read now, if it can't (nothing is saved over it).
+    pub fn unreadable() -> Option<String> {
+        FILE.lock().unwrap_or_else(|e| e.into_inner()).unreadable.clone()
     }
 
     /// The settings as written, each one that can't be read (a typo in a theme's name)
@@ -393,10 +424,42 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Writes the settings, into the file as it's written: keys this Null doesn't know (a
+    /// newer one's), and values it couldn't read (left at their defaults here), are kept.
+    /// Never over a file that can't be read: that waits until it's put right.
     fn save(&self) {
-        let Some(path) = Self::path() else { return };
+        if let Some(path) = Self::path() {
+            self.save_to(&path);
+        }
+    }
+
+    fn save_to(&self, path: &std::path::Path) {
+        let path = path.to_path_buf();
+        // What's known of this file (another's says nothing about it).
+        let state = Some(FILE.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .filter(|s| s.path.as_ref() == Some(&path))
+            .unwrap_or_default();
+        if state.unreadable.is_some() {
+            eprintln!("null: not saving settings over {}, which can't be read", path.display());
+            return;
+        }
+        let mut out = serde_json::to_value(self).unwrap_or_default();
+        let defaults = serde_json::to_value(Self::default()).unwrap_or_default();
+        let written: Option<serde_json::Value> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&crate::snippets::without_comments(&text)).ok());
+        if let (Some(serde_json::Value::Object(written)), Some(out)) = (written, out.as_object_mut()) {
+            for (key, value) in written {
+                let unknown = !out.contains_key(&key);
+                // Couldn't be read, and not changed since: as written.
+                let unread = state.skipped.contains(&key) && out.get(&key) == defaults.get(&key);
+                if unknown || unread {
+                    out.insert(key, value);
+                }
+            }
+        }
         let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
-            crate::fs_ops::write_file(&path, (serde_json::to_string_pretty(self).unwrap_or_default() + "\n").as_bytes())
+            crate::fs_ops::write_file(&path, (serde_json::to_string_pretty(&out).unwrap_or_default() + "\n").as_bytes())
         });
         if let Err(err) = result {
             eprintln!("null: couldn't save settings to {}: {err}", path.display());
@@ -467,7 +530,7 @@ pub fn reapply_theme(cx: &mut App) {
 
 pub fn init(cx: &mut App) {
     fonts::register(cx);
-    let settings = Settings::load();
+    let settings = Settings::load().unwrap_or_default();
     cx.set_global(settings.theme_now(cx));
     fonts::apply(&settings.code_font, &settings.ui_font, cx);
     cx.set_global(settings);
@@ -486,7 +549,8 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
 
 /// Re-reads the settings file, after it was edited by hand.
 pub fn reload(cx: &mut App) {
-    let settings = Settings::load();
+    // Can't be read: the settings stay as they were (see `Settings::unreadable`).
+    let Some(settings) = Settings::load() else { return };
     if settings != *cx.global::<Settings>() {
         apply(settings, cx);
     }
@@ -542,6 +606,35 @@ mod tests {
         // Written back as given, nothing added.
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains(r#""python":{"indent_size":2,"word_wrap":true}"#), "{json}");
+    }
+
+    /// Saving writes into the file as it's written: keys this Null doesn't know, and values
+    /// it couldn't read, stay; comments are allowed; a file that can't be read isn't
+    /// written over.
+    #[test]
+    fn the_file_as_written_is_kept() {
+        let dir = crate::tools::test_dir("settings-kept");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            "{\n  // mine\n  \"theme\": \"neon\",\n  \"font_size\": 15,\n  \"from_the_future\": [1, 2],\n}\n",
+        )
+        .unwrap();
+        let mut settings = Settings::load_from(&path).expect("read, comments and all");
+        assert_eq!(settings.font_size, 15.);
+        settings.word_wrap = !settings.word_wrap;
+        settings.save_to(&path);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["from_the_future"], serde_json::json!([1, 2]), "unknown, kept");
+        assert_eq!(saved["theme"], "neon", "couldn't be read, kept as written");
+        assert_eq!(saved["word_wrap"], settings.word_wrap);
+        // Broken: not read, and not written over.
+        std::fs::write(&path, "{ \"font_size\": 15 \"oops\" }").unwrap();
+        assert!(Settings::load_from(&path).is_none());
+        Settings::default().save_to(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ \"font_size\": 15 \"oops\" }");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

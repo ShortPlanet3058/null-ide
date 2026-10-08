@@ -250,6 +250,11 @@ pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String
         run(root, &["rm", "-q", "--cached", "--ignore-unmatch", "--", &name]).ok();
         return Ok(());
     }
+    // What's thrown away is kept in the file's history first (git writes it, not Null).
+    if path.is_file() {
+        let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        crate::local_history::keep_before_writing(&real, &[]);
+    }
     run(root, &["restore", "--source=HEAD", "--staged", "--worktree", "--", &name]).map(|_| ())
 }
 

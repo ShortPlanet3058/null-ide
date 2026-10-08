@@ -383,6 +383,9 @@ struct Snapshot {
 
 pub enum EditorEvent {
     Edited,
+    /// The text was read again from disk (a reload, a revert): its other copies take it as
+    /// it is now, not as edits replayed on theirs.
+    ReadFromDisk,
     /// The file was read again in another encoding: its other copies are too.
     Reread {
         encoding: crate::encoding::Encoding,
@@ -531,6 +534,8 @@ pub struct Editor {
     /// The file changed on disk under unsaved edits here (or under ones brought back from
     /// last time): a save asks before writing over it.
     pub disk_changed: bool,
+    /// Set while saving by itself (see `save_by_itself`).
+    saving_by_itself: bool,
     /// What the file last held on disk, as far as Null knows, to recognise it moved.
     pub on_disk: Option<Fingerprint>,
     /// How the file's bytes are text, kept when saving.
@@ -786,6 +791,7 @@ impl Editor {
             preview: None,
             missing: false,
             disk_changed: false,
+            saving_by_itself: false,
             on_disk: None,
             encoding: Default::default(),
             viewport_height: None,
@@ -987,6 +993,7 @@ impl Editor {
         self.single_cursor();
         self.selection = Selection::caret(self.buffer.offset(line, column));
         self.text_changed(cx);
+        cx.emit(EditorEvent::ReadFromDisk);
         cx.notify();
     }
 
@@ -2464,25 +2471,41 @@ impl Editor {
     }
 
     /// What saving tidies, as the file's .editorconfig asks: spaces at line ends, the
-    /// final line break, and stray "\n" breaks in a "\r\n" file.
-    fn tidy_for_save(&mut self, cx: &mut Context<Self>) {
+    /// final line break, and stray "\n" breaks in a "\r\n" file (not in one written with
+    /// both on purpose). Saved by itself (auto save), the lines being typed on keep their
+    /// spaces: the one just typed after `return` isn't taken away.
+    fn tidy_for_save(&mut self, by_itself: bool, cx: &mut Context<Self>) {
         let style = self.style.clone();
         let text = self.buffer.to_string();
+        let typing_on: Vec<usize> = if by_itself {
+            self.all_selections().iter().map(|s| self.buffer.point(s.head).0).collect()
+        } else {
+            Vec::new()
+        };
         let mut edits: Vec<(Range<usize>, String)> = Vec::new();
         let mut trailing: Option<usize> = None; // where a run of spaces at the end of a line starts
         let mut previous = None;
         let mut count = 0;
+        let mut line = 0;
         for (i, c) in text.chars().enumerate() {
             match c {
                 ' ' | '\t' => {
                     trailing.get_or_insert(i);
                 }
                 '\n' | '\r' => {
-                    if let Some(start) = trailing.take().filter(|_| style.trim_trailing) {
+                    let keep = typing_on.contains(&line);
+                    if let Some(start) = trailing.take().filter(|_| style.trim_trailing && !keep) {
                         edits.push((start..i, String::new()));
                     }
-                    if c == '\n' && previous != Some('\r') && style.line_ending == crate::file_style::LineEnding::Crlf {
+                    if c == '\n'
+                        && previous != Some('\r')
+                        && style.line_ending == crate::file_style::LineEnding::Crlf
+                        && !style.mixed_endings
+                    {
                         edits.push((i..i, "\r".into()));
+                    }
+                    if c == '\n' {
+                        line += 1;
                     }
                 }
                 _ => trailing = None,
@@ -2490,7 +2513,7 @@ impl Editor {
             previous = Some(c);
             count = i + 1;
         }
-        if let Some(start) = trailing.filter(|_| style.trim_trailing) {
+        if let Some(start) = trailing.filter(|_| style.trim_trailing && !typing_on.contains(&line)) {
             edits.push((start..count, String::new()));
         }
         if style.final_newline == Some(true) && !text.is_empty() && !text.ends_with('\n') {
@@ -2837,6 +2860,15 @@ impl Editor {
         self.save_to_disk(cx)
     }
 
+    /// Saves without being asked to (auto save): as `save_to_disk`, but the lines being
+    /// typed on keep their trailing spaces.
+    pub fn save_by_itself(&mut self, cx: &mut Context<Self>) -> bool {
+        self.saving_by_itself = true;
+        let saved = self.save_to_disk(cx);
+        self.saving_by_itself = false;
+        saved
+    }
+
     pub fn save_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
         // Nothing to write: what's shown is the file itself.
         if self.preview.is_some() {
@@ -2850,7 +2882,18 @@ impl Editor {
             cx.emit(EditorEvent::SaveConflict);
             return false;
         }
-        self.tidy_for_save(cx);
+        // Changed on disk since it was read, unseen (a file outside the project, a change the
+        // watcher missed): asked about, as one seen is, not written over.
+        if let (Some(path), Some(read)) = (&self.path, self.on_disk)
+            && let Ok((now, _)) = crate::encoding::read(path)
+            && fingerprint(&now) != read
+        {
+            self.disk_changed = true;
+            cx.emit(EditorEvent::SaveConflict);
+            return false;
+        }
+        let by_itself = self.saving_by_itself;
+        self.tidy_for_save(by_itself, cx);
         let Some(path) = &self.path else { return false };
         // Deleted on disk with its folder: saving puts both back.
         if self.missing
@@ -5077,6 +5120,40 @@ mod tests {
             e.reopen_with(Encoding::Utf16Le, cx);
             assert_eq!(e.buffer.to_string(), "日");
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file changed by another program, unseen (no watcher on it): saving asks first
+    /// instead of writing over it.
+    #[gpui::test]
+    fn an_unseen_change_on_disk_isn_t_written_over(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = crate::tools::test_dir("unseen-change");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "mine\n").unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(path.clone(), None, cx));
+        std::fs::write(&path, "theirs\n").unwrap();
+        editor.update(cx, |e, cx| {
+            e.type_text_for_test(0, "more ", cx);
+            assert!(!e.save_to_disk(cx), "asked first");
+            assert!(e.disk_changed);
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n");
+        // Its own save, then another: no question (what's on disk is what it wrote).
+        std::fs::write(&path, "mine\n").unwrap();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(path.clone(), None, cx));
+        editor.update(cx, |e, cx| {
+            e.type_text_for_test(0, "a", cx);
+            assert!(e.save_to_disk(cx));
+            e.type_text_for_test(0, "b", cx);
+            assert!(e.save_to_disk(cx));
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "bamine\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 
