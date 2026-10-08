@@ -282,6 +282,10 @@ called from, ⌥F12 shows a definition where you are without going there; ⌥⇧
 "Format on save" does it on ⌘S; ⌘⇧M, or the error count in the status bar, lists every
 problem found.
 
+Without a server, ⌥⇧F still formats JSON (Null lays it out itself: keys in their order,
+numbers as written, the comments of `tsconfig.json` kept, the file's own indentation; broken
+JSON is left alone with the line where it breaks) and lines up Markdown tables.
+
 In Rust, **Expand Macro** (⌘K) shows what the macro at the caret turns into (`println!`, a
 `derive`), from rust-analyzer, in the info card; **Go to Parent Module** goes to the `mod` line
 that brings the file in, **Open Cargo.toml** to its crate's, and **Open Documentation** opens
