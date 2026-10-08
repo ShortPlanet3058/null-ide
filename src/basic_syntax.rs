@@ -715,6 +715,11 @@ static BASICS: &[Basic] = &[
 ];
 
 /// The scanner for a file Null has no grammar for, if it knows its language.
+/// Every language coloured without a grammar.
+pub fn all() -> &'static [Basic] {
+    BASICS
+}
+
 pub fn for_path(path: &Path) -> Option<&'static Basic> {
     let name = path.file_name()?.to_str()?;
     if let Some(basic) = BASICS.iter().find(|b| b.file_names.contains(&name)) {

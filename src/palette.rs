@@ -459,8 +459,9 @@ impl Palette {
     }
 
     /// Types `query` into the field, as if the person had.
+    /// Opens on these commands (`language: `), the caret after them: typing narrows them.
     pub fn set_query(&mut self, query: &str, cx: &mut Context<Self>) {
-        self.input.update(cx, |input, cx| input.set_text(query, cx));
+        self.input.update(cx, |input, cx| input.set_text_caret_at_end(query, cx));
     }
 
     pub fn kind(&self) -> PaletteKind {

@@ -41,6 +41,8 @@ pub struct TabState {
     pub conditions: Vec<(usize, String)>,
     /// Lines with a bookmark.
     pub bookmarks: Vec<usize>,
+    /// The language chosen for the file, when it isn't the one its name says.
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]

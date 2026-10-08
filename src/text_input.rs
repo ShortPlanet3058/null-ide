@@ -133,6 +133,12 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Like `set_text`, with the caret after it rather than all of it selected.
+    pub fn set_text_caret_at_end(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.set_text(text, cx);
+        self.selected = self.content.len()..self.content.len();
+    }
+
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
         self.selected = 0..self.content.len();
         self.reversed = false;

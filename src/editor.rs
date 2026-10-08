@@ -13,6 +13,7 @@ mod fold;
 mod ghost;
 mod hints;
 mod intel;
+mod language_pick;
 mod links;
 mod mac_keys;
 mod marks;
@@ -70,6 +71,7 @@ pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
+pub use language_pick::{SetLanguage, by_name as language_by_name, names as language_names};
 pub use meaning::SEMANTIC_TYPES;
 pub use numbers::{Decrement, Increment};
 pub use refactor::{
@@ -658,6 +660,10 @@ pub struct Editor {
     color_pick: Option<color_pick::ColorPick>,
     /// The line just moved out for a word like `end` (see `outdent_word`).
     word_outdent: Option<commands::WordOutdent>,
+    /// The language chosen for the file, over the one its name or first line says.
+    chosen_language: Option<language_pick::Kind>,
+    /// The language the first line says (`#!/bin/bash`), for a file whose name says none.
+    first_line_language: Option<language_pick::Kind>,
     pub git_hunks: Vec<crate::git::Hunk>,
     git_base_task: Option<Task<()>>,
     /// Who last changed the caret's line, once it rests there.
@@ -692,10 +698,10 @@ pub fn fingerprint(text: &str) -> Fingerprint {
 /// Colours for a file, unless it's too big to colour as you type: a minified bundle's one
 /// long line, or a file of many megabytes, is parsed again after every keystroke, which
 /// took longer than the keystroke. Those show as plain text, as in other editors.
-fn highlighter_for(path: &std::path::Path, buffer: &Buffer) -> Option<Highlighter> {
+fn highlighter_for(language: Option<&'static languages::Language>, buffer: &Buffer) -> Option<Highlighter> {
     const MAX_COLOURED_LINE: usize = 20_000;
     const MAX_COLOURED_FILE: usize = 8 * 1024 * 1024;
-    let language = languages::for_path(path)?;
+    let language = language?;
     let rope = buffer.rope();
     if rope.len_bytes() > MAX_COLOURED_FILE || rope.lines().any(|l| l.len_bytes() > MAX_COLOURED_LINE) {
         return None;
@@ -705,7 +711,18 @@ fn highlighter_for(path: &std::path::Path, buffer: &Buffer) -> Option<Highlighte
 
 impl Editor {
     pub fn new(buffer: Buffer, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
-        let highlighter = path.as_deref().and_then(|p| highlighter_for(p, &buffer));
+        // A file whose name says nothing: its first line may (`#!/usr/bin/env python3`).
+        let by_name = path.as_deref().and_then(language_pick::by_path);
+        let first_line_language = if by_name.is_none() {
+            language_pick::from_first_line(&buffer.rope().line(0).chars().take(200).collect::<String>())
+        } else {
+            None
+        };
+        let language = match by_name.or(first_line_language) {
+            Some(language_pick::Kind::Grammar(l)) => Some(l),
+            _ => None,
+        };
+        let highlighter = highlighter_for(language, &buffer);
         let style = crate::file_style::FileStyle::for_file(
             path.as_deref(),
             &buffer.slice(0..buffer.len_chars().min(200_000)),
@@ -819,6 +836,8 @@ impl Editor {
             over_change_mark: false,
             color_pick: None,
             word_outdent: None,
+            chosen_language: None,
+            first_line_language,
             git_hunks: Vec::new(),
             git_base_task: None,
             blame: None,
@@ -934,7 +953,6 @@ impl Editor {
         self.missing = false;
         self.disk_changed = false;
         self.release_lsp(cx);
-        self.highlighter = highlighter_for(&path, &self.buffer);
         self.spans.clear();
         self.spans_for = None;
         // A new name can bring other rules (.editorconfig sections, Go's tabs).
@@ -944,6 +962,7 @@ impl Editor {
             cx.global::<Settings>().default_indent(),
         );
         self.path = Some(path);
+        self.highlighter = highlighter_for(self.language(), &self.buffer);
         self.rehighlight();
         if let Some(lsp) = lsp {
             self.attach_lsp(lsp, cx);
@@ -965,14 +984,14 @@ impl Editor {
     }
 
     pub fn language(&self) -> Option<&'static languages::Language> {
-        languages::for_path(self.path.as_ref()?)
+        match self.kind()? {
+            language_pick::Kind::Grammar(language) => Some(language),
+            _ => None,
+        }
     }
 
     pub fn language_name(&self) -> &'static str {
-        match self.language() {
-            Some(language) => language.name,
-            None => self.basic_syntax().map_or("Plain Text", |b| b.name),
-        }
+        self.kind().map_or(language_pick::PLAIN, |k| k.name())
     }
 
     /// Zero-based line and column of the caret.
@@ -1024,6 +1043,7 @@ impl Editor {
         self.text_changed_for_git(cx);
         self.hints_after_edit();
         self.meaning_after_edit();
+        self.first_line_after_edit(cx);
         self.breakpoints_after_edit(cx);
         self.bookmarks_after_edit(cx);
         // Cursors from before an edit aren't somewhere to go back to.
@@ -1144,7 +1164,10 @@ impl Editor {
         if self.highlighter.is_some() {
             return None;
         }
-        self.path.as_deref().and_then(crate::basic_syntax::for_path)
+        match self.kind()? {
+            language_pick::Kind::Basic(basic) => Some(basic),
+            _ => None,
+        }
     }
 
     /// The colours of one line, for a line shown away from the others (pinned at the top).
@@ -3880,6 +3903,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::pascal_case))
             .on_action(cx.listener(Self::kebab_case))
             .on_action(cx.listener(Self::title_case))
+            .on_action(cx.listener(Self::set_language))
             .on_action(cx.listener(Self::increment))
             .on_action(cx.listener(Self::decrement))
             .on_action(cx.listener(Self::increment_by_ten))

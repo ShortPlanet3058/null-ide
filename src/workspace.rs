@@ -766,6 +766,7 @@ impl Workspace {
                     breakpoints: editor.breakpoints.clone(),
                     conditions: editor.breakpoint_conditions.clone(),
                     bookmarks: editor.bookmarks.clone(),
+                    language: editor.chosen_language().map(str::to_string),
                 })
             })
             .collect::<Vec<_>>();
@@ -819,6 +820,9 @@ impl Workspace {
                     editor.breakpoint_conditions =
                         tab.conditions.iter().filter(|(l, _)| editor.breakpoints.contains(l)).cloned().collect();
                     editor.bookmarks = tab.bookmarks.iter().copied().filter(|&l| l < lines).collect();
+                    if let Some(name) = &tab.language {
+                        editor.choose_language(crate::editor::language_by_name(name), cx);
+                    }
                     editor.restore_view(tab.line, tab.column, tab.top_line, cx)
                 });
             }
@@ -3415,6 +3419,14 @@ impl Workspace {
         // A page or a picture: open it in the browser.
         if self.active_editor().and_then(|e| e.read(cx).path()).is_some_and(crate::file_tree::opens_in_browser) {
             commands.push((File, "Open in Browser".into(), Box::new(OpenInBrowser)));
+        }
+        // The file's language, to put it in another (a script without an extension).
+        if let Some(editor) = self.active_editor() {
+            let now = editor.read(cx).language_name();
+            for name in crate::editor::language_names() {
+                let label = format!("Language: {name}{}", current(name == now));
+                commands.push((View, label, Box::new(crate::editor::SetLanguage { name })));
+            }
         }
         commands.push((App, "Welcome to Null…".into(), Box::new(ShowWelcome)));
         commands.push((App, "Quit Null".into(), Box::new(Quit)));
@@ -6194,7 +6206,6 @@ impl Render for Workspace {
                                 0 => position_label(editor, line, col),
                                 n => format!("{} cursors · Esc for one", n + 1),
                             },
-                            editor.language_name().into(),
                         ],
                         (count(lsp_types::DiagnosticSeverity::ERROR), count(lsp_types::DiagnosticSeverity::WARNING)),
                     )
@@ -6209,6 +6220,8 @@ impl Render for Workspace {
                 (vec![shorten_path(&shown, STATUS_PATH_CHARS)], (0, 0))
             }
         };
+        let language =
+            self.active_editor().map(|e| e.read(cx)).filter(|e| e.preview.is_none()).map(|e| e.language_name());
         let split = self.is_split();
         let tabs_left = self.render_tabs(0, cx);
         let tabs_right = split.then(|| self.render_tabs(1, cx));
@@ -6378,278 +6391,292 @@ impl Render for Workspace {
             .child(div().w(px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
 
         let mut items = status_items.into_iter().map(|item| spaced(&item));
-        let status = div()
-            .h(px(28.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(16.))
-            .px(px(16.))
-            .border_t_1()
-            .border_color(theme.hairline)
-            .bg(theme.surface)
-            .text_size(px(12.))
-            .text_color(theme.muted)
-            .opacity(opacity)
-            .children(self.branch.clone().map(|branch| {
-                // The branch (a click switches it), and how many files changed (a click lists them).
-                let changed = self.git_status.len();
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.))
-                    .child(
-                        div()
-                            .id("branch")
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .tooltip(ui::tip("Switch branch", Some(Box::new(SwitchBranch))))
-                            .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
-                            .child(branch)
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.switch_branch(&SwitchBranch, window, cx)
-                            })),
-                    )
-                    // Commits to push and to pull, when there are: a click does it.
-                    .children(self.sync.filter(|&(ahead, _)| ahead > 0).map(|(ahead, _)| {
-                        div()
-                            .id("to-push")
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .tooltip(ui::tip(
-                                if ahead == 1 {
-                                    "1 commit to push".to_string()
-                                } else {
-                                    format!("{ahead} commits to push")
-                                },
-                                Some(Box::new(PushBranch)),
-                            ))
-                            .child(format!("↑{ahead}"))
-                            .active(|s| s.opacity(0.7))
-                            .on_click(
-                                cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.push_branch(&PushBranch, window, cx)
-                                }),
-                            )
-                    }))
-                    .children(self.sync.filter(|&(_, behind)| behind > 0).map(|(_, behind)| {
-                        div()
-                            .id("to-pull")
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .tooltip(ui::tip(
-                                if behind == 1 {
-                                    "1 commit to pull".to_string()
-                                } else {
-                                    format!("{behind} commits to pull")
-                                },
-                                Some(Box::new(PullBranch)),
-                            ))
-                            .child(format!("↓{behind}"))
-                            .active(|s| s.opacity(0.7))
-                            .on_click(
-                                cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.pull_branch(&PullBranch, window, cx)
-                                }),
-                            )
-                    }))
-                    .when(changed > 0, |d| {
-                        d.child(
+        let status =
+            div()
+                .h(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .px(px(16.))
+                .border_t_1()
+                .border_color(theme.hairline)
+                .bg(theme.surface)
+                .text_size(px(12.))
+                .text_color(theme.muted)
+                .opacity(opacity)
+                .children(self.branch.clone().map(|branch| {
+                    // The branch (a click switches it), and how many files changed (a click lists them).
+                    let changed = self.git_status.len();
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(5.))
+                        .child(
                             div()
-                                .id("changes")
+                                .id("branch")
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
                                 .cursor_pointer()
-                                .text_color(theme.git_modified)
                                 .hover(|s| s.text_color(theme.foreground))
-                                .tooltip(ui::tip("Review changes", Some(Box::new(ReviewChanges))))
-                                .child(format!("· {changed}"))
+                                .tooltip(ui::tip("Switch branch", Some(Box::new(SwitchBranch))))
+                                .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
+                                .child(branch)
                                 .active(|s| s.opacity(0.7))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.review_changes(&ReviewChanges, window, cx)
+                                    this.switch_branch(&SwitchBranch, window, cx)
                                 })),
                         )
-                    })
-            }))
-            .child(div().flex_1().min_w_0().truncate().children(items.next()))
-            .children(lsp_status)
-            .children(indent_label.map(|label| {
-                div()
-                    .id("status-indent")
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.foreground))
-                    .child(label)
-                    .active(|s| s.opacity(0.7))
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.show_commands_for("indent with", window, cx)
-                        }),
-                    )
-            }))
-            // Not UTF-8: which encoding it's kept in; a click offers UTF-8.
-            .children(encoding.map(|encoding| {
-                div()
-                    .id("status-encoding")
-                    .flex_none()
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.foreground))
-                    .child(encoding.label())
-                    .active(|s| s.opacity(0.7))
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_commands_for("encoding", window, cx)),
-                    )
-            }))
-            .when(crlf, |bar| {
-                bar.child(
+                        // Commits to push and to pull, when there are: a click does it.
+                        .children(self.sync.filter(|&(ahead, _)| ahead > 0).map(|(ahead, _)| {
+                            div()
+                                .id("to-push")
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme.foreground))
+                                .tooltip(ui::tip(
+                                    if ahead == 1 {
+                                        "1 commit to push".to_string()
+                                    } else {
+                                        format!("{ahead} commits to push")
+                                    },
+                                    Some(Box::new(PushBranch)),
+                                ))
+                                .child(format!("↑{ahead}"))
+                                .active(|s| s.opacity(0.7))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.push_branch(&PushBranch, window, cx)
+                                }))
+                        }))
+                        .children(self.sync.filter(|&(_, behind)| behind > 0).map(|(_, behind)| {
+                            div()
+                                .id("to-pull")
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme.foreground))
+                                .tooltip(ui::tip(
+                                    if behind == 1 {
+                                        "1 commit to pull".to_string()
+                                    } else {
+                                        format!("{behind} commits to pull")
+                                    },
+                                    Some(Box::new(PullBranch)),
+                                ))
+                                .child(format!("↓{behind}"))
+                                .active(|s| s.opacity(0.7))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.pull_branch(&PullBranch, window, cx)
+                                }))
+                        }))
+                        .when(changed > 0, |d| {
+                            d.child(
+                                div()
+                                    .id("changes")
+                                    .cursor_pointer()
+                                    .text_color(theme.git_modified)
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .tooltip(ui::tip("Review changes", Some(Box::new(ReviewChanges))))
+                                    .child(format!("· {changed}"))
+                                    .active(|s| s.opacity(0.7))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.review_changes(&ReviewChanges, window, cx)
+                                    })),
+                            )
+                        })
+                }))
+                .child(div().flex_1().min_w_0().truncate().children(items.next()))
+                .children(lsp_status)
+                .children(indent_label.map(|label| {
                     div()
-                        .id("status-crlf")
+                        .id("status-indent")
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child(label)
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_commands_for("indent with", window, cx)
+                        }))
+                }))
+                // Not UTF-8: which encoding it's kept in; a click offers UTF-8.
+                .children(encoding.map(|encoding| {
+                    div()
+                        .id("status-encoding")
                         .flex_none()
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.foreground))
-                        .child("CRLF")
+                        .child(encoding.label())
                         .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.show_commands_for("line endings", window, cx)
-                        })),
-                )
-            })
-            // The terminal hidden while something runs in it: what, and a click shows it.
-            .children(self.terminal_busy(cx).map(|(ix, name)| {
-                div()
-                    .id("terminal-busy")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.))
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.foreground))
-                    .child(div().size(px(5.)).rounded_full().bg(theme.caret.opacity(0.7)))
-                    .child(format!("{name} running"))
-                    .tooltip(ui::tip("Show the terminal", Some(Box::new(ToggleTerminal))))
-                    .active(|s| s.opacity(0.7))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.active_terminal = ix;
-                        this.toggle_terminal(&ToggleTerminal, window, cx);
-                    }))
-            }))
-            .children(self.ai_task.as_ref().map(|run| {
-                // One line for a task: what it's at, then how many files to review.
-                let text: String = match &run.state {
-                    TaskState::Starting => "Starting the task…".into(),
-                    TaskState::Running(Some(file)) => {
-                        let name =
-                            Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
-                        format!("Working on {name}…")
-                    }
-                    TaskState::Running(None) => format!("{}…", run.title.trim()),
-                    TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
-                    TaskState::Review(changes) => format!("Review {} files", changes.len()),
-                };
-                let reviewing = matches!(run.state, TaskState::Review(_));
-                div()
-                    .id("ai-task")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.))
-                    .whitespace_nowrap()
-                    .max_w(px(320.))
-                    .text_color(theme.foreground)
-                    .child(div().flex_none().text_color(theme.caret).child("✦"))
-                    .child(div().min_w_0().truncate().child(text))
-                    // While it works, only "Stop" stops it; once done, the line opens the review.
-                    .when(!reviewing, |d| {
-                        d.child(
-                            div()
-                                .id("stop-ai-task")
-                                .flex_none()
-                                .cursor_pointer()
-                                .text_color(theme.muted)
-                                .hover(|s| s.text_color(theme.foreground))
-                                .child("Stop")
-                                .active(|s| s.opacity(0.7))
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.stop_ai_task(&StopAiTask, window, cx)
-                                })),
-                        )
-                    })
-                    .when(reviewing, |d| {
-                        d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
-                        ))
-                    })
-            }))
-            // AI's only lasting mark: a dot. Its name shows on hover; a click opens its settings.
-            .when(ai_provider != ProviderId::Off, |bar| {
-                let dot = theme.caret.opacity(0.6);
-                let lit = theme.caret;
-                bar.child(
+                            this.show_commands_for("encoding", window, cx)
+                        }))
+                }))
+                .when(crlf, |bar| {
+                    bar.child(
+                        div()
+                            .id("status-crlf")
+                            .flex_none()
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child("CRLF")
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_commands_for("line endings", window, cx)
+                            })),
+                    )
+                })
+                // The terminal hidden while something runs in it: what, and a click shows it.
+                .children(self.terminal_busy(cx).map(|(ix, name)| {
                     div()
-                        .id("ai-status")
-                        .flex_none()
-                        .size(px(14.))
+                        .id("terminal-busy")
                         .flex()
+                        .flex_none()
                         .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .group("ai-status")
-                        .child(div().size(px(6.)).rounded_full().bg(dot).group_hover("ai-status", move |s| s.bg(lit)))
-                        .tooltip(ui::tip(format!("AI · {}", ai_provider.label()), None))
-                        .active(|s| s.opacity(0.7))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.open_settings_at(Some(Section::Ai), window, cx)
-                        })),
-                )
-            })
-            // Merge conflicts left in the file: a click goes to the next.
-            .when(conflicts > 0, |bar| {
-                bar.child(
-                    div()
-                        .id("conflicts")
-                        .flex_none()
+                        .gap(px(6.))
                         .whitespace_nowrap()
                         .cursor_pointer()
-                        .text_color(theme.error)
-                        .child(if conflicts == 1 { "1 conflict".to_string() } else { format!("{conflicts} conflicts") })
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child(div().size(px(5.)).rounded_full().bg(theme.caret.opacity(0.7)))
+                        .child(format!("{name} running"))
+                        .tooltip(ui::tip("Show the terminal", Some(Box::new(ToggleTerminal))))
                         .active(|s| s.opacity(0.7))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            if let Some(editor) = this.active_editor().cloned() {
-                                editor.update(cx, |e, cx| e.go_to_conflict(true, cx));
-                                window.focus(&editor.focus_handle(cx));
-                            }
-                        })),
-                )
-            })
-            .when(problems != (0, 0), |bar| {
-                let (errors, warnings) = problems;
-                let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
-                bar.child(
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.active_terminal = ix;
+                            this.toggle_terminal(&ToggleTerminal, window, cx);
+                        }))
+                }))
+                .children(self.ai_task.as_ref().map(|run| {
+                    // One line for a task: what it's at, then how many files to review.
+                    let text: String = match &run.state {
+                        TaskState::Starting => "Starting the task…".into(),
+                        TaskState::Running(Some(file)) => {
+                            let name =
+                                Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                            format!("Working on {name}…")
+                        }
+                        TaskState::Running(None) => format!("{}…", run.title.trim()),
+                        TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
+                        TaskState::Review(changes) => format!("Review {} files", changes.len()),
+                    };
+                    let reviewing = matches!(run.state, TaskState::Review(_));
                     div()
-                        .id("problems")
+                        .id("ai-task")
                         .flex()
                         .flex_none()
+                        .items_center()
+                        .gap(px(6.))
                         .whitespace_nowrap()
-                        .gap(px(10.))
-                        .cursor_pointer()
-                        .active(|s| s.opacity(0.7))
-                        .on_click(
-                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                        .max_w(px(320.))
+                        .text_color(theme.foreground)
+                        .child(div().flex_none().text_color(theme.caret).child("✦"))
+                        .child(div().min_w_0().truncate().child(text))
+                        // While it works, only "Stop" stops it; once done, the line opens the review.
+                        .when(!reviewing, |d| {
+                            d.child(
+                                div()
+                                    .id("stop-ai-task")
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .text_color(theme.muted)
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .child("Stop")
+                                    .active(|s| s.opacity(0.7))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.stop_ai_task(&StopAiTask, window, cx)
+                                    })),
+                            )
+                        })
+                        .when(reviewing, |d| {
+                            d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
+                            ))
+                        })
+                }))
+                // AI's only lasting mark: a dot. Its name shows on hover; a click opens its settings.
+                .when(ai_provider != ProviderId::Off, |bar| {
+                    let dot = theme.caret.opacity(0.6);
+                    let lit = theme.caret;
+                    bar.child(
+                        div()
+                            .id("ai-status")
+                            .flex_none()
+                            .size(px(14.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .group("ai-status")
+                            .child(
+                                div().size(px(6.)).rounded_full().bg(dot).group_hover("ai-status", move |s| s.bg(lit)),
+                            )
+                            .tooltip(ui::tip(format!("AI · {}", ai_provider.label()), None))
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_settings_at(Some(Section::Ai), window, cx)
+                            })),
+                    )
+                })
+                // Merge conflicts left in the file: a click goes to the next.
+                .when(conflicts > 0, |bar| {
+                    bar.child(
+                        div()
+                            .id("conflicts")
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .text_color(theme.error)
+                            .child(if conflicts == 1 {
+                                "1 conflict".to_string()
+                            } else {
+                                format!("{conflicts} conflicts")
+                            })
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                if let Some(editor) = this.active_editor().cloned() {
+                                    editor.update(cx, |e, cx| e.go_to_conflict(true, cx));
+                                    window.focus(&editor.focus_handle(cx));
+                                }
+                            })),
+                    )
+                })
+                .when(problems != (0, 0), |bar| {
+                    let (errors, warnings) = problems;
+                    let plural =
+                        |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+                    bar.child(
+                        div()
+                            .id("problems")
+                            .flex()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .gap(px(10.))
+                            .cursor_pointer()
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.show_problems(&ShowProblems, window, cx)
+                            }))
+                            .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
+                            .when(warnings > 0, |d| {
+                                d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
                             }),
-                        )
-                        .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
-                        .when(warnings > 0, |d| {
-                            d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
-                        }),
-                )
-            })
-            .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)));
+                    )
+                })
+                .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)))
+                // The file's language: a click puts it in another.
+                .children(language.map(|name| {
+                    div()
+                        .id("status-language")
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child(name)
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_commands_for("language: ", window, cx)
+                        }))
+                }));
 
         div()
             .key_context("Workspace")

@@ -148,6 +148,11 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
 });
 
 /// The language of a file, from its name or extension.
+/// Every language with a grammar.
+pub fn all() -> &'static [Language] {
+    &LANGUAGES
+}
+
 pub fn for_path(path: &Path) -> Option<&'static Language> {
     let name = path.file_name()?.to_str()?;
     if let Some(language) = LANGUAGES.iter().find(|l| l.file_names.contains(&name)) {
