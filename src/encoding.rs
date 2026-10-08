@@ -63,16 +63,45 @@ pub fn decode(bytes: Vec<u8>) -> Option<(String, Encoding)> {
         Ok(text) => Some((text, Encoding::Utf8)),
         Err(e) => {
             let bytes = e.into_bytes();
-            looks_like_text(&bytes).then(|| (decode_1252(&bytes), Encoding::Windows1252))
+            if !looks_like_text(&bytes) {
+                return None;
+            }
+            // UTF-8 with a few stray bytes (a Latin-1 "é" pasted in): read as UTF-8, the
+            // strays as Windows-1252, so its own accents aren't garbled (and saved as UTF-8,
+            // the file comes out whole). Mostly stray bytes: a Windows-1252 file.
+            match mixed(&bytes) {
+                Some(text) => Some((text, Encoding::Utf8)),
+                None => Some((decode_1252(&bytes), Encoding::Windows1252)),
+            }
         }
     }
+}
+
+/// `bytes` as UTF-8 with stray bytes in Windows-1252, when they're mostly UTF-8: more
+/// characters written in UTF-8's several bytes than bytes that aren't UTF-8.
+fn mixed(bytes: &[u8]) -> Option<String> {
+    let (mut wide, mut stray) = (0, 0);
+    for chunk in bytes.utf8_chunks() {
+        wide += chunk.valid().chars().filter(|c| !c.is_ascii()).count();
+        stray += chunk.invalid().len();
+    }
+    if wide <= stray {
+        return None;
+    }
+    let mut text = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        text.push_str(chunk.valid());
+        text.push_str(&decode_1252(chunk.invalid()));
+    }
+    Some(text)
 }
 
 /// Decodes bytes known to be in `encoding` (the committed copy of a file, say).
 pub fn decode_as(bytes: Vec<u8>, encoding: Encoding) -> Option<String> {
     match encoding {
         Encoding::Windows1252 => Some(decode_1252(&bytes)),
-        Encoding::Utf8 => String::from_utf8(bytes).ok(),
+        // As the file itself was read: a few stray bytes among the UTF-8 included.
+        Encoding::Utf8 => String::from_utf8(bytes).or_else(|e| mixed(e.as_bytes()).ok_or(())).ok(),
         _ => decode(bytes).map(|(text, _)| text),
     }
 }
@@ -151,6 +180,17 @@ pub fn encode(text: &str, encoding: Encoding) -> Result<Vec<u8>, char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf8_with_a_stray_byte_keeps_its_accents() {
+        // "café, naïve, ", then a Latin-1 "é" (0xE9) pasted in.
+        let mut bytes = "café, naïve, ".as_bytes().to_vec();
+        bytes.extend([b'r', 0xE9, b's', b'u', b'm', b'\n']);
+        assert_eq!(decode(bytes), Some(("café, naïve, résum\n".to_string(), Encoding::Utf8)));
+        // A Windows-1252 file (its accents all single bytes) is still one.
+        let latin = b"caf\xE9, na\xEFve, r\xE9sum\xE9\n".to_vec();
+        assert_eq!(decode(latin), Some(("café, naïve, résumé\n".to_string(), Encoding::Windows1252)));
+    }
 
     #[test]
     fn bytes_read_as_one_encoding_only() {

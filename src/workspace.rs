@@ -415,6 +415,8 @@ struct AiTaskRun {
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
     /// Set to stop a task running through an API (between two steps).
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Files you saved while it ran: their changes aren't the task's alone.
+    yours: HashSet<PathBuf>,
     _task: Option<Task<()>>,
 }
 
@@ -569,6 +571,10 @@ pub struct Workspace {
     debug_show_output: bool,
     /// The paused call's variables the code shows, with values worth showing.
     debug_locals: Vec<(String, String)>,
+    /// Renames asked for and waiting their turn (see `queue_rename`), and whether one is
+    /// under way.
+    renames: std::collections::VecDeque<(PathBuf, PathBuf)>,
+    renaming: bool,
     /// The problems the last command in the terminal reported (a build's errors), and
     /// that command (`cargo build`).
     reported: Vec<(PathBuf, lsp_types::Diagnostic)>,
@@ -648,7 +654,7 @@ impl Workspace {
                     window.focus(&this.tree.focus_handle(cx));
                 }
                 FileTreeEvent::Renamed { from, to } => this.paths_renamed(from, to, cx),
-                FileTreeEvent::RenameRequested { from, to } => this.rename_file(from.clone(), to.clone(), cx),
+                FileTreeEvent::RenameRequested { from, to } => this.queue_rename(from.clone(), to.clone(), cx),
                 FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
                 FileTreeEvent::OpenTerminal(dir) => this.open_terminal_in(dir.clone(), window, cx),
                 FileTreeEvent::FindInFolder(dir) => this.find_in_folder(dir, window, cx),
@@ -794,6 +800,8 @@ impl Workspace {
             debug_watch: cx.new(|cx| crate::text_input::TextInput::new("Watch an expression", cx)),
             terminal_rename: None,
             reported: Vec::new(),
+            renames: Default::default(),
+            renaming: false,
             reported_by: String::new(),
             debug_program: None,
             focus_mode: false,
@@ -2238,20 +2246,23 @@ impl Workspace {
                     let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     return this.show_notice(format!("Couldn't move it: {name} is taken there"), cx);
                 }
-                // What every server asked for, as one: the files changed and those that couldn't be.
-                let changed = (!edits.is_empty()).then(|| {
-                    edits.into_iter().map(|edit| this.apply_edit_to_files(edit, cx)).fold(
-                        (0, 0, Vec::new()),
-                        |(places, files, mut failed), (p, f, mut x)| {
-                            failed.append(&mut x);
-                            (places + p, files + f, failed)
-                        },
-                    )
-                });
+                // Moved first: if that fails (no room, no right, another disk), nothing that
+                // names it has been changed to a place it isn't.
                 let result = this.tree.update(cx, |tree, cx| tree.finish_rename(&from, &to, cx));
                 if let Err(error) = result {
                     return this.show_notice(error, cx);
                 }
+                // What every server asked for, as one, at the files where they are now: the
+                // files changed and those that couldn't be.
+                let changed = (!edits.is_empty()).then(|| {
+                    edits
+                        .into_iter()
+                        .map(|edit| this.apply_edit_after_move(edit, Some((from.as_path(), to.as_path())), cx))
+                        .fold((0, 0, Vec::new()), |(places, files, mut failed), (p, f, mut x)| {
+                            failed.append(&mut x);
+                            (places + p, files + f, failed)
+                        })
+                });
                 this.lsp.read(cx).did_rename(&from, &to);
                 match changed {
                     Some((_, _, failed)) if !failed.is_empty() => {
@@ -2265,8 +2276,32 @@ impl Workspace {
                 }
             })
             .ok();
+            // The next one asked for (several dropped together), from what this left.
+            this.update(cx, |this, cx| {
+                this.renaming = false;
+                this.next_rename(cx);
+            })
+            .ok();
         })
         .detach();
+    }
+
+    /// A rename or move asked for: done after those before it, each working out what
+    /// names it from the files as the last one left them (two at once read the same
+    /// text, and the second's changes landed in the wrong places).
+    fn queue_rename(&mut self, from: PathBuf, to: PathBuf, cx: &mut Context<Self>) {
+        self.renames.push_back((from, to));
+        self.next_rename(cx);
+    }
+
+    fn next_rename(&mut self, cx: &mut Context<Self>) {
+        if self.renaming {
+            return;
+        }
+        if let Some((from, to)) = self.renames.pop_front() {
+            self.renaming = true;
+            self.rename_file(from, to, cx);
+        }
     }
 
     /// Files moved outside Null (`mv`, `git mv`, another tool): an open file that's gone,
@@ -2569,6 +2604,12 @@ impl Workspace {
                     this.twin_seen.insert(editor.entity_id(), editor.read(cx).buffer.revision());
                 }
                 EditorEvent::Saved => {
+                    // Saved while an AI task works: that file's change is yours too.
+                    if let Some(run) = this.ai_task.as_mut().filter(|r| !matches!(r.state, TaskState::Review(_)))
+                        && let Some(path) = editor.read(cx).path()
+                    {
+                        run.yours.insert(path.to_path_buf());
+                    }
                     this.schedule_backup(cx);
                     this.refresh_git_status(cx);
                     // Saving (and tidying) one copy saves the other: same text, same file.
@@ -4389,7 +4430,14 @@ impl Workspace {
             let changes = cx.background_executor().spawn(async move { snapshot.changes(&root) }).await;
             this.update(cx, |this, cx| this.task_finished(result, changes, cx)).ok();
         });
-        self.ai_task = Some(AiTaskRun { title, state: TaskState::Starting, child, stop, _task: Some(task) });
+        self.ai_task = Some(AiTaskRun {
+            title,
+            state: TaskState::Starting,
+            child,
+            stop,
+            yours: HashSet::new(),
+            _task: Some(task),
+        });
         cx.notify();
     }
 
@@ -4399,6 +4447,13 @@ impl Workspace {
         changes: Vec<crate::ai_task::FileChange>,
         cx: &mut Context<Self>,
     ) {
+        // Saved by you meanwhile: marked, so undoing all leaves them to you.
+        let mut changes = changes;
+        if let Some(run) = &self.ai_task {
+            for change in &mut changes {
+                change.yours_too = run.yours.contains(&change.path);
+            }
+        }
         let count = changes.len();
         let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
         let message = match (&result, count) {
@@ -4518,8 +4573,23 @@ impl Workspace {
     fn undo_all_task_changes(&mut self, _: &UndoAllTaskChanges, _: &mut Window, cx: &mut Context<Self>) {
         let Some(AiTaskRun { state: TaskState::Review(changes), .. }) = self.ai_task.take() else { return };
         let mut failed = Vec::new();
+        let mut left = Vec::new();
         for change in &changes {
             let open = self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(change.path.as_path()));
+            // Yours too (saved during the task), or changed since it ended: not the task's
+            // to take back. Left for you to review.
+            let now = match open {
+                Some(tab) => Some(tab.editor.read(cx).buffer.to_string()),
+                None => std::fs::read_to_string(&change.path).ok(),
+            };
+            let as_left = match change.kind {
+                crate::ai_task::ChangeKind::Deleted => !change.path.exists(),
+                _ => now.as_deref() == Some(change.after.as_str()),
+            };
+            if change.yours_too || !as_left {
+                left.push(change.path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()));
+                continue;
+            }
             match (open.map(|t| t.editor.clone()), change.kind) {
                 // An open file goes back in its editor too (one undo step), then to disk.
                 (Some(editor), crate::ai_task::ChangeKind::Changed) => {
@@ -4537,10 +4607,10 @@ impl Workspace {
                 }
             }
         }
-        let message = if failed.is_empty() {
-            "Every file is back as it was before the task.".to_string()
-        } else {
-            format!("Couldn't undo everything: {}", failed.join("; "))
+        let message = match (failed.is_empty(), left.is_empty()) {
+            (true, true) => "Every file is back as it was before the task.".to_string(),
+            (true, false) => format!("Undone, but left as they are (edited by you too): {}", left.join(", ")),
+            (false, _) => format!("Couldn't undo everything: {}", failed.join("; ")),
         };
         self.show_notice(message, cx);
         cx.notify();
@@ -6246,9 +6316,24 @@ impl Workspace {
         edit: lsp_types::WorkspaceEdit,
         cx: &mut Context<Self>,
     ) -> (usize, usize, Vec<String>) {
+        self.apply_edit_after_move(edit, None, cx)
+    }
+
+    /// `apply_edit_to_files`, for an edit made for a move (`from`, `to`) that has happened
+    /// since: what it says of a file under `from` goes to it where it is now.
+    fn apply_edit_after_move(
+        &mut self,
+        edit: lsp_types::WorkspaceEdit,
+        moved: Option<(&Path, &Path)>,
+        cx: &mut Context<Self>,
+    ) -> (usize, usize, Vec<String>) {
         let mut by_file: Vec<(PathBuf, Vec<lsp_types::TextEdit>)> = Vec::new();
         let mut add = |uri: &lsp_types::Uri, edits: Vec<lsp_types::TextEdit>| {
             let Some(path) = crate::lsp::path_for(uri) else { return };
+            let path = match moved {
+                Some((from, to)) => moved_path(&path, from, to).unwrap_or(path),
+                None => path,
+            };
             match by_file.iter_mut().find(|(p, _)| *p == path) {
                 Some((_, list)) => list.extend(edits),
                 None => by_file.push((path, edits)),
@@ -9282,6 +9367,50 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Undoing all of an AI task's changes takes back only its own: a file you saved while
+    /// it ran, or edited since it ended, is left as it is.
+    #[gpui::test]
+    fn undoing_a_task_leaves_your_own_edits(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("task-undo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(name), "before\n").unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let snapshot = crate::ai_task::Snapshot::take(&dir);
+        // The task changes a and c; you save b meanwhile.
+        std::fs::write(dir.join("a.txt"), "by the task\n").unwrap();
+        std::fs::write(dir.join("c.txt"), "by the task\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "by you\n").unwrap();
+        workspace.update_in(cx, |w, window, cx| {
+            w.ai_task = Some(AiTaskRun {
+                title: "t".into(),
+                state: TaskState::Running(None),
+                child: Arc::default(),
+                stop: Arc::default(),
+                yours: HashSet::from([dir.join("b.txt")]),
+                _task: None,
+            });
+            w.task_finished(Ok(String::new()), snapshot.changes(&dir), cx);
+            // You edit c after it ended.
+            std::fs::write(dir.join("c.txt"), "by the task, then you\n").unwrap();
+            w.undo_all_task_changes(&UndoAllTaskChanges, window, cx);
+        });
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        assert_eq!(read("a.txt"), "before\n", "the task's own: undone");
+        assert_eq!(read("b.txt"), "by you\n", "saved by you meanwhile: left");
+        assert_eq!(read("c.txt"), "by the task, then you\n", "edited since: left");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A theme of your own: made from the one shown, in use at once, its saved changes shown;
     /// one of Null's picked again puts it aside.
     #[gpui::test]
@@ -10317,6 +10446,18 @@ mod tests {
             std::fs::read_to_string(dir.join("guide.md")).unwrap(),
             "Back to [readme](README.md), ![a](pics/a.png)\n"
         );
+        // Two pictures moved together (dropped at once), linked on one line of a closed file:
+        // each move's changes worked out after the one before landed, so both links are right.
+        std::fs::write(dir.join("b.png"), "x").unwrap();
+        std::fs::write(dir.join("c.png"), "x").unwrap();
+        std::fs::write(dir.join("gallery.md"), "![](b.png) ![](c.png)\n").unwrap();
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        workspace.update(cx, |w, cx| {
+            w.queue_rename(dir.join("b.png"), dir.join("assets/b.png"), cx);
+            w.queue_rename(dir.join("c.png"), dir.join("assets/c.png"), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(dir.join("gallery.md")).unwrap(), "![](assets/b.png) ![](assets/c.png)\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 
