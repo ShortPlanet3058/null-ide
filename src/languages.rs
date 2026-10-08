@@ -163,6 +163,11 @@ pub fn for_path(path: &Path) -> Option<&'static Language> {
 }
 
 impl Language {
+    /// The extension a new file in this language gets (`py`), if it has one.
+    pub fn extension(&self) -> Option<&'static str> {
+        self.extensions.first().copied()
+    }
+
     pub fn grammar(&self) -> tree_sitter::Language {
         (self.grammar)()
     }

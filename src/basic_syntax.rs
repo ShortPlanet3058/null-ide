@@ -715,6 +715,18 @@ static BASICS: &[Basic] = &[
 ];
 
 /// The scanner for a file Null has no grammar for, if it knows its language.
+impl Basic {
+    /// The extension a new file in this language gets (`swift`), if it has one.
+    pub fn extension(&self) -> Option<&'static str> {
+        self.extensions.first().copied()
+    }
+
+    /// Its file name, for languages known by name rather than extension (`Makefile`).
+    pub fn file_name(&self) -> Option<&'static str> {
+        self.file_names.first().copied()
+    }
+}
+
 /// Every language coloured without a grammar.
 pub fn all() -> &'static [Basic] {
     BASICS

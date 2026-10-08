@@ -114,6 +114,38 @@ pub fn from_first_line(line: &str) -> Option<Kind> {
     by_name(name)
 }
 
+/// What `suggested_name` gives for a file in `kind` starting with `head`.
+fn suggested_name(kind: Option<Kind>, head: &str) -> String {
+    let (extension, words) = match kind {
+        Some(Kind::Grammar(l)) if l.name == "Markdown" => {
+            // The first heading, else the first line written.
+            let heading =
+                head.lines().find_map(|l| l.trim_start().strip_prefix('#').map(|h| h.trim_start_matches('#')));
+            ("md", heading.or_else(|| head.lines().find(|l| !l.trim().is_empty())))
+        }
+        Some(Kind::Grammar(l)) => (l.extension().unwrap_or("txt"), None),
+        Some(Kind::Basic(b)) => match (b.extension(), b.file_name()) {
+            // A language known by its file's name: `Makefile`, `Dockerfile`.
+            (_, Some(name)) if name == b.name => return name.to_string(),
+            (Some(extension), _) => (extension, None),
+            (None, _) => ("txt", None),
+        },
+        Some(Kind::Plain) | None => ("txt", head.lines().find(|l| !l.trim().is_empty())),
+    };
+    // Letters, digits, spaces and a few marks; nothing a file name can't hold, 40 at most.
+    let name: String = words
+        .unwrap_or("")
+        .chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '\'' | ',') { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let name: String = name.chars().take(40).collect::<String>().trim_end_matches([' ', ',', '-']).to_string();
+    let name = if name.is_empty() { "untitled".to_string() } else { name };
+    format!("{name}.{extension}")
+}
+
 impl Editor {
     /// The file's language: chosen, from its name, or from its first line.
     pub fn kind(&self) -> Option<Kind> {
@@ -123,6 +155,13 @@ impl Editor {
     /// The language chosen for this file, if one was (kept with the session).
     pub fn chosen_language(&self) -> Option<&'static str> {
         self.chosen_language.map(|k| k.name())
+    }
+
+    /// A name for saving an untitled file: a Markdown note after its first heading, prose
+    /// after its first words, code `untitled` with its language's extension.
+    pub fn suggested_name(&self) -> String {
+        let head: String = self.buffer.slice(0..self.buffer.len_chars().min(2000));
+        suggested_name(self.kind(), &head)
     }
 
     pub(super) fn set_language(&mut self, action: &SetLanguage, _: &mut Window, cx: &mut Context<Self>) {
@@ -223,6 +262,24 @@ mod tests {
         // A name that says: the first line doesn't change it.
         let rust = cx.new(|cx| Editor::new(Buffer::from_text("#!/bin/bash\n"), Some("a.rs".into()), cx));
         rust.read_with(cx, |e, _| assert_eq!(e.language_name(), "Rust"));
+    }
+
+    #[test]
+    fn untitled_files_get_a_name() {
+        let named = |language: &str, head: &str| suggested_name(by_name(language), head);
+        assert_eq!(named("Markdown", "\n# Trip to Lyon: day 1 / 2\nsome text"), "Trip to Lyon day 1 2.md");
+        assert_eq!(named("Markdown", "Just a note.\n"), "Just a note.md");
+        assert_eq!(named("Python", "import os\n"), "untitled.py");
+        assert_eq!(named("Swift", ""), "untitled.swift");
+        assert_eq!(named("Makefile", "all:\n"), "Makefile");
+        assert_eq!(named("Dockerfile", "FROM x\n"), "Dockerfile");
+        assert_eq!(named("Ruby", "puts 1\n"), "untitled.rb");
+        assert_eq!(
+            named(PLAIN, "Groceries, for Sunday's lunch: bread, cheese, wine and a very long list of other things\n"),
+            "Groceries, for Sunday's lunch bread, che.txt"
+        );
+        assert_eq!(named(PLAIN, "   \n"), "untitled.txt");
+        assert_eq!(suggested_name(None, "!!!"), "untitled.txt");
     }
 
     #[test]
