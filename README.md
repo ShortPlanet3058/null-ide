@@ -98,6 +98,11 @@ doesn't need Xcode's separate Metal Toolchain download.
 - A `}`, `)` or `]` typed first on a line goes back to its opening line's indentation; in
   Python, the line after `return` (or `pass`, `break`…) steps out of the block, and `else:`,
   `elif`, `except`, `finally` go back to their `if` or `try` as their `:` is typed.
+- Ruby, Lua and shell scripts get the same for their words: Enter after `do`, `then` or
+  `def` goes in a level, and `end`, `fi`, `done` or `else` goes back to what it closes as
+  it's typed (and back in if it was the start of `endpoint`). In YAML, Enter after `key:`
+  goes in, and after `- name: web` lines up under `name`. When the word typed is already
+  the suggestion, ↩ is just a new line.
 - Pasted code takes the indentation of where it goes, its lines keeping theirs relative
   to each other; ⌥⇧⌘V pastes it as it was.
 - Enter in a doc comment (`///`, `//!`, ` * ` in `/** */`) starts the next line with it; in a

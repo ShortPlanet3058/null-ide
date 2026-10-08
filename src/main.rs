@@ -57,6 +57,7 @@ mod theme;
 mod tools;
 mod ui;
 mod welcome;
+mod word_blocks;
 mod workspace;
 mod wrap;
 

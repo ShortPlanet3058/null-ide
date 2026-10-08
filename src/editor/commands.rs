@@ -6,6 +6,15 @@ use gpui::Context;
 use std::ops::Range;
 
 /// Pairs that close themselves when the opening one is typed.
+/// A line moved out for a word like `end`: where it was, to put it back if the word turns
+/// out to be another (`endpoint`).
+pub(super) struct WordOutdent {
+    line: usize,
+    indent: String,
+    /// The text's revision right after the move.
+    revision: u64,
+}
+
 const PAIRS: &[(char, char)] = &[('(', ')'), ('[', ']'), ('{', '}'), ('"', '"'), ('\'', '\''), ('`', '`')];
 
 impl Editor {
@@ -642,6 +651,56 @@ impl Editor {
         self.selection = Selection::caret(caret + has - had);
     }
 
+    /// Ruby, Lua, the shell: `end`, `fi`, `else`… just typed first on its line goes back to
+    /// the indentation of what it closes. Typed on into a longer word (`endpoint`, `file`),
+    /// the line goes back where it was.
+    pub(super) fn outdent_word(&mut self, cx: &mut Context<Self>) {
+        let moved = self.word_outdent.take();
+        let caret = self.selection.head;
+        let (line, col) = self.buffer.point(caret);
+        let text = self.buffer.line_text(line);
+        let before: String = text.chars().take(col).collect();
+        let word = before.trim_start();
+        let is_word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if !is_word(word) || !text.chars().skip(col).all(char::is_whitespace) || !self.selection.is_empty() {
+            return;
+        }
+        let language = self.language_name();
+        let leading = &before[..before.len() - word.len()];
+        let wanted = if crate::word_blocks::grew_from_word(language, word) {
+            // Only right after the move, one letter later.
+            match moved {
+                Some(m) if m.line == line && m.revision + 1 == self.buffer.revision() => m.indent,
+                _ => return,
+            }
+        } else {
+            // Not in a string or a comment (Lua's `--[[ … ]]`).
+            let rope = self.buffer.rope();
+            let byte = rope.char_to_byte(caret - 1);
+            self.highlight_bytes(byte..byte + 1);
+            if matches!(
+                super::spelling::syntax_at(&self.spans, byte),
+                Some(crate::theme::Syntax::String | crate::theme::Syntax::Comment)
+            ) {
+                return;
+            }
+            let above: Vec<String> =
+                (line.saturating_sub(2000)..line).rev().map(|l| self.buffer.line_text(l)).collect();
+            match crate::word_blocks::closer_indent(language, &text, above.iter().map(String::as_str)) {
+                Some(indent) => indent.to_string(),
+                None => return,
+            }
+        };
+        if wanted == leading {
+            return;
+        }
+        let start = self.buffer.line_to_char(line);
+        let (had, has) = (leading.chars().count(), wanted.chars().count());
+        self.edit(start..start + had, &wanted, EditKind::Typing, cx);
+        self.selection = Selection::caret(caret + has - had);
+        self.word_outdent = Some(WordOutdent { line, indent: leading.to_string(), revision: self.buffer.revision() });
+    }
+
     /// Backspace between an empty pair like `()` removes both.
     pub(super) fn empty_pair_around_caret(&self) -> bool {
         let caret = self.selection.head;
@@ -1177,6 +1236,58 @@ mod editor_tests {
         assert_eq!(at(cx, "a.jsx", "<ul></ul>", 4), "<ul>\n    x\n</ul>");
         // Not after a closing or self-closing tag.
         assert_eq!(at(cx, "a.html", "<p></p></div>", 7), "<p></p>\nx</div>");
+    }
+
+    /// Ruby, Lua, the shell and YAML: Enter after `do`, `then` or `key:` goes in a level;
+    /// `end`, `fi` or `else` typed first on a line goes back to what it closes, and back in
+    /// if it was the start of another word.
+    #[gpui::test]
+    fn word_blocks_step_in_and_out(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        // Keys one by one, as typed.
+        let typed = |cx: &mut TestAppContext, file: &str, text: &str, keys: &str| {
+            let (text, file) = (text.to_string(), PathBuf::from(file));
+            let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(file), cx));
+            e.update_in(cx, |e, window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(e, cx));
+                e.selection = Selection::caret(e.buffer.len_chars());
+            });
+            for c in keys.chars() {
+                match c {
+                    '\n' => cx.simulate_keystrokes("enter"),
+                    c => cx.simulate_input(&c.to_string()),
+                }
+            }
+            e.read_with(cx, |e, _| e.buffer.to_string())
+        };
+        let ruby = "class A\n  def b\n    x\n  end\nend\n\n";
+        assert_eq!(
+            typed(cx, "a.rb", ruby, "def f(xs)\nxs.each do |x|\nputs x\nend\nend"),
+            format!("{ruby}def f(xs)\n  xs.each do |x|\n    puts x\n  end\nend")
+        );
+        assert_eq!(typed(cx, "a.rb", ruby, "if a\nb\nelse\nc\nend"), format!("{ruby}if a\n  b\nelse\n  c\nend"));
+        // A word that starts like one goes back in.
+        assert_eq!(typed(cx, "a.rb", "def f\n  ", "ending = 1"), "def f\n  ending = 1");
+        assert_eq!(typed(cx, "a.sh", "if a; then\n  ", "file=x"), "if a; then\n  file=x");
+        assert_eq!(
+            typed(cx, "a.lua", "local M = {}\n\n", "function M.f(a)\nif a then\nreturn 1\nelseif b then\nend\nend"),
+            "local M = {}\n\nfunction M.f(a)\n    if a then\n        return 1\n    elseif b then\n    end\nend"
+        );
+        assert_eq!(
+            typed(cx, "a.sh", "#!/bin/sh\n", "for f in *; do\necho $f\ndone"),
+            "#!/bin/sh\nfor f in *; do\n    echo $f\ndone"
+        );
+        assert_eq!(
+            typed(cx, "a.yml", "on:\n  push:\n", "jobs:\nbuild:\nsteps:\n- name: a\nrun: b"),
+            "on:\n  push:\njobs:\n  build:\n    steps:\n      - name: a\n        run: b"
+        );
+        // In a comment: left alone.
+        assert_eq!(typed(cx, "a.lua", "function f()\n  --[[ notes\n  ", "end"), "function f()\n  --[[ notes\n  end");
     }
 
     /// Enter in a doc comment carries it on, splitting a plain comment too; code that looks
