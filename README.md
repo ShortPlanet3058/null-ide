@@ -145,6 +145,8 @@ doesn't need Xcode's separate Metal Toolchain download.
   sourcekit-lsp), its colours go over the grammar's: a type is coloured as a type, a call
   as a call, a macro as a macro, even where the grammar could only guess from how it's
   written (SwiftUI's `Text(…)` is a type, not a call).
+- Spaces and tabs show as faint dots and dashes in a selection; Settings → Editor can show
+  them at line ends too (where they're left by mistake), or always.
 - Faint indent guides (the caret's block's a little brighter), sticky scroll (the enclosing lines stay at the top), the other uses
   of a name tinted, and a line at the length the project keeps to (from `.editorconfig`,
   rustfmt, Prettier, Black or Ruff). Each can be turned off.
