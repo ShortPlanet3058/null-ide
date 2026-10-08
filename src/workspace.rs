@@ -518,6 +518,8 @@ pub struct Workspace {
     twin_seen: std::collections::HashMap<gpui::EntityId, u64>,
     /// Quit was asked and this window's unsaved changes were answered for.
     pub quitting: bool,
+    /// Unsaved work was just kept for next time: the backup stays.
+    keeping_unsaved: bool,
     /// Writing unsaved work to its backup, once typing pauses.
     backup_task: Option<Task<()>>,
     /// Saves waiting for a pause in typing, by editor.
@@ -677,6 +679,7 @@ impl Workspace {
             auto_saves: Default::default(),
             backup_task: None,
             quitting: false,
+            keeping_unsaved: false,
             view_before_preview: None,
             ai_task: None,
             git_status: Vec::new(),
@@ -2796,6 +2799,15 @@ impl Workspace {
             self.finish_close(action, window, cx);
             return true;
         }
+        // Quitting, closing the window, opening another project: unsaved work is kept for
+        // next time rather than asked about (closing a tab still asks).
+        if cx.global::<Settings>().keep_unsaved && !matches!(action, CloseAction::CloseTabs(_)) {
+            let root = self.tree.read(cx).root().to_path_buf();
+            crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
+            self.keeping_unsaved = true;
+            self.finish_close(action, window, cx);
+            return true;
+        }
         let message = match dirty.as_slice() {
             [one] => format!("Save changes to {}?", one.read(cx).file_name()),
             many => format!("Save changes to {} files?", many.len()),
@@ -2864,10 +2876,13 @@ impl Workspace {
     }
 
     fn finish_close(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) {
-        // Every unsaved change was saved or let go: no backup to bring back.
+        // Every unsaved change was saved or let go: no backup to bring back (unless they
+        // were kept for next time).
         if !matches!(action, CloseAction::CloseTabs(_)) {
             self.backup_task = None;
-            crate::session::save_backups(self.tree.read(cx).root(), &[]);
+            if !std::mem::take(&mut self.keeping_unsaved) {
+                crate::session::save_backups(self.tree.read(cx).root(), &[]);
+            }
         }
         match action {
             // The other windows ask about theirs too, then Null quits.
@@ -8848,7 +8863,8 @@ mod tests {
         };
         let (first, second) = (make("one"), make("two"));
         cx.update(|cx| {
-            cx.set_global(Settings::default());
+            // Asking, rather than keeping the changes for next time.
+            cx.set_global(Settings { keep_unsaved: false, ..Default::default() });
             cx.set_global(Theme::oled());
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
             crate::keymap::register(crate::keymap::Keymap::Null, cx);
@@ -8880,6 +8896,46 @@ mod tests {
         cx.run_until_parked();
         std::fs::remove_dir_all(&first).ok();
         std::fs::remove_dir_all(&second).ok();
+    }
+
+    /// Quitting with unsaved changes, kept for next time: no question, and they come back.
+    #[gpui::test]
+    fn quitting_keeps_unsaved_changes_for_next_time(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("quit-keep");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let window = cx.add_window(|window, cx| Workspace::new(root, window, cx));
+        window
+            .update(cx, |w, window, cx| {
+                w.open_file(dir.join("a.txt"), window, cx);
+                w.active_editor().unwrap().update(cx, |e, cx| e.type_text_for_test(0, "kept ", cx));
+                w.quit(&Quit, window, cx);
+                assert!(w.quitting);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt(), "no question");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "a\n", "the file isn't saved");
+        // Next time: the change is back, still unsaved.
+        let root = dir.clone();
+        let again = cx.add_window(|window, cx| Workspace::new(root, window, cx));
+        again
+            .update(cx, |w, window, cx| {
+                w.restore_session(crate::session::Session::default(), window, cx);
+                let e = w.active_editor().unwrap().read(cx);
+                assert_eq!((e.buffer.to_string(), e.buffer.is_dirty()), ("kept a\n".to_string(), true));
+            })
+            .unwrap();
+        crate::session::save_backups(&dir, &[]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[gpui::test]
