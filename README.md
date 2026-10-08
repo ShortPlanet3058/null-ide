@@ -149,10 +149,11 @@ doesn't need Xcode's separate Metal Toolchain download.
 - Files keep their own style: indentation, line endings, and encoding (UTF-8 with or
   without BOM, UTF-16, Windows-1252), shown in the status bar when not the usual.
 - Unsaved work survives a crash, and quitting doesn't ask about it: it's kept, and comes
-  back unsaved next time (Settings → Editor turns this off; closing a tab still asks). A file renamed or moved outside Null is followed; one
-  deleted shows struck through, and saving puts it back. A file changed on disk under
-  unsaved edits (a pull, an AI agent) asks before a save writes over it. Saves are whole or
-  not at all, and keep the file's permissions and tags.
+  back unsaved next time (Settings → Editor turns this off; closing a tab still asks). A
+  file renamed or moved outside Null is followed; one deleted shows struck through, and
+  saving puts it back. A file changed on disk under unsaved edits (a pull, an AI agent)
+  asks before a save writes over it. Saves are whole or not at all, and keep the file's
+  permissions and tags.
 - **Revert to Saved** (File menu, ⌘K) takes the file back to its last save, as one step ⌘Z
   undoes.
 - **Local history**: what each save replaced is kept for a month, git or not, and listed in
