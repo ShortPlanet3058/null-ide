@@ -80,6 +80,8 @@ doesn't need Xcode's separate Metal Toolchain download.
 - **⌘.** offers the language server's quick fixes at the caret (a missing import, match
   arms…), and with AI on, Fix with AI for an error. **Organize Imports** (⌘K) has the server
   sort the file's imports and drop the unused ones, where it can (TypeScript, Go, Python). **F8** goes from problem to problem.
+- Blocks fold from the gutter's arrow or ⌥⌘← / ⌥⌘→ (their first and closing lines stay);
+  **Fold Level 1/2/3** (⌘K) folds every block that deep, for the file's outline.
 - Multiple cursors (⌘D, ⌘⇧-click), a box with ⌥⇧-drag, cursors at line ends (⌥⇧I);
   expand the selection by syntax, move and duplicate lines, join, sort, change case.
 - ⌃⌥↑ / ⌃⌥↓ step the number at the caret (or the next one on the line) up or down, by ten

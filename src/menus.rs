@@ -153,6 +153,10 @@ pub fn set(cx: &mut App) {
                         MenuItem::separator(),
                         MenuItem::action("Fold All", crate::editor::FoldAll),
                         MenuItem::action("Unfold All", crate::editor::UnfoldAll),
+                        MenuItem::separator(),
+                        MenuItem::action("Fold Level 1", crate::editor::FoldLevel1),
+                        MenuItem::action("Fold Level 2", crate::editor::FoldLevel2),
+                        MenuItem::action("Fold Level 3", crate::editor::FoldLevel3),
                     ],
                 }),
                 MenuItem::submenu(Menu {
