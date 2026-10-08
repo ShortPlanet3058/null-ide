@@ -103,6 +103,10 @@ pub struct ProjectSearch {
     case_sensitive: bool,
     whole_word: bool,
     regex: bool,
+    /// Only the files open in tabs.
+    open_only: bool,
+    /// The files open in this window's tabs: kept up to date by its workspace.
+    pub open_files: Vec<PathBuf>,
     results: Vec<FileResult>,
     rows: Vec<Row>,
     status: Status,
@@ -140,6 +144,8 @@ impl ProjectSearch {
             input,
             case_sensitive: false,
             whole_word: false,
+            open_only: false,
+            open_files: Vec::new(),
             regex: false,
             results: Vec::new(),
             rows: Vec::new(),
@@ -268,6 +274,8 @@ impl ProjectSearch {
         // The files field counts only while it shows.
         let files = if self.show_replace { self.files_input.read(cx).text().to_string() } else { String::new() };
         let unsaved = cx.try_global::<UnsavedFiles>().map(|u| u.0.clone()).unwrap_or_default();
+        let only: Option<std::collections::HashSet<PathBuf>> =
+            self.open_only.then(|| self.open_files.iter().cloned().collect());
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = cancel.clone();
         // Results show as they're found, file by file in order; the previous results stay
@@ -277,7 +285,7 @@ impl ProjectSearch {
             let (tx, mut rx) = futures::channel::mpsc::unbounded();
             cx.background_executor()
                 .spawn(async move {
-                    search_files(&root, &query, &files, &unsaved, &cancel, |found| {
+                    search_files(&root, &query, &files, only.as_ref(), &unsaved, &cancel, |found| {
                         tx.unbounded_send(found).ok();
                     })
                 })
@@ -495,6 +503,7 @@ impl ProjectSearch {
         let tip = match id {
             "case" => "Match case",
             "word" => "Whole word",
+            "open" => "Only the files open in tabs",
             _ => "Regular expression",
         };
         div()
@@ -529,6 +538,7 @@ fn search_files(
     root: &Path,
     query: &SearchQuery,
     files_wanted: &str,
+    only: Option<&std::collections::HashSet<PathBuf>>,
     unsaved: &std::collections::HashMap<PathBuf, ropey::Rope>,
     cancel: &AtomicBool,
     mut report: impl FnMut(Found),
@@ -546,6 +556,8 @@ fn search_files(
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
         .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_FILE_SIZE))
         .map(|e| e.into_path())
+        // Asked for the open files only: those.
+        .filter(|path| only.is_none_or(|only| only.contains(path)))
         .collect();
     files.sort();
 
@@ -749,6 +761,7 @@ impl Render for ProjectSearch {
         let case = self.toggle("case", "Aa", self.case_sensitive, |s| s.case_sensitive = !s.case_sensitive, cx);
         let word = self.toggle("word", "W", self.whole_word, |s| s.whole_word = !s.whole_word, cx);
         let regex = self.toggle("regex", ".*", self.regex, |s| s.regex = !s.regex, cx);
+        let open = self.toggle("open", "Tabs", self.open_only, |s| s.open_only = !s.open_only, cx);
         let theme = cx.global::<Theme>();
         let status: SharedString = match self.status {
             Status::Idle => "".into(),
@@ -823,7 +836,8 @@ impl Render for ProjectSearch {
                     .child(div().flex_1().min_w_0().overflow_hidden().child(self.input.clone()))
                     .child(case)
                     .child(word)
-                    .child(regex),
+                    .child(regex)
+                    .child(open),
             )
             .when(self.show_replace, |panel| {
                 let can_replace = !self.results.is_empty();
@@ -954,7 +968,7 @@ mod tests {
         let query = SearchQuery { text: "needle".into(), ..Default::default() };
         let found = |files: &str| {
             let mut found = Vec::new();
-            search_files(&root, &query, files, &Default::default(), &AtomicBool::new(false), |f| {
+            search_files(&root, &query, files, None, &Default::default(), &AtomicBool::new(false), |f| {
                 if let Found::Files(files) = f {
                     found.extend(files.into_iter().map(|f| f.relative));
                 }
@@ -1046,13 +1060,38 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.rs"), "// TODO: split\nfn a() {} // FIXME later\n// TODOS, todo, XXXL\n").unwrap();
         let mut lines = Vec::new();
-        search_files(&dir, &todo_query(), "", &Default::default(), &AtomicBool::new(false), |found| {
+        search_files(&dir, &todo_query(), "", None, &Default::default(), &AtomicBool::new(false), |found| {
             if let Found::Files(files) = found {
                 lines.extend(files.into_iter().flat_map(|f| f.matches.into_iter().map(|m| m.line)));
             }
         });
         lines.sort();
         assert_eq!(lines, [0, 1]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn searches_only_the_open_files_when_asked() {
+        let dir = crate::tools::test_dir("search-open");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(name), "needle\n").unwrap();
+        }
+        let query = SearchQuery { text: "needle".into(), ..Default::default() };
+        let found = |only: Option<&std::collections::HashSet<PathBuf>>| {
+            let mut names = Vec::new();
+            search_files(&dir, &query, "", only, &Default::default(), &AtomicBool::new(false), |found| {
+                if let Found::Files(files) = found {
+                    names.extend(files.into_iter().map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned()));
+                }
+            });
+            names
+        };
+        assert_eq!(found(None), ["a.txt", "b.txt", "c.txt"]);
+        let open = std::collections::HashSet::from([dir.join("b.txt")]);
+        assert_eq!(found(Some(&open)), ["b.txt"]);
+        assert!(found(Some(&Default::default())).is_empty(), "no tabs: nothing");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1064,7 +1103,7 @@ mod tests {
         std::fs::write(dir.join("old.txt"), b"caf\xe9 cr\xe8me\n").unwrap();
         let query = SearchQuery { text: "crème".into(), ..Default::default() };
         let mut results = Vec::new();
-        search_files(&dir, &query, "", &Default::default(), &AtomicBool::new(false), |found| {
+        search_files(&dir, &query, "", None, &Default::default(), &AtomicBool::new(false), |found| {
             if let Found::Files(files) = found {
                 results.extend(files)
             }
@@ -1089,7 +1128,7 @@ mod tests {
         let query = SearchQuery { text: "alpha".into(), ..Default::default() };
         let mut results = Vec::new();
         let mut truncated = None;
-        search_files(&dir, &query, "", &Default::default(), &AtomicBool::new(false), |found| match found {
+        search_files(&dir, &query, "", None, &Default::default(), &AtomicBool::new(false), |found| match found {
             Found::Files(files) => results.extend(files),
             Found::Done { truncated: t } => truncated = Some(t),
         });
@@ -1106,7 +1145,7 @@ mod tests {
 
         // A cancelled search reports nothing.
         let mut reported = false;
-        search_files(&dir, &query, "", &Default::default(), &AtomicBool::new(true), |_| reported = true);
+        search_files(&dir, &query, "", None, &Default::default(), &AtomicBool::new(true), |_| reported = true);
         assert!(!reported);
 
         std::fs::remove_dir_all(&dir).unwrap();

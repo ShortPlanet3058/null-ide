@@ -6527,6 +6527,12 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The files open in tabs, for a search of those only.
+        let open: Vec<PathBuf> =
+            self.tabs.iter().filter_map(|t| t.editor.read(cx).path().map(Path::to_path_buf)).collect();
+        if self.project_search.read(cx).open_files != open {
+            self.project_search.update(cx, |search, _| search.open_files = open);
+        }
         let (chrome, fading) = self.chrome.value(FADE_IN, FADE_OUT);
         let (sidebar, sliding) = self.sidebar.value(SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         let (searching, switching) = self.sidebar_search.value(SIDEBAR_SLIDE, SIDEBAR_SLIDE);
