@@ -178,6 +178,9 @@ struct Row {
     kind: RowKind,
     depth: usize,
     expanded: bool,
+    /// Folders that each hold only the next, shown as one row (`src / main / java`): the
+    /// first of them, which opens and closes the row, and the names before the last.
+    chain: Option<(PathBuf, SharedString)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -459,10 +462,10 @@ impl FileTree {
     fn push_new_item_row(&mut self, dir: &Path, depth: usize) {
         match self.edit.as_ref().map(|e| &e.kind) {
             Some(EditKind::NewFile { dir: d }) if d == dir => {
-                self.rows.push(Row { kind: RowKind::NewItem { is_dir: false }, depth, expanded: false })
+                self.rows.push(Row { kind: RowKind::NewItem { is_dir: false }, depth, expanded: false, chain: None })
             }
             Some(EditKind::NewFolder { dir: d }) if d == dir => {
-                self.rows.push(Row { kind: RowKind::NewItem { is_dir: true }, depth, expanded: false })
+                self.rows.push(Row { kind: RowKind::NewItem { is_dir: true }, depth, expanded: false, chain: None })
             }
             _ => {}
         }
@@ -475,15 +478,73 @@ impl FileTree {
     fn push_children_of(&mut self, dir: &Path, depth: usize, inside_ignored: bool) {
         let entries =
             self.children.entry(dir.to_path_buf()).or_insert_with(|| Self::read_dir(dir, inside_ignored)).clone();
-        for entry in entries {
+        for mut entry in entries {
             let expanded = entry.is_dir && self.expanded.contains(&entry.path);
+            // Open, and holding only a folder: that folder joins this row, and so on down.
+            let mut chain: Option<(PathBuf, String)> = None;
+            while expanded && !self.new_item_in(&entry.path) {
+                let inner = self
+                    .children
+                    .entry(entry.path.clone())
+                    .or_insert_with(|| Self::read_dir(&entry.path, entry.ignored))
+                    .clone();
+                let [only] = inner.as_slice() else { break };
+                if !only.is_dir {
+                    break;
+                }
+                let (_, names) = chain.get_or_insert_with(|| (entry.path.clone(), String::new()));
+                names.push_str(&entry.name);
+                names.push_str(" / ");
+                entry = only.clone();
+            }
+            let chain = chain.map(|(head, names)| (head, names.into()));
             let (path, ignored) = (entry.path.clone(), entry.ignored);
-            self.rows.push(Row { kind: RowKind::Entry(entry), depth, expanded });
+            self.rows.push(Row { kind: RowKind::Entry(entry), depth, expanded, chain });
             if expanded {
                 self.push_new_item_row(&path, depth + 1);
                 self.push_children_of(&path, depth + 1, ignored);
             }
         }
+    }
+
+    /// Whether a new file or folder is being named in `dir`.
+    fn new_item_in(&self, dir: &Path) -> bool {
+        matches!(
+            self.edit.as_ref().map(|e| &e.kind),
+            Some(EditKind::NewFile { dir: d } | EditKind::NewFolder { dir: d }) if d == dir
+        )
+    }
+
+    /// The folder `path`'s row: the folder that opens and closes it (a joined row's first),
+    /// and whether it's open.
+    fn folder_row(&self, path: &Path) -> (PathBuf, bool) {
+        let row = self.rows.iter().find(|r| matches!(&r.kind, RowKind::Entry(e) if e.path == path));
+        match row {
+            Some(row) => {
+                (row.chain.as_ref().map_or_else(|| path.to_path_buf(), |(head, _)| head.clone()), row.expanded)
+            }
+            None => (path.to_path_buf(), self.expanded.contains(path)),
+        }
+    }
+
+    /// Opens or closes a folder's row. A joined row closing goes back to its first folder
+    /// alone, which stays selected.
+    fn toggle_row(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let (head, open) = self.folder_row(path);
+        if open && head != path && self.selected.as_deref() == Some(path) {
+            self.selected = Some(head.clone());
+        }
+        self.toggle(&head, cx);
+    }
+
+    /// What a row shows: a joined row's folders, then its name.
+    fn row_label(&self, ix: usize) -> Option<String> {
+        let row = self.rows.get(ix)?;
+        let RowKind::Entry(entry) = &row.kind else { return None };
+        Some(match &row.chain {
+            Some((_, names)) => format!("{names}{}", entry.name),
+            None => entry.name.to_string(),
+        })
     }
 
     /// Scrolls the selected row into view, the least needed.
@@ -535,7 +596,7 @@ impl FileTree {
         window.focus(&self.focus_handle);
         if entry.is_dir {
             if click_count == 1 {
-                self.toggle(&entry.path, cx);
+                self.toggle_row(&entry.path, cx);
             }
         } else if click_count >= 2 {
             cx.emit(FileTreeEvent::Open(entry.path));
@@ -570,11 +631,9 @@ impl FileTree {
         let current = self.selected_ix().unwrap_or(0);
         let start = if again { current + 1 } else { current };
         let rows = self.rows.len();
-        let found = (0..rows).map(|i| (start + i) % rows.max(1)).find(|&ix| {
-            self.entry_at(ix).is_some_and(|e| {
-                e.path.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().starts_with(prefix))
-            })
-        });
+        let found = (0..rows)
+            .map(|i| (start + i) % rows.max(1))
+            .find(|&ix| self.row_label(ix).is_some_and(|label| label.to_lowercase().starts_with(prefix)));
         if let Some(ix) = found {
             self.selected = self.entry_at(ix).map(|e| e.path.clone());
             self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
@@ -611,8 +670,8 @@ impl FileTree {
     fn expand_or_open(&mut self, _: &ExpandOrOpen, _: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.selected_entry() else { return };
         if entry.is_dir {
-            if !self.expanded.contains(&entry.path) {
-                self.toggle(&entry.path, cx);
+            if !self.folder_row(&entry.path).1 {
+                self.toggle_row(&entry.path, cx);
             }
         } else {
             cx.emit(FileTreeEvent::Preview(entry.path));
@@ -621,8 +680,8 @@ impl FileTree {
 
     fn collapse(&mut self, _: &Collapse, _: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.selected_entry() else { return };
-        if entry.is_dir && self.expanded.contains(&entry.path) {
-            self.toggle(&entry.path, cx);
+        if entry.is_dir && self.folder_row(&entry.path).1 {
+            self.toggle_row(&entry.path, cx);
         } else if let Some(parent) = entry.path.parent().filter(|p| *p != self.root) {
             // On a file or closed folder, Left goes up to the parent folder.
             self.selected = Some(parent.to_path_buf());
@@ -634,7 +693,7 @@ impl FileTree {
     fn activate(&mut self, _: &Activate, _: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.selected_entry() else { return };
         if entry.is_dir {
-            self.toggle(&entry.path, cx);
+            self.toggle_row(&entry.path, cx);
         } else {
             cx.emit(FileTreeEvent::Open(entry.path));
         }
@@ -1136,7 +1195,8 @@ impl FileTree {
                 let active = self.active.as_ref() == Some(&entry.path);
                 let selected =
                     self.selected.as_ref() == Some(&entry.path) && self.focus_handle.contains_focused(window, cx);
-                let (turn, turning) = self.chevron_turn(&entry.path, row.expanded);
+                let head = row.chain.as_ref().map_or(entry.path.as_path(), |(head, _)| head.as_path());
+                let (turn, turning) = self.chevron_turn(head, row.expanded);
                 if turning {
                     window.request_animation_frame();
                 }
@@ -1183,7 +1243,11 @@ impl FileTree {
                     row_el.key_context("TreeEdit").child(name_field(edit)).into_any_element()
                 } else {
                     row_el
-                        .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
+                        // A joined row: the folders it goes through, then its own name, one line.
+                        .child(div().flex_1().min_w_0().truncate().child(match &row.chain {
+                            Some((_, names)) => SharedString::from(format!("{names}{}", entry.name)),
+                            None => entry.name.clone(),
+                        }))
                         // A folder with changes inside: a small dot at the end.
                         .when(holds_changes || holds_errors, |r| {
                             let dot = if holds_errors { theme.error } else { theme.git_modified };
@@ -1431,6 +1495,51 @@ mod tests {
 
     /// Typing with the files focused goes to a name starting with what's typed; the same
     /// letter again, to the next one with it.
+    /// Folders that each hold only the next show as one row, which opens and closes as one.
+    #[gpui::test]
+    fn single_folders_join_into_one_row(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("tree-compact");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/main/java/app")).unwrap();
+        std::fs::write(dir.join("src/main/java/app/App.java"), "x").unwrap();
+        std::fs::write(dir.join("src/main/java/app/Util.java"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/a.md"), "x").unwrap();
+        std::fs::write(dir.join("docs/b.md"), "x").unwrap();
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            bind_keys(cx);
+        });
+        let root = dir.clone();
+        let (tree, cx) = cx.add_window_view(|_, cx| FileTree::new(root, cx));
+        let labels = |cx: &mut gpui::VisualTestContext| {
+            tree.read_with(cx, |t, _| (0..t.rows.len()).filter_map(|ix| t.row_label(ix)).collect::<Vec<_>>())
+        };
+        assert_eq!(labels(cx), ["docs", "src"]);
+        let src = dir.join("src");
+        tree.update(cx, |t, cx| t.toggle_row(&src, cx));
+        assert_eq!(labels(cx), ["docs", "src / main / java / app", "App.java", "Util.java"]);
+        // The row is the last folder's: new files go there.
+        let app = dir.join("src/main/java/app");
+        tree.read_with(cx, |t, _| {
+            let ix = t.rows.iter().position(|r| matches!(&r.kind, RowKind::Entry(e) if e.path == app)).unwrap();
+            assert_eq!(t.dir_for(t.entry_at(ix)), app);
+        });
+        // Closed from its last folder (selected): back to `src` alone, still selected.
+        tree.update(cx, |t, cx| {
+            t.selected = Some(app.clone());
+            t.toggle_row(&app, cx);
+            assert_eq!(t.selected.as_deref(), Some(src.as_path()));
+        });
+        assert_eq!(labels(cx), ["docs", "src"]);
+        // A folder with two things in it isn't joined.
+        tree.update(cx, |t, cx| t.toggle_row(&dir.join("docs"), cx));
+        assert_eq!(labels(cx), ["docs", "a.md", "b.md", "src"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[gpui::test]
     fn typing_goes_to_a_name(cx: &mut gpui::TestAppContext) {
         let dir = crate::tools::test_dir("tree-typing");
