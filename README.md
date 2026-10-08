@@ -233,7 +233,8 @@ numbers can show everywhere, only in code, or nowhere.
   and something runs in it, the status bar says what (`cargo running`; a click shows it), and
   a terminal's tab gets a dot while it's busy behind another.
 - **F5** debugs (lldb-dap, with Xcode): breakpoints with **F9**, conditions with a
-  right-click, values shown faintly beside the code and in a panel.
+  right-click, values shown faintly beside the code and in a panel. Under the variables,
+  type an expression to watch (`letters * 2`): its value shows at every stop.
 
 ## Principles
 

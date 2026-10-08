@@ -102,6 +102,7 @@ actions!(
         StepOver,
         StepInto,
         StepOut,
+        AddWatch,
         PauseDebugging,
         NextProblem,
         ToggleIndentGuides,
@@ -172,6 +173,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f10", StepOver, ctx),
         KeyBinding::new("f11", StepInto, ctx),
         KeyBinding::new("shift-f11", StepOut, ctx),
+        KeyBinding::new("enter", AddWatch, Some("DebugWatch")),
         KeyBinding::new("f8", NextProblem, ctx),
         KeyBinding::new("shift-f8", PreviousProblem, ctx),
         KeyBinding::new("ctrl-tab", NextTab, ctx),
@@ -502,6 +504,8 @@ pub struct Workspace {
     debug_show_output: bool,
     /// The paused call's variables the code shows, with values worth showing.
     debug_locals: Vec<(String, String)>,
+    /// Where an expression to watch is typed, under the variables while paused.
+    debug_watch: Entity<crate::text_input::TextInput>,
     /// The program to debug, when the project doesn't say (no Cargo.toml): asked once.
     debug_program: Option<PathBuf>,
     /// The projects for the list about to open.
@@ -696,6 +700,7 @@ impl Workspace {
             debug_output_scroll: gpui::ScrollHandle::new(),
             debug_show_output: false,
             debug_locals: Vec::new(),
+            debug_watch: cx.new(|cx| crate::text_input::TextInput::new("Watch an expression", cx)),
             debug_program: None,
             focus_mode: false,
             tab_menu: None,
@@ -4660,6 +4665,49 @@ impl Workspace {
                         .child(div().text_color(theme.foreground).child(name.clone()))
                         .child(div().min_w_0().truncate().text_color(theme.muted).child(value.clone()))
                 });
+                let watches: Vec<AnyElement> = debugger
+                    .watches
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, watch)| {
+                        let (value, failed) = match &watch.value {
+                            Some(Ok(value)) => (value.clone(), false),
+                            Some(Err(why)) => (why.clone(), true),
+                            None => ("…".to_string(), true),
+                        };
+                        let group: SharedString = format!("watch-{ix}").into();
+                        div()
+                            .id(("dbg-watch", ix))
+                            .group(group.clone())
+                            .flex()
+                            .gap(px(10.))
+                            .whitespace_nowrap()
+                            .child(div().text_color(theme.caret).child(watch.expression.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(if failed { theme.faint } else { theme.muted })
+                                    .child(value),
+                            )
+                            .child(
+                                div()
+                                    .id(("dbg-unwatch", ix))
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .invisible()
+                                    .group_hover(group, |s| s.visible())
+                                    .text_color(theme.faint)
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .child("×")
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.debugger.update(cx, |d, cx| d.remove_watch(ix, cx));
+                                    })),
+                            )
+                            .into_any_element()
+                    })
+                    .collect();
                 // The project's own calls; the libraries' ones (the runtime, std) are only counted.
                 let in_project =
                     |f: &crate::debugger::Frame| f.place.as_ref().is_some_and(|(p, _)| p.starts_with(&root));
@@ -4705,9 +4753,22 @@ impl Workspace {
                     .pb(px(8.))
                     .code_font(cx)
                     .text_size(px(12.5))
-                    .child(column("dbg-variables").children(variables).when(self.debug_locals.is_empty(), |d| {
-                        d.child(div().text_color(theme.faint).child("No local variables here"))
-                    }))
+                    .child(
+                        column("dbg-variables")
+                            .children(variables)
+                            .when(self.debug_locals.is_empty(), |d| {
+                                d.child(div().text_color(theme.faint).child("No local variables here"))
+                            })
+                            // Expressions watched: their values here, at every stop.
+                            .children(watches)
+                            .child(
+                                div()
+                                    .key_context("DebugWatch")
+                                    .mt(px(4.))
+                                    .text_color(theme.foreground)
+                                    .child(self.debug_watch.clone()),
+                            ),
+                    )
                     .child(column("dbg-calls").children(calls).when(hidden > 0, |d| {
                         let more = if hidden == 1 {
                             "1 more in libraries".to_string()
@@ -6855,6 +6916,11 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &StepOut, _, cx| this.debugger.update(cx, |d, cx| d.resume("stepOut", cx))),
             )
+            .on_action(cx.listener(|this, _: &AddWatch, _, cx| {
+                let expression = this.debug_watch.read(cx).text().to_string();
+                this.debugger.update(cx, |d, cx| d.add_watch(&expression, cx));
+                this.debug_watch.update(cx, |input, cx| input.set_text("", cx));
+            }))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::next_terminal))
             .on_action(cx.listener(Self::next_problem))
