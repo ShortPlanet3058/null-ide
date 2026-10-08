@@ -298,6 +298,10 @@ In Rust, **Expand Macro** (⌘K) shows what the macro at the caret turns into (`
 that brings the file in, **Open Cargo.toml** to its crate's, and **Open Documentation** opens
 the docs.rs (or standard library) page of the name at the caret.
 
+In C, C++ and Objective-C, **⌃⌘↑** goes from a source file to its header and back (`app.cpp` ↔
+`app.h`): clangd finds it anywhere in the project (`include/`), and without it, it's looked for
+beside the file.
+
 ## AI (optional, off by default)
 
 AI is a tool: it shows up only when you call it, right in the code, and a switch (⌘K or

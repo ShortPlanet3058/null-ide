@@ -152,6 +152,16 @@ impl lsp_types::request::Request for OpenCargoToml {
     const METHOD: &'static str = "experimental/openCargoToml";
 }
 
+/// clangd's own request for a file's counterpart: the header of a source file, or the other
+/// way round.
+pub enum SwitchSourceHeader {}
+
+impl lsp_types::request::Request for SwitchSourceHeader {
+    type Params = TextDocumentIdentifier;
+    type Result = Option<lsp_types::Uri>;
+    const METHOD: &'static str = "textDocument/switchSourceHeader";
+}
+
 /// rust-analyzer's own request for a macro's expansion.
 pub enum ExpandMacro {}
 
@@ -695,6 +705,16 @@ impl LspStore {
                 None => Vec::new(),
             }
         }
+    }
+
+    /// The header of a source file, or the source of a header, as the server finds it (in
+    /// other folders too, like `include/`).
+    pub fn counterpart(&self, path: &Path) -> impl Future<Output = Option<PathBuf>> + use<> {
+        let request = self
+            .server_for(path)
+            .zip(uri_for(path))
+            .map(|(server, uri)| server.request::<SwitchSourceHeader>(TextDocumentIdentifier { uri }));
+        async move { request?.await.ok().flatten().and_then(|uri| path_for(&uri)) }
     }
 
     /// Where the symbol at `position` is defined, its type is, or it's implemented.

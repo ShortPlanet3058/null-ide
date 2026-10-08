@@ -2442,6 +2442,16 @@ impl Workspace {
                     }
                     this.schedule_session_save(cx);
                 }
+                EditorEvent::Open(path) => {
+                    if let Some(place) = editor
+                        .read(cx)
+                        .path()
+                        .map(|p| Place { path: p.to_path_buf(), point: editor.read(cx).caret_point() })
+                    {
+                        this.remember_place(Some(place));
+                    }
+                    this.open_file(path.clone(), window, cx);
+                }
                 EditorEvent::GoTo { path, range } => {
                     let range = *range;
                     this.go_to(path.clone(), range, window, cx);
@@ -3412,6 +3422,10 @@ impl Workspace {
             commands.push((Go, "Open Documentation".into(), Box::new(crate::editor::OpenDocumentation)));
             commands.push((Go, "Go to Parent Module".into(), Box::new(crate::editor::GoToParentModule)));
             commands.push((Go, "Open Cargo.toml".into(), Box::new(crate::editor::OpenCargoToml)));
+        }
+        // C, C++, Objective-C: from a source to its header and back.
+        if self.active_editor().and_then(|e| e.read(cx).path()).is_some_and(crate::editor::has_counterpart) {
+            commands.push((Go, "Switch Header/Source".into(), Box::new(crate::editor::SwitchSourceHeader)));
         }
         // Markdown: a table of contents of its headings; the document as a page.
         if self.active_editor().is_some_and(|e| e.read(cx).is_markdown()) {
