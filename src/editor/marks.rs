@@ -112,12 +112,19 @@ impl Editor {
         let start = self.buffer.line_to_char(first);
         let end =
             if last >= self.buffer.len_lines() { self.buffer.len_chars() } else { self.buffer.line_to_char(last) };
+        // Lines, or this many characters either side on long ones (a minified file's one
+        // line): matched in a slice that size.
+        const AROUND: usize = 200_000;
+        let (start, end) = (start.max(at.saturating_sub(AROUND)), end.min(at + AROUND));
         let text = self.buffer.slice(start..end);
         let len = word.chars().count();
+        // Each match's char from the rope, not by counting from the start each time.
+        let rope = self.buffer.rope();
+        let start_byte = rope.char_to_byte(start);
         whole_word_matches(&text, word)
             .into_iter()
             .map(|byte| {
-                let from = start + text[..byte].chars().count();
+                let from = rope.byte_to_char(start_byte + byte);
                 from..from + len
             })
             .collect()

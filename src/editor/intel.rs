@@ -83,6 +83,10 @@ pub struct HoverBlock {
 #[derive(Clone)]
 pub struct Problem {
     pub range: Range<usize>,
+    /// Where it starts and ends, as (line, column): worked out once with the list, not
+    /// on every frame.
+    pub start: (usize, usize),
+    pub end: (usize, usize),
     pub severity: DiagnosticSeverity,
     pub message: String,
     /// As the server sent it, to hand back when asking for fixes.
@@ -239,15 +243,31 @@ impl Editor {
         if pinned.version != version || lost_track {
             let rope = self.buffer.rope();
             let byte = |p: Position| rope.char_to_byte(self.offset_from_lsp(p).min(rope.len_chars()));
-            let mut previous = std::mem::take(&mut pinned.items);
+            // Found by where they are and what they say (a search through all of them for
+            // each was thousands squared with a big build's problems).
+            let mut previous: Vec<Option<(lsp_types::Diagnostic, Option<Range<usize>>)>> =
+                std::mem::take(&mut pinned.items).into_iter().map(Some).collect();
+            let key = |d: &lsp_types::Diagnostic| {
+                let r = d.range;
+                (r.start.line, r.start.character, r.end.line, r.end.character, d.message.clone())
+            };
+            let mut by_key: std::collections::HashMap<_, Vec<usize>> = std::collections::HashMap::new();
+            if !lost_track {
+                for (i, item) in previous.iter().enumerate() {
+                    if let Some((d, _)) = item {
+                        by_key.entry(key(d)).or_default().push(i);
+                    }
+                }
+            }
             pinned.items = lsp
                 .diagnostics(path)
                 .iter()
                 .map(|d| {
-                    let kept = (!lost_track)
-                        .then(|| previous.iter().position(|(old, _)| old == d))
-                        .flatten()
-                        .map(|i| previous.swap_remove(i).1);
+                    let kept = by_key.get_mut(&key(d)).and_then(|candidates| {
+                        let at =
+                            candidates.iter().position(|&i| previous[i].as_ref().is_some_and(|(old, _)| old == d))?;
+                        previous[candidates.swap_remove(at)].take().map(|(_, range)| range)
+                    });
                     (d.clone(), kept.unwrap_or_else(|| Some(byte(d.range.start)..byte(d.range.end))))
                 })
                 .collect();
@@ -261,8 +281,11 @@ impl Editor {
                 .iter()
                 .filter_map(|(d, range)| {
                     let range = range.clone()?;
+                    let range = char_at(range.start)..char_at(range.end);
                     Some(Problem {
-                        range: char_at(range.start)..char_at(range.end),
+                        start: self.buffer.point(range.start),
+                        end: self.buffer.point(range.end),
+                        range,
                         severity: d.severity.unwrap_or(DiagnosticSeverity::ERROR),
                         message: d.message.clone(),
                         diagnostic: d.clone(),

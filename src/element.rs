@@ -310,7 +310,10 @@ fn whitespace_xs(r: &RowLayout, marks: &[(usize, bool)]) -> Vec<(Pixels, Pixels,
 
 /// The note at the end of the caret's line when something's wrong there: the most serious
 /// problem starting on it (`chars` of the text), its first line, cut short.
-fn problem_note(problems: &[crate::editor::Problem], chars: Range<usize>) -> Option<(String, DiagnosticSeverity)> {
+fn problem_note<'a>(
+    problems: impl IntoIterator<Item = &'a crate::editor::Problem>,
+    chars: Range<usize>,
+) -> Option<(String, DiagnosticSeverity)> {
     let rank = |s: DiagnosticSeverity| match s {
         DiagnosticSeverity::ERROR => 0,
         DiagnosticSeverity::WARNING => 1,
@@ -318,7 +321,7 @@ fn problem_note(problems: &[crate::editor::Problem], chars: Range<usize>) -> Opt
         _ => 3,
     };
     let problem = problems
-        .iter()
+        .into_iter()
         .filter(|p| chars.contains(&p.range.start) && rank(p.severity) <= 1)
         .min_by_key(|p| rank(p.severity))?;
     let first = problem.message.lines().next().unwrap_or("").trim();
@@ -709,8 +712,10 @@ impl Element for EditorElement {
                 if color.is_none() && !faded && !struck {
                     continue;
                 }
-                let (start_line, start_col) = editor.buffer.point(problem.range.start);
-                let (end_line, end_col) = editor.buffer.point(problem.range.end);
+                let ((start_line, start_col), (end_line, end_col)) = (problem.start, problem.end);
+                if end_line < lines_shown.start || start_line >= lines_shown.end {
+                    continue;
+                }
                 for line in start_line.max(lines_shown.start)..=end_line.min(lines_shown.end.saturating_sub(1)) {
                     let i = line - lines_shown.start;
                     let text = &texts[i];
@@ -750,15 +755,18 @@ impl Element for EditorElement {
             let every_line = cx.global::<crate::settings::Settings>().problems_at_line_ends;
             let line_notes: std::collections::HashMap<usize, (String, Hsla)> = {
                 let rope = editor.buffer.rope();
-                let problems = editor.problems(cx);
                 let noted = if every_line { lines_shown.clone() } else { caret_line..caret_line + 1 };
+                // Only those starting on the lines noted, looked through once.
+                let all = editor.problems(cx);
+                let problems: Vec<&crate::editor::Problem> =
+                    all.iter().filter(|p| noted.contains(&p.start.0)).collect();
                 noted
                     .filter_map(|line| {
                         // Problems are in chars.
                         let chars = rope.line_to_char(line.min(rope.len_lines()))
                             ..rope.line_to_char((line + 1).min(rope.len_lines()));
                         let chars = chars.start..chars.end.max(chars.start + 1);
-                        problem_note(&problems, chars).map(|(note, severity)| {
+                        problem_note(problems.iter().copied(), chars).map(|(note, severity)| {
                             let color = if severity == DiagnosticSeverity::ERROR { theme.error } else { theme.warning };
                             let strength = if line == caret_line { 0.75 } else { 0.5 };
                             (line, (format!("{BLAME_GAP}{note}"), color.opacity(strength)))
@@ -1268,14 +1276,14 @@ impl Element for EditorElement {
                     let row_start = editor.buffer.line_to_char(r.row.line) + r.row.cols.start;
                     let top = row_top(visible.start + i);
                     // A wrapped row ends the line's text when all that's after it is blank.
+                    // (Read from the rope after the row, not from a copy of the whole line.)
                     let ends_line = r.row.last
-                        || (shown_whitespace == crate::settings::ShowWhitespace::Trailing
-                            && editor
-                                .buffer
-                                .line_text(r.row.line)
-                                .chars()
-                                .skip(r.row.cols.end)
-                                .all(|c| c == ' ' || c == '\t'));
+                        || (shown_whitespace == crate::settings::ShowWhitespace::Trailing && {
+                            let rope = editor.buffer.rope();
+                            let from = rope.line_to_char(r.row.line) + r.row.cols.end;
+                            let to = rope.line_to_char(r.row.line) + editor.buffer.line_len(r.row.line);
+                            rope.slice(from.min(to)..to).chars().all(|c| c == ' ' || c == '\t')
+                        });
                     let marks = whitespace_marks(&r.text, row_start, &selected, shown_whitespace, ends_line);
                     if marks.is_empty() {
                         continue;
@@ -1439,7 +1447,7 @@ impl Element for EditorElement {
                         DiagnosticSeverity::WARNING => theme.warning,
                         _ => continue,
                     };
-                    scroll_marks.push(mark(editor.buffer.point(problem.range.start).0, 6., 4., color));
+                    scroll_marks.push(mark(problem.start.0, 6., 4., color));
                 }
             }
             let (_, caret_x) = pos(caret_line, caret_col);
@@ -1883,6 +1891,8 @@ mod problem_notes {
     fn problem(start: usize, severity: DiagnosticSeverity, message: &str) -> crate::editor::Problem {
         crate::editor::Problem {
             range: start..start + 1,
+            start: (0, start),
+            end: (0, start + 1),
             severity,
             message: message.into(),
             diagnostic: Default::default(),

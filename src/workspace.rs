@@ -7091,9 +7091,10 @@ fn position_label(editor: &Editor, line: usize, col: usize) -> String {
                 None => format!("{place} · {}", plural(words)),
             },
             (true, None) => place,
-            (false, _) => {
-                format!("{place} · {} selected", plural(crate::editor::words_in(&editor.buffer.slice(range))))
-            }
+            (false, _) => match editor.selected_words() {
+                Some(words) => format!("{place} · {} selected", plural(words)),
+                None => place,
+            },
         };
     }
     // Data in columns: which one the caret's in, by its name in the first line.

@@ -108,11 +108,20 @@ impl WrapMap {
             return;
         }
         let general = width.is_some() || !blocks.is_empty() || !self.hidden.is_empty();
-        if same_layout && self.general && general && self.rewrap_edits(buffer) {
-            self.revision = buffer.revision();
-            self.hidden_changed = false;
-            self.place_rows();
-            return;
+        // The same width: lines wrap as they did. Only edits are followed, and the rows
+        // placed again around the blocks and folds (a streamed answer, a ghost appearing,
+        // a fold: nothing to wrap again; that took every line of the file each time).
+        if width == self.width && self.general && general {
+            let unedited = buffer.revision() == self.revision && buffer.len_lines() == self.lines;
+            if unedited || self.rewrap_edits(buffer) {
+                self.revision = buffer.revision();
+                self.hidden_changed = false;
+                if blocks != self.blocks.as_slice() {
+                    self.blocks = blocks.to_vec();
+                }
+                self.place_rows();
+                return;
+            }
         }
         self.hidden_changed = false;
         self.width = width;

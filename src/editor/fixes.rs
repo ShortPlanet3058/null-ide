@@ -158,10 +158,7 @@ impl Editor {
     /// Whether the caret's line has a problem the server reported.
     pub fn caret_on_problem(&self, cx: &App) -> bool {
         let line = self.buffer.point(self.selection.head).0;
-        self.problems(cx).iter().any(|p| {
-            let (start, end) = (self.buffer.point(p.range.start).0, self.buffer.point(p.range.end).0);
-            start <= line && line <= end
-        })
+        self.problems(cx).iter().any(|p| p.start.0 <= line && line <= p.end.0)
     }
 
     pub(super) fn close_fixes(&mut self, cx: &mut Context<Self>) {
