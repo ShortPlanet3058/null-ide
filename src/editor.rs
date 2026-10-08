@@ -16,6 +16,7 @@ mod intel;
 mod links;
 mod mac_keys;
 mod marks;
+mod meaning;
 mod numbers;
 mod refactor;
 mod reindent;
@@ -69,6 +70,7 @@ pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
+pub use meaning::SEMANTIC_TYPES;
 pub use numbers::{Decrement, Increment};
 pub use refactor::{
     FindReferences, FormatDocument, FormatSelection, InsertFootnote, InsertTableOfContents, RenameSymbol, apply_edits,
@@ -616,6 +618,8 @@ pub struct Editor {
     fix_menu: Option<fixes::FixMenu>,
     /// Type hints from the language server.
     hints: hints::Hints,
+    /// What the language server says each name is, to colour it.
+    meaning: meaning::Meaning,
     /// Other uses of the symbol at the caret.
     symbol_marks: marks::SymbolMarks,
     /// Lines (from 0) where the debugger should stop; they move with edits.
@@ -807,6 +811,7 @@ impl Editor {
             debug_locals: Vec::new(),
             symbol_marks: Default::default(),
             hints: Default::default(),
+            meaning: Default::default(),
             fixes_task: None,
             signature: Default::default(),
             folds: Default::default(),
@@ -1016,6 +1021,7 @@ impl Editor {
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
         self.hints_after_edit();
+        self.meaning_after_edit();
         self.breakpoints_after_edit(cx);
         self.bookmarks_after_edit(cx);
         // Cursors from before an edit aren't somewhere to go back to.

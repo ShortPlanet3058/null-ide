@@ -622,9 +622,12 @@ impl Element for EditorElement {
                     line + byte_in_line(&editor.buffer, text, r.line, r.cols.start)..end
                 })
                 .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end));
-            if let Some(bytes) = shown_bytes {
-                editor.highlight_bytes(bytes);
+            if let Some(bytes) = &shown_bytes {
+                editor.highlight_bytes(bytes.clone());
             }
+            editor.ensure_meaning(cx);
+            // The server's colours over the grammar's, when it has said what names are.
+            let meant = editor.spans_with_meaning(shown_bytes.unwrap_or_default());
             // The lines that can fold, needed only while the mouse is over the gutter.
             let over_gutter = editor.mouse_position.is_some_and(|p| {
                 p.x >= bounds.left() && p.x < text_bounds.left() && p.y >= bounds.top() && p.y < bounds.bottom()
@@ -762,9 +765,23 @@ impl Element for EditorElement {
                         let under_before: Vec<_> = row_underlines.iter().filter_map(|r| split(r, 0, at)).collect();
                         let under_after: Vec<_> =
                             row_underlines.iter().filter_map(|r| split(r, at, text.len())).collect();
-                        let mut runs = runs_for(before, line_byte, &editor.spans, &under_before, &theme, &font);
+                        let mut runs = runs_for(
+                            before,
+                            line_byte,
+                            meant.as_deref().unwrap_or(&editor.spans),
+                            &under_before,
+                            &theme,
+                            &font,
+                        );
                         runs.push(run(ghost.len(), &font, theme.faint));
-                        runs.extend(runs_for(after, line_byte + at, &editor.spans, &under_after, &theme, &font));
+                        runs.extend(runs_for(
+                            after,
+                            line_byte + at,
+                            meant.as_deref().unwrap_or(&editor.spans),
+                            &under_after,
+                            &theme,
+                            &font,
+                        ));
                         let shown = format!("{before}{ghost}{after}");
                         let (shaped, tabs) = shape_row(&shown, &runs);
                         return RowLayout { x: char_width * row.indent as f32, row, text, shaped, gaps: tabs };
@@ -774,7 +791,14 @@ impl Element for EditorElement {
                         let (shaped, tabs) = shape_row(&text, &[run(text.len(), &font, theme.faint)]);
                         return RowLayout { x: char_width * row.indent as f32, row, text, shaped, gaps: tabs };
                     }
-                    let runs = runs_for(&text, line_byte, &editor.spans, &row_underlines, &theme, &font);
+                    let runs = runs_for(
+                        &text,
+                        line_byte,
+                        meant.as_deref().unwrap_or(&editor.spans),
+                        &row_underlines,
+                        &theme,
+                        &font,
+                    );
                     // The row's type hints, at their bytes in its text.
                     let mut hints: Vec<(usize, String, Option<Hsla>)> = if show_hints {
                         editor
@@ -1445,6 +1469,7 @@ impl Element for EditorElement {
                             let text = editor.buffer.line_text(line);
                             let line_byte = editor.buffer.line_to_byte(line);
                             let spans = editor.line_spans(line);
+                            let spans = editor.line_spans_with_meaning(line, spans);
                             let runs = runs_for(&text, line_byte, &spans, &[], &theme, &font);
                             let (shaped, _) = shape_row(&text, &runs);
                             // Hidden line numbers stay hidden on the pinned lines too.
