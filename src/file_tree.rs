@@ -96,12 +96,14 @@ pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
 pub struct DraggedEntry {
     path: PathBuf,
     name: SharedString,
+    /// Picked along with it, and dragged with it.
+    also: Vec<PathBuf>,
 }
 
 impl DraggedEntry {
-    /// The file or folder being dragged.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// Everything dragged: the one held, and those picked with it.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        std::iter::once(self.path.clone()).chain(self.also.iter().cloned()).collect()
     }
 }
 
@@ -877,20 +879,22 @@ impl FileTree {
     /// A file or folder dropped on a folder: it moves there (through the workspace, which
     /// lets language servers update the code naming it).
     fn drop_into(&mut self, dragged: &DraggedEntry, dir: PathBuf, cx: &mut Context<Self>) {
-        if dragged.path.parent() == Some(dir.as_path()) {
-            return;
-        }
-        match fs_ops::move_target(&dragged.path, &dir) {
-            Err(message) => cx.emit(FileTreeEvent::Notice(message)),
-            Ok(to) if self.ask_before_renaming => {
-                cx.emit(FileTreeEvent::RenameRequested { from: dragged.path.clone(), to })
+        // Each of what's dragged: those already there stay.
+        for path in dragged.paths() {
+            if path.parent() == Some(dir.as_path()) {
+                continue;
             }
-            Ok(to) => {
-                if let Err(message) = self.finish_rename(&dragged.path, &to, cx) {
-                    cx.emit(FileTreeEvent::Notice(message));
+            match fs_ops::move_target(&path, &dir) {
+                Err(message) => cx.emit(FileTreeEvent::Notice(message)),
+                Ok(to) if self.ask_before_renaming => cx.emit(FileTreeEvent::RenameRequested { from: path, to }),
+                Ok(to) => {
+                    if let Err(message) = self.finish_rename(&path, &to, cx) {
+                        cx.emit(FileTreeEvent::Notice(message));
+                    }
                 }
             }
         }
+        self.also.clear();
     }
 
     /// Files and folders dropped from the Finder on a folder: copied into it (beside what
@@ -1372,7 +1376,15 @@ impl FileTree {
                 } else {
                     entry.path.parent().map(Path::to_path_buf).unwrap_or_default()
                 };
-                let dragged = DraggedEntry { path: entry.path.clone(), name: entry.name.clone() };
+                // One of several picked: they all go along.
+                let along: Vec<PathBuf> = if picked && !self.also.is_empty() {
+                    self.picked().into_iter().map(|e| e.path).filter(|p| *p != entry.path).collect()
+                } else {
+                    Vec::new()
+                };
+                let name: SharedString =
+                    if along.is_empty() { entry.name.clone() } else { format!("{} items", along.len() + 1).into() };
+                let dragged = DraggedEntry { path: entry.path.clone(), name, also: along };
                 let tint = theme.accent_soft;
                 let row_el = base
                     // Tests find a row by its path (no cost outside them).
@@ -1697,6 +1709,17 @@ mod tests {
         cx.run_until_parked();
         assert!(!dir.join("a.txt").exists() && !dir.join("b.txt").exists() && !dir.join("c.txt").exists());
         assert!(dir.join("d.txt").exists());
+        // Several dragged onto a folder: all of them move there.
+        std::fs::create_dir_all(dir.join("dest")).unwrap();
+        std::fs::write(dir.join("e.txt"), "e").unwrap();
+        tree.update(cx, |t, cx| {
+            t.children.clear();
+            t.rebuild();
+            let dragged =
+                DraggedEntry { path: dir.join("d.txt"), name: "2 items".into(), also: vec![dir.join("e.txt")] };
+            t.drop_into(&dragged, dir.join("dest"), cx);
+        });
+        assert!(dir.join("dest/d.txt").exists() && dir.join("dest/e.txt").exists());
         // A plain click: one again.
         tree.update_in(cx, |t, window, cx| {
             t.click(0, 1, Default::default(), window, cx);
