@@ -51,6 +51,8 @@ pub struct Settings {
     /// A file clicked once in the files opens in a passing tab, which the next one replaces
     /// until it's edited or double-clicked.
     pub preview_tabs: bool,
+    /// Brackets coloured by how deep they are, a pair the same colour.
+    pub bracket_colours: bool,
     /// Save files without ⌘S: never, after a pause in typing, or when leaving them.
     pub auto_save: AutoSave,
     /// Quitting (or closing the window) with unsaved changes keeps them for next time,
@@ -117,6 +119,7 @@ impl Default for Settings {
             format_on_save: false,
             format_on_paste: false,
             preview_tabs: true,
+            bracket_colours: false,
             auto_save: AutoSave::Off,
             keep_unsaved: true,
             keymap: Default::default(),

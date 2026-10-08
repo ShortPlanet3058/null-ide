@@ -146,7 +146,7 @@ fn spans_in(tokens: &[(u32, u32, u32, Syntax)], buffer: &crate::buffer::Buffer) 
 }
 
 /// The grammar's `spans` with `tokens` laid over them, both in order and each apart.
-fn overlay(spans: &[Span], tokens: &[Span]) -> Vec<Span> {
+pub(super) fn overlay(spans: &[Span], tokens: &[Span]) -> Vec<Span> {
     let mut out = Vec::with_capacity(spans.len() + tokens.len());
     for (range, syntax) in spans {
         let mut start = range.start;

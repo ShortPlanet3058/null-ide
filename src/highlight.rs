@@ -141,6 +141,11 @@ impl Highlighter {
         self.revision = buffer.revision();
     }
 
+    /// The buffer revision the tree is of.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// The syntax tree, as of the last [`Self::sync`].
     pub fn tree(&self) -> Option<&Tree> {
         self.tree.as_ref()

@@ -714,6 +714,14 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Coloured bracket pairs",
+                Some("Brackets in colour by how deep they are, both of a pair the same"),
+                Self::toggle("bracket-colours", s.bracket_colours, &theme, cx, |s| {
+                    s.bracket_colours = !s.bracket_colours
+                }),
+                &theme,
+            ),
+            Self::row(
                 "Line-length guide",
                 Some(
                     "A faint line at the length the project keeps to: .editorconfig, rustfmt, Prettier, Black or Ruff",

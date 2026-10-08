@@ -1,5 +1,6 @@
 mod assist;
 mod bookmarks;
+mod brackets;
 mod breakpoints;
 mod broken_links;
 mod changes;
@@ -635,6 +636,8 @@ pub struct Editor {
     hints: hints::Hints,
     /// What the language server says each name is, to colour it.
     meaning: meaning::Meaning,
+    /// The brackets in colour (see `brackets`), for the buffer revision they're of.
+    brackets: std::cell::RefCell<Option<(u64, std::rc::Rc<Vec<Span>>)>>,
     /// Asking for a header's source (or the other way round).
     counterpart_task: Option<Task<()>>,
     /// Other uses of the symbol at the caret.
@@ -852,6 +855,7 @@ impl Editor {
             symbol_marks: Default::default(),
             hints: Default::default(),
             meaning: Default::default(),
+            brackets: Default::default(),
             counterpart_task: None,
             fixes_task: None,
             signature: Default::default(),
