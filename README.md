@@ -54,6 +54,7 @@ Getting around:
 | replace in lower case | each match keeps its case: `user` → `client` makes `User` `Client` and `USER` `CLIENT` (typed with capitals, it goes in as typed) |
 | ⌃- / ⌃⇧- | back / forward to where you were; ⇧⌘⌫ to the last edit |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
+| right-click a tab → Move Below | the two sides one above the other (dragged, a tab offers "Open below" too); the line between them resizes |
 | right-click a tab → Pin Tab | it stays first, out of "Close Others" and "Close All"; its pin unpins it |
 | ⌘⇧N / ⌥⌘O | a new window / a recent project |
 | drop from the Finder | files open; on a folder in the files, they're copied there; on the terminal, their paths are typed in |

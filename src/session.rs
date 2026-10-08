@@ -13,8 +13,10 @@ pub struct Session {
     pub active: Option<usize>,
     /// The tab the right side showed, when the window was split.
     pub shown_right: Option<usize>,
-    /// How much of the width the left side took, when split.
+    /// How much of the width the left side took, when split (of the height, stacked).
     pub split_ratio: Option<f32>,
+    /// Whether the two sides were one above the other.
+    pub stacked: bool,
     /// Folders expanded in the file tree.
     pub expanded: Vec<PathBuf>,
     /// Files opened lately, most recent first, for ⌘P.
