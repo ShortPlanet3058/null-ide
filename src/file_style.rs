@@ -80,8 +80,9 @@ impl FileStyle {
     /// `default` (with a language's usual indentation where it has one).
     pub fn for_file(path: Option<&Path>, text: &str, default: Indent) -> Self {
         let config = path.map(editorconfig).unwrap_or_default();
+        // Make needs tabs, whatever's set (Go's are only its way: see `Settings::indent_for`).
         let language_default = match path.and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
-            Some(name) if name.ends_with(".go") || name == "Makefile" || name.ends_with(".mk") => Indent::Tabs,
+            Some(name) if name == "Makefile" || name.ends_with(".mk") => Indent::Tabs,
             _ => default,
         };
         Self {
@@ -147,6 +148,11 @@ fn number_after(text: &str, key: &str) -> Option<usize> {
 
 /// The indentation a text uses, if it shows: tabs or spaces, whichever most lines start
 /// with; for spaces, the step most lines go in by from the line above.
+/// The indentation a file shows itself: its `.editorconfig`'s, or the one it's written in.
+pub fn own_indent(path: Option<&Path>, text: &str) -> Option<Indent> {
+    path.and_then(|p| editorconfig(p).indent).or_else(|| detect_indent(text))
+}
+
 pub fn detect_indent(text: &str) -> Option<Indent> {
     let (mut tabs, mut spaces) = (0, 0);
     let mut steps = [0usize; 9];
@@ -381,8 +387,9 @@ mod tests {
         // The root file says 4 spaces for everything: it wins over Go's usual tabs.
         assert_eq!(style.indent, Indent::Spaces(4));
         std::fs::remove_dir_all(&root).ok();
-        // Without any config, Go files use tabs.
-        let style = FileStyle::for_file(Some(Path::new("/nowhere/main.go")), "", Indent::Spaces(4));
+        // Without any config, Go files use tabs: Go's way, unless set otherwise for it.
+        let go = crate::settings::Settings::default().indent_for("Go");
+        let style = FileStyle::for_file(Some(Path::new("/nowhere/main.go")), "", go);
         assert_eq!(style.indent, Indent::Tabs);
     }
 }

@@ -202,9 +202,21 @@ impl Editor {
         }
     }
 
+    /// A file that shows no indentation of its own (none in it, no `.editorconfig`) takes
+    /// the one its language is set to.
+    pub(super) fn indent_as_language(&mut self, cx: &gpui::App) {
+        let head = self.buffer.slice(0..self.buffer.len_chars().min(200_000));
+        if crate::file_style::own_indent(self.path.as_deref(), &head).is_none() {
+            self.style.indent = cx.global::<crate::settings::Settings>().indent_for(self.language_name());
+        }
+    }
+
     /// Colours again, in the language the file is in now.
     pub(super) fn language_changed(&mut self, cx: &mut Context<Self>) {
+        self.indent_as_language(cx);
         self.highlighter = super::highlighter_for(self.language(), &self.buffer);
+        // Another grammar's brackets (or none).
+        *self.brackets.borrow_mut() = None;
         self.spans.clear();
         self.spans_for = None;
         self.pinned_spans.clear();

@@ -1531,8 +1531,7 @@ impl Element for EditorElement {
                             let y = top + line_height * i as f32;
                             let text = editor.buffer.line_text(line);
                             let line_byte = editor.buffer.line_to_byte(line);
-                            let spans = editor.line_spans(line);
-                            let spans = editor.line_spans_with_meaning(line, spans);
+                            let spans = editor.line_spans_to_draw(line, cx.global::<Settings>().bracket_colours);
                             let runs = runs_for(&text, line_byte, &spans, &[], &theme, &font);
                             let (shaped, _) = shape_row(&text, &runs);
                             // Hidden line numbers stay hidden on the pinned lines too.

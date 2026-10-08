@@ -8,6 +8,14 @@ pub const DEFAULT_FONT_SIZE: f32 = 14.;
 pub const MIN_FONT_SIZE: f32 = 9.;
 pub const MAX_FONT_SIZE: f32 = 32.;
 
+/// What a language may set for itself, and that a toggle flips for it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PerLanguage {
+    WordWrap,
+    FormatOnSave,
+    Autocomplete,
+}
+
 /// A language's own settings (see `Settings::languages`): each one given wins over the
 /// general one; one left out follows it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -266,9 +274,33 @@ impl Settings {
     /// The indentation for a new `language` file (one that doesn't show its own).
     pub fn indent_for(&self, language: &str) -> crate::file_style::Indent {
         let set = self.language(language);
-        let tabs = set.and_then(|s| s.indent_with_tabs).unwrap_or(self.indent_with_tabs);
+        // Go and Make are written with tabs, unless said otherwise for them.
+        let tabs_by_nature = matches!(language, "Go" | "Makefile");
+        let tabs = set.and_then(|s| s.indent_with_tabs).unwrap_or(tabs_by_nature || self.indent_with_tabs);
         let size = set.and_then(|s| s.indent_size).unwrap_or(self.indent_size);
         if tabs { crate::file_style::Indent::Tabs } else { crate::file_style::Indent::Spaces(size.clamp(1, 16)) }
+    }
+
+    /// Flips `which` for `language`: its own value, when it has one (so the toggle
+    /// changes what that file does), else the general one.
+    pub fn flip(&mut self, which: PerLanguage, language: &str) {
+        let own =
+            self.languages.iter_mut().find(|(name, _)| name.eq_ignore_ascii_case(language)).and_then(|(_, set)| {
+                match which {
+                    PerLanguage::WordWrap => set.word_wrap.as_mut(),
+                    PerLanguage::FormatOnSave => set.format_on_save.as_mut(),
+                    PerLanguage::Autocomplete => set.autocomplete.as_mut(),
+                }
+            });
+        let value = match own {
+            Some(value) => value,
+            None => match which {
+                PerLanguage::WordWrap => &mut self.word_wrap,
+                PerLanguage::FormatOnSave => &mut self.format_on_save,
+                PerLanguage::Autocomplete => &mut self.autocomplete,
+            },
+        };
+        *value = !*value;
     }
 
     pub fn format_on_save_for(&self, language: &str) -> bool {
@@ -416,11 +448,11 @@ impl Settings {
 
 /// The Mac switched between light and dark: the theme follows, when it's asked to.
 pub fn appearance_changed(cx: &mut App) {
+    // Rare (the Mac switched): the theme set again whole, so one of yours that shares a
+    // background with Null's is swapped as well.
     let theme = cx.global::<Settings>().theme_now(cx);
-    if theme.background != cx.global::<Theme>().background {
-        cx.set_global(theme);
-        cx.refresh_windows();
-    }
+    cx.set_global(theme);
+    cx.refresh_windows();
 }
 
 /// A theme file of your own was saved: its colours now.
@@ -459,7 +491,8 @@ pub fn reload(cx: &mut App) {
 
 fn apply(settings: Settings, cx: &mut App) {
     let old = cx.global::<Settings>();
-    let theme_changed = settings.shown_theme(cx) != old.shown_theme(cx) || settings.own_theme != old.own_theme;
+    let theme_changed =
+        settings.shown_theme(cx) != old.shown_theme(cx) || settings.shown_own_theme(cx) != old.shown_own_theme(cx);
     let fonts_changed = settings.code_font != old.code_font || settings.ui_font != old.ui_font;
     let keymap = (settings.keymap != old.keymap || settings.keys != old.keys).then_some(settings.keymap);
     if theme_changed {
@@ -495,6 +528,14 @@ mod tests {
         assert_eq!(settings.indent_for("Rust"), Indent::Spaces(4));
         assert!(settings.word_wrap_for("Python") && !settings.word_wrap_for("Rust"));
         assert!(!settings.format_on_save_for("Go") && settings.format_on_save_for("Python"));
+        // A toggle flips the language's own value where it has one, the general one elsewhere.
+        let mut flipped = settings.clone();
+        flipped.flip(PerLanguage::WordWrap, "Python");
+        assert!(!flipped.word_wrap_for("Python") && !flipped.word_wrap);
+        flipped.flip(PerLanguage::WordWrap, "Rust");
+        assert!(flipped.word_wrap && !flipped.word_wrap_for("Python"));
+        // Go writes with tabs, unless said otherwise for it.
+        assert_eq!(Settings::default().indent_for("Go"), Indent::Tabs);
         // Written back as given, nothing added.
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains(r#""python":{"indent_size":2,"word_wrap":true}"#), "{json}");

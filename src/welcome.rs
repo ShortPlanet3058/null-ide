@@ -466,7 +466,12 @@ impl Welcome {
                                 .flex_col()
                                 .gap(px(2.))
                                 .cursor_pointer()
-                                .child(ui::theme_preview_scaled(name, settings.theme == name, &theme, 1.45))
+                                .child(ui::theme_preview_scaled(
+                                    name,
+                                    settings.theme == name && settings.own_theme.is_none(),
+                                    &theme,
+                                    1.45,
+                                ))
                                 .child(div().text_size(px(ui::T_SM)).text_color(theme.faint).child(name.note()))
                                 .active(|s| s.opacity(0.7))
                                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {

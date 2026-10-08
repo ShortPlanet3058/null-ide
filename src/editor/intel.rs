@@ -629,6 +629,9 @@ impl Editor {
         what: &str,
         cx: &mut Context<Self>,
     ) {
+        // Only places in files can be gone to (not a server's own documents).
+        let mut found = found;
+        found.retain(|l| path_for(&l.uri).is_some());
         match found.as_slice() {
             [] => self.show_notice(offset, none.into(), cx),
             [location] => {

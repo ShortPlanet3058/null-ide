@@ -7,9 +7,9 @@ use crate::theme::Syntax;
 use std::rc::Rc;
 use tree_sitter::Tree;
 
-/// Files longer than this are left as they are: walking the whole tree after each edit
-/// would show.
-const LONGEST: usize = 2_000_000;
+/// Files longer than this are left as they are: the whole tree is walked after each edit,
+/// a few milliseconds at this size.
+const LONGEST: usize = 500_000;
 
 /// What opens a pair, and the closing bracket it waits for (`${` in a template string
 /// closes with `}`).
@@ -32,7 +32,11 @@ pub(crate) fn coloured(tree: &Tree) -> Vec<Span> {
     let mut cursor = tree.walk();
     'walk: loop {
         let node = cursor.node();
-        if node.child_count() == 0 && !node.is_missing() {
+        // One the parser put in where it's missing (`g(a;`): it closes its bracket, unseen,
+        // so what follows isn't taken a level deeper.
+        if node.is_missing() && open.last() == Some(&node.kind()) {
+            open.pop();
+        } else if node.child_count() == 0 && !node.is_missing() {
             let kind = node.kind();
             let range = node.start_byte()..node.end_byte();
             if let Some(closer) = closer_of(kind) {
@@ -79,6 +83,18 @@ impl Editor {
 
     /// The colours to draw for the bytes `shown`: the grammar's, the server's over them,
     /// and with coloured brackets on, the brackets'. None when the grammar's alone will do.
+    /// A line's colours to draw on its own (a pinned line of sticky scroll): as
+    /// `spans_to_draw` has them for the rest.
+    pub fn line_spans_to_draw(&mut self, line: usize, brackets: bool) -> Vec<Span> {
+        let grammar = self.line_spans(line);
+        let spans = self.line_spans_with_meaning(line, grammar);
+        let Some(all) = brackets.then(|| self.bracket_spans()).flatten() else { return spans };
+        let shown = self.buffer.line_to_byte(line)..self.buffer.line_to_byte(line + 1);
+        let from = all.partition_point(|(r, _)| r.end <= shown.start);
+        let to = from + all[from..].partition_point(|(r, _)| r.start < shown.end);
+        if from == to { spans } else { super::meaning::overlay(&spans, &all[from..to]) }
+    }
+
     pub fn spans_to_draw(&self, shown: std::ops::Range<usize>, brackets: bool) -> Option<Vec<Span>> {
         let meant = self.spans_with_meaning(shown.clone());
         let Some(all) = brackets.then(|| self.bracket_spans()).flatten() else { return meant };
@@ -118,6 +134,9 @@ mod tests {
         let want = [("(", 0), ("[", 1), ("]", 1), (")", 0), ("{", 0), ("(", 1), (")", 1), ("}", 0)];
         assert_eq!(got, want.map(|(b, d)| (b.to_string(), d)));
         // Deeper than three: the colours come round again.
+        // A closing bracket missing: what follows keeps its depth.
+        let mended = depths("Rust", "fn f() { g(a; }\nfn h() {}\n");
+        assert_eq!(mended.last(), Some(&("}".to_string(), 0)), "{mended:?}");
         let deep = depths("Rust", "fn f() { ((((1)))) }\n");
         assert_eq!(deep.iter().map(|(_, d)| *d).collect::<Vec<_>>(), [0, 0, 0, 1, 2, 0, 1, 1, 0, 2, 1, 0]);
     }

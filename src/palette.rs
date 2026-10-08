@@ -287,6 +287,8 @@ pub struct PaletteOptions {
     pub terminal_open: bool,
     /// The current file is prose (Markdown, text): Wrap shows its own setting.
     pub prose_here: bool,
+    /// The current file's language: its own settings (wrap, suggestions) are shown.
+    pub language_here: &'static str,
     /// For a list of places: what it is ("Problems", "References to x") and the places.
     pub title: Option<String>,
     pub locations: Vec<Location>,
@@ -374,6 +376,7 @@ pub struct Palette {
     line_count: Option<usize>,
     terminal_open: bool,
     prose_here: bool,
+    language_here: &'static str,
     title: Option<String>,
     locations: Vec<Location>,
     branches: Vec<crate::git::Branch>,
@@ -437,6 +440,7 @@ impl Palette {
             line_count: options.line_count,
             terminal_open: options.terminal_open,
             prose_here: options.prose_here,
+            language_here: options.language_here,
             title: options.title,
             left_out: Default::default(),
             in_file: matches!(options.locations.first(), Some(l) if matches!(l.kind, LocationKind::Symbol(_)))
@@ -949,10 +953,10 @@ impl Palette {
             _ => {
                 let on = match quick {
                     Quick::Wrap if self.prose_here => settings.wrap_prose,
-                    Quick::Wrap => settings.word_wrap,
+                    Quick::Wrap => settings.word_wrap_for(self.language_here),
                     Quick::Sidebar => settings.sidebar_visible,
                     Quick::Terminal => self.terminal_open,
-                    Quick::Suggestions => settings.autocomplete,
+                    Quick::Suggestions => settings.autocomplete_for(self.language_here),
                     Quick::Fade => settings.fade_bars_while_typing,
                     Quick::Ai => settings.ai.enabled,
                     _ => false,
@@ -1556,6 +1560,7 @@ mod tests {
             line_count: Some(10),
             terminal_open: false,
             prose_here: false,
+            language_here: "Plain Text",
             title: None,
             locations: Vec::new(),
             branches: Vec::new(),
@@ -1626,6 +1631,7 @@ mod tests {
             line_count: None,
             terminal_open: false,
             prose_here: false,
+            language_here: "Plain Text",
             title: Some("2 uses of total".into()),
             locations: vec![place("a.rs", "let total = 1;"), place("b.rs", "print(total)")],
             branches: Vec::new(),
@@ -1656,6 +1662,7 @@ mod tests {
             line_count: None,
             terminal_open: false,
             prose_here: false,
+            language_here: "Plain Text",
             title: None,
             locations: Vec::new(),
             branches: vec![
@@ -1696,6 +1703,7 @@ mod tests {
             line_count: None,
             terminal_open: false,
             prose_here: false,
+            language_here: "Plain Text",
             title: None,
             locations: Vec::new(),
             branches: Vec::new(),

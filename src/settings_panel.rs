@@ -425,7 +425,8 @@ impl SettingsPanel {
         let theme = cx.global::<Theme>().clone();
         let s = cx.global::<Settings>();
         // Following the Mac's light and dark: its pick for each is chosen.
-        let chosen = name == s.theme || s.match_appearance && name == s.light_theme;
+        // One of yours in Null's place: none of these is the one.
+        let chosen = (name == s.theme && s.own_theme.is_none()) || s.match_appearance && name == s.light_theme;
         ui::theme_preview(name, chosen, &theme)
             .id(name.label())
             .cursor_pointer()
