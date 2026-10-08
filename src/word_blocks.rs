@@ -88,7 +88,7 @@ fn line_words<'a>(line: &'a str, comment: &str) -> Vec<(&'a str, bool, char)> {
             }
         } else {
             if let Some(s) = word_start.take() {
-                out.push((&line[s..i], before == '.', before));
+                out.push((&line[s..i], not_a_keyword(line, s, i, before), before));
             }
             // `#` starts a comment after a space only (`$#`, `${#a}` are the shell's).
             if line[i..].starts_with(comment) && (comment != "#" || i == 0 || last_is_space) {
@@ -104,9 +104,37 @@ fn line_words<'a>(line: &'a str, comment: &str) -> Vec<(&'a str, bool, char)> {
         last_is_space = c.is_whitespace();
     }
     if let Some(s) = word_start {
-        out.push((&line[s..], before == '.', before));
+        out.push((&line[s..], not_a_keyword(line, s, line.len(), before), before));
     }
     out
+}
+
+/// The word at `start..end` is a name, not a keyword: a method (`self.class`), a symbol
+/// (`:end`) or a hash key (`class: "nav"`).
+fn not_a_keyword(line: &str, start: usize, end: usize, before: char) -> bool {
+    let after = &line[end..];
+    before == '.' || line[..start].ends_with(':') || (after.starts_with(':') && !after.starts_with("::"))
+}
+
+/// Ruby's one-line method, `def name = value`: it has no `end`.
+fn endless_def(after_def: &str) -> bool {
+    let b = after_def.as_bytes();
+    let mut depth = 0i32;
+    for (i, &c) in b.iter().enumerate() {
+        match c {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'=' if depth == 0 => {
+                let spaced = i > 0 && matches!(b[i - 1], b' ' | b'\t' | b')');
+                let alone = !matches!(b.get(i + 1), Some(b'=' | b'~' | b'>'));
+                if spaced && alone {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// How many blocks a line leaves open (less than zero: closes ones opened before), not
@@ -129,8 +157,9 @@ fn net(words: &Words, line: &str) -> i32 {
             net += 1;
             loops |= matches!(*word, "while" | "until" | "for");
         } else if words.openers.contains(word) {
+            let at = word.as_ptr() as usize - line.as_ptr() as usize + word.len();
             // Ruby's `while x do`: one block, not two.
-            if !(*word == "do" && loops) {
+            if !(*word == "do" && loops) && !(*word == "def" && endless_def(&line[at..])) {
                 net += 1;
             }
         } else if words.closers.contains(word) {
@@ -206,6 +235,12 @@ pub fn closer_indent<'a>(language: &str, line: &str, lines: impl Iterator<Item =
     None
 }
 
+/// Whether `word` closes a block or starts its next part (`end`, `else`), so typing it may
+/// move its line.
+pub fn is_block_word(language: &str, word: &str) -> bool {
+    words(language).is_some_and(|w| w.closers.contains(&word) || w.middles.contains(&word))
+}
+
 /// `word` is a block word with something typed after it (`endpoint`, `file`): the line
 /// was moved for the word and shouldn't have been.
 pub fn grew_from_word(language: &str, word: &str) -> bool {
@@ -237,6 +272,10 @@ mod tests {
             ("Ruby", "else"),
             ("Ruby", "when :big"),
             ("Ruby", "while x do"),
+            ("Ruby", "def ==(other)"),
+            ("Ruby", "def initialize(a = 1, b = {})"),
+            ("Ruby", "def name=(value)"),
+            ("Ruby", "class Foo::Bar"),
             ("Lua", "function M.setup(opts)"),
             ("Lua", "local f = function(x)"),
             ("Lua", "if a then"),
@@ -266,6 +305,11 @@ mod tests {
             ("Ruby", "x = \"do\""),
             ("Ruby", "items.each do |i| puts i end"),
             ("Ruby", "# def commented"),
+            ("Ruby", "  link_to \"Home\", root_path, class: \"nav\""),
+            ("Ruby", "x = { if: 1, do: 2 }"),
+            ("Ruby", "send(:class)"),
+            ("Ruby", "def full = \"#{first} #{last}\""),
+            ("Ruby", "def area() = width * height"),
             ("Lua", "local f = function() return 1 end"),
             ("Lua", "if a then return end"),
             ("Lua", "x = 1 -- then"),

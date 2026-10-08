@@ -45,8 +45,19 @@ pub(super) struct Meaning {
     revision: u64,
     /// The revision the server last answered for: if it's this one there's nothing to ask.
     answered: Option<u64>,
+    /// The servers' refresh count when last asked: when they say names changed (the
+    /// project's read), ask again.
+    refresh: u64,
     task: Option<Task<()>>,
 }
+
+/// Edits moving the colours along at most: past this (thousands of cursors typing), they're
+/// dropped and asked for again.
+const MAX_EDITS_TO_FOLLOW: usize = 64;
+/// An empty answer is asked again this many times, this far apart: a server can say
+/// "ready" before it has read the file.
+const EMPTY_TRIES: usize = 3;
+const EMPTY_AGAIN: Duration = Duration::from_secs(2);
 
 /// The colour for a kind of name, by its name in the server's legend (servers add their
 /// own: rust-analyzer's `builtinType`, `selfKeyword`…). None: the grammar's colour stays.
@@ -87,35 +98,49 @@ fn decode(tokens: &[lsp_types::SemanticToken], legend: &crate::lsp::SemanticLege
         .collect()
 }
 
-/// Decoded tokens as bytes in `buffer`'s text, in order and apart.
+/// Decoded tokens as bytes in `buffer`'s text, in order and apart. Each line is read once,
+/// its tokens found along it in order (a minified file's one line can hold 100k of them).
 fn spans_in(tokens: &[(u32, u32, u32, Syntax)], buffer: &crate::buffer::Buffer) -> Vec<Span> {
     let rope = buffer.rope();
     let lines = rope.len_lines();
-    let mut spans: Vec<Span> = tokens
-        .iter()
-        .filter(|(line, ..)| (*line as usize) < lines)
-        .map(|&(line, start, len, syntax)| {
-            let line = line as usize;
-            let at = |utf16: u32| rope.char_to_byte(buffer.offset(line, buffer.utf16_to_column(line, utf16 as usize)));
-            (at(start)..at(start + len), syntax)
-        })
-        .filter(|(r, syntax)| {
-            // A name followed by one `:` is a label (Swift's `f(p: x)`), never a call.
-            let label = *syntax == Syntax::Function
-                && rope.get_byte(r.end) == Some(b':')
-                && rope.get_byte(r.end + 1) != Some(b':');
-            r.start < r.end && !label
-        })
-        .collect();
-    spans.sort_by_key(|(r, _)| r.start);
-    // Apart, as the protocol says they are: a stray overlap is dropped.
-    let mut end = 0;
-    spans.retain(|(r, _)| {
-        let apart = r.start >= end;
-        if apart {
-            end = r.end;
+    let mut spans: Vec<Span> = Vec::with_capacity(tokens.len());
+    let mut current: Option<(u32, usize, String)> = None;
+    // Where the walk along the line is: its byte, and its UTF-16 unit.
+    let (mut byte, mut unit) = (0usize, 0usize);
+    for &(line, start, len, syntax) in tokens {
+        if line as usize >= lines {
+            break;
         }
-        apart
+        if current.as_ref().is_none_or(|(l, ..)| *l != line) {
+            let text = rope.line(line as usize).to_string();
+            current = Some((line, rope.line_to_byte(line as usize), text));
+            (byte, unit) = (0, 0);
+        }
+        let Some((_, line_byte, text)) = &current else { break };
+        // Tokens come in order along a line; one that doesn't is dropped.
+        let (start, end) = (start as usize, start as usize + len as usize);
+        if start < unit {
+            continue;
+        }
+        let walk = |to: usize, byte: &mut usize, unit: &mut usize| {
+            for c in text[*byte..].chars() {
+                if *unit >= to || c == '\n' || c == '\r' {
+                    break;
+                }
+                *unit += c.len_utf16();
+                *byte += c.len_utf8();
+            }
+        };
+        walk(start, &mut byte, &mut unit);
+        let from = byte;
+        walk(end, &mut byte, &mut unit);
+        if from < byte {
+            spans.push((line_byte + from..line_byte + byte, syntax));
+        }
+    }
+    // A name followed by one `:` is a label (Swift's `f(p: x)`), never a call.
+    spans.retain(|(r, syntax)| {
+        !(*syntax == Syntax::Function && rope.get_byte(r.end) == Some(b':') && rope.get_byte(r.end + 1) != Some(b':'))
     });
     spans
 }
@@ -189,7 +214,10 @@ impl Editor {
         }
         match self.buffer.edits_since(self.meaning.revision) {
             Some(edits) => {
-                let edits: Vec<_> = edits.collect();
+                let edits: Vec<_> = edits.take(MAX_EDITS_TO_FOLLOW + 1).collect();
+                if edits.len() > MAX_EDITS_TO_FOLLOW {
+                    self.meaning.tokens.clear();
+                }
                 self.meaning.tokens.retain_mut(|(range, _)| {
                     match edits.iter().try_fold(range.clone(), |r, e| map_token(r, e)) {
                         Some(r) => {
@@ -209,13 +237,16 @@ impl Editor {
     /// Asks the server what the names in this text are, once typing pauses.
     pub fn ensure_meaning(&mut self, cx: &mut Context<Self>) {
         let revision = self.buffer.revision();
-        if self.meaning.task.is_some() || self.meaning.answered == Some(revision) {
+        let Some(lsp) = self.lsp.clone() else { return };
+        let refresh = lsp.read(cx).semantic_refresh();
+        if self.meaning.task.is_some() || (self.meaning.answered == Some(revision) && self.meaning.refresh == refresh) {
             return;
         }
-        let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else { return };
+        let Some(path) = self.path.clone() else { return };
         if !lsp.read(cx).has_server_for(&path) {
             return;
         }
+        self.meaning.refresh = refresh;
         self.meaning.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PAUSE).await;
             loop {
@@ -226,24 +257,41 @@ impl Editor {
                         cx.background_executor().timer(NOT_READY).await;
                     }
                     _ => {
-                        this.update(cx, |this, _| this.meaning.answered = Some(revision)).ok();
+                        this.update(cx, |this, _| {
+                            this.meaning.answered = Some(revision);
+                            this.meaning.task = None;
+                        })
+                        .ok();
                         return;
                     }
                 }
             }
-            let Ok(request) = this.update(cx, |_, cx| lsp.read(cx).semantic_tokens(&path)) else { return };
-            let found = request.await;
-            this.update(cx, |this, cx| {
-                this.meaning.task = None;
-                if this.buffer.revision() != revision {
+            for attempt in 1..=EMPTY_TRIES {
+                let Ok(request) = this.update(cx, |_, cx| lsp.read(cx).semantic_tokens(&path)) else { return };
+                let found = request.await;
+                let Ok(empty) = this.update(cx, |this, cx| {
+                    if this.buffer.revision() != revision {
+                        this.meaning.task = None;
+                        return false;
+                    }
+                    let tokens = found.map(|(data, legend)| decode(&data, &legend)).unwrap_or_default();
+                    if tokens.is_empty() && attempt < EMPTY_TRIES {
+                        return true;
+                    }
+                    this.meaning.tokens = spans_in(&tokens, &this.buffer);
+                    this.meaning.revision = revision;
+                    this.meaning.answered = Some(revision);
+                    this.meaning.task = None;
+                    cx.notify();
+                    false
+                }) else {
+                    return;
+                };
+                if !empty {
                     return;
                 }
-                let tokens = found.map(|(data, legend)| decode(&data, &legend)).unwrap_or_default();
-                let spans = spans_in(&tokens, &this.buffer);
-                this.meaning = Meaning { tokens: spans, revision, answered: Some(revision), task: None };
-                cx.notify();
-            })
-            .ok();
+                cx.background_executor().timer(EMPTY_AGAIN).await;
+            }
         }));
     }
 }
@@ -276,6 +324,25 @@ mod tests {
             decode(&tokens, &legend),
             [(0, 7, 3, Syntax::Type), (0, 11, 5, Syntax::Function), (2, 2, 3, Syntax::Type), (2, 6, 1, Syntax::Plain),],
             "strings keep the grammar's colour; code in a comment, the comment's"
+        );
+    }
+
+    #[test]
+    fn tokens_are_found_along_their_lines() {
+        let buffer = crate::buffer::Buffer::from_text("let é = f(p: 1);\r\nx\n");
+        let tokens = [
+            (0, 4, 1, Syntax::Plain),
+            (0, 8, 1, Syntax::Function),
+            (0, 6, 1, Syntax::Type),
+            (0, 10, 1, Syntax::Function),
+            (0, 30, 2, Syntax::Type),
+            (1, 0, 1, Syntax::Type),
+            (9, 0, 1, Syntax::Type),
+        ];
+        assert_eq!(
+            spans_in(&tokens, &buffer),
+            [(4..6, Syntax::Plain), (9..10, Syntax::Function), (19..20, Syntax::Type)],
+            "é is two bytes; out of order, past the line, a label, past the text: dropped"
         );
     }
 

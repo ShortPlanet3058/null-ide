@@ -76,7 +76,11 @@ impl Editor {
         }
         match self.buffer.edits_since(self.hints.revision) {
             Some(edits) => {
-                let edits: Vec<_> = edits.collect();
+                // Thousands of cursors typing: the hints go, and come back once asked again.
+                let edits: Vec<_> = edits.take(65).collect();
+                if edits.len() > 64 {
+                    self.hints.items.clear();
+                }
                 self.hints.items.retain_mut(|(byte, _)| match edits.iter().try_fold(*byte, |b, e| map_hint(b, e)) {
                     Some(b) => {
                         *byte = b;

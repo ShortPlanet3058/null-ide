@@ -177,6 +177,9 @@ pub struct LspStore {
     diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
     /// Goes up whenever any diagnostics change, so views can keep what they derived.
     diagnostics_version: u64,
+    /// Goes up when a server says what names are has changed (it finished reading the
+    /// project): files ask again.
+    semantic_refresh: u64,
     /// Work servers report, by progress token.
     progress: HashMap<String, Progress>,
     _tasks: Vec<Task<()>>,
@@ -192,6 +195,7 @@ impl LspStore {
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
             diagnostics_version: 0,
+            semantic_refresh: 0,
             progress: HashMap::new(),
             _tasks: Vec::new(),
         }
@@ -199,6 +203,10 @@ impl LspStore {
 
     pub fn diagnostics_version(&self) -> u64 {
         self.diagnostics_version
+    }
+
+    pub fn semantic_refresh(&self) -> u64 {
+        self.semantic_refresh
     }
 
     pub fn diagnostics(&self, path: &Path) -> &[Diagnostic] {
@@ -431,6 +439,9 @@ impl LspStore {
                 window: Some(WindowClientCapabilities { work_done_progress: Some(true), ..Default::default() }),
                 workspace: Some(lsp_types::WorkspaceClientCapabilities {
                     apply_edit: Some(true),
+                    semantic_tokens: Some(lsp_types::SemanticTokensWorkspaceClientCapabilities {
+                        refresh_support: Some(true),
+                    }),
                     // Renaming a file can update the code that names it (`mod parser;`).
                     file_operations: Some(lsp_types::WorkspaceFileOperationsClientCapabilities {
                         will_rename: Some(true),
@@ -524,6 +535,11 @@ impl LspStore {
                             cx.emit(LspEvent::ApplyEdit(edit.edit));
                         }
                         serde_json::json!({ "applied": applied })
+                    }
+                    "workspace/semanticTokens/refresh" => {
+                        self.semantic_refresh += 1;
+                        cx.notify();
+                        Value::Null
                     }
                     _ => Value::Null,
                 };

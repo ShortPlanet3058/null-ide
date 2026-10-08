@@ -673,6 +673,8 @@ impl Editor {
                 Some(m) if m.line == line && m.revision + 1 == self.buffer.revision() => m.indent,
                 _ => return,
             }
+        } else if !crate::word_blocks::is_block_word(language, word) {
+            return;
         } else {
             // Not in a string or a comment (Lua's `--[[ … ]]`).
             let rope = self.buffer.rope();
