@@ -51,6 +51,7 @@ mod spell;
 mod tasks;
 mod terminal;
 mod terminal_links;
+mod terminal_watch;
 mod test_at;
 mod text_input;
 mod theme;

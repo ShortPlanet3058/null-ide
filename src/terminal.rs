@@ -151,6 +151,8 @@ pub enum TerminalEvent {
     Exited,
     /// ⌘-click on a place in a file the output names: the file, and its 1-based line and column.
     OpenFile(PathBuf, Option<u32>, Option<u32>),
+    /// A command that ran a while finished: its name, and how long it took.
+    Finished(String, std::time::Duration),
 }
 
 /// A link the mouse is over while ⌘ is held: its row (as the grid counts, history
@@ -195,6 +197,7 @@ pub struct TerminalView {
     link: Option<HoveredLink>,
     find: Option<TerminalFind>,
     _events: Task<()>,
+    _watching: Option<Task<()>>,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -206,6 +209,7 @@ pub struct Shell {
     events: mpsc::UnboundedReceiver<TermEvent>,
     size: GridSize,
     cwd: PathBuf,
+    watch: Option<crate::terminal_watch::Foreground>,
 }
 
 impl Shell {
@@ -234,6 +238,10 @@ impl Shell {
         let size = GridSize { columns: 80, lines: 24 };
         let window_size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
         let pty = tty::new(&options, window_size, 0)?;
+        #[cfg(unix)]
+        let watch = crate::terminal_watch::Foreground::new(pty.file(), pty.child().id());
+        #[cfg(not(unix))]
+        let watch = None;
         let (tx, events) = mpsc::unbounded();
         let listener = Listener(tx);
         let config = Config { scrolling_history: SCROLLBACK, ..Default::default() };
@@ -241,13 +249,31 @@ impl Shell {
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
         let sender = event_loop.channel();
         event_loop.spawn();
-        Ok(Self { term, sender, events, size, cwd })
+        Ok(Self { term, sender, events, size, cwd, watch })
     }
 }
 
 impl TerminalView {
     pub fn new(shell: Shell, cx: &mut Context<Self>) -> Self {
-        let Shell { term, sender, mut events, size, cwd } = shell;
+        let Shell { term, sender, mut events, size, cwd, watch } = shell;
+        // Once a second, what the shell is running.
+        let watching = watch.map(|watch| {
+            cx.spawn(async move |this, cx| {
+                let mut running = None;
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                    let now = watch.program();
+                    let finished = crate::terminal_watch::step(&mut running, now, std::time::Instant::now());
+                    let Ok(()) = this.update(cx, |_, cx| {
+                        if let Some((name, took)) = finished {
+                            cx.emit(TerminalEvent::Finished(name, took));
+                        }
+                    }) else {
+                        break;
+                    };
+                }
+            })
+        });
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this.update(cx, |this, cx| this.handle_event(event, cx)).is_err() {
@@ -275,6 +301,7 @@ impl TerminalView {
             link: None,
             find: None,
             _events: events,
+            _watching: watching,
         }
     }
 
