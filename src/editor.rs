@@ -454,6 +454,7 @@ pub struct TwinSource {
     encoding: crate::encoding::Encoding,
     view: (usize, usize, usize),
     bookmarks: Vec<usize>,
+    language: Option<language_pick::Kind>,
 }
 
 pub struct Scroll {
@@ -527,6 +528,8 @@ pub struct Editor {
     /// `problems()` for a (diagnostics version, buffer revision).
     #[allow(clippy::type_complexity)]
     problems_cache: std::cell::RefCell<Option<((u64, u64), std::rc::Rc<Vec<intel::Problem>>)>>,
+    /// The caret's column in a CSV (see `data_column`), for this text and caret.
+    data_column_cache: std::cell::RefCell<DataColumnCache>,
     pinned: std::cell::RefCell<intel::Pinned>,
     /// The main cursor: the one the view follows. Any others are in `extra`.
     pub selection: Selection,
@@ -627,6 +630,8 @@ pub struct Editor {
     hints: hints::Hints,
     /// What the language server says each name is, to colour it.
     meaning: meaning::Meaning,
+    /// Asking for a header's source (or the other way round).
+    counterpart_task: Option<Task<()>>,
     /// Other uses of the symbol at the caret.
     symbol_marks: marks::SymbolMarks,
     /// Lines (from 0) where the debugger should stop; they move with edits.
@@ -693,6 +698,9 @@ pub struct Editor {
 /// A file's text in brief: its length and a hash, enough to tell it again somewhere else.
 pub type Fingerprint = (usize, u64);
 
+/// (revision, caret) and the column found there with its name.
+type DataColumnCache = Option<((u64, usize), Option<(usize, Option<String>)>)>;
+
 pub fn fingerprint(text: &str) -> Fingerprint {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
@@ -754,6 +762,7 @@ impl Editor {
             reading_scroll: gpui::ScrollHandle::new(),
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
+            data_column_cache: Default::default(),
             pinned: Default::default(),
             selection: Selection::caret(0),
             goal_column: None,
@@ -834,6 +843,7 @@ impl Editor {
             symbol_marks: Default::default(),
             hints: Default::default(),
             meaning: Default::default(),
+            counterpart_task: None,
             fixes_task: None,
             signature: Default::default(),
             folds: Default::default(),
@@ -967,6 +977,12 @@ impl Editor {
             cx.global::<Settings>().default_indent(),
         );
         self.path = Some(path);
+        // A name that says nothing: the first line may (`run.sh` renamed `run`).
+        self.first_line_language = if self.path.as_deref().and_then(language_pick::by_path).is_none() {
+            language_pick::from_first_line(&self.buffer.rope().line(0).chars().take(200).collect::<String>())
+        } else {
+            None
+        };
         // Chosen while untitled, and now what its name says: nothing left to remember.
         if self.chosen_language.is_some()
             && self.chosen_language == self.path.as_deref().and_then(language_pick::by_path)
@@ -1174,15 +1190,31 @@ impl Editor {
     /// first line, when it has one.
     pub fn data_column(&self) -> Option<(usize, Option<String>)> {
         let delimiter = self.basic_syntax()?.delimiter?;
-        let first = self.buffer.line_text(0);
-        let delimiter = crate::basic_syntax::delimiter_of(first.as_bytes(), delimiter);
-        let (line, col) = self.caret_point();
-        let text = self.buffer.line_text(line);
-        let at = text.char_indices().nth(col).map_or(text.len(), |(i, _)| i);
-        let (_, column) = crate::basic_syntax::fields(&text, delimiter, at);
-        let (header, _) = crate::basic_syntax::fields(&first, delimiter, 0);
-        let name = header.get(column).map(|n| n.trim().to_string()).filter(|n| !n.is_empty() && line > 0);
-        Some((column + 1, name))
+        // Drawn with the status bar, every frame: worked out once per caret place.
+        let key = (self.buffer.revision(), self.selection.head);
+        if let Some((k, found)) = &*self.data_column_cache.borrow()
+            && *k == key
+        {
+            return found.clone();
+        }
+        let rope = self.buffer.rope();
+        let found = (rope.len_bytes() <= crate::basic_syntax::MAX_BYTES).then(|| {
+            let text: Vec<u8> = rope.bytes().collect();
+            let delimiter = crate::basic_syntax::delimiter_of(&text, delimiter);
+            let at = rope.char_to_byte(self.selection.head);
+            let (record, column, names_end) = crate::basic_syntax::place_in_columns(&text, at, delimiter);
+            let names = String::from_utf8_lossy(&text[..names_end]);
+            let (names, _) = crate::basic_syntax::fields(&names, delimiter, 0);
+            // A name, not a first row of data: short, and not on that row itself.
+            let name = names
+                .get(column)
+                .map(|n| n.trim())
+                .filter(|n| !n.is_empty() && record > 0 && n.chars().count() <= 40)
+                .map(str::to_string);
+            (column + 1, name)
+        });
+        *self.data_column_cache.borrow_mut() = Some((key, found.clone()));
+        found
     }
 
     /// The scanner colouring this file when Null has no grammar for it (Swift, Kotlin…).
@@ -2394,6 +2426,7 @@ impl Editor {
         let (line, column, top) = source.view;
         editor.restore_view(line, column, top, cx);
         editor.set_bookmarks(source.bookmarks, cx);
+        editor.choose_language(source.language, cx);
         editor
     }
 
@@ -2407,6 +2440,7 @@ impl Editor {
             encoding: self.encoding,
             view: self.view_state(),
             bookmarks: self.bookmarks.clone(),
+            language: self.chosen_language,
         })
     }
 

@@ -119,9 +119,11 @@ fn suggested_name(kind: Option<Kind>, head: &str) -> String {
     let (extension, words) = match kind {
         Some(Kind::Grammar(l)) if l.name == "Markdown" => {
             // The first heading, else the first line written.
-            let heading =
-                head.lines().find_map(|l| l.trim_start().strip_prefix('#').map(|h| h.trim_start_matches('#')));
-            ("md", heading.or_else(|| head.lines().find(|l| !l.trim().is_empty())))
+            let heading = head
+                .lines()
+                .find_map(|l| l.trim_start().strip_prefix('#').map(|h| h.trim_start_matches('#')))
+                .filter(|h| h.chars().any(char::is_alphanumeric));
+            ("md", heading.or_else(|| head.lines().find(|l| l.chars().any(char::is_alphanumeric))))
         }
         Some(Kind::Grammar(l)) => (l.extension().unwrap_or("txt"), None),
         Some(Kind::Basic(b)) => match (b.extension(), b.file_name()) {
@@ -130,13 +132,18 @@ fn suggested_name(kind: Option<Kind>, head: &str) -> String {
             (Some(extension), _) => (extension, None),
             (None, _) => ("txt", None),
         },
-        Some(Kind::Plain) | None => ("txt", head.lines().find(|l| !l.trim().is_empty())),
+        Some(Kind::Plain) | None => ("txt", head.lines().find(|l| l.chars().any(char::is_alphanumeric))),
     };
     // Letters, digits, spaces and a few marks; nothing a file name can't hold, 40 at most.
     let name: String = words
         .unwrap_or("")
         .chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '\'' | ',') { c } else { ' ' })
+        // Letters and digits, any script's marks with them (`é` written as `e` and an accent,
+        // Hindi's virama), and a few signs; ASCII punctuation (`/`, `:`, `.`) goes.
+        .map(|c| {
+            let kept = c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '\'' | ',');
+            if kept || (!c.is_ascii() && !c.is_whitespace() && !c.is_control()) { c } else { ' ' }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -269,6 +276,9 @@ mod tests {
         let named = |language: &str, head: &str| suggested_name(by_name(language), head);
         assert_eq!(named("Markdown", "\n# Trip to Lyon: day 1 / 2\nsome text"), "Trip to Lyon day 1 2.md");
         assert_eq!(named("Markdown", "Just a note.\n"), "Just a note.md");
+        assert_eq!(named("Markdown", "#\nMy trip\n"), "My trip.md", "an empty heading: the first line");
+        assert_eq!(named("Markdown", "# Cafe\u{301}\n"), "Cafe\u{301}.md", "the accent stays with its letter");
+        assert_eq!(named(PLAIN, "नमस्ते\n"), "नमस्ते.txt");
         assert_eq!(named("Python", "import os\n"), "untitled.py");
         assert_eq!(named("Swift", ""), "untitled.swift");
         assert_eq!(named("Makefile", "all:\n"), "Makefile");

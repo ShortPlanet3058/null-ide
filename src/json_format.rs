@@ -140,7 +140,16 @@ pub fn format(text: &str, unit: &str, newline: &str) -> Result<String, Problem> 
             out.push_str(unit);
         }
     };
+    // The last thing written that wasn't a comment: a value after a value is a missing comma.
+    let mut ended_value = false;
     for (n, (token, breaks, token_line)) in tokens.iter().enumerate() {
+        let starts_value = matches!(token, Token::Value(_) | Token::Open(_));
+        if starts_value && ended_value {
+            return Err(Problem { line: *token_line, message: "a missing comma".into() });
+        }
+        if !matches!(token, Token::Comment(..)) {
+            ended_value = matches!(token, Token::Value(_) | Token::Close(_));
+        }
         let first_in_block = matches!(n.checked_sub(1).map(|p| &tokens[p].0), Some(Token::Open(_)));
         let follows_line_comment = std::mem::replace(&mut after_line_comment, matches!(token, Token::Comment(_, true)));
         let blank = *breaks >= 2 && !first_in_block;
@@ -178,7 +187,12 @@ pub fn format(text: &str, unit: &str, newline: &str) -> Result<String, Problem> 
                 space_due = false;
             }
             Token::Colon => {
+                // After a `// comment`, the colon can't go on its line.
+                if follows_line_comment {
+                    new_line(&mut out, open.len(), false);
+                }
                 out.push(':');
+                break_due = false;
                 space_due = true;
             }
             Token::Comment(comment, line) => {
@@ -261,6 +275,19 @@ mod tests {
             two(text),
             "// settings\n{\n  \"compilerOptions\": { // for the build\n    \"strict\": true, /* yes */\n\n    \"target\": \"es2022\"\n  }\n}\n"
         );
+    }
+
+    #[test]
+    fn a_missing_comma_is_said_not_glued() {
+        let problem = |text: &str| format(text, "  ", "\n").unwrap_err();
+        assert_eq!(problem("{\"a\": 1\n\"b\": 2}"), Problem { line: 1, message: "a missing comma".into() });
+        assert_eq!(problem("[1\n2]").line, 1);
+        assert_eq!(problem("[true false]").message, "a missing comma");
+        assert_eq!(problem("[[] {}]").message, "a missing comma");
+        assert_eq!(problem("[1 /* c */ 2]").message, "a missing comma");
+        // Empty ones and comments between are fine.
+        assert_eq!(two("[[], {}]"), "[\n  [],\n  {}\n]");
+        assert_eq!(two("{\"a\" // c\n: 1}"), "{\n  \"a\" // c\n  : 1\n}");
     }
 
     #[test]
