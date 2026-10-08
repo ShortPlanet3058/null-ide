@@ -1,11 +1,12 @@
 //! Your own shortcuts, from `"keys"` in settings.json, over the preset's:
 //!
 //! ```json
-//! "keys": { "ctrl-cmd-l": "select all occurrences", "cmd-d": null }
+//! "keys": { "ctrl-cmd-l": "select all occurrences", "cmd-d": null, "cmd-f": "-find" }
 //! ```
 //!
 //! A command is named as Null calls it in the code (`editor::SelectAllOccurrences`), without
-//! the part before `::`, or in words, as ⌘K lists it; `null` takes a shortcut away. They hold
+//! the part before `::`, or in words, as ⌘K lists it; `null` takes a shortcut away from
+//! everything, and a command with `-` before it loses only its own use of it. They hold
 //! everywhere in the window (bound with no context, they match as deep as anything focused)
 //! and come last, so they win. A key that types something (`x`, `⇧X`, a space) can't be one:
 //! it would stop typing.
@@ -50,12 +51,33 @@ fn command_named<'a>(name: &str, known: &[&'a str]) -> Option<&'a str> {
     matching.iter().find(|k| k.starts_with("editor::")).or(matching.first()).copied()
 }
 
-/// The bindings for `keys`, and what couldn't be understood.
-pub fn bindings(keys: &BTreeMap<String, Option<String>>, cx: &App) -> (Vec<KeyBinding>, Vec<String>) {
+/// Keys as a binding's are written (`cmd-shift-l`), however they were.
+fn as_written(keystrokes: &str) -> Option<String> {
+    let keys: Option<Vec<String>> =
+        keystrokes.split_whitespace().map(|k| Keystroke::parse(k).ok().map(|k| k.unparse())).collect();
+    keys.map(|k| k.join(" "))
+}
+
+/// What `keys` say: the bindings, the preset's keys taken from a command alone (the keys,
+/// as written, and the command's full name), and what couldn't be understood.
+pub fn bindings(
+    keys: &BTreeMap<String, Option<String>>,
+    cx: &App,
+) -> (Vec<KeyBinding>, Vec<(String, String)>, Vec<String>) {
     let known = cx.all_action_names();
     let mut bindings = Vec::new();
+    let mut taken = Vec::new();
     let mut problems = Vec::new();
     for (keystrokes, name) in keys {
+        // "-find": Find's use of the keys, not the keys.
+        if let Some(name) = name.as_deref().and_then(|n| n.strip_prefix('-')) {
+            match (command_named(name, known), as_written(keystrokes)) {
+                (Some(full), Some(written)) => taken.push((written, full.to_string())),
+                (None, _) => problems.push(format!("\"{keystrokes}\": no command called \"{name}\"")),
+                (_, None) => problems.push(format!("\"{keystrokes}\" isn't a shortcut (like \"cmd-shift-l\")")),
+            }
+            continue;
+        }
         let action: Box<dyn Action> = match name {
             None => Box::new(NoAction),
             Some(name) => match command_named(name, known).and_then(|full| cx.build_action(full, None).ok()) {
@@ -75,13 +97,30 @@ pub fn bindings(keys: &BTreeMap<String, Option<String>>, cx: &App) -> (Vec<KeyBi
             Err(_) => problems.push(format!("\"{keystrokes}\" isn't a shortcut (like \"cmd-shift-l\")")),
         }
     }
-    (bindings, problems)
+    (bindings, taken, problems)
 }
 
-/// Binds your shortcuts, after every other key, and keeps what was wrong with them.
+/// Binds your shortcuts, after every other key, and keeps what was wrong with them. The
+/// preset's keys taken from a command alone go first (bound again without them).
 pub fn register(cx: &mut App) {
     let keys = cx.try_global::<crate::settings::Settings>().map(|s| s.keys.clone()).unwrap_or_default();
-    let (bindings, problems) = bindings(&keys, cx);
+    let (bindings, taken, problems) = bindings(&keys, cx);
+    if !taken.is_empty() {
+        let kept: Vec<KeyBinding> = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            keymap
+                .bindings()
+                .filter(|b| {
+                    let written = b.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>().join(" ");
+                    !taken.iter().any(|(keys, name)| *keys == written && b.action().name() == name)
+                })
+                .cloned()
+                .collect()
+        };
+        cx.clear_key_bindings();
+        cx.bind_keys(kept);
+    }
     cx.bind_keys(bindings);
     cx.set_global(KeyProblems(problems));
 }
@@ -120,6 +159,7 @@ mod tests {
             let keys = BTreeMap::from([
                 ("ctrl-cmd-l".to_string(), Some("select all occurrences".to_string())),
                 ("cmd-d".to_string(), None),
+                ("cmd-shift-l".to_string(), Some("-select all occurrences".to_string())),
                 ("cmd-alt-9".to_string(), Some("launch rockets".to_string())),
                 ("cmd-shiftt-x".to_string(), Some("Copy".to_string())),
                 ("x".to_string(), Some("toggle terminal".to_string())),
@@ -142,6 +182,9 @@ mod tests {
         });
         // ⌘D, taken away: still one selection.
         cx.simulate_keystrokes("cmd-d");
+        assert_eq!(e.read_with(cx, |e, _| e.extra.len()), 0);
+        // ⌘⇧L, taken from Select All Occurrences alone: it doesn't run.
+        cx.simulate_keystrokes("cmd-shift-l");
         assert_eq!(e.read_with(cx, |e, _| e.extra.len()), 0);
         // ⌃⌘L, yours: every `a`.
         cx.simulate_keystrokes("ctrl-cmd-l");

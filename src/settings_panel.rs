@@ -120,7 +120,7 @@ pub struct SettingsPanel {
     has_key: Option<bool>,
     /// Waiting for new keys for shortcut `ix` (Keyboard): the next keystroke, caught before
     /// anything else sees it, becomes its shortcut.
-    recording: Option<(usize, Subscription)>,
+    recording: Option<(usize, [Subscription; 2])>,
     /// What came of the keys last pressed, said under that command.
     key_note: Option<(usize, String)>,
     /// Which shortcuts can be given keys: commands known by their name alone.
@@ -1172,18 +1172,37 @@ impl SettingsPanel {
         keys
     }
 
-    /// Waits for the keys for shortcut `ix`.
-    fn record_keys(&mut self, ix: usize, cx: &mut Context<Self>) {
+    /// Waits for the keys for shortcut `ix`: pressed here, the panel focused. Pressed
+    /// anywhere else (a click went to the search, another window), they're not taken: the
+    /// waiting ends and they do what they do.
+    fn record_keys(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle);
         let panel = cx.entity().downgrade();
-        let caught = cx.intercept_keystrokes(move |event, _, cx| {
+        let caught = cx.intercept_keystrokes(move |event, window, cx| {
             let keys = event.keystroke.clone();
-            if panel.update(cx, |panel, cx| panel.keys_pressed(keys, cx)).is_ok() {
+            let taken = panel.update(cx, |panel, cx| {
+                if panel.focus_handle.is_focused(window) {
+                    panel.keys_pressed(keys, cx);
+                    true
+                } else {
+                    panel.stop_recording(cx);
+                    false
+                }
+            });
+            if taken.unwrap_or(false) {
                 cx.stop_propagation();
             }
         });
-        self.recording = Some((ix, caught));
+        let left = cx.on_blur(&self.focus_handle, window, |panel, _, cx| panel.stop_recording(cx));
+        self.recording = Some((ix, [caught, left]));
         self.key_note = None;
         cx.notify();
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// The keys pressed while waiting: the command's shortcut now (its old one let go), or
@@ -1199,12 +1218,13 @@ impl SettingsPanel {
         let name = self.shortcuts[ix].action.name().to_string();
         let now = self.keys_now(ix, cx);
         let mut keys = cx.global::<Settings>().keys.clone();
-        // A key of yours for it goes; one of the preset's is taken away (null).
+        // A key of yours for it goes; one of the preset's is taken from it alone ("-name"):
+        // what else the key does (⌘F in the terminal) stays.
         let let_go = |keys: &mut std::collections::BTreeMap<String, Option<String>>, key: &str| {
             if keys.get(key) == Some(&Some(name.clone())) {
                 keys.remove(key);
             } else {
-                keys.insert(key.to_string(), None);
+                keys.insert(key.to_string(), Some(format!("-{name}")));
             }
         };
         if bare && pressed.key == "backspace" {
@@ -1215,8 +1235,12 @@ impl SettingsPanel {
             return settings::update(cx, |s| s.keys = keys);
         }
         let typed = pressed.unparse();
-        if crate::user_keys::types_something(&typed) {
-            self.key_note = Some((ix, "That key types: add ⌘, ⌃ or ⌥".into()));
+        // Alone (or with ⇧), a key types, or moves, or confirms (↵, ⇥, the arrows): as a
+        // shortcut it would stop doing that everywhere. F1–F20 are free.
+        let f_key = pressed.key.strip_prefix('f').is_some_and(|n| n.parse::<u8>().is_ok_and(|n| (1..=20).contains(&n)));
+        if !(m.platform || m.control || m.alt || f_key) {
+            let why = if crate::user_keys::types_something(&typed) { "That key types" } else { "That key has a use" };
+            self.key_note = Some((ix, format!("{why}: add ⌘, ⌃ or ⌥")));
             return;
         }
         let shown = gpui::KeyBinding::new(&typed, gpui::NoAction, None);
@@ -1331,8 +1355,8 @@ impl SettingsPanel {
                                             d.cursor_pointer()
                                                 .rounded(px(ui::R_KEY))
                                                 .hover(|s| s.opacity(0.75))
-                                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                                    this.record_keys(ix, cx)
+                                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                                    this.record_keys(ix, window, cx)
                                                 }))
                                         })
                                         .child(keys_shown),
@@ -1422,6 +1446,7 @@ impl Render for SettingsPanel {
                     .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.section = section;
+                        this.stop_recording(cx);
                         this.search.update(cx, |search, cx| search.set_text("", cx));
                         cx.notify();
                     }))
@@ -1541,23 +1566,36 @@ mod tests {
         });
         let before = panel.read_with(cx, |p, cx| p.keys_now(0, cx));
         assert!(!before.is_empty(), "Select All Occurrences has a key in the preset");
-        panel.update(cx, |p, cx| p.record_keys(0, cx));
+        panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
         cx.simulate_keystrokes("ctrl-cmd-l");
         let keys = cx.update(|_, cx| cx.global::<Settings>().keys.clone());
         assert_eq!(keys.get("ctrl-cmd-l"), Some(&Some("editor::SelectAllOccurrences".to_string())));
-        assert!(before.iter().all(|k| keys.get(k) == Some(&None)), "the old keys let go: {keys:?}");
+        let from_it = Some("-editor::SelectAllOccurrences".to_string());
+        assert!(before.iter().all(|k| keys.get(k) == Some(&from_it)), "the old keys let go: {keys:?}");
         assert_eq!(panel.read_with(cx, |p, cx| p.keys_now(0, cx)), ["ctrl-cmd-l"]);
         // Save's ⌘S, taken: it says whose it was.
-        panel.update(cx, |p, cx| p.record_keys(0, cx));
+        panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
         cx.simulate_keystrokes("cmd-s");
         let note = panel.read_with(cx, |p, _| p.key_note.clone().unwrap().1);
         assert!(note.contains("no longer Save"), "{note}");
         // A plain letter types: refused, nothing written.
-        panel.update(cx, |p, cx| p.record_keys(0, cx));
+        panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
         cx.simulate_keystrokes("x");
         assert!(!cx.update(|_, cx| cx.global::<Settings>().keys.contains_key("x")));
+        // So does ↵ alone (it would stop starting new lines).
+        panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
+        cx.simulate_keystrokes("enter");
+        assert!(!cx.update(|_, cx| cx.global::<Settings>().keys.contains_key("enter")));
+        // Waiting, then the keyboard went elsewhere (the search): the key isn't taken.
+        panel.update_in(cx, |p, window, cx| {
+            p.record_keys(0, window, cx);
+            p.search.update(cx, |search, cx| window.focus(&search.focus_handle(cx)));
+        });
+        cx.simulate_keystrokes("cmd-alt-9");
+        assert!(!cx.update(|_, cx| cx.global::<Settings>().keys.contains_key("cmd-alt-9")));
+        assert!(panel.read_with(cx, |p, _| p.recording.is_none()), "no longer waiting");
         // ⌫: no keys at all.
-        panel.update(cx, |p, cx| p.record_keys(0, cx));
+        panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
         cx.simulate_keystrokes("backspace");
         assert!(panel.read_with(cx, |p, cx| p.keys_now(0, cx)).is_empty());
         assert!(panel.read_with(cx, |p, _| p.recording.is_none()));
