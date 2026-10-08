@@ -7,7 +7,7 @@ use crate::theme::Syntax;
 use crate::theme::Theme;
 use gpui::{
     AnyElement, App, FontStyle, FontWeight, HighlightStyle, InteractiveText, SharedString, StrikethroughStyle,
-    StyledText, UnderlineStyle, Window, div, img, prelude::*, px,
+    StyledText, UnderlineStyle, Window, div, prelude::*, px,
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -1578,7 +1578,7 @@ fn image(alt: &str, url: &str, style: &Style) -> AnyElement {
     if local && file.is_file() {
         let alt = alt.to_string();
         let faint = theme.faint;
-        return img(crate::svg_image::source(&file))
+        return crate::svg_image::image(&file)
             .max_w_full()
             .with_fallback(move || div().text_color(faint).child(alt.clone()).into_any_element())
             .into_any_element();
