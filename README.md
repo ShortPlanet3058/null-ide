@@ -145,6 +145,8 @@ doesn't need Xcode's separate Metal Toolchain download.
   **Show File History** with the commits, to compare with and take back.
 - In the files, typing a name goes to it, as in the Finder; a file with an error in it shows
   red, its folders a red dot. **Find in Folder…** searches one folder from its menu.
+  Folders that each hold only the next open together, as one row (`src / main / java`):
+  new files, drops and renames there go to the last of them.
 - Selected text drags to where it's dropped (⌥ copies it); a file dragged from the files
   onto Markdown becomes a link, onto other code it opens.
 - Images open as images; other files that aren't text are never saved over. Minified
