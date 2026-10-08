@@ -141,7 +141,7 @@ fn copy_name(path: &Path, dir: &Path) -> Result<PathBuf, String> {
 }
 
 /// Whether two paths name the same file on disk (one file under two spellings).
-fn same_file(a: &Path, b: &Path) -> bool {
+pub fn same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

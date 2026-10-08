@@ -182,14 +182,23 @@ struct RunStart {
 }
 
 /// A command too quick to be seen running is taken as done this long after Return.
-const QUICK_RUN: std::time::Duration = std::time::Duration::from_millis(250);
+const QUICK_RUN: std::time::Duration = std::time::Duration::from_millis(600);
 
 /// A row's text as it reads: a wide character once (not followed by its spacer), with the
 /// marks drawn over it.
 fn row_text(grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>, line: Line) -> String {
+    row_text_to(grid, line, grid.columns())
+}
+
+/// A row's text up to column `end` (see `row_text`).
+fn row_text_to(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    line: Line,
+    end: usize,
+) -> String {
     let row = &grid[line];
     let mut text = String::new();
-    for column in 0..grid.columns() {
+    for column in 0..end.min(grid.columns()) {
         let cell = &row[Column(column)];
         if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
             continue;
@@ -200,16 +209,17 @@ fn row_text(grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell
     text
 }
 
+/// The signs a prompt ends with, before what's typed.
+const PROMPT_SIGNS: [&str; 6] = ["% ", "$ ", "# ", "> ", "❯ ", "➜ "];
+
 /// The command typed on a prompt's line (`me@mac app % make test` → `make test`): what
 /// follows the prompt's first `% `, `$ `, `# `, `> `, `❯ ` or `➜ `, from its first word
-/// that's a program (`➜  app git:(main) make` → `make`), or the whole line.
+/// that's a program (`➜  app git:(main) make` → `make`), or the whole line; without what a
+/// prompt shows at the right, after a long gap (`make   at 10:42`).
 fn typed_command(line: &str) -> &str {
-    let end = ["% ", "$ ", "# ", "> ", "❯ ", "➜ "]
-        .iter()
-        .filter_map(|sign| line.find(sign).map(|at| at + sign.len()))
-        .min()
-        .unwrap_or(0);
+    let end = PROMPT_SIGNS.iter().filter_map(|sign| line.find(sign).map(|at| at + sign.len())).min().unwrap_or(0);
     let typed = line[end..].trim();
+    let typed = typed.split("   ").next().unwrap_or(typed).trim_end();
     let paths: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     let program = |word: &str| {
         word.contains('=')
@@ -365,7 +375,7 @@ impl TerminalView {
                             match (this.running.take(), &name) {
                                 (None, Some(_)) => {
                                     if this.run.is_none() {
-                                        this.run = Some(this.run_start());
+                                        this.run = Some(this.run_start(None));
                                     }
                                     if let Some(run) = &mut this.run {
                                         run.seen = true;
@@ -381,10 +391,14 @@ impl TerminalView {
                             this.running = name;
                             cx.emit(TerminalEvent::TitleChanged);
                         } else if this.running.is_none()
-                            && this.run.as_ref().is_some_and(|r| !r.seen && r.at.elapsed() >= QUICK_RUN)
+                            && this
+                                .run
+                                .as_ref()
+                                .is_some_and(|r| !r.seen && r.at.elapsed() >= QUICK_RUN && this.at_prompt(r))
                             && let Some(run) = this.run.take()
                         {
-                            // Done before it could be seen (a quick `gcc`): it ran all the same.
+                            // Done before it could be seen (a quick `gcc`), and the prompt is
+                            // back (not still in the shell's own work, as `nvm use`): it ran.
                             this.report_run(None, run, cx);
                         }
                         if let Some((name, took)) = finished {
@@ -435,7 +449,7 @@ impl TerminalView {
     pub fn run_command(&mut self, command: &str, cx: &mut Context<Self>) {
         if self.settled {
             if self.running.is_none() {
-                self.run = Some(self.run_start());
+                self.run = Some(self.run_start(Some(command)));
             }
             return self.write(format!("{command}\r").into_bytes());
         }
@@ -452,6 +466,7 @@ impl TerminalView {
             this.update(cx, |this, _| {
                 this.settled = true;
                 for command in std::mem::take(&mut this.queued) {
+                    this.run = Some(this.run_start(Some(&command)));
                     this.write(format!("{command}\r").into_bytes());
                 }
             })
@@ -524,6 +539,9 @@ impl TerminalView {
         if self.settled && bracketed {
             let text = text.replace('\x1b', "").replace("\r\n", "\n").replace('\n', "\r");
             let text = text.trim_end_matches('\r');
+            if self.running.is_none() {
+                self.run = Some(self.run_start(text.split('\r').next()));
+            }
             return self.write(format!("\x1b[200~{text}\x1b[201~\r").into_bytes());
         }
         for line in run_lines(text) {
@@ -563,7 +581,7 @@ impl TerminalView {
         if let Some(bytes) = key_to_bytes(&event.keystroke, app_cursor) {
             // Return at the shell's prompt: a command begins here.
             if bytes == b"\r" && self.running.is_none() {
-                self.run = Some(self.run_start());
+                self.run = Some(self.run_start(None));
             }
             // Typing jumps back to the prompt if the view was scrolled up.
             self.term.lock().scroll_display(Scroll::Bottom);
@@ -641,15 +659,46 @@ impl TerminalView {
     }
 
     /// A command beginning now, at the cursor's line.
-    fn run_start(&self) -> RunStart {
+    /// A command beginning at the cursor's line (its first row, when a long one wraps).
+    /// `typing`: the command Null is about to type there itself, not on the line yet.
+    fn run_start(&self, typing: Option<&str>) -> RunStart {
         let (mark, line) = {
             let term = self.term.lock();
             let grid = term.grid();
-            let at = grid.cursor.point.line;
-            (grid.history_size() + at.0.max(0) as usize, row_text(grid, at))
+            let cursor = grid.cursor.point;
+            let top = -(grid.history_size() as i32);
+            let wraps = |line: i32| grid[Line(line)][Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE);
+            let mut first = cursor.line.0;
+            while first > top && wraps(first - 1) {
+                first -= 1;
+            }
+            let text = match typing {
+                Some(command) if first == cursor.line.0 => {
+                    format!("{}{command}", row_text_to(grid, cursor.line, cursor.column.0))
+                }
+                _ => row_text(grid, Line(first)),
+            };
+            // As the line's first row will read: to find it again by.
+            let text: String = text.chars().take(grid.columns()).collect();
+            ((grid.history_size() as i32 + first).max(0) as usize, text.trim_end().to_string())
         };
-        let line = line.trim_end().to_string();
         RunStart { mark, line, folder: self.shell_folder(), at: std::time::Instant::now(), seen: false }
+    }
+
+    /// Whether the shell shows its prompt again after `run`: what's before the cursor
+    /// begins as the prompt `run` was typed on did (its first word: `➜`, `ada@mac`), or
+    /// ends as a prompt does.
+    fn at_prompt(&self, run: &RunStart) -> bool {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let cursor = grid.cursor.point;
+        let before = row_text_to(grid, cursor.line, cursor.column.0);
+        // What came before the command on its line (`typed_command` gives part of it).
+        let typed = typed_command(&run.line);
+        let at = (typed.as_ptr() as usize).saturating_sub(run.line.as_ptr() as usize).min(run.line.len());
+        let prompt = run.line.get(..at).unwrap_or(&run.line);
+        let same_start = prompt.split_whitespace().next().is_some_and(|w| before.split_whitespace().next() == Some(w));
+        same_start || PROMPT_SIGNS.iter().any(|sign| before.ends_with(sign))
     }
 
     /// Tells what a finished command printed (unless nothing was typed: a bare Return).
@@ -1535,6 +1584,7 @@ mod tests {
         assert_eq!(typed_command("➜  ~/code/app ./build.sh"), "./build.sh");
         assert_eq!(typed_command("ada@mac app % "), "");
         assert_eq!(typed_command("make"), "make");
+        assert_eq!(typed_command("ada@mac app % ls src      at 10:42:13"), "ls src", "the prompt's right side");
         assert_eq!(program_of("FOO=1 ./scripts/build.sh -v"), "build.sh");
         assert_eq!(program_of(""), "");
     }

@@ -162,15 +162,20 @@ pub fn definitions_in(path: &Path, text: &str) -> Vec<Definition> {
 /// A Markdown file's outline, for ⌘⇧O: its headings (not lines starting with # in code).
 fn headings_in(path: &Path, text: &str) -> Vec<Definition> {
     const LEVELS: [&str; 6] = ["#", "##", "###", "####", "#####", "######"];
-    let mut in_code = false;
+    // The fence a code block opened with, while in one: only one as long closes it.
+    let mut fence: Option<String> = None;
     text.lines()
         .enumerate()
         .filter_map(|(row, line)| {
-            if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-                in_code = !in_code;
+            let trimmed = line.trim_start();
+            if let Some(open) = &fence {
+                if crate::markdown_view::closes(trimmed, open) {
+                    fence = None;
+                }
                 return None;
             }
-            if in_code {
+            if let Some(open) = crate::markdown_view::fence_of(trimmed) {
+                fence = Some(open.to_string());
                 return None;
             }
             let level = line.chars().take_while(|&c| c == '#').count();

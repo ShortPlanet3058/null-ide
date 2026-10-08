@@ -49,21 +49,28 @@ fn last_drawn(text: &str) -> String {
 /// after it, which Jupyter keeps apart.
 fn closed(text: &str) -> String {
     let mut text = text.trim_end().to_string();
+    // As the preview reads it: a fence until one that closes it; outside code, a line
+    // starting `<!--` until a line with `-->`.
     let mut fence: Option<String> = None;
+    let mut comment = false;
     for line in text.lines() {
         let line = line.trim_start();
+        if comment {
+            comment = !line.contains("-->");
+            continue;
+        }
         match &fence {
             Some(open) if crate::markdown_view::closes(line, open) => fence = None,
             Some(_) => {}
+            None if line.starts_with("<!--") => comment = !line[4..].contains("-->"),
             None => fence = crate::markdown_view::fence_of(line).map(str::to_string),
         }
     }
     if let Some(open) = fence {
         text.push('\n');
         text.push_str(&open);
-    }
-    if text.rfind("<!--").is_some_and(|open| !text[open..].contains("-->")) {
-        text.push_str(" -->");
+    } else if comment {
+        text.push_str("\n-->");
     }
     text
 }
@@ -186,7 +193,10 @@ mod tests {
             ]}
         ]}"#;
         let markdown = to_markdown(json).unwrap();
-        assert!(markdown.starts_with("```python\nnot closed\n```\n\n<!-- nor this -->\n\n"), "{markdown}");
+        assert!(markdown.starts_with("```python\nnot closed\n```\n\n<!-- nor this\n-->\n\n"), "{markdown}");
+        // A comment's start inside code, or in a sentence, opens nothing.
+        assert_eq!(closed("```html\n<!-- start\n```"), "```html\n<!-- start\n```");
+        assert_eq!(closed("Use `<!--` to hide text."), "Use `<!--` to hide text.");
         assert!(markdown.ends_with("```output\n100%\ndone\n```\n\n"), "{markdown}");
         // As the preview reads it: the code cell is code, not part of the comment.
         let blocks = crate::markdown_view::parse(&markdown);

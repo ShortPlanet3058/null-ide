@@ -69,9 +69,11 @@ fn quoted(word: &str) -> String {
     if plain { word.to_string() } else { format!("'{}'", word.replace('\'', "'\\''")) }
 }
 
-/// `text` with VS Code's `${…}` filled in: the project's folder, the file being worked on.
-/// None when it uses one Null can't fill (`${input:…}`, or a file when none is open).
-fn filled(text: &str, root: &Path, file: Option<&Path>) -> Option<String> {
+/// `text` with VS Code's `${…}` filled in: the project's folder, the file being worked on,
+/// a variable of the environment; each value put in by `put` (quoted for the shell, or as
+/// it is). None when it uses one Null can't fill (`${input:…}`, or a file when none is
+/// open).
+fn filled(text: &str, root: &Path, file: Option<&Path>, put: fn(&str) -> String) -> Option<String> {
     let mut out = String::new();
     let mut rest = text;
     while let Some(at) = rest.find("${") {
@@ -89,18 +91,31 @@ fn filled(text: &str, root: &Path, file: Option<&Path>) -> Option<String> {
             "fileExtname" => file_part(|f| Some(format!(".{}", f.extension()?.to_string_lossy()))),
             "fileDirname" => file_part(|f| Some(f.parent()?.display().to_string())),
             "relativeFile" => file.and_then(|f| Some(f.strip_prefix(root).ok()?.display().to_string())),
-            _ => name.strip_prefix("env:").map(|var| format!("${var}")),
+            // As VS Code: its value now (none set, nothing).
+            _ => name.strip_prefix("env:").map(|var| std::env::var(var).unwrap_or_default()),
         }?;
-        out.push_str(&value);
+        out.push_str(&put(&value));
         rest = &rest[end + 1..];
     }
     out.push_str(rest);
     Some(out)
 }
 
+/// A part of a shell task's command line, as VS Code writes it: in quotes when it holds a
+/// space or a quote, else as written (so `*.rs`, `2>&1`, `$HOME` keep their meaning). A
+/// filled-in value is quoted in its own right, so a file's name is never taken as shell.
+fn shell_part(part: &str, root: &Path, file: Option<&Path>) -> Option<String> {
+    if part.contains(|c: char| c.is_whitespace() || c == '\'' || c == '"') {
+        Some(quoted(&filled(part, root, file, str::to_string)?))
+    } else {
+        filled(part, root, file, quoted)
+    }
+}
+
 /// The tasks of a `.vscode/tasks.json` (comments and trailing commas allowed, as VS Code
 /// has them): each as its label, and the command line it runs, the Mac's variant if it
-/// has one. One running in another folder goes there first.
+/// has one. One running in another folder runs there (in a subshell, so the terminal
+/// stays where it is); one depending on others runs them first, in order.
 fn vscode_tasks(text: &str, root: &Path, file: Option<&Path>) -> Vec<ProjectTask> {
     use serde_json::Value;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -114,37 +129,105 @@ fn vscode_tasks(text: &str, root: &Path, file: Option<&Path>) -> Vec<ProjectTask
     } else {
         "linux"
     };
-    let task_of = |task: &Value| -> Option<ProjectTask> {
+    let string = |v: &Value| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(o) => o.get("value")?.as_str().map(String::from),
+        _ => None,
+    };
+    // Each task's own command (None: it only runs others, or can't be filled in), and what
+    // it depends on.
+    let own = |task: &Value| -> (Option<String>, Vec<String>) {
         // What this system's variant says, over what the task says.
         let field = |name: &str| task.get(platform).and_then(|p| p.get(name)).or(task.get(name));
-        let command = if field("type").and_then(Value::as_str) == Some("npm") {
-            format!("npm run {}", field("script")?.as_str()?)
-        } else {
-            let command = match field("command")? {
-                Value::String(c) => c.clone(),
-                Value::Object(o) => o.get("value")?.as_str()?.to_string(),
-                _ => return None,
-            };
-            let args: Vec<String> = field("args")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|a| match a {
-                    Value::String(s) => Some(quoted(s)),
-                    Value::Object(o) => o.get("value")?.as_str().map(quoted),
-                    _ => None,
-                })
-                .collect();
-            std::iter::once(command).chain(args).collect::<Vec<_>>().join(" ")
+        let depends: Vec<String> = match field("dependsOn") {
+            Some(Value::String(label)) => vec![label.clone()],
+            Some(Value::Array(labels)) => labels.iter().filter_map(|l| l.as_str().map(String::from)).collect(),
+            _ => Vec::new(),
         };
-        let mut command = filled(&command, root, file)?;
-        if let Some(cwd) = field("options").and_then(|o| o.get("cwd")).and_then(Value::as_str) {
-            command = format!("cd {} && {command}", quoted(&filled(cwd, root, file)?));
-        }
-        let label = task.get("label").and_then(Value::as_str).map(String::from).unwrap_or_else(|| command.clone());
-        Some(ProjectTask { label, command, source: ".vscode/tasks.json" })
+        let command = (|| {
+            let kind = field("type").and_then(Value::as_str).unwrap_or("shell");
+            let (command, cwd) = if kind == "npm" {
+                let path = field("path").and_then(Value::as_str).filter(|p| !p.is_empty());
+                let runner = package_runner(&path.map_or(root.to_path_buf(), |p| root.join(p)));
+                (format!("{runner} run {}", quoted(field("script")?.as_str()?)), path.map(|p| root.join(p)))
+            } else {
+                let command = string(field("command")?)?;
+                let args: Vec<String> =
+                    field("args").and_then(Value::as_array).into_iter().flatten().filter_map(string).collect();
+                let line = if kind == "process" {
+                    // One program and its arguments: each part exactly as written.
+                    let mut parts = vec![quoted(&filled(&command, root, file, str::to_string)?)];
+                    for arg in &args {
+                        parts.push(quoted(&filled(arg, root, file, str::to_string)?));
+                    }
+                    parts.join(" ")
+                } else if args.is_empty() {
+                    // A whole command line.
+                    filled(&command, root, file, quoted)?
+                } else {
+                    let mut parts = vec![shell_part(&command, root, file)?];
+                    for arg in &args {
+                        parts.push(shell_part(arg, root, file)?);
+                    }
+                    parts.join(" ")
+                };
+                let cwd = field("options").and_then(|o| o.get("cwd")).and_then(Value::as_str);
+                let cwd = match cwd {
+                    Some(cwd) => Some(std::path::PathBuf::from(filled(cwd, root, file, str::to_string)?)),
+                    None => None,
+                };
+                (line, cwd)
+            };
+            Some(match cwd {
+                Some(dir) => format!("(cd {} && {command})", quoted(&dir.display().to_string())),
+                None => command,
+            })
+        })();
+        (command, depends)
     };
-    json.get("tasks").and_then(Value::as_array).into_iter().flatten().filter_map(task_of).collect()
+    let tasks: Vec<(String, Option<String>, Vec<String>)> = json
+        .get("tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|task| {
+            let (command, depends) = own(task);
+            let label = task.get("label").and_then(Value::as_str).map(String::from);
+            (label.or(command.clone()).unwrap_or_default(), command, depends)
+        })
+        .collect();
+    // A task's whole run: what it depends on first, then itself. None when one of them
+    // can't run (missing, can't be filled in, or depending on itself).
+    fn whole(
+        label: &str,
+        tasks: &[(String, Option<String>, Vec<String>)],
+        seen: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        if seen.iter().any(|s| s == label) {
+            return None;
+        }
+        seen.push(label.to_string());
+        let (_, command, depends) = tasks.iter().find(|(l, ..)| l == label)?;
+        let mut run = Vec::new();
+        for dependency in depends {
+            run.extend(whole(dependency, tasks, seen)?);
+        }
+        if let Some(command) = command {
+            run.push(command.clone());
+        } else if depends.is_empty() {
+            return None;
+        }
+        seen.pop();
+        Some(run)
+    }
+    tasks
+        .iter()
+        .filter(|(label, ..)| !label.is_empty())
+        .filter_map(|(label, ..)| {
+            let run = whole(label, &tasks, &mut Vec::new())?;
+            Some(ProjectTask { label: label.clone(), command: run.join(" && "), source: ".vscode/tasks.json" })
+        })
+        .collect()
 }
 
 /// The package manager a JavaScript project uses, by its lockfile.
@@ -212,6 +295,11 @@ mod tests {
                 {"label": "mac only", "command": "echo other", "osx": {"command": "echo mac"}},
                 {"label": "asks", "command": "deploy ${input:target}"},
                 {"label": "quoted", "command": "echo", "args": ["two words", {"value": "it's", "quoting": "strong"}]},
+                {"label": "shell", "command": "ls", "args": ["*.rs", "2>&1", "${fileBasename}"]},
+                {"label": "exact", "type": "process", "command": "${workspaceFolder}/run.sh", "args": ["*.rs"]},
+                {"label": "web", "type": "npm", "script": "dev", "path": "web/"},
+                {"label": "all", "dependsOn": ["build", "lint"]},
+                {"label": "loop", "command": "x", "dependsOn": "loop"},
             ],
         }"#;
         let tasks: Vec<(String, String)> =
@@ -222,14 +310,23 @@ mod tests {
             [
                 ("build".into(), "cargo build --release".into()),
                 ("this file".into(), "python3 /p/app/src/main.py".into()),
-                ("docs".into(), "cd '/p/app/docs site' && make html".into()),
+                ("docs".into(), "(cd '/p/app/docs site' && make html)".into()),
                 ("lint".into(), "npm run lint".into()),
                 ("mac only".into(), mac.into()),
                 ("quoted".into(), "echo 'two words' 'it'\\''s'".into()),
+                // Shell syntax kept as written; a filled-in name quoted only as it needs.
+                ("shell".into(), "ls *.rs 2>&1 main.py".into()),
+                ("exact".into(), "/p/app/run.sh '*.rs'".into()),
+                ("web".into(), "(cd /p/app/web/ && npm run dev)".into()),
+                ("all".into(), "cargo build --release && npm run lint".into()),
             ]
         );
         // With no file open, a task naming one is left out.
-        assert_eq!(vscode_tasks(text, root, None).len(), 5);
+        assert_eq!(vscode_tasks(text, root, None).len(), 8);
+        // A file's name is never taken as shell.
+        let named = r#"{"tasks": [{"label": "run", "command": "python3", "args": ["${file}"]}]}"#;
+        let odd = Path::new("/p/app/x';rm -rf ~;'.py");
+        assert_eq!(vscode_tasks(named, root, Some(odd))[0].command, "python3 '/p/app/x'\\'';rm -rf ~;'\\''.py'");
         assert!(vscode_tasks("not json", root, None).is_empty());
     }
 

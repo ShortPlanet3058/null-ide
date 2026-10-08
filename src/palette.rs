@@ -355,8 +355,8 @@ pub enum PaletteEvent {
     SwitchBranch(crate::git::Branch),
     /// Start a branch with this name, here.
     CreateBranch(String),
-    /// Run this command in the terminal.
-    RunCommand(String),
+    /// Run this command in the terminal; the task it is, if one (its name).
+    RunCommand(String, Option<String>),
     /// Open this folder as the project.
     OpenProject(PathBuf),
     /// Open this folder in a window of its own.
@@ -891,9 +891,12 @@ impl Palette {
             Item::Branch(i) if self.branches[i].current => cx.emit(PaletteEvent::Dismissed),
             Item::Branch(i) => cx.emit(PaletteEvent::SwitchBranch(self.branches[i].clone())),
             Item::NewBranch => cx.emit(PaletteEvent::CreateBranch(crate::git::branch_name(&self.query))),
-            Item::RunTask(i) => cx.emit(PaletteEvent::RunCommand(self.tasks[i].command.clone())),
+            Item::RunTask(i) => {
+                let task = &self.tasks[i];
+                cx.emit(PaletteEvent::RunCommand(task.command.clone(), Some(task.label.clone())))
+            }
             Item::Project(i) => cx.emit(PaletteEvent::OpenProject(self.projects[i].clone())),
-            Item::RunTyped => cx.emit(PaletteEvent::RunCommand(self.query.clone())),
+            Item::RunTyped => cx.emit(PaletteEvent::RunCommand(self.query.clone(), None)),
         }
     }
 

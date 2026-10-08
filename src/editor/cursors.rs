@@ -344,6 +344,10 @@ impl Editor {
             .find(|r| !others.contains(r))
             .cloned();
         if let Some(range) = next {
+            // A word picked by ⌘D stays matched as a whole word from the one picked now.
+            if whole_word {
+                self.word_pick = Some(range.clone());
+            }
             let mut cursors: Vec<(Cursor, bool)> = self.take_cursors().into_iter().filter(|(_, main)| !main).collect();
             cursors.push((Cursor::new(Selection { anchor: range.start, head: range.end }), true));
             self.set_cursors(cursors);
@@ -584,6 +588,16 @@ mod tests {
             e.selection = Selection { anchor: 0, head: 1 };
             e.skip_occurrence(cx);
             assert_eq!((e.selection.range(), e.extra.len()), (4..5, 0));
+        });
+        // A word picked with ⌘D, skipped alone: still whole words after (not the `a` in `ab`).
+        let (e, cx) = editor(cx, "a b a ab a\n");
+        e.update(cx, |e, cx| {
+            e.selection = Selection::caret(0);
+            e.add_next_occurrence(cx);
+            e.skip_occurrence(cx);
+            assert_eq!(e.selection.range(), 4..5);
+            e.add_next_occurrence(cx);
+            assert_eq!(e.selection.range(), 9..10);
         });
     }
 
