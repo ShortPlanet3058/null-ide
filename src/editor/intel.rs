@@ -600,6 +600,25 @@ impl Editor {
         }));
     }
 
+    /// What the function at the caret calls, each where it's defined: one is gone to,
+    /// several listed.
+    pub(super) fn show_callees(&mut self, _: &super::ShowCallees, _: &mut gpui::Window, cx: &mut Context<Self>) {
+        let offset = self.selection.head;
+        if let Some(message) = self.not_ready_message(cx) {
+            return self.show_notice(offset, message, cx);
+        }
+        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return };
+        let request = lsp.read(cx).callees(path, self.lsp_position(offset));
+        let word = self.buffer.slice(self.word_at(offset));
+        self.definition_task = Some(cx.spawn(async move |this, cx| {
+            let found = request.await;
+            this.update(cx, |this, cx| {
+                this.go_or_list(found, offset, "This calls nothing the server knows.", &format!("called by {word}"), cx)
+            })
+            .ok();
+        }));
+    }
+
     /// Places found for the symbol at `offset`: none says so, one is gone to, several are
     /// listed as "{count} {what}".
     fn go_or_list(

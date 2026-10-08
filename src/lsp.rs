@@ -258,6 +258,34 @@ pub async fn callers(server: &LanguageServer, at: lsp_types::TextDocumentPositio
         .collect()
 }
 
+/// What the function at `at` calls: each function, where it's defined (the call
+/// hierarchy's outgoing calls), once however often it's called.
+pub async fn callees(server: &LanguageServer, at: lsp_types::TextDocumentPositionParams) -> Vec<lsp_types::Location> {
+    use lsp_types::request::{CallHierarchyOutgoingCalls, CallHierarchyPrepare};
+    let prepared = server
+        .request::<CallHierarchyPrepare>(lsp_types::CallHierarchyPrepareParams {
+            text_document_position_params: at,
+            work_done_progress_params: Default::default(),
+        })
+        .await;
+    let Some(item) = prepared.ok().flatten().and_then(|items| items.into_iter().next()) else { return Vec::new() };
+    let calls = server
+        .request::<CallHierarchyOutgoingCalls>(lsp_types::CallHierarchyOutgoingCallsParams {
+            item,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await;
+    let mut found: Vec<lsp_types::Location> = Vec::new();
+    for call in calls.ok().flatten().unwrap_or_default() {
+        let place = lsp_types::Location { uri: call.to.uri, range: call.to.selection_range };
+        if !found.contains(&place) {
+            found.push(place);
+        }
+    }
+    found
+}
+
 pub fn uri_for(path: &Path) -> Option<lsp_types::Uri> {
     url::Url::from_file_path(path).ok()?.as_str().parse().ok()
 }
@@ -428,6 +456,57 @@ mod rust_analyzer_tests {
             lines.sort();
             assert_eq!(lines, [3, 8], "{found:?}");
             assert!(found.iter().all(|l| l.uri == uri_for(&file).unwrap()));
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Show Callees' requests, as rust-analyzer answers them: each function called, once.
+    #[test]
+    #[ignore]
+    fn lists_callees() {
+        let dir = crate::tools::test_dir("ra-callees");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+            .unwrap();
+        let source = "fn greet() {}\n\nfn main() {\n    greet();\n    other();\n    greet();\n}\n\nfn other() {}\n";
+        let file = dir.join("src/main.rs");
+        std::fs::write(&file, source).unwrap();
+        let program = which("rust-analyzer").expect("rust-analyzer on PATH");
+        let (server, mut messages) = LanguageServer::spawn(&program, &[], &dir).unwrap();
+        futures::executor::block_on(async {
+            #[allow(deprecated)]
+            let init = InitializeParams { root_uri: uri_for(&dir), ..Default::default() };
+            server.request::<Initialize>(init).await.unwrap();
+            server.notify::<Initialized>(InitializedParams {});
+            server.notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri_for(&file).unwrap(),
+                    language_id: "rust".into(),
+                    version: 0,
+                    text: source.into(),
+                },
+            });
+            // `main`, at its name.
+            let at = TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri_for(&file).unwrap() },
+                position: Position { line: 2, character: 4 },
+            };
+            let deadline = Instant::now() + Duration::from_secs(120);
+            let mut found = Vec::new();
+            while found.len() < 2 && Instant::now() < deadline {
+                while let Ok(message) = messages.try_recv() {
+                    if let ServerMessage::Request { id, .. } = message {
+                        server.respond(id, Value::Null);
+                    }
+                }
+                found = callees(&server, at.clone()).await;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            // `greet` (called twice, listed once) and `other`, where each is defined.
+            let mut lines: Vec<u32> = found.iter().map(|l| l.range.start.line).collect();
+            lines.sort();
+            assert_eq!(lines, [0, 8], "{found:?}");
         });
         std::fs::remove_dir_all(&dir).ok();
     }
