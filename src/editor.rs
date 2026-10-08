@@ -170,6 +170,7 @@ actions!(
         GoToTypeDefinition,
         GoToImplementation,
         ShowCallers,
+        SkipOccurrence,
         ShowInfo,
         ShowCompletions,
         CompletionNext,
@@ -3472,6 +3473,11 @@ impl Editor {
         self.add_next_occurrence(cx);
     }
 
+    fn skip_occurrence_action(&mut self, _: &SkipOccurrence, _: &mut Window, cx: &mut Context<Self>) {
+        self.remember_cursors();
+        self.skip_occurrence(cx);
+    }
+
     fn add_cursors_to_line_ends(&mut self, _: &AddCursorsToLineEnds, _: &mut Window, cx: &mut Context<Self>) {
         self.remember_cursors();
         self.cursors_at_line_ends(cx);
@@ -4003,6 +4009,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::select_subword_left))
             .on_action(cx.listener(Self::select_subword_right))
             .on_action(cx.listener(Self::delete_subword_left))
+            .on_action(cx.listener(Self::delete_subword_right))
+            .on_action(cx.listener(Self::skip_occurrence_action))
             .on_action(cx.listener(Self::jump_to_selection))
             .on_action(cx.listener(Self::yank))
             .on_action(cx.listener(Self::transpose))

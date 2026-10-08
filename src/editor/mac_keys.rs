@@ -24,7 +24,8 @@ actions!(
         MoveSubwordRight,
         SelectSubwordLeft,
         SelectSubwordRight,
-        DeleteSubwordLeft
+        DeleteSubwordLeft,
+        DeleteSubwordRight
     ]
 );
 
@@ -40,6 +41,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-alt-shift-left", SelectSubwordLeft, ctx),
         KeyBinding::new("ctrl-alt-shift-right", SelectSubwordRight, ctx),
         KeyBinding::new("ctrl-alt-backspace", DeleteSubwordLeft, ctx),
+        KeyBinding::new("ctrl-alt-delete", DeleteSubwordRight, ctx),
+        KeyBinding::new("ctrl-cmd-d", super::SkipOccurrence, ctx),
         KeyBinding::new("cmd-j", JumpToSelection, ctx),
         KeyBinding::new("ctrl-a", MoveLineStart, ctx),
         KeyBinding::new("ctrl-e", MoveLineEnd, ctx),
@@ -196,6 +199,12 @@ impl Editor {
     pub(super) fn delete_subword_left(&mut self, _: &DeleteSubwordLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.for_each_cursor(cx, |this, cx| {
             this.delete_or(|this| this.subword_left_of(this.selection.head)..this.selection.head, cx);
+        });
+    }
+
+    pub(super) fn delete_subword_right(&mut self, _: &DeleteSubwordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.for_each_cursor(cx, |this, cx| {
+            this.delete_or(|this| this.selection.head..this.subword_right_of(this.selection.head), cx);
         });
     }
 
@@ -393,6 +402,14 @@ mod view_tests {
         e.update(cx, |e, _| e.selection = Selection::caret(13));
         cx.simulate_keystrokes("ctrl-alt-backspace");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "let parseRequest = 1;\n"));
+        // ⌃⌥⌦: the part to the right.
+        e.update(cx, |e, _| e.selection = Selection::caret(9));
+        cx.simulate_keystrokes("ctrl-alt-delete");
+        e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "let parse = 1;\n"));
+        // ⌃⌘D, after ⌘D: the one picked let go, the next picked.
+        e.update(cx, |e, _| e.selection = Selection::caret(4));
+        cx.simulate_keystrokes("ctrl-cmd-d");
+        e.update(cx, |e, _| assert_eq!(e.selection.range(), 4..9, "nothing picked yet: the word"));
         // A Windows file: over a line break whole; ⌃⌥⌫ at a line's start joins the lines.
         let (w, cx) =
             cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("ab\r\ncd²x"), Some(PathBuf::from("w.rs")), cx));

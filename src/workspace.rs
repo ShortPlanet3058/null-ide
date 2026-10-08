@@ -35,6 +35,8 @@ actions!(
         CloseTab,
         ToggleSidebar,
         NextTab,
+        SwitchTab,
+        SwitchTabBack,
         MoveTabRight,
         MoveTabLeft,
         MoveTabDown,
@@ -186,8 +188,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CancelTerminalName, Some("TerminalName")),
         KeyBinding::new("f8", NextProblem, ctx),
         KeyBinding::new("shift-f8", PreviousProblem, ctx),
-        KeyBinding::new("ctrl-tab", NextTab, ctx),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, ctx),
+        KeyBinding::new("ctrl-tab", SwitchTab, ctx),
+        KeyBinding::new("ctrl-shift-tab", SwitchTabBack, ctx),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
         KeyBinding::new("secondary-shift-f", SearchProject, ctx),
         KeyBinding::new("secondary-shift-h", ReplaceInProject, ctx),
@@ -488,6 +490,11 @@ pub struct Workspace {
     active: Option<usize>,
     /// The tab each side shows.
     shown: [Option<Entity<Editor>>; 2],
+    /// The tabs' editors, the one used last first (for ⌃Tab).
+    used: Vec<gpui::EntityId>,
+    /// While ⌃ is held after ⌃Tab: how far down `used` it has gone. Letting go of ⌃ makes
+    /// the tab reached the last used.
+    switching: Option<usize>,
     /// How much of the width the left side takes when split (of the height, stacked).
     split_ratio: f32,
     /// The two sides one above the other, rather than side by side.
@@ -718,6 +725,8 @@ impl Workspace {
             tabs: Vec::new(),
             shown: [None, None],
             split_ratio: 0.5,
+            used: Vec::new(),
+            switching: None,
             stacked: false,
             active: None,
             sidebar: Transition::new(cx.global::<Settings>().sidebar_visible),
@@ -2724,6 +2733,12 @@ impl Workspace {
         let Some(tab) = self.tabs.get(ix) else { return };
         self.active = Some(ix);
         self.shown[tab.side] = Some(tab.editor.clone());
+        // Used now (unless only passed on the way, ⌃ held after ⌃Tab).
+        if self.switching.is_none() {
+            let id = tab.editor.entity_id();
+            self.used.retain(|u| *u != id);
+            self.used.insert(0, id);
+        }
         let side = tab.side;
         let position = self.side_tabs(side).iter().position(|&i| i == ix).unwrap_or(0);
         let tab = &self.tabs[ix];
@@ -3360,6 +3375,41 @@ impl Workspace {
         self.step_tab(-1, window, cx);
     }
 
+    /// ⌃Tab: the tab used before this one; again with ⌃ still held, the one before that,
+    /// and so on (⌃⇧Tab back). Letting go of ⌃ stays there.
+    fn switch_tab(&mut self, back: bool, held: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let open: Vec<gpui::EntityId> = self.tabs.iter().map(|t| t.editor.entity_id()).collect();
+        self.used.retain(|id| open.contains(id));
+        // Tabs never shown yet (opened with others, from the last session) come last.
+        for id in open {
+            if !self.used.contains(&id) {
+                self.used.push(id);
+            }
+        }
+        if self.used.len() < 2 {
+            return;
+        }
+        let at = self.switching.unwrap_or(0) as isize;
+        let next = (at + if back { -1 } else { 1 }).rem_euclid(self.used.len() as isize) as usize;
+        self.switching = Some(next);
+        let id = self.used[next];
+        if let Some(ix) = self.tabs.iter().position(|t| t.editor.entity_id() == id) {
+            self.activate(ix, window, cx);
+        }
+        // Without ⌃ held (from a menu, or a key of your own): that's the one.
+        if !held {
+            self.settle_switch();
+        }
+    }
+
+    /// ⌃ let go after ⌃Tab: the tab reached is now the last used.
+    fn settle_switch(&mut self) {
+        if let Some(at) = self.switching.take() {
+            let id = self.used.remove(at);
+            self.used.insert(0, id);
+        }
+    }
+
     fn step_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.active else { return };
         let side = self.side_tabs(self.tabs[ix].side);
@@ -3555,6 +3605,7 @@ impl Workspace {
                 (Lines, "Fold Level 3".into(), Box::new(crate::editor::FoldLevel3)),
                 (Lines, "Unfold All".into(), Box::new(crate::editor::UnfoldAll)),
                 (Cursors, "Add Next Occurrence".into(), Box::new(crate::editor::AddNextOccurrence)),
+                (Cursors, "Skip This Occurrence".into(), Box::new(crate::editor::SkipOccurrence)),
                 (Cursors, "Select All Occurrences".into(), Box::new(crate::editor::SelectAllOccurrences)),
                 (Cursors, "Add Cursor Above".into(), Box::new(crate::editor::AddCursorAbove)),
                 (Cursors, "Add Cursor Below".into(), Box::new(crate::editor::AddCursorBelow)),
@@ -3598,6 +3649,7 @@ impl Workspace {
                 ),
                 (Go, "Show Info at Cursor".into(), Box::new(ShowInfo)),
                 (Go, "Next Tab".into(), Box::new(NextTab)),
+                (Go, "Last Used Tab".into(), Box::new(SwitchTab)),
                 (View, "Move Tab to the Right Side".into(), Box::new(MoveTabRight)),
                 (View, "Move Tab to the Left Side".into(), Box::new(MoveTabLeft)),
                 (View, "Move Tab Below".into(), Box::new(MoveTabDown)),
@@ -7414,6 +7466,11 @@ impl Render for Workspace {
         div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, _| {
+                if !event.modifiers.control {
+                    this.settle_switch();
+                }
+            }))
             // Files dropped from the Finder open, as with Open With (a folder becomes the project).
             .on_drop(cx.listener(|this, dropped: &gpui::ExternalPaths, window, cx| {
                 this.open_paths(dropped.paths().to_vec(), window, cx)
@@ -7640,6 +7697,14 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::search_project))
             .on_action(cx.listener(Self::show_files))
+            .on_action(cx.listener(|this, _: &SwitchTab, window, cx| {
+                let held = window.modifiers().control;
+                this.switch_tab(false, held, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SwitchTabBack, window, cx| {
+                let held = window.modifiers().control;
+                this.switch_tab(true, held, window, cx)
+            }))
             .on_action(cx.listener(Self::show_outline))
             .on_action(cx.listener(Self::quit))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -8768,6 +8833,49 @@ mod tests {
             assert_eq!(w.outline.as_ref().unwrap().2.len(), 4);
             w.show_files(&ShowFiles, window, cx);
             assert!(!w.sidebar_outline);
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ⌃Tab goes by when tabs were used: the one before, and on while ⌃ is held; letting go
+    /// stays there, so the next ⌃Tab comes back.
+    #[gpui::test]
+    fn ctrl_tab_goes_by_last_used(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("switch-tab");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            let shown = |w: &Workspace, cx: &App| w.active_editor().unwrap().read(cx).file_name();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                w.open_file(dir.join(name), window, cx);
+            }
+            // Used a, b, c, then a again: by last use, a, c, b.
+            w.activate(0, window, cx);
+            // ⌃ held: c (used before a), then b.
+            w.switch_tab(false, true, window, cx);
+            assert_eq!(shown(w, cx), "c.txt");
+            w.switch_tab(false, true, window, cx);
+            assert_eq!(shown(w, cx), "b.txt");
+            // Let go: b is the last used, so ⌃Tab alone goes back to a.
+            w.settle_switch();
+            w.switch_tab(false, false, window, cx);
+            assert_eq!(shown(w, cx), "a.txt");
+            w.switch_tab(false, false, window, cx);
+            assert_eq!(shown(w, cx), "b.txt");
+            // ⌃⇧Tab goes the other way round: the one used longest ago.
+            w.switch_tab(true, false, window, cx);
+            assert_eq!(shown(w, cx), "c.txt");
         });
         std::fs::remove_dir_all(&dir).ok();
     }
