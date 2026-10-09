@@ -7944,21 +7944,25 @@ impl Render for Workspace {
                             match editor.extra.len() {
                                 _ if editor.reading => "Preview".into(),
                                 // A character that can't be seen, at the caret: named.
-                                0 if editor.invisible_at_caret().is_some() => format!(
-                                    "{} · {}",
-                                    position_label(editor, line, col),
-                                    editor.invisible_at_caret().unwrap_or_default()
-                                ),
-                                // Vim's keys: the mode first ("Normal · Ln 4, Col 9").
-                                0 => match editor.vim_mode(cx) {
-                                    Some(mode) => match editor.vim_recording() {
-                                        Some(name) => {
-                                            format!("{} · Recording @{name} · {}", mode.label(), position_label(editor, line, col))
-                                        }
-                                        None => format!("{} · {}", mode.label(), position_label(editor, line, col)),
-                                    },
-                                    None => position_label(editor, line, col),
-                                },
+                                // Vim's keys: the mode first ("Normal · Ln 4, Col 9"); a character
+                                // that can't be seen, at the caret: named after.
+                                0 => {
+                                    let mut label = match editor.vim_mode(cx) {
+                                        Some(mode) => match editor.vim_recording() {
+                                            Some(name) => format!(
+                                                "{} · Recording @{name} · {}",
+                                                mode.label(),
+                                                position_label(editor, line, col)
+                                            ),
+                                            None => format!("{} · {}", mode.label(), position_label(editor, line, col)),
+                                        },
+                                        None => position_label(editor, line, col),
+                                    };
+                                    if let Some(invisible) = editor.invisible_at_caret() {
+                                        label = format!("{label} · {invisible}");
+                                    }
+                                    label
+                                }
                                 // Vim's block: its cursors are the block's lines.
                                 n if editor.vim_mode(cx) == Some(crate::editor::vim::Mode::VisualBlock) => {
                                     match editor.vim_recording() {

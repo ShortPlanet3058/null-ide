@@ -278,6 +278,23 @@ fn whitespace_marks(
         .collect()
 }
 
+/// Where the character at column `col` of a row's text is drawn, its glyphs looked for in
+/// any order (right-to-left text is drawn in another order than it's written).
+fn glyph_x(r: &RowLayout, col: usize) -> Pixels {
+    let Some((byte, _)) = r.text.char_indices().nth(col) else { return r.shaped.width };
+    let before: usize = r.gaps.iter().filter(|g| g.byte < byte).map(|g| g.extra).sum();
+    let hint: usize = r.gaps.iter().filter(|g| g.byte == byte && g.hint).map(|g| g.extra).sum();
+    let index = byte + before + hint;
+    let glyphs = || r.shaped.runs.iter().flat_map(|run| run.glyphs.iter());
+    // Its own glyph; else (a character drawn as nothing) the one after it in the text.
+    glyphs()
+        .filter(|g| g.index == index)
+        .map(|g| g.position.x)
+        .reduce(|a, b| if b < a { b } else { a })
+        .or_else(|| glyphs().filter(|g| g.index > index).min_by_key(|g| g.index).map(|g| g.position.x))
+        .unwrap_or(r.shaped.width)
+}
+
 /// Where each of `marks` (columns of the row's text, and whether a tab) starts and ends in
 /// the row as shown (after a hint shown before it), in one walk along the row's characters
 /// and one along its glyphs: per frame, on every visible row.
@@ -575,7 +592,7 @@ impl Element for EditorElement {
             // The caret's line: what the server says over it ("3 references", "▶ Run Test").
             let lens: Vec<crate::editor::lens::LensItem> = if cx.global::<Settings>().code_lens {
                 editor.ensure_lenses(cx);
-                let line = editor.buffer.point(editor.selection.head).0;
+                let line = editor.buffer.point(editor.shown_caret(cx)).0;
                 editor.lens_on_line(line, cx)
             } else {
                 Vec::new()
@@ -948,7 +965,7 @@ impl Element for EditorElement {
                     {
                         (Some(run(note.len(), &font, *color)), note.clone())
                     } else if let Some(note) =
-                        lens_note.clone().filter(|_| row.last && row.line == editor.buffer.point(editor.selection.head).0)
+                        lens_note.clone().filter(|_| row.last && row.line == caret_line)
                     {
                         (Some(run(note.len(), &font, theme.muted)), note)
                     } else if let Some(note) = blame {
@@ -1138,10 +1155,15 @@ impl Element for EditorElement {
                     let rows = rows_of(line..line + 1);
                     (!rows.is_empty()).then(|| {
                         let y = row_top(rows.start) + (line_height - dot) / 2.;
-                        let kind = match editor.breakpoint_conditions.iter().find(|(l, _)| *l == line) {
-                            Some((_, text)) if matches!(crate::editor::BreakWhen::read(text), crate::editor::BreakWhen::Log(_)) => 2,
+                        let kind = match editor
+                            .breakpoint_conditions
+                            .iter()
+                            .find(|(l, _)| *l == line)
+                            .map(|(_, text)| crate::editor::BreakWhen::read(text))
+                        {
+                            Some(crate::editor::BreakWhen::Log(_)) => 2,
+                            Some(crate::editor::BreakWhen::Condition("")) | None => 0,
                             Some(_) => 1,
-                            None => 0,
                         };
                         (Bounds::new(point(bounds.left() + px(5.), y), size(dot, dot)), kind)
                     })
@@ -1365,13 +1387,17 @@ impl Element for EditorElement {
                 if kinds.is_empty() {
                     continue;
                 }
-                let found: Vec<(usize, bool)> = kinds.iter().map(|(col, _)| (*col, false)).collect();
                 let top = row_top(visible.start + i);
-                for ((x0, x1, _), &(_, kind)) in whitespace_xs(r, &found).into_iter().zip(&kinds) {
-                    let (x0, x1) = (origin.x + r.x + x0, origin.x + r.x + x1);
+                for &(col, kind) in &kinds {
+                    // Found among the glyphs in any order: text turned around (a direction mark)
+                    // is drawn in another order than it's written.
+                    let x = origin.x + r.x + glyph_x(r, col);
                     let (y0, y1) = (top + line_height * 0.15, top + line_height * 0.85);
-                    // No width of its own: a narrow box where it is.
-                    let (x0, x1) = if x1 - x0 < px(3.) { (x0 - px(2.), x0 + px(2.)) } else { (x0, x1) };
+                    // No width of its own: a narrow box where it is; a space, its own width.
+                    let (x0, x1) = match kind {
+                        crate::editor::invisible::Invisible::OddSpace => (x, x + char_width),
+                        _ => (x - px(2.), x + px(2.)),
+                    };
                     invisibles.push((Bounds::from_corners(point(x0, y0), point(x1, y1)), kind));
                 }
             }

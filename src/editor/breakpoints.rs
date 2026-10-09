@@ -21,25 +21,37 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 /// What a breakpoint's field says, read: a condition it stops on ("i == 3"), the time it's
-/// reached it stops at ("5", ">= 5"), or a message it prints without stopping ("log x is
-/// {x}").
+/// reached from which it stops ("5", ">= 5", "> 4": the 5th time and every time after, as
+/// lldb counts), or a message it prints without stopping ("log x is {x}").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BreakWhen<'a> {
     Condition(&'a str),
-    Hit(&'a str),
+    Hit(usize),
     Log(&'a str),
 }
 
 impl<'a> BreakWhen<'a> {
     pub fn read(text: &'a str) -> Self {
         let text = text.trim();
-        if let Some(message) = text.strip_prefix("log ").or_else(|| text.strip_prefix("log:")) {
-            return BreakWhen::Log(message.trim());
+        // "log x is {x}" (not "log == 3": a variable called log).
+        if let Some(message) = text.strip_prefix("log:").or_else(|| text.strip_prefix("log ")) {
+            let message = message.trim();
+            let operator = message.starts_with(['=', '!', '<', '>', '.', '-', '(', '[', '&', '|', '+', '*', '/', '%']);
+            if !operator {
+                // Nothing to say: a plain breakpoint.
+                return if message.is_empty() { BreakWhen::Condition("") } else { BreakWhen::Log(message) };
+            }
         }
-        // A count (lldb's "ignore this many times first"): digits, maybe after >= or ==.
-        let count = text.trim_start_matches(['>', '=', ' ']);
-        if !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()) {
-            return BreakWhen::Hit(count);
+        // A count: digits, maybe after >=, == or > (one more).
+        let (after, rest) = match text {
+            t if t.starts_with(">=") || t.starts_with("==") => (0, &t[2..]),
+            t if t.starts_with('>') => (1, &t[1..]),
+            t => (0, t),
+        };
+        let digits = rest.trim();
+        if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+            let n: usize = digits.parse().unwrap_or(usize::MAX - 1);
+            return BreakWhen::Hit((n + after).max(1));
         }
         BreakWhen::Condition(text)
     }
@@ -154,7 +166,8 @@ impl Editor {
         let Some(line) = self.breakpoint_click(event.position) else { return };
         let current = self.breakpoint_conditions.iter().find(|(l, _)| *l == line).map(|(_, c)| c.clone());
         let input = cx.new(|cx| {
-            let mut input = TextInput::new("Stop when i == 3 · 5: the 5th time · log x is {x}: print, don't stop", cx);
+            let mut input =
+                TextInput::new("Stop when i == 3 · 5: from the 5th time on · log x is {x}: print, don't stop", cx);
             if let Some(text) = &current {
                 input.set_text(text, cx);
             }
@@ -233,10 +246,15 @@ mod tests {
     #[test]
     fn a_breakpoint_s_field_is_read() {
         assert_eq!(BreakWhen::read(" i == 3 "), BreakWhen::Condition("i == 3"));
-        assert_eq!(BreakWhen::read("5"), BreakWhen::Hit("5"));
-        assert_eq!(BreakWhen::read(">= 12"), BreakWhen::Hit("12"));
+        assert_eq!(BreakWhen::read("5"), BreakWhen::Hit(5));
+        assert_eq!(BreakWhen::read(">= 12"), BreakWhen::Hit(12));
+        assert_eq!(BreakWhen::read("> 4"), BreakWhen::Hit(5), "past the 4th: from the 5th");
+        assert_eq!(BreakWhen::read("0"), BreakWhen::Hit(1));
+        assert_eq!(BreakWhen::read("5 > i"), BreakWhen::Condition("5 > i"));
         assert_eq!(BreakWhen::read("log total is {total}"), BreakWhen::Log("total is {total}"));
         assert_eq!(BreakWhen::read("log: hi"), BreakWhen::Log("hi"));
+        assert_eq!(BreakWhen::read("log:"), BreakWhen::Condition(""), "nothing to say: plain");
+        assert_eq!(BreakWhen::read("log == 3"), BreakWhen::Condition("log == 3"), "a variable called log");
         assert_eq!(BreakWhen::read("logged == 3"), BreakWhen::Condition("logged == 3"), "a name starting with log");
     }
 

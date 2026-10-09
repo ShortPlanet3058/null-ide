@@ -1179,6 +1179,7 @@ impl Editor {
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
         self.hints_after_edit();
+        self.lenses_after_edit();
         self.meaning_after_edit();
         self.first_line_after_edit(cx);
         self.breakpoints_after_edit(cx);
@@ -3300,7 +3301,9 @@ impl Editor {
         self.close_hover(cx);
         self.close_completion(cx);
         // A lens's words at the end of the line: what they say, done.
-        if event.button == MouseButton::Left && self.click_lens(event.position, window, cx) {
+        // (A plain click: not a double one, nor one held with ⌘ or ⇧ to select.)
+        let plain = event.click_count == 1 && !event.modifiers.modified();
+        if event.button == MouseButton::Left && plain && self.click_lens(event.position, window, cx) {
             return;
         }
         if self.scrollbar_mouse_down(event.position, cx) {
