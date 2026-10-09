@@ -1452,6 +1452,29 @@ impl Render for SettingsPanel {
                     }))
             }))
             .child(div().flex_1())
+            .child({
+                // Settings of the project's own, over these: how many, and where to change them.
+                let set_here = crate::settings::project_keys().len();
+                let label = match set_here {
+                    0 => "For this project…".to_string(),
+                    1 => "This project sets 1…".to_string(),
+                    n => format!("This project sets {n}…"),
+                };
+                div()
+                    .id("project-json")
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(7.))
+                    .text_size(px(12.))
+                    .text_color(if set_here > 0 { theme.muted } else { theme.faint })
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(theme.foreground))
+                    .child(label)
+                    .active(|s| s.opacity(0.7))
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                        cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::OpenProjectSettings)))
+                    }))
+            })
             .child(
                 div()
                     .id("edit-json")

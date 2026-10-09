@@ -121,6 +121,7 @@ actions!(
         AutoSaveWhenLeaving,
         OpenSettings,
         OpenSettingsFile,
+        OpenProjectSettings,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
@@ -639,6 +640,8 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // This project's own settings, over yours, while its window is in front.
+        crate::settings::use_project(&root, cx);
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
         let lsp = cx.new(|_| LspStore::new(root.clone()));
         let ignore_rules = crate::project_index::ignore_rules(&root);
@@ -845,6 +848,10 @@ impl Workspace {
             ._subscriptions
             .push(cx.observe_window_appearance(window, |_, _, cx| crate::settings::appearance_changed(cx)));
         workspace._subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                let root = this.tree.read(cx).root().to_path_buf();
+                crate::settings::use_project(&root, cx);
+            }
             if window.is_window_active()
                 && let Some(message) = this.notice_on_return.take()
             {
@@ -1125,6 +1132,11 @@ impl Workspace {
             paths.into_iter().filter(|p| !p.components().any(|c| c.as_os_str() == ".git")).collect();
         self.tree.update(cx, |tree, cx| tree.refresh(&visible, cx));
         self.reindex(&visible, cx);
+        // The project's settings, changed (by hand, by another app): in use as they are now.
+        let root = self.tree.read(cx).root().to_path_buf();
+        if visible.contains(&crate::settings::project_file(&root)) {
+            crate::settings::use_project(&root, cx);
+        }
         let changed: HashSet<&PathBuf> = visible.iter().collect();
         for tab in &self.tabs {
             let Some(path) = tab.editor.read(cx).path().map(Path::to_path_buf) else { continue };
@@ -2704,6 +2716,10 @@ impl Workspace {
                     if let Some(name) = theme_file {
                         this.theme_saved(&name, cx);
                     }
+                    let root = this.tree.read(cx).root().to_path_buf();
+                    if editor.read(cx).path() == Some(crate::settings::project_file(&root).as_path()) {
+                        settings::use_project(&root, cx);
+                    }
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
                         // Not readable as written: said, and nothing saved over it meanwhile.
@@ -3821,6 +3837,7 @@ impl Workspace {
             (View, "Next Terminal".into(), Box::new(NextTerminal)),
             (View, "Split Terminal".into(), Box::new(SplitTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
+            (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
         if self.active.is_some() {
             commands.extend([
@@ -6609,6 +6626,25 @@ impl Workspace {
         }
     }
 
+    /// The project's own settings (`.null/settings.json`), made if there are none yet: any
+    /// setting there is used over yours in this project.
+    fn open_project_settings(&mut self, _: &OpenProjectSettings, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let path = crate::settings::project_file(&root);
+        if !path.exists() {
+            let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
+                crate::fs_ops::write_file(
+                    &path,
+                    b"{\n  // Settings for this project only, over yours: \"indent_size\": 2, \"format_on_save\": true\n}\n",
+                )
+            });
+            if let Err(err) = made {
+                return self.show_notice(format!("Couldn't make .null/settings.json: {err}"), cx);
+            }
+        }
+        self.open_file(path, window, cx);
+    }
+
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let moved = self.last_mouse.is_none_or(|last| {
             let d = event.position - last;
@@ -8038,6 +8074,7 @@ impl Render for Workspace {
             .relative()
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_settings_file))
+            .on_action(cx.listener(Self::open_project_settings))
             .on_action(cx.listener(Self::show_commands))
             .on_action(cx.listener(Self::toggle_ai))
             .on_action(cx.listener(Self::show_problems))
@@ -9252,6 +9289,39 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine\n");
         assert!(!editor.read_with(cx, |e, _| e.disk_changed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A project's `.null/settings.json` is used over yours in its window; another
+    /// project's window in front, yours come back. Changed in Settings meanwhile, its own
+    /// value is changed in its file.
+    #[gpui::test]
+    fn a_project_has_its_own_settings(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("project-settings");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (ours, other) = (dir.join("ours"), dir.join("other"));
+        std::fs::create_dir_all(&other).unwrap();
+        let file = crate::settings::project_file(&ours);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{ \"indent_size\": 3 }\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings { indent_size: 4, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = ours.clone();
+        let (_workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        assert_eq!(cx.update(|_, cx| cx.global::<Settings>().indent_size), 3);
+        // Changed in Settings: the project's own value, in its file.
+        cx.update(|_, cx| settings::update(cx, |s| s.indent_size = 5));
+        assert!(std::fs::read_to_string(&file).unwrap().contains("\"indent_size\": 5"));
+        // Another project in front: yours again.
+        cx.update(|_, cx| crate::settings::use_project(&other, cx));
+        assert_eq!(cx.update(|_, cx| cx.global::<Settings>().indent_size), 4);
+        // Back, and changed by hand meanwhile: as it is now.
+        std::fs::write(&file, "{ \"indent_size\": 2 }\n").unwrap();
+        cx.update(|_, cx| crate::settings::use_project(&ours, cx));
+        assert_eq!(cx.update(|_, cx| cx.global::<Settings>().indent_size), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 
