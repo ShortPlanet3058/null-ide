@@ -15,6 +15,7 @@ mod fold;
 mod ghost;
 mod hints;
 mod intel;
+pub mod lens;
 pub mod invisible;
 mod language_pick;
 mod links;
@@ -399,6 +400,8 @@ pub enum EditorEvent {
     Saved,
     /// Save was asked for, but the buffer has no file yet.
     NeedsPath,
+    /// A command to run in the terminal (a code lens's "▶ Run Test").
+    RunCommand(String),
     /// Vim's `:`: its command line, to open.
     VimCommandLine,
     /// The file changed on disk while there were unsaved edits here.
@@ -677,6 +680,7 @@ pub struct Editor {
     fix_menu: Option<fixes::FixMenu>,
     /// Type hints from the language server.
     hints: hints::Hints,
+    lenses: lens::Lenses,
     /// What the language server says each name is, to colour it.
     meaning: meaning::Meaning,
     /// The brackets in colour (see `brackets`), for the buffer revision they're of.
@@ -915,6 +919,7 @@ impl Editor {
             debug_locals: Vec::new(),
             symbol_marks: Default::default(),
             hints: Default::default(),
+            lenses: Default::default(),
             meaning: Default::default(),
             brackets: Default::default(),
             counterpart_task: None,
@@ -3294,6 +3299,10 @@ impl Editor {
         self.vim_clicked();
         self.close_hover(cx);
         self.close_completion(cx);
+        // A lens's words at the end of the line: what they say, done.
+        if event.button == MouseButton::Left && self.click_lens(event.position, window, cx) {
+            return;
+        }
         if self.scrollbar_mouse_down(event.position, cx) {
             return;
         }

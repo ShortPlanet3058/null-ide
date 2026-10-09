@@ -238,6 +238,9 @@ fn sticky_lines(
 pub const FOLDED: &str = " ⋯";
 /// Space between a line's end and who last changed it.
 const BLAME_GAP: &str = "      ";
+
+/// Between the parts of a code lens.
+const LENS_SEP: &str = "  ·  ";
 /// Shown before a color written in the code, in that color.
 const SWATCH: &str = "■ ";
 /// Shown instead for a color that would hardly show on the background.
@@ -567,6 +570,16 @@ impl Element for EditorElement {
             if show_hints {
                 editor.ensure_hints(cx);
             }
+            // The caret's line: what the server says over it ("3 references", "▶ Run Test").
+            let lens: Vec<crate::editor::lens::LensItem> = if cx.global::<Settings>().code_lens {
+                editor.ensure_lenses(cx);
+                let line = editor.buffer.point(editor.selection.head).0;
+                editor.lens_on_line(line, cx)
+            } else {
+                Vec::new()
+            };
+            let lens_note = (!lens.is_empty())
+                .then(|| format!("{BLAME_GAP}{}", lens.iter().map(|l| l.title.as_str()).collect::<Vec<_>>().join(LENS_SEP)));
 
             let char_width = shape("0".repeat(10), &[run(10, &font, theme.foreground)]).width / 10.;
             let total_lines = editor.buffer.len_lines();
@@ -932,6 +945,10 @@ impl Element for EditorElement {
                         line_notes.get(&row.line).filter(|_| row.last && !editor.is_folded(row.line))
                     {
                         (Some(run(note.len(), &font, *color)), note.clone())
+                    } else if let Some(note) =
+                        lens_note.clone().filter(|_| row.last && row.line == editor.buffer.point(editor.selection.head).0)
+                    {
+                        (Some(run(note.len(), &font, theme.muted)), note)
                     } else if let Some(note) = blame {
                         (Some(run(note.len(), &font, theme.faint)), note)
                     } else {
@@ -984,6 +1001,27 @@ impl Element for EditorElement {
                 bounds.top() + px(TOP_PADDING - editor.scroll.y),
             );
             let row_top = |row: usize| origin.y + line_height * row as f32;
+            // Where each part of the caret's line's lens is drawn: a click there does it.
+            let mut lens_hits = Vec::new();
+            if let Some(note) = &lens_note
+                && let Some((i, r)) = row_layouts.iter().enumerate().find(|(_, r)| {
+                    r.row.last && r.row.block.is_none() && r.row.line == caret_line && r.shaped.text.ends_with(note.as_str())
+                })
+            {
+                let mut at = r.shaped.text.len() - note.len() + BLAME_GAP.len();
+                let top = row_top(visible.start + i);
+                for item in &lens {
+                    let (x0, x1) = (r.shaped.x_for_index(at), r.shaped.x_for_index(at + item.title.len()));
+                    lens_hits.push((
+                        Bounds::from_corners(
+                            point(origin.x + r.x + x0, top),
+                            point(origin.x + r.x + x1, top + line_height),
+                        ),
+                        item.action.clone(),
+                    ));
+                    at += item.title.len() + LENS_SEP.len();
+                }
+            }
             // The rows a range of lines takes, clipped to the screen.
             let rows_of = |lines: Range<usize>| {
                 let end =
@@ -1485,6 +1523,7 @@ impl Element for EditorElement {
 
             // Caret: glide toward its new position, then blink softly once idle.
             let target = point(caret_x, line_height * caret_row as f32);
+            editor.set_lens_hits(lens_hits);
             let motion = &mut editor.caret;
             if !motion.placed {
                 (motion.from, motion.to, motion.visual, motion.placed) = (target, target, target, true);
