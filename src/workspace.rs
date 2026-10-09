@@ -2761,6 +2761,7 @@ impl Workspace {
                     }
                 }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
+                EditorEvent::VimCommandLine => this.open_palette(PaletteKind::Ex, window, cx),
                 EditorEvent::Reviewed => this.file_reviewed(editor, cx),
                 EditorEvent::FilesDropped { paths, at } => this.link_dropped(editor.clone(), paths, *at, cx),
                 EditorEvent::SaveFailed(message) => this.show_notice(message.clone(), cx),
@@ -4155,6 +4156,11 @@ impl Workspace {
                 let text = text.clone();
                 this.close_palette(window, cx);
                 this.start_task(text, window, cx);
+            }
+            PaletteEvent::Ex(text) => {
+                let text = text.clone();
+                this.close_palette(window, cx);
+                this.run_ex(&text, window, cx);
             }
             PaletteEvent::OpenFile(path) => {
                 let path = path.clone();
@@ -6627,6 +6633,44 @@ impl Workspace {
     fn open_settings_file(&mut self, _: &OpenSettingsFile, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = Settings::ensure_file(cx) {
             self.open_file(path, window, cx);
+        }
+    }
+
+    /// A Vim command typed after `:` (see `PaletteKind::Ex`).
+    fn run_ex(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let command = text.trim().trim_start_matches(':').trim();
+        let Some(editor) = self.active_editor().cloned() else { return };
+        window.focus(&editor.focus_handle(cx));
+        if command.is_empty() {
+            return;
+        }
+        if let Ok(line) = command.parse::<usize>() {
+            return editor.update(cx, |e, cx| e.vim_go_to_line(line, cx));
+        }
+        let save = |editor: &Entity<Editor>, cx: &mut Context<Self>| editor.update(cx, |e, cx| e.save_to_disk(cx));
+        match command {
+            "w" | "write" => editor.update(cx, |e, cx| e.save_from_keyboard(cx)),
+            "wa" | "wall" => self.save_all(&SaveAll, window, cx),
+            "q" | "q!" | "quit" | "close" => self.close_tab(&CloseTab, window, cx),
+            "wq" | "x" | "xit" => {
+                if save(&editor, cx) {
+                    self.close_tab(&CloseTab, window, cx);
+                }
+            }
+            "qa" | "qa!" | "qall" => self.close_all_tabs(&CloseAllTabs, window, cx),
+            "wqa" | "xa" | "wqall" | "xall" => {
+                self.save_all(&SaveAll, window, cx);
+                self.close_all_tabs(&CloseAllTabs, window, cx);
+            }
+            "noh" | "nohlsearch" => editor.update(cx, |e, cx| e.close_find(window, cx)),
+            _ if command.starts_with('s') || command.starts_with("%s") => {
+                match editor.update(cx, |e, cx| e.vim_substitute(command, cx)) {
+                    Ok(1) => self.show_notice("1 replaced".into(), cx),
+                    Ok(n) => self.show_notice(format!("{n} replaced"), cx),
+                    Err(why) => self.show_notice(why, cx),
+                }
+            }
+            _ => self.show_notice(format!("Not a command here: {command}"), cx),
         }
     }
 

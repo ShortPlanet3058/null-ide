@@ -81,6 +81,25 @@ pub struct Vim {
     head: usize,
     /// The column `j` and `k` keep to (`usize::MAX` after `$`: the line's end).
     goal: Option<usize>,
+    /// The last f F t T, and its character, for ; and ,.
+    last_find: Option<(char, char)>,
+    /// The keys of the command being typed, and the text's revision before it.
+    typed: Vec<Key>,
+    change_from: u64,
+    /// The last change, for `.`: its keys, and what was typed after them (Insert mode).
+    last_change: Vec<Key>,
+    last_insert: Option<String>,
+    /// Where typing began after a change, to know what was typed.
+    insert_from: Option<usize>,
+    /// Replaying the last change (`.`): not a change of its own.
+    replaying: bool,
+    /// The search went backwards (?, #): n goes on backwards.
+    search_back: bool,
+    /// Where the caret was when / or ? opened the find bar (Esc goes back there).
+    before_search: Option<usize>,
+    /// The undo history's length when the change being made began: all it adds is one
+    /// step (the typing after `cw` included), as Vim undoes a change.
+    undo_from: Option<usize>,
 }
 
 /// A key as Vim reads it.
@@ -191,6 +210,15 @@ impl Editor {
         self.close_completion(cx);
         self.single_cursor();
         let head = self.selection.head;
+        // What was typed after the change began, for `.` to type again.
+        if let Some(from) = self.vim.insert_from.take()
+            && from <= head
+        {
+            self.vim.last_insert = Some(self.buffer.slice(from..head));
+        }
+        if !self.vim.replaying {
+            self.vim_one_undo_step();
+        }
         let (_, column) = self.buffer.point(head);
         // Back onto the last character typed, as Vim does.
         let at = if column > 0 { head - 1 } else { head };
@@ -375,6 +403,21 @@ impl Editor {
                 exclusive(to)
             }
             Key::Char('0') => exclusive(self.line_start(line)),
+            Key::Char(c @ (';' | ',')) => {
+                let (kind, ch) = self.vim.last_find?;
+                let kind = if *c == ';' {
+                    kind
+                } else {
+                    match kind {
+                        'f' => 'F',
+                        'F' => 'f',
+                        't' => 'T',
+                        _ => 't',
+                    }
+                };
+                return self.vim_find(kind, ch, n, true);
+            }
+            Key::Char('%') => inclusive(self.vim_matching_bracket(at)?),
             Key::Char('^') => exclusive(self.first_non_blank(line)),
             Key::Char('$') => {
                 self.vim.goal = Some(usize::MAX);
@@ -389,8 +432,39 @@ impl Editor {
         })
     }
 
-    /// One key in Normal or Visual mode. True when Vim took it.
+    /// One key in Normal or Visual mode. True when Vim took it. The keys of a command that
+    /// changed the text are kept, for `.`.
     pub(super) fn vim_input(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.vim.replaying {
+            return self.vim_step(key, window, cx);
+        }
+        if self.vim.typed.is_empty() {
+            self.vim.change_from = self.buffer.revision();
+            self.vim.undo_from = Some(self.undo_stack.len());
+        }
+        let normal = self.vim.mode == Mode::Normal && self.selection.is_empty();
+        if normal {
+            self.vim.typed.push(key.clone());
+        }
+        let taken = self.vim_step(key, window, cx);
+        let waiting = self.vim.count.is_some() || self.vim.operator.is_some() || self.vim.pending.is_some();
+        if !waiting {
+            let typed = std::mem::take(&mut self.vim.typed);
+            let history = matches!(typed.last(), Some(Key::Char('u' | '.') | Key::Ctrl('r')));
+            let changed = self.buffer.revision() != self.vim.change_from || self.vim.mode == Mode::Insert;
+            if normal && changed && !history && !typed.is_empty() {
+                self.vim.last_change = typed;
+                self.vim.last_insert = None;
+                self.vim.insert_from = (self.vim.mode == Mode::Insert).then_some(self.selection.head);
+                if self.vim.mode != Mode::Insert {
+                    self.vim_one_undo_step();
+                }
+            }
+        }
+        taken
+    }
+
+    fn vim_step(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // The arrows and such, as the letters Vim has for them.
         let key = match key {
             Key::Named(k) => match k.as_str() {
@@ -456,9 +530,10 @@ impl Editor {
                 self.vim_operate(operator, self.selection.head, motion, window, cx);
                 return true;
             }
-            if key == Key::Char('g') {
+            // g (gg), f t F T (to a character), i a (a text object): one more key.
+            if let Key::Char(c @ ('g' | 'f' | 'F' | 't' | 'T' | 'i' | 'a')) = key {
                 self.vim.operator = Some((operator, total));
-                self.vim.pending = Some('g');
+                self.vim.pending = Some(c);
                 return true;
             }
             // cw changes to the word's end, as ce.
@@ -489,10 +564,23 @@ impl Editor {
             Key::Char(c) if Operator::of(c).is_some() => {
                 self.vim.operator = Operator::of(c).map(|op| (op, count));
             }
-            Key::Char(c @ ('g' | 'r')) => {
+            Key::Char(c @ ('g' | 'r' | 'f' | 'F' | 't' | 'T')) => {
                 self.vim.count = count;
                 self.vim.pending = Some(c);
             }
+            Key::Char('.') => self.vim_repeat(count, window, cx),
+            Key::Char(c @ ('/' | '?')) => {
+                self.vim.search_back = c == '?';
+                self.vim.before_search = Some(head);
+                self.deploy_find_bar(false, window, cx);
+            }
+            Key::Char(c @ ('n' | 'N')) => {
+                for _ in 0..n {
+                    self.vim_next_match((c == 'n') != self.vim.search_back, cx);
+                }
+            }
+            Key::Char(c @ ('*' | '#')) => self.vim_search_word(c == '#', n, cx),
+            Key::Char(':') => cx.emit(EditorEvent::VimCommandLine),
             Key::Char('i') => self.vim_insert_at(head, cx),
             Key::Char('a') => {
                 let at = if self.buffer.line_len(line) == 0 { head } else { head + 1 };
@@ -579,25 +667,20 @@ impl Editor {
         self.buffer.char_at(self.selection.head).is_none_or(char::is_whitespace)
     }
 
-    /// The key after `g` or `r`.
+    /// The key after `g`, `r`, f F t T, or i a (a text object).
     fn vim_pending(&mut self, pending: char, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let count = self.vim.count.take();
+        let operator = self.vim.operator.take();
+        let count = self.vim.count.take().or(operator.and_then(|(_, n)| n));
+        let operator = operator.map(|(op, _)| op);
+        let n = count.unwrap_or(1).max(1);
         match (pending, key) {
             ('g', Key::Char('g')) => {
                 let last = self.vim_last_line();
                 let to = count.map_or(0, |c| c.saturating_sub(1).min(last));
                 let motion = Motion { to: self.first_non_blank(to), linewise: true, inclusive: false };
-                if let Some((operator, _)) = self.vim.operator.take() {
-                    self.vim_operate(operator, self.selection.head, motion, window, cx);
-                } else if self.vim.mode.visual() {
-                    self.vim.head = motion.to;
-                    self.vim_show_visual(cx);
-                } else {
-                    self.vim_place(motion.to, cx);
-                }
+                self.vim_go(motion, operator, window, cx);
             }
             ('r', Key::Char(c)) if !self.vim.mode.visual() => {
-                let n = count.unwrap_or(1).max(1);
                 let head = self.selection.head;
                 let line = self.buffer.point(head).0;
                 if head + n <= self.line_end(line) {
@@ -605,11 +688,418 @@ impl Editor {
                     self.vim_place(head + n - 1, cx);
                 }
             }
-            _ => {
-                self.vim.operator = None;
+            (kind @ ('f' | 'F' | 't' | 'T'), Key::Char(c)) => {
+                self.vim.last_find = Some((kind, c));
+                if let Some(motion) = self.vim_find(kind, c, n, false) {
+                    self.vim_go(motion, operator, window, cx);
+                }
             }
+            (around @ ('i' | 'a'), Key::Char(c)) if operator.is_some() || self.vim.mode.visual() => {
+                if let Some((range, linewise)) = self.vim_object(around == 'i', c) {
+                    self.vim_on_object(range, linewise, operator, window, cx);
+                }
+            }
+            _ => {}
         }
         true
+    }
+
+    /// Where a motion goes: an operator acts up to it; Visual mode's end moves; else the caret.
+    fn vim_go(&mut self, motion: Motion, operator: Option<Operator>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(operator) = operator {
+            self.vim_operate(operator, self.selection.head, motion, window, cx);
+        } else if self.vim.mode.visual() {
+            self.vim.head = self.vim_clamp(motion.to);
+            self.vim_show_visual(cx);
+        } else {
+            self.vim_place(motion.to, cx);
+        }
+    }
+
+    /// The `n`th `c` on the caret's line: f (on it), t (before it), F and T backwards.
+    /// `again` (; and ,): t and T don't stop where they are.
+    fn vim_find(&self, kind: char, c: char, n: usize, again: bool) -> Option<Motion> {
+        let at = if self.vim.mode.visual() { self.vim.head } else { self.selection.head };
+        let line = self.buffer.point(at).0;
+        let (start, end) = (self.line_start(line), self.line_end(line));
+        let rope = self.buffer.rope();
+        let skip = usize::from(again && matches!(kind, 't' | 'T'));
+        let mut found = None;
+        let mut left = n;
+        if matches!(kind, 'f' | 't') {
+            for i in (at + 1 + skip).min(end)..end {
+                if rope.char(i) == c {
+                    left -= 1;
+                    if left == 0 {
+                        found = Some(i);
+                        break;
+                    }
+                }
+            }
+        } else {
+            for i in (start..at.saturating_sub(skip)).rev() {
+                if rope.char(i) == c {
+                    left -= 1;
+                    if left == 0 {
+                        found = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+        let i = found?;
+        Some(match kind {
+            'f' => Motion { to: i, linewise: false, inclusive: true },
+            't' => Motion { to: i - 1, linewise: false, inclusive: true },
+            'F' => Motion { to: i, linewise: false, inclusive: false },
+            _ => Motion { to: i + 1, linewise: false, inclusive: false },
+        })
+    }
+
+    /// The bracket matching the one at (or after) the caret on its line, for %.
+    fn vim_matching_bracket(&self, at: usize) -> Option<usize> {
+        let line = self.buffer.point(at).0;
+        let rope = self.buffer.rope();
+        let from = (at..self.line_end(line)).find(|&i| "()[]{}".contains(rope.char(i)))?;
+        let c = rope.char(from);
+        let (open, close, forward) = match c {
+            '(' => ('(', ')', true),
+            '[' => ('[', ']', true),
+            '{' => ('{', '}', true),
+            ')' => ('(', ')', false),
+            ']' => ('[', ']', false),
+            _ => ('{', '}', false),
+        };
+        if forward { self.closing(from + 1, open, close) } else { self.opening(from, open, close) }
+    }
+
+    /// The `close` that ends what's open at `from` (scanning ahead, nested pairs skipped).
+    fn closing(&self, from: usize, open: char, close: char) -> Option<usize> {
+        let rope = self.buffer.rope();
+        let mut depth = 0usize;
+        for (i, c) in rope.chars_at(from.min(rope.len_chars())).enumerate().take(1_000_000) {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                if depth == 0 {
+                    return Some(from + i);
+                }
+                depth -= 1;
+            }
+        }
+        None
+    }
+
+    /// The `open` before `before` that isn't closed by then.
+    fn opening(&self, before: usize, open: char, close: char) -> Option<usize> {
+        let rope = self.buffer.rope();
+        let mut depth = 0usize;
+        let mut chars = rope.chars_at(before.min(rope.len_chars()));
+        let mut i = before;
+        while let Some(c) = chars.prev() {
+            i -= 1;
+            if before - i > 1_000_000 {
+                return None;
+            }
+            if c == close {
+                depth += 1;
+            } else if c == open {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            }
+        }
+        None
+    }
+
+    /// A text object at the caret: `inner` (i) or around (a); `c` says which. The range,
+    /// and whether it's whole lines.
+    fn vim_object(&self, inner: bool, c: char) -> Option<(Range<usize>, bool)> {
+        let at = if self.vim.mode.visual() { self.vim.head } else { self.selection.head };
+        let rope = self.buffer.rope();
+        let len = rope.len_chars();
+        let (line, _) = self.buffer.point(at);
+        let (start, end) = (self.line_start(line), self.line_end(line));
+        match c {
+            'w' | 'W' => {
+                if start == end {
+                    return None;
+                }
+                let at = at.min(end - 1);
+                let big = c == 'W';
+                let k = class(rope.char(at), big);
+                let same = |i: usize| class(rope.char(i), big) == k;
+                let mut a = at;
+                while a > start && same(a - 1) {
+                    a -= 1;
+                }
+                let mut b = at + 1;
+                while b < end && same(b) {
+                    b += 1;
+                }
+                if !inner {
+                    let blank = |i: usize| matches!(rope.char(i), ' ' | '\t');
+                    if k == 0 {
+                        // On spaces: they and the word after.
+                        if b < end {
+                            let k2 = class(rope.char(b), big);
+                            while b < end && class(rope.char(b), big) == k2 {
+                                b += 1;
+                            }
+                        }
+                    } else if b < end && blank(b) {
+                        while b < end && blank(b) {
+                            b += 1;
+                        }
+                    } else {
+                        while a > start && blank(a - 1) {
+                            a -= 1;
+                        }
+                    }
+                }
+                Some((a..b, false))
+            }
+            '"' | '\'' | '`' => {
+                let quotes: Vec<usize> = (start..end)
+                    .filter(|&i| rope.char(i) == c && (i == start || rope.char(i - 1) != '\\'))
+                    .collect();
+                let pair = quotes
+                    .chunks(2)
+                    .filter(|p| p.len() == 2)
+                    .find(|p| p[0] <= at && at <= p[1])
+                    .or_else(|| quotes.chunks(2).filter(|p| p.len() == 2).find(|p| p[0] > at))?;
+                let (a, b) = (pair[0], pair[1]);
+                Some(if inner { (a + 1..b, false) } else { (a..b + 1, false) })
+            }
+            '(' | ')' | 'b' | '[' | ']' | '{' | '}' | 'B' | '<' | '>' => {
+                let (open, close) = match c {
+                    '(' | ')' | 'b' => ('(', ')'),
+                    '[' | ']' => ('[', ']'),
+                    '{' | '}' | 'B' => ('{', '}'),
+                    _ => ('<', '>'),
+                };
+                let here = rope.char(at.min(len.saturating_sub(1)));
+                // On the opener: this pair; else (on the closer too) the one around.
+                let a = if here == open { at } else { self.opening(at, open, close)? };
+                let b = self.closing(a + 1, open, close)?;
+                if !inner {
+                    return Some((a..b + 1, false));
+                }
+                // A block over lines: its lines, not the breaks after { and before }.
+                let mut from = a + 1;
+                if rope.get_char(from) == Some('\r') {
+                    from += 1;
+                }
+                if rope.get_char(from) == Some('\n') {
+                    let to_line = self.buffer.point(b).0;
+                    let closer_alone = self.first_non_blank(to_line) == b;
+                    if closer_alone && to_line > self.buffer.point(a).0 + 1 {
+                        return Some((from + 1..self.line_start(to_line), false));
+                    }
+                }
+                Some((a + 1..b, false))
+            }
+            'p' => {
+                let blank = |l: usize| self.buffer.line_text(l).trim().is_empty();
+                let last = self.vim_last_line();
+                let kind = blank(line);
+                let mut first = line;
+                while first > 0 && blank(first - 1) == kind {
+                    first -= 1;
+                }
+                let mut end_line = line;
+                while end_line < last && blank(end_line + 1) == kind {
+                    end_line += 1;
+                }
+                if !inner {
+                    while end_line < last && blank(end_line + 1) != kind {
+                        end_line += 1;
+                        if end_line < last && blank(end_line + 1) == kind {
+                            break;
+                        }
+                    }
+                }
+                Some((self.line_start(first)..self.line_start(end_line + 1), true))
+            }
+            _ => None,
+        }
+    }
+
+    /// An operator on a text object, or Visual mode taking it.
+    fn vim_on_object(
+        &mut self,
+        range: Range<usize>,
+        linewise: bool,
+        operator: Option<Operator>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if linewise {
+            let (first, last) = (self.buffer.point(range.start).0, self.buffer.point(range.end.saturating_sub(1)).0);
+            match operator {
+                Some(operator) => self.vim_operate_lines(operator, first, last, window, cx),
+                None => {
+                    self.vim.mode = Mode::VisualLine;
+                    (self.vim.anchor, self.vim.head) = (self.line_start(first), self.line_start(last));
+                    self.vim_show_visual(cx);
+                }
+            }
+            return;
+        }
+        match operator {
+            // Nothing inside (di( on "()"): c types there, d does nothing.
+            Some(Operator::Change) if range.is_empty() => self.vim_insert_at(range.start, cx),
+            Some(_) if range.is_empty() => {}
+            Some(operator) => {
+                let motion = Motion { to: range.end - 1, linewise: false, inclusive: true };
+                self.vim_operate(operator, range.start, motion, window, cx);
+            }
+            None if !range.is_empty() => {
+                if self.vim.mode == Mode::VisualLine {
+                    self.vim.mode = Mode::Visual;
+                }
+                (self.vim.anchor, self.vim.head) = (range.start, range.end - 1);
+                self.vim_show_visual(cx);
+            }
+            None => {}
+        }
+    }
+
+    /// The steps added to the undo history since the change began, as one.
+    fn vim_one_undo_step(&mut self) {
+        if let Some(from) = self.vim.undo_from.take()
+            && self.undo_stack.len() > from + 1
+        {
+            self.undo_stack.truncate(from + 1);
+        }
+    }
+
+    /// `.`: the last change again (`count` in place of its own, when given).
+    fn vim_repeat(&mut self, count: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut keys = self.vim.last_change.clone();
+        if keys.is_empty() {
+            return;
+        }
+        if let Some(count) = count {
+            let digits = keys.iter().take_while(|k| matches!(k, Key::Char('0'..='9'))).count();
+            keys.drain(..digits);
+            let typed: Vec<Key> = count.to_string().chars().map(Key::Char).collect();
+            keys.splice(0..0, typed);
+        }
+        self.vim.replaying = true;
+        for key in keys {
+            self.vim_step(key, window, cx);
+        }
+        if self.vim.mode == Mode::Insert {
+            if let Some(text) = self.vim.last_insert.clone() {
+                let at = self.selection.head;
+                self.edit(at..at, &text, EditKind::Other, cx);
+            }
+            self.vim_leave_insert(cx);
+        }
+        self.vim.replaying = false;
+        self.vim_one_undo_step();
+    }
+
+    /// n and N: the next match of the search (backwards: `forward` false), the caret on it.
+    fn vim_next_match(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let head = self.selection.head;
+        // From just after the caret: the match it's on isn't the next.
+        self.selection = Selection::caret(if forward { head + 1 } else { head });
+        self.step_match(forward, cx);
+        let at = if self.selection.is_empty() { head } else { self.selection.range().start };
+        self.vim_place(at, cx);
+    }
+
+    /// * and #: the word at the caret, searched for as a whole word.
+    fn vim_search_word(&mut self, back: bool, count: usize, cx: &mut Context<Self>) {
+        let Some((range, _)) = self.vim_object(true, 'w').filter(|(r, _)| !r.is_empty()) else { return };
+        let word = self.buffer.slice(range.clone());
+        if word.trim().is_empty() {
+            return;
+        }
+        crate::find_bar::remember_search(&word, cx);
+        self.vim.search_back = back;
+        self.selection = Selection { anchor: range.start, head: range.end };
+        let query = SearchQuery { text: word, regex: false, whole_word: true, case_sensitive: true };
+        self.set_search(query, cx);
+        self.selection = Selection::caret(range.start);
+        for _ in 0..count {
+            self.vim_next_match(!back, cx);
+        }
+    }
+
+    /// The find bar opened by / or ? closes: on the match found (Enter), or back where it
+    /// started (Esc).
+    pub fn vim_search_done(&mut self, found: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.vim.before_search.take();
+        let at = match before {
+            Some(before) if !found => before,
+            _ => self.selection.range().start,
+        };
+        self.close_find(window, cx);
+        self.vim.mode = Mode::Normal;
+        self.vim_place(at, cx);
+    }
+
+    /// :N: line N, on its first character.
+    pub fn vim_go_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        let line = line.saturating_sub(1).min(self.vim_last_line());
+        self.vim.mode = Mode::Normal;
+        let at = self.first_non_blank(line);
+        self.vim_place(at, cx);
+    }
+
+    /// :s/a/b/ (this line) and :%s/a/b/g (every line): `a` a regular expression; `b` with
+    /// \1 and & for what it found. False when it isn't one.
+    pub fn vim_substitute(&mut self, command: &str, cx: &mut Context<Self>) -> Result<usize, String> {
+        let (every_line, rest) = match command.strip_prefix('%') {
+            Some(rest) => (true, rest),
+            None => (false, command),
+        };
+        let rest = rest.strip_prefix("s").ok_or_else(|| "not a substitution".to_string())?;
+        let mut chars = rest.chars();
+        let sep = chars.next().filter(|c| !c.is_alphanumeric() && *c != ' ').ok_or("not a substitution")?;
+        let parts: Vec<String> = split_unescaped(chars.as_str(), sep);
+        let (pattern, replacement, flags) = match parts.as_slice() {
+            [p] => (p.clone(), String::new(), String::new()),
+            [p, r] => (p.clone(), r.clone(), String::new()),
+            [p, r, f, ..] => (p.clone(), r.clone(), f.clone()),
+            _ => return Err("not a substitution".into()),
+        };
+        let pattern = if flags.contains('i') { format!("(?i){pattern}") } else { pattern };
+        let regex = Regex::new(&pattern).map_err(|_| format!("Can't search for {pattern}"))?;
+        let replacement = vim_replacement(&replacement);
+        let all = flags.contains('g');
+        let lines = if every_line {
+            0..=self.vim_last_line()
+        } else {
+            let line = self.buffer.point(self.selection.head).0;
+            line..=line
+        };
+        let mut edits = Vec::new();
+        let mut count = 0;
+        for line in lines {
+            let text = self.buffer.line_text(line);
+            let found = if all { regex.find_iter(&text).count() } else { usize::from(regex.is_match(&text)) };
+            if found == 0 {
+                continue;
+            }
+            count += found;
+            let new = if all { regex.replace_all(&text, replacement.as_str()) } else { regex.replace(&text, replacement.as_str()) };
+            edits.push((self.line_start(line)..self.line_end(line), new.into_owned()));
+        }
+        if count == 0 {
+            return Err(format!("Not found: {}", parts.first().cloned().unwrap_or_default()));
+        }
+        let first = edits[0].0.start;
+        self.apply_char_edits(edits, cx);
+        self.vim.mode = Mode::Normal;
+        let line = self.buffer.point(first).0;
+        let at = self.first_non_blank(line);
+        self.vim_place(at, cx);
+        Ok(count)
     }
 
     fn vim_insert_at(&mut self, at: usize, cx: &mut Context<Self>) {
@@ -812,9 +1302,9 @@ impl Editor {
 
     /// A key in Visual mode: a motion moves the head; an operator acts on the selection.
     fn vim_visual(&mut self, key: Key, count: Option<usize>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if key == Key::Char('g') {
+        if let Key::Char(c @ ('g' | 'i' | 'a' | 'f' | 'F' | 't' | 'T')) = key {
             self.vim.count = count;
-            self.vim.pending = Some('g');
+            self.vim.pending = Some(c);
             return true;
         }
         if let Some(motion) = self.vim_motion(&key, count, false) {
@@ -905,6 +1395,53 @@ impl Editor {
         }
         true
     }
+}
+
+/// `text` cut at each `sep` not after a backslash (a `\sep` is kept as `sep`).
+fn split_unescaped(text: &str, sep: char) -> Vec<String> {
+    let mut parts = vec![String::new()];
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(n) if n == sep => parts.last_mut().unwrap().push(n),
+                Some(n) => {
+                    parts.last_mut().unwrap().push('\\');
+                    parts.last_mut().unwrap().push(n);
+                }
+                None => parts.last_mut().unwrap().push('\\'),
+            }
+        } else if c == sep {
+            parts.push(String::new());
+        } else {
+            parts.last_mut().unwrap().push(c);
+        }
+    }
+    if parts.last().is_some_and(String::is_empty) && parts.len() > 1 {
+        parts.pop();
+    }
+    parts
+}
+
+/// Vim's replacement (\1, &, \&) as the regex crate writes it (${1}, ${0}, &).
+fn vim_replacement(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(d @ '0'..='9') => out.push_str(&format!("${{{d}}}")),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(other) => out.push(other),
+                None => {}
+            },
+            '&' => out.push_str("${0}"),
+            '$' => out.push_str("$$"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn toggle_case(c: char) -> char {
@@ -1056,6 +1593,96 @@ mod tests {
         assert_eq!(e.read_with(cx, |e, _| e.vim.register.clone().unwrap().text), "ONE two");
         cx.simulate_keystrokes("v escape");
         assert!(e.read_with(cx, |e, _| e.selection.is_empty()));
+    }
+
+    #[gpui::test]
+    fn text_objects(cx: &mut TestAppContext) {
+        let (e, cx) = vim("call(one, \"two |words\", [x])\n", cx);
+        cx.simulate_keystrokes("c i w W escape");
+        assert_eq!(shown(&e, cx), "call(one, \"two |W\", [x])\n");
+        cx.simulate_keystrokes("d i \"");
+        assert_eq!(shown(&e, cx), "call(one, \"|\", [x])\n");
+        cx.simulate_keystrokes("d a (");
+        assert_eq!(shown(&e, cx), "cal|l\n");
+        let (e, cx) = vim("fn f() {\n    let a = 1;\n    |let b = 2;\n}\n\nnext\n", &mut cx.cx);
+        cx.simulate_keystrokes("d i {");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "fn f() {\n}\n\nnext\n", "a block's lines");
+        cx.simulate_keystrokes("u g g y a p G p");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()).matches("fn f()").count(), 2, "a paragraph, and the blank after");
+        // In Visual mode, i w selects the word.
+        let (e, cx) = vim("say he|llo there\n", &mut cx.cx);
+        cx.simulate_keystrokes("v i w");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.slice(e.selection.range())), "hello");
+    }
+
+    #[gpui::test]
+    fn find_on_the_line_and_brackets(cx: &mut TestAppContext) {
+        let (e, cx) = vim("|a(b, c(d), e)\n", cx);
+        cx.simulate_keystrokes("f ,");
+        assert_eq!(shown(&e, cx), "a(b|, c(d), e)\n");
+        cx.simulate_keystrokes(";");
+        assert_eq!(shown(&e, cx), "a(b, c(d)|, e)\n");
+        cx.simulate_keystrokes(",");
+        assert_eq!(shown(&e, cx), "a(b|, c(d), e)\n");
+        cx.simulate_keystrokes("0 %");
+        assert_eq!(shown(&e, cx), "a(b, c(d), e|)\n", "% from before the bracket");
+        cx.simulate_keystrokes("%");
+        assert_eq!(shown(&e, cx), "a|(b, c(d), e)\n");
+        cx.simulate_keystrokes("d t )");
+        assert_eq!(shown(&e, cx), "a|), e)\n", "up to the first )");
+    }
+
+    #[gpui::test]
+    fn dot_repeats_the_last_change(cx: &mut TestAppContext) {
+        let (e, cx) = vim("|one two three four\n", cx);
+        cx.simulate_keystrokes("d w .");
+        assert_eq!(shown(&e, cx), "|three four\n");
+        cx.simulate_keystrokes("c w T H R E E escape w .");
+        assert_eq!(shown(&e, cx), "THREE THRE|E\n", "with what was typed");
+        cx.simulate_keystrokes("u");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "THREE four\n");
+        cx.simulate_keystrokes("0 A ! escape j .");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "THREE four!!\n");
+    }
+
+    #[gpui::test]
+    fn searching(cx: &mut TestAppContext) {
+        let (e, cx) = vim("|item = items[0]\nfor item in items:\n    print(item)\n", cx);
+        cx.simulate_keystrokes("*");
+        assert_eq!(shown(&e, cx), "item = items[0]\nfor |item in items:\n    print(item)\n", "the whole word");
+        cx.simulate_keystrokes("n");
+        assert_eq!(shown(&e, cx), "item = items[0]\nfor item in items:\n    print(|item)\n");
+        cx.simulate_keystrokes("N N");
+        assert_eq!(shown(&e, cx), "|item = items[0]\nfor item in items:\n    print(item)\n");
+        // :s and :%s.
+        e.update(cx, |e, cx| {
+            assert_eq!(e.vim_substitute("%s/item(s?)/thing\\1/g", cx), Ok(5));
+            assert_eq!(e.buffer.to_string(), "thing = things[0]\nfor thing in things:\n    print(thing)\n");
+            assert_eq!(e.vim_substitute("s/thing/&&/", cx), Ok(1));
+            assert!(e.buffer.to_string().starts_with("thingthing = things"));
+            assert!(e.vim_substitute("%s/nothing here//", cx).is_err());
+        });
+    }
+
+    #[gpui::test]
+    fn slash_searches_with_the_find_bar(cx: &mut TestAppContext) {
+        let (e, cx) = vim("|alpha\nbeta\ngamma beta\n", cx);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("beta");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(shown(&e, cx), "alpha\n|beta\ngamma beta\n");
+        e.read_with(cx, |e, cx| assert_eq!(e.vim_mode(cx), Some(Mode::Normal)));
+        cx.simulate_keystrokes("n");
+        assert_eq!(shown(&e, cx), "alpha\nbeta\ngamma |beta\n");
+        // Esc: back where it started.
+        cx.simulate_keystrokes("g g / g a m escape");
+        assert_eq!(shown(&e, cx), "|alpha\nbeta\ngamma beta\n");
+    }
+
+    #[test]
+    fn substitutions_read_as_vim_writes_them() {
+        assert_eq!(split_unescaped("a\\/b/c/g", '/'), ["a/b", "c", "g"]);
+        assert_eq!(vim_replacement("<\\1>&$"), "<${1}>${0}$$");
     }
 
     #[gpui::test]
