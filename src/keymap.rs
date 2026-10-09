@@ -23,10 +23,13 @@ pub enum Keymap {
     JetBrains,
     Sublime,
     Zed,
+    /// Vim's modes and keys in the editor, Null's ⌘ keys everywhere.
+    Vim,
 }
 
 impl Keymap {
-    pub const ALL: [Keymap; 5] = [Keymap::Null, Keymap::VsCode, Keymap::JetBrains, Keymap::Sublime, Keymap::Zed];
+    pub const ALL: [Keymap; 6] =
+        [Keymap::Null, Keymap::VsCode, Keymap::JetBrains, Keymap::Sublime, Keymap::Zed, Keymap::Vim];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -35,6 +38,7 @@ impl Keymap {
             Keymap::JetBrains => "JetBrains",
             Keymap::Sublime => "Sublime Text",
             Keymap::Zed => "Zed",
+            Keymap::Vim => "Vim",
         }
     }
 
@@ -46,6 +50,7 @@ impl Keymap {
             Keymap::JetBrains => "⇧⌘O files · ⇧⌘A actions · ⌘L go to line · ⌘D duplicate · ⌘⌫ delete line",
             Keymap::Sublime => "⌘P files · ⇧⌘P commands · ⇧⌘D duplicate · ⌃⇧K delete line · ⌃⌘↑ move line",
             Keymap::Zed => "⌘P files · ⇧⌘P commands · ⌘D next match · ⇧⌘D duplicate · ⌃⇧K delete line",
+            Keymap::Vim => "hjkl w b e move · i a o insert · v V select · d c y p · Esc · ⌘ keys as Null's",
         }
     }
 
@@ -55,7 +60,7 @@ impl Keymap {
         let workspace = Some("Workspace");
         match self {
             // Null's own keys already follow VS Code for nearly everything.
-            Keymap::Null | Keymap::VsCode => Vec::new(),
+            Keymap::Null | Keymap::VsCode | Keymap::Vim => Vec::new(),
             Keymap::JetBrains => vec![
                 KeyBinding::new("secondary-shift-o", TogglePalette, workspace),
                 KeyBinding::new("secondary-e", TogglePalette, workspace),
