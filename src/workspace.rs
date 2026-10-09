@@ -7979,19 +7979,23 @@ impl Render for Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         let lsp_status = self.language_status(cx);
         let conflicts = self.active_editor().map_or(0, |e| e.read(cx).conflicts().len());
-        // Where the caret is in the code, after the file's name: `Shop › checkout`.
-        let trail: Option<String> = self.active_editor().cloned().and_then(|editor| {
-            let (row, plain) = {
-                let e = editor.read(cx);
-                (e.caret_point().0, e.preview.is_none() && !e.reading && e.extra.is_empty())
-            };
-            if !plain {
-                return None;
-            }
-            let items = self.outline_items(&editor, 300_000, cx)?;
-            let trail = crate::outline::trail(&items, row);
-            (!trail.is_empty()).then(|| trail.join(" › "))
-        });
+        // Where the caret is in the code, after the file's name: `Shop › checkout`, each
+        // with its row (a click goes there).
+        let trail: Vec<(String, usize)> = self
+            .active_editor()
+            .cloned()
+            .and_then(|editor| {
+                let (row, plain) = {
+                    let e = editor.read(cx);
+                    (e.caret_point().0, e.preview.is_none() && !e.reading && e.extra.is_empty())
+                };
+                if !plain {
+                    return None;
+                }
+                let items = self.outline_items(&editor, 300_000, cx)?;
+                Some(crate::outline::trail_items(&items, row).into_iter().map(|i| (i.name.clone(), i.row)).collect())
+            })
+            .unwrap_or_default();
         let (status_items, problems): (Vec<String>, (usize, usize)) = match self.active_editor().map(|e| e.read(cx)) {
             Some(editor) => {
                 let (line, col) = editor.buffer.point(editor.shown_caret(cx));
@@ -8001,10 +8005,6 @@ impl Render for Workspace {
                 let mut path = path.map(|p| shorten_path(&p, STATUS_PATH_CHARS)).unwrap_or_else(|| "Untitled".into());
                 if editor.missing {
                     path.push_str(" · deleted on disk");
-                }
-                if let Some(trail) = &trail {
-                    path.push_str(" › ");
-                    path.push_str(trail);
                 }
                 if let Some(preview) = &editor.preview {
                     (vec![path, preview.summary()], (0, 0))
@@ -8415,7 +8415,55 @@ impl Render for Workspace {
                             )
                         })
                 }))
-                .child(div().flex_1().min_w_0().truncate().children(items.next()))
+                // The file (a click shows it in the files), then where the caret is in it (a
+                // click on a name goes there).
+                .child({
+                    let file_path = self.active_path(cx);
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .flex()
+                        .items_center()
+                        .children(items.next().map(|place| {
+                            div()
+                                .id("status-place")
+                                .debug_selector(|| "status-place".into())
+                                .flex_shrink()
+                                .min_w_0()
+                                .truncate()
+                                .when(file_path.is_some(), |d| {
+                                    d.cursor_pointer().hover(|s| s.text_color(theme.foreground))
+                                })
+                                .child(place)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    if let Some(path) = &file_path {
+                                        this.show_files(&ShowFiles, window, cx);
+                                        this.tree.update(cx, |tree, cx| tree.show_path(path, cx));
+                                    }
+                                }))
+                        }))
+                        .children(trail.iter().enumerate().map(|(i, (name, row))| {
+                            let row = *row;
+                            div()
+                                .flex_none()
+                                .flex()
+                                .child(div().px(px(5.)).text_color(theme.faint).child("›"))
+                                .child(
+                                    div()
+                                        .id(("status-trail", i))
+                                        .debug_selector(move || format!("status-trail {i}"))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme.foreground))
+                                        .child(name.clone())
+                                        .active(|s| s.opacity(0.7))
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                            this.go_to_outline_row(row, window, cx)
+                                        })),
+                                )
+                        }))
+                })
                 .children(lsp_status)
                 .children(indent_label.map(|label| {
                     div()
@@ -9919,6 +9967,39 @@ mod tests {
         cx.update(|_, cx| crate::settings::use_project(&dir, cx));
         let now = cx.update(|_, cx| (cx.global::<Settings>().indent_size, cx.global::<Settings>().format_on_save));
         assert_eq!(now, (2, false));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The status bar's place: a click on a name in it goes there; on the file, shows it in
+    /// the files.
+    #[gpui::test]
+    fn the_status_bar_s_place_is_clicked(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("status-trail");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let file = dir.join("src/shop.py");
+        std::fs::write(&file, "class Shop:\n    def checkout(self):\n        pay()\n        ship()\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings { sidebar_visible: false, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(file.clone(), window, cx));
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+        editor.update(cx, |e, cx| e.set_caret_point((3, 8), cx));
+        cx.run_until_parked();
+        // "Shop": to its line.
+        let shop = cx.debug_bounds("status-trail 0").expect("the trail is drawn").center();
+        cx.simulate_click(shop, Default::default());
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.caret_point().0), 0);
+        // The file: shown in the files.
+        let place = cx.debug_bounds("status-place").expect("the file is drawn").center();
+        cx.simulate_click(place, Default::default());
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| cx.global::<Settings>().sidebar_visible));
         std::fs::remove_dir_all(&dir).ok();
     }
 
