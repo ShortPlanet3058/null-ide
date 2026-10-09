@@ -95,6 +95,7 @@ actions!(
         ToggleLineBlame,
         ToggleSpellCheck,
         ToggleInlayHints,
+        ToggleCodeLens,
         ToggleBracketColours,
         ToggleProblemsAtLineEnds,
         ToggleFocusMode,
@@ -2799,6 +2800,7 @@ impl Workspace {
                 }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
                 EditorEvent::VimCommandLine => this.open_palette(PaletteKind::Ex, window, cx),
+                EditorEvent::RunCommand(command) => this.run_in_terminal(command.clone(), None, window, cx),
                 EditorEvent::Reviewed => this.file_reviewed(editor, cx),
                 EditorEvent::FilesDropped { paths, at } => this.link_dropped(editor.clone(), paths, *at, cx),
                 EditorEvent::SaveFailed(message) => this.show_notice(message.clone(), cx),
@@ -3770,6 +3772,7 @@ impl Workspace {
                 Box::new(ToggleLineBlame),
             ),
             (View, toggle(settings.inlay_hints, "Hide Type Hints", "Show Type Hints"), Box::new(ToggleInlayHints)),
+            (View, toggle(settings.code_lens, "Hide Code Lens", "Show Code Lens"), Box::new(ToggleCodeLens)),
             (
                 View,
                 toggle(settings.bracket_colours, "Plain Brackets", "Colour Bracket Pairs"),
@@ -8637,6 +8640,9 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|_, _: &ToggleInlayHints, _, cx| settings::update(cx, |s| s.inlay_hints = !s.inlay_hints)),
+            )
+            .on_action(
+                cx.listener(|_, _: &ToggleCodeLens, _, cx| settings::update(cx, |s| s.code_lens = !s.code_lens)),
             )
             .on_action(cx.listener(|_, _: &ToggleBracketColours, _, cx| {
                 settings::update(cx, |s| s.bracket_colours = !s.bracket_colours)

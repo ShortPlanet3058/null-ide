@@ -451,6 +451,8 @@ pub struct Settings {
     pub symbol_marks: bool,
     /// Type hints from the language server inside the code (`x: i32`), faintly.
     pub inlay_hints: bool,
+    /// What the language server says over the caret's function ("3 references", "▶ Run").
+    pub code_lens: bool,
     /// Show suggestions while typing. Ctrl+Space asks for them either way.
     pub autocomplete: bool,
     /// Where AI answers come from. Off until a provider is chosen.
@@ -493,6 +495,7 @@ impl Default for Settings {
             autocomplete: true,
             line_blame: true,
             inlay_hints: false,
+            code_lens: true,
             indent_guides: true,
             caret_blink: true,
             typewriter: false,

@@ -383,6 +383,7 @@ impl LspStore {
                     implementation: Some(Default::default()),
                     document_highlight: Some(Default::default()),
                     inlay_hint: Some(Default::default()),
+                    code_lens: Some(lsp_types::CodeLensClientCapabilities::default()),
                     semantic_tokens: Some(lsp_types::SemanticTokensClientCapabilities {
                         requests: lsp_types::SemanticTokensClientCapabilitiesRequests {
                             range: Some(false),
@@ -447,6 +448,10 @@ impl LspStore {
                     ..Default::default()
                 }),
                 window: Some(WindowClientCapabilities { work_done_progress: Some(true), ..Default::default() }),
+                // rust-analyzer gives "▶ Run" lenses only to a client that says it runs them.
+                experimental: Some(serde_json::json!({
+                    "commands": { "commands": ["rust-analyzer.runSingle", "rust-analyzer.showReferences"] }
+                })),
                 workspace: Some(lsp_types::WorkspaceClientCapabilities {
                     apply_edit: Some(true),
                     semantic_tokens: Some(lsp_types::SemanticTokensWorkspaceClientCapabilities {
@@ -869,6 +874,33 @@ impl LspStore {
             let Some(request) = request else { return Vec::new() };
             request.await.ok().flatten().unwrap_or_default()
         }
+    }
+
+    /// The code lenses of a file ("3 references", "▶ Run Test"), maybe without their words.
+    pub fn code_lenses(&self, path: &Path) -> impl Future<Output = Vec<lsp_types::CodeLens>> + use<> {
+        let request = self.server_for(path).zip(uri_for(path)).map(|(server, uri)| {
+            server.request::<lsp_types::request::CodeLensRequest>(lsp_types::CodeLensParams {
+                text_document: TextDocumentIdentifier { uri },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+        });
+        async move {
+            let Some(request) = request else { return Vec::new() };
+            request.await.ok().flatten().unwrap_or_default()
+        }
+    }
+
+    /// A code lens with its words (and what it does), as the server puts them.
+    pub fn resolve_code_lens(
+        &self,
+        path: &Path,
+        lens: lsp_types::CodeLens,
+    ) -> impl Future<Output = Option<lsp_types::CodeLens>> + use<> {
+        let request = self
+            .server_for(path)
+            .map(|server| server.request::<lsp_types::request::CodeLensResolve>(lens));
+        async move { request?.await.ok() }
     }
 
     /// The servers that care about renaming `path`: its language's, or for a folder,
