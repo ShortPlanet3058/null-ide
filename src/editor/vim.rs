@@ -53,10 +53,12 @@ impl Operator {
 }
 
 /// Text yanked or deleted, and whether it's whole lines.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Register {
     text: String,
     linewise: bool,
+    /// A Visual Block's columns, a line each: put back as a block.
+    block: bool,
 }
 
 /// Where a motion goes, and how an operator takes it: whole lines, or up to it (and the
@@ -124,6 +126,8 @@ pub struct Vim {
     in_replay: bool,
     /// 3i, 2o: what's typed is typed this many more times (on new lines, for o and O).
     insert_repeat: Option<(usize, bool)>,
+    /// Visual Block after $: every line to its end, however long.
+    block_to_end: bool,
     /// How many times the last typing went in (3i: three), for `.`.
     last_insert_times: usize,
     /// The caret moved in Insert mode by other means than typing (an arrow, a click): what's
@@ -429,12 +433,16 @@ impl Editor {
         let len = self.buffer.len_chars();
         let (anchor, head) = (self.buffer.point(self.vim.anchor.min(len)), self.buffer.point(self.vim.head.min(len)));
         let (first, last) = (anchor.0.min(head.0), anchor.0.max(head.0));
-        let (left, right) = (anchor.1.min(head.1), anchor.1.max(head.1));
+        // Columns as shown (a tab is as wide as it's drawn), so the block is straight.
+        let (a, h) = (self.display_column(anchor.0, anchor.1), self.display_column(head.0, head.1));
+        let (left, right) = (a.min(h), a.max(h));
         (first..=last)
             .map(|line| {
                 let start = self.line_start(line);
-                let len = self.buffer.line_len(line);
-                (line, start + left.min(len)..start + (right + 1).min(len))
+                let from = self.column_char(line, left).0;
+                // $: every line to its end.
+                let to = if self.vim.block_to_end { self.buffer.line_len(line) } else { self.column_char(line, right + 1).0 };
+                (line, start + from..start + to.max(from))
             })
             .collect()
     }
@@ -459,7 +467,7 @@ impl Editor {
         match key {
             Key::Char('d' | 'x' | 'y' | 'c' | 's') => {
                 let yank = key == Key::Char('y');
-                self.vim_yank(text, false, yank, cx);
+                self.vim_keep(Register { text, linewise: false, block: true }, yank, cx);
                 if !yank {
                     let edits: Vec<(Range<usize>, String)> =
                         ranges.iter().filter(|(_, r)| !r.is_empty()).map(|(_, r)| (r.clone(), String::new())).collect();
@@ -524,6 +532,29 @@ impl Editor {
     fn vim_at(&self) -> usize {
         let at = if self.vim.mode.visual() { self.vim.head } else { self.selection.head };
         at.min(self.buffer.len_chars())
+    }
+
+    /// The column `char_column` of `line` is shown at, tabs taking the room they're drawn in.
+    fn display_column(&self, line: usize, char_column: usize) -> usize {
+        let tab = self.style.indent.width().max(1);
+        self.buffer.line_text(line).chars().take(char_column).fold(0, |col, c| {
+            if c == '\t' { (col / tab + 1) * tab } else { col + 1 }
+        })
+    }
+
+    /// The character of `line` at shown column `column`, and how many spaces short of it
+    /// the line ends (a short line).
+    fn column_char(&self, line: usize, column: usize) -> (usize, usize) {
+        let tab = self.style.indent.width().max(1);
+        let mut shown = 0;
+        for (i, c) in self.buffer.line_text(line).chars().enumerate() {
+            let next = if c == '\t' { (shown / tab + 1) * tab } else { shown + 1 };
+            if next > column {
+                return (i, 0);
+            }
+            shown = next;
+        }
+        (self.buffer.line_len(line), column - shown)
     }
 
     /// The last line with text (ropey counts an empty one after a final line break).
@@ -1548,12 +1579,18 @@ impl Editor {
     /// The text of `range`, kept to put back (and on the clipboard, as Vim with
     /// `clipboard=unnamed` has it).
     fn vim_yank(&mut self, text: String, linewise: bool, yanked: bool, cx: &mut Context<Self>) {
+        self.vim_keep(Register { text, linewise, block: false }, yanked, cx);
+    }
+
+    /// `register` kept (see `vim_yank`): in the register named, the unnamed one and the
+    /// clipboard; in "0 too when it was yanked.
+    fn vim_keep(&mut self, register: Register, yanked: bool, cx: &mut Context<Self>) {
         let name = self.vim.register_name;
         // "_: kept nowhere.
         if name == Some('_') {
             return;
         }
-        let register = Register { text, linewise };
+        let linewise = register.linewise;
         match name {
             // "A: added to "a.
             Some(c) if c.is_ascii_uppercase() => {
@@ -1561,7 +1598,7 @@ impl Editor {
                     .default_global::<Shared>()
                     .registers
                     .entry(c.to_ascii_lowercase())
-                    .or_insert(Register { text: String::new(), linewise });
+                    .or_insert(Register { linewise, ..Register::default() });
                 kept.text.push_str(&register.text);
                 kept.linewise |= linewise;
             }
@@ -1594,7 +1631,7 @@ impl Editor {
             && cx.try_global::<Shared>().and_then(|s| s.unnamed.as_ref()).is_none_or(|r| r.text != text)
         {
             let linewise = text.ends_with('\n');
-            return Some(Register { text, linewise });
+            return Some(Register { text, linewise, block: false });
         }
         #[cfg(test)]
         let _ = cx;
@@ -1708,6 +1745,9 @@ impl Editor {
         let Some(register) = self.vim_register(cx) else { return };
         let head = self.selection.head;
         let line = self.buffer.point(head).0;
+        if register.block {
+            return self.vim_put_block(&register.text, after, count, cx);
+        }
         if register.linewise {
             let body = register.text.strip_suffix('\n').unwrap_or(&register.text).to_string();
             let text = self.vim_breaks(&(body + "\n").repeat(count));
@@ -1733,7 +1773,41 @@ impl Editor {
         self.vim_place(end.saturating_sub(1).max(at), cx);
     }
 
+    /// A block put back as one: each of its lines on a line from the caret's down, at the
+    /// caret's column (after it, for p), short lines filled with spaces to reach it, lines
+    /// added past the end.
+    fn vim_put_block(&mut self, text: &str, after: bool, count: usize, cx: &mut Context<Self>) {
+        let (line, column) = self.buffer.point(self.selection.head);
+        let shown = self.display_column(line, column) + usize::from(after && self.buffer.line_len(line) > 0);
+        let last = self.vim_last_line();
+        let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+        let mut added = String::new();
+        for (i, part) in text.split('\n').enumerate() {
+            let part = part.repeat(count.max(1));
+            let target = line + i;
+            if target <= last {
+                let (at, short) = self.column_char(target, shown);
+                let at = self.line_start(target) + at;
+                edits.push((at..at, format!("{}{part}", " ".repeat(short))));
+            } else {
+                added.push_str(&format!("{}{}{part}", self.style.line_ending.text(), " ".repeat(shown)));
+            }
+        }
+        if !added.is_empty() {
+            let end = self.line_end(last);
+            // (Right after what goes at the end of the last line, if anything does.)
+            match edits.iter_mut().find(|(r, _)| r.start == end) {
+                Some((_, text)) => text.push_str(&added),
+                None => edits.push((end..end, added)),
+            }
+        }
+        self.apply_char_edits(edits, cx);
+        let at = self.line_start(line) + self.column_char(line, shown).0;
+        self.vim_place(at, cx);
+    }
+
     fn vim_start_visual(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.vim.block_to_end = false;
         self.vim.mode = mode;
         self.vim.anchor = self.selection.head;
         self.vim.head = self.selection.head;
@@ -1786,6 +1860,10 @@ impl Editor {
             return true;
         }
         if let Some(motion) = self.vim_motion(&key, count, false) {
+            // $ in a block: to every line's end; a move across a line ends that.
+            if !matches!(key, Key::Char('j' | 'k' | 'G' | '+' | '-') | Key::Ctrl(_)) {
+                self.vim.block_to_end = key == Key::Char('$');
+            }
             let goal = self.vim.goal;
             self.vim.head = self.vim_clamp(motion.to);
             self.vim.goal = goal;
@@ -2365,6 +2443,28 @@ mod tests {
         let (e, cx) = vim("ab|cd\nx\nabcd\n", &mut cx.cx);
         cx.simulate_keystrokes("ctrl-v j j I # escape");
         assert_eq!(text(&e, cx), "ab#cd\nx\nab#cd\n");
+    }
+
+    /// A block copied goes back as a block; $ takes every line to its end; tabs count as
+    /// the room they take.
+    #[gpui::test]
+    fn blocks_go_back_as_blocks(cx: &mut TestAppContext) {
+        let (e, cx) = vim("|ab12\ncd34\nef\n", cx);
+        let text = |e: &Entity<Editor>, cx: &mut gpui::VisualTestContext| e.read_with(cx, |e, _| e.buffer.to_string());
+        cx.simulate_keystrokes("ctrl-v j l y");
+        cx.simulate_keystrokes("j j $ p");
+        assert_eq!(text(&e, cx), "ab12\ncd34\nefab\n  cd\n", "after the column, a line added below");
+        cx.simulate_keystrokes("g g ctrl-v j $ d");
+        assert_eq!(text(&e, cx), "\n\nefab\n  cd\n", "$: every line to its end");
+        // Columns as shown: a tab takes the room it's drawn in.
+        let (e, cx) = vim("|\tab\nxy\n", &mut cx.cx);
+        e.read_with(cx, |e, _| {
+            let tab = e.style.indent.width().max(1);
+            assert_eq!(e.display_column(0, 1), tab, "after the tab");
+            assert_eq!(e.column_char(0, tab + 1), (2, 0), "b, past the tab and a");
+            assert_eq!(e.column_char(0, tab + 5), (3, 3), "past the line's end: 3 spaces short");
+            assert_eq!(e.column_char(1, 1), (1, 0));
+        });
     }
 
     #[test]
