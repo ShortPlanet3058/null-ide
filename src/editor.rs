@@ -531,6 +531,9 @@ pub struct Editor {
     longest_line: std::cell::Cell<(u64, usize)>,
     /// Set for an image or a file that isn't text, shown instead of the text.
     pub preview: Option<crate::preview::Preview>,
+    /// A file that isn't text, as its bytes (the first `HEX_LIMIT` of them), to show in hex.
+    binary: Option<std::sync::Arc<Vec<u8>>>,
+    hex_scroll: gpui::UniformListScrollHandle,
     /// The file was deleted on disk while open (a checkout, the terminal): the text is
     /// still here, and saving puts the file back.
     pub missing: bool,
@@ -810,6 +813,8 @@ impl Editor {
             spans_for: None,
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
             preview: None,
+            binary: None,
+            hex_scroll: gpui::UniformListScrollHandle::new(),
             missing: false,
             disk_changed: false,
             saving_by_itself: false,
@@ -950,6 +955,7 @@ impl Editor {
         {
             let mut editor = Self::new(Buffer::new(), Some(path), cx);
             editor.preview = Some(preview);
+            editor.read_bytes();
             return editor;
         }
         let (text, encoding) = read.unwrap_or_default();
@@ -990,6 +996,7 @@ impl Editor {
             let readable_now = now.is_none() && read.is_ok();
             if !(readable_now && matches!(self.preview, Some(crate::preview::Preview::Unreadable { .. }))) {
                 self.preview = now.or(self.preview.take());
+                self.read_bytes();
                 return cx.notify();
             }
             self.preview = None;
@@ -2897,6 +2904,7 @@ impl Editor {
             .ok_or_else(|| format!("This file isn't {} text.", encoding.label()))?;
         // Text after all: shown, and written, as text is (its line endings, its indentation).
         if self.preview.take().is_some() {
+            self.binary = None;
             self.style = crate::file_style::FileStyle::for_file(
                 Some(&path),
                 &text[..text.floor_char_boundary(200_000)],
@@ -4672,7 +4680,89 @@ impl Editor {
 
     /// An image at its own size (smaller if it doesn't fit), or a line saying the file
     /// isn't text.
+    /// A file that isn't text: its bytes read, for the hex view (none for anything else).
+    fn read_bytes(&mut self) {
+        use std::io::Read;
+        self.binary = match (&self.preview, &self.path) {
+            (Some(crate::preview::Preview::NotText { .. }), Some(path)) => std::fs::File::open(path).ok().map(|file| {
+                let mut bytes = Vec::new();
+                file.take(HEX_LIMIT as u64).read_to_end(&mut bytes).ok();
+                std::sync::Arc::new(bytes)
+            }),
+            _ => None,
+        };
+    }
+
+    /// A file that isn't text, as its bytes: sixteen to a row, the offset before them and
+    /// the characters they'd be after. Read only.
+    fn render_hex(&self, bytes: std::sync::Arc<Vec<u8>>, preview: &crate::preview::Preview, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.global::<Theme>().clone();
+        let code = cx.global::<Fonts>().code.clone();
+        let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let commands = crate::palette::shortcut(&crate::workspace::ShowCommands, cx).unwrap_or_else(|| "⌘K".into());
+        let total = preview.summary();
+        let cut = match preview {
+            crate::preview::Preview::NotText { bytes: all } if *all > bytes.len() as u64 => {
+                format!(" · the first {} shown", crate::preview::file_size(bytes.len() as u64))
+            }
+            _ => String::new(),
+        };
+        let rows = bytes.len().div_ceil(HEX_ROW);
+        let digits = format!("{:x}", bytes.len().max(1)).len().max(8);
+        let list = gpui::uniform_list("hex", rows, {
+            let theme = theme.clone();
+            move |range: Range<usize>, _: &mut Window, _: &mut App| {
+                range
+                    .map(|row| {
+                        let (offset, hex, chars) = hex_row(&bytes, row, digits);
+                        div()
+                            .flex()
+                            .gap(px(24.))
+                            .px(px(24.))
+                            .h(px(20.))
+                            .items_center()
+                            .whitespace_nowrap()
+                            .child(div().text_color(theme.faint).child(offset))
+                            .child(div().text_color(theme.foreground).child(hex))
+                            .child(div().text_color(theme.muted).child(chars))
+                            .into_any_element()
+                    })
+                    .collect()
+            }
+        })
+        .track_scroll(self.hex_scroll.clone())
+        .flex_1()
+        .min_h_0()
+        // Never joined: "...." and "<=" are bytes, one column each.
+        .code_font_as(code, crate::fonts::code_features(false))
+        .text_size(px(13.));
+        div()
+            .key_context("Preview")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, a: &ReopenWithEncoding, _, cx| this.reopen_with(a.encoding, cx)))
+            .size_full()
+            .flex()
+            .flex_col()
+            .font_family(cx.global::<Fonts>().ui.clone())
+            .child(
+                div()
+                    .px(px(24.))
+                    .pt(px(14.))
+                    .pb(px(10.))
+                    .text_size(px(crate::ui::T_SM))
+                    .text_color(theme.faint)
+                    .child(format!(
+                        "{name} isn't text: its bytes, {total}{cut}. Text in another encoding? {commands}, “Encoding: Reopen as…”"
+                    )),
+            )
+            .child(list)
+            .into_any_element()
+    }
+
     fn render_preview(&self, preview: &crate::preview::Preview, cx: &Context<Self>) -> AnyElement {
+        if let (crate::preview::Preview::NotText { .. }, Some(bytes)) = (preview, &self.binary) {
+            return self.render_hex(bytes.clone(), preview, cx);
+        }
         use gpui::{ObjectFit, StyledImage, img};
         let theme = cx.global::<Theme>();
         let (muted, faint) = (theme.muted, theme.faint);
@@ -4727,6 +4817,31 @@ impl Editor {
             .child(content)
             .into_any_element()
     }
+}
+
+/// How much of a file that isn't text the hex view reads.
+const HEX_LIMIT: usize = 16 << 20;
+
+/// Bytes on a row of the hex view.
+const HEX_ROW: usize = 16;
+
+/// Row `row` of `bytes` in hex: its offset ("0000a0f0"), its bytes in two groups of eight,
+/// and the characters they are (ASCII; a dot for the rest).
+fn hex_row(bytes: &[u8], row: usize, digits: usize) -> (String, String, String) {
+    let start = row * HEX_ROW;
+    let chunk = &bytes[start.min(bytes.len())..(start + HEX_ROW).min(bytes.len())];
+    let mut hex = String::with_capacity(HEX_ROW * 3 + 1);
+    for i in 0..HEX_ROW {
+        if i == HEX_ROW / 2 {
+            hex.push(' ');
+        }
+        match chunk.get(i) {
+            Some(b) => hex.push_str(&format!("{b:02x} ")),
+            None => hex.push_str("   "),
+        }
+    }
+    let chars: String = chunk.iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
+    (format!("{start:0digits$x}"), hex.trim_end().to_string(), chars)
 }
 
 /// Prose files bigger than this don't show their word count.
@@ -4975,6 +5090,17 @@ mod tests {
         // ⌘/ still uses line comments.
         cx.simulate_keystrokes("cmd-z cmd-/");
         e.update(cx, |e, _| assert!(e.buffer.to_string().starts_with("// let a")));
+    }
+
+    #[test]
+    fn bytes_are_shown_sixteen_to_a_row() {
+        let bytes: Vec<u8> = (0..20).map(|i| if i == 1 { b'A' } else { i }).collect();
+        let (offset, hex, chars) = hex_row(&bytes, 0, 8);
+        assert_eq!(offset, "00000000");
+        assert_eq!(hex, "00 41 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f");
+        assert_eq!(chars, ".A..............");
+        let (offset, hex, chars) = hex_row(&bytes, 1, 8);
+        assert_eq!((offset.as_str(), hex.as_str(), chars.as_str()), ("00000010", "10 11 12 13", "...."));
     }
 
     #[test]
@@ -5240,7 +5366,9 @@ mod tests {
         let (editor, cx) = cx.add_window_view(|_, cx| Editor::open(path.clone(), None, cx));
         editor.update(cx, |e, cx| {
             assert!(matches!(e.preview, Some(crate::preview::Preview::NotText { .. })));
+            assert_eq!(e.binary.as_deref().map(Vec::as_slice), Some(b"h\0i\0".as_slice()), "shown in hex");
             e.reopen_with(Encoding::Utf16Le, cx);
+            assert!(e.binary.is_none());
             assert_eq!((e.buffer.to_string(), e.encoding), ("hi".to_string(), Encoding::Utf16Le));
             assert!(e.preview.is_none(), "text after all");
             // Read, not edited: ⌘Z has nothing to take back (not the empty "isn't text").
