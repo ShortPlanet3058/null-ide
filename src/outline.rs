@@ -61,13 +61,19 @@ pub fn current(items: &[Item], row: usize) -> Option<usize> {
 
 /// Where the caret on `row` is, from the outside in (`Shop`, `checkout`): the item it's
 /// in, and each one that item sits inside.
+#[cfg(test)]
 pub fn trail(items: &[Item], row: usize) -> Vec<&str> {
+    trail_items(items, row).into_iter().map(|item| item.name.as_str()).collect()
+}
+
+/// The items of `trail`, outermost first (each with its row, to go to).
+pub fn trail_items(items: &[Item], row: usize) -> Vec<&Item> {
     let Some(at) = current(items, row) else { return Vec::new() };
-    let mut trail = vec![items[at].name.as_str()];
+    let mut trail = vec![&items[at]];
     let mut depth = items[at].depth;
     for item in items[..at].iter().rev() {
         if item.depth < depth {
-            trail.push(&item.name);
+            trail.push(item);
             depth = item.depth;
         }
     }

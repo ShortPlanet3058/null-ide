@@ -400,6 +400,16 @@ impl FileTree {
     }
 
     /// Highlights `path` and expands its folders so it's visible.
+    /// Shows `path` in the files, its folders opened, picked and scrolled to.
+    pub fn show_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.expand_to(path);
+        self.selected = Some(path.to_path_buf());
+        self.also.clear();
+        self.rebuild();
+        self.reveal_selected();
+        cx.notify();
+    }
+
     pub fn set_active(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
         // Already the one shown and picked: nothing to lay out again.
         if self.active == path && path.is_some() && self.selected == path && self.also.is_empty() {
