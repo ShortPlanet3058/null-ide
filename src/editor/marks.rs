@@ -121,8 +121,13 @@ impl Editor {
         // Each match's char from the rope, not by counting from the start each time.
         let rope = self.buffer.rope();
         let start_byte = rope.char_to_byte(start);
+        // Cut out of a long line, the slice's ends can be inside a word: a match there is
+        // whole only if the word goes no further.
+        let cut_before = start > 0 && is_word_char(rope.char(start - 1));
+        let cut_after = end < rope.len_chars() && is_word_char(rope.char(end));
         whole_word_matches(&text, word)
             .into_iter()
+            .filter(|&byte| !(cut_before && byte == 0) && !(cut_after && byte + word.len() == text.len()))
             .map(|byte| {
                 let from = rope.byte_to_char(start_byte + byte);
                 from..from + len

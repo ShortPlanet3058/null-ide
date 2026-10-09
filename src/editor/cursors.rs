@@ -358,6 +358,7 @@ impl Editor {
     /// ⌥↵ in the find bar: a cursor on every match (the current one the main cursor), the
     /// bar closed and the keyboard back in the text.
     pub fn select_all_matches(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.search_now();
         let Some(search) = &self.search else { return };
         let current = search.current;
         let cursors: Vec<(Cursor, bool)> = search

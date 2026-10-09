@@ -164,11 +164,45 @@ fn backup_files(root: &Path) -> Vec<(PathBuf, Option<u32>)> {
         .collect()
 }
 
-/// Whether process `pid` is running.
+/// The lock a Null holds while it runs: `backups/running.<pid>.lock`.
+fn lock_file(pid: u32) -> Option<PathBuf> {
+    Some(crate::tools::data_dir()?.join("backups").join(format!("running.{pid}.lock")))
+}
+
+/// Takes this Null's lock, held until it ends (the system lets go of it however it ends):
+/// another Null tells it's still running by that, not by its number, which a process
+/// started since may have been given.
+fn hold_own_lock() {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        static HELD: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
+        HELD.get_or_init(|| {
+            let path = lock_file(std::process::id())?;
+            std::fs::create_dir_all(path.parent()?).ok()?;
+            let file = std::fs::File::create(&path).ok()?;
+            (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(file)
+        });
+    }
+}
+
+/// Whether process `pid` is a Null still running.
 fn running(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // Signal 0 only asks: there, or there but someone else's.
+        use std::os::fd::AsRawFd;
+        // Its lock: held, it runs; free, it's gone (and its number may be another's now).
+        if let Some(path) = lock_file(pid)
+            && let Ok(file) = std::fs::File::open(&path)
+        {
+            let free = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+            if free {
+                std::fs::remove_file(&path).ok();
+            }
+            return !free;
+        }
+        // No lock (a Null from before them): whether any process has that number. Signal 0
+        // only asks: there, or there but someone else's.
         unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
     }
     #[cfg(not(unix))]
@@ -180,6 +214,7 @@ fn running(pid: u32) -> bool {
 
 /// Keeps `backups` as this Null's unsaved work in the project; none removes its file.
 pub fn save_backups(root: &Path, backups: &[Backup]) {
+    hold_own_lock();
     let Some(file) = own_backups_file(root) else { return };
     if backups.is_empty() {
         std::fs::remove_file(&file).ok();
@@ -203,6 +238,7 @@ pub fn save_backups(root: &Path, backups: &[Backup]) {
 /// that of any that's gone, taken over (kept in this one's file first, then theirs
 /// removed). A Null still running keeps its own.
 pub fn load_backups(root: &Path) -> Vec<Backup> {
+    hold_own_lock();
     let own = std::process::id();
     let mut files: Vec<PathBuf> = backup_files(root)
         .into_iter()
@@ -315,6 +351,20 @@ mod tests {
         save_backups(&root, &[]);
         assert!(running.exists() && load_backups(&root).is_empty());
         std::fs::remove_file(&running).ok();
+    }
+
+    /// A Null runs while it holds its lock: a process given a gone Null's number since
+    /// doesn't keep that Null's backups from coming back.
+    #[test]
+    fn a_running_null_is_told_by_its_lock() {
+        hold_own_lock();
+        assert!(running(std::process::id()));
+        // A process that's there (this test's parent), with a lock left free: a Null gone.
+        let parent = std::os::unix::process::parent_id();
+        let lock = lock_file(parent).unwrap();
+        std::fs::write(&lock, "").unwrap();
+        assert!(!running(parent));
+        assert!(!lock.exists(), "a gone Null's lock is cleared away");
     }
 
     #[test]

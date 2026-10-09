@@ -45,6 +45,18 @@ pub fn read(path: &Path) -> std::io::Result<(String, Encoding)> {
     decode(bytes).ok_or_else(|| std::io::ErrorKind::InvalidData.into())
 }
 
+/// Reads a file as text only if that text, written back, is its bytes again: for changes
+/// to a file that isn't open (a replace across the project, a rename's edits), which mustn't
+/// touch what they don't change. (A few stray bytes among UTF-8 would come back as UTF-8.)
+pub fn read_whole(path: &Path) -> std::io::Result<(String, Encoding)> {
+    let bytes = std::fs::read(path)?;
+    let (text, encoding) = decode(bytes.clone()).ok_or(std::io::ErrorKind::InvalidData)?;
+    if encode(&text, encoding).ok().as_deref() != Some(bytes.as_slice()) {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    Ok((text, encoding))
+}
+
 pub fn decode(bytes: Vec<u8>) -> Option<(String, Encoding)> {
     if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
         return String::from_utf8(rest.to_vec()).ok().map(|t| (t, Encoding::Utf8Bom));
@@ -180,6 +192,22 @@ pub fn encode(text: &str, encoding: Encoding) -> Result<Vec<u8>, char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_files_that_write_back_the_same_are_read_whole() {
+        let dir = crate::tools::test_dir("read-whole");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mixed = dir.join("mixed.txt");
+        let mut bytes = "café, naïve, ".as_bytes().to_vec();
+        bytes.extend([b'r', 0xE9, b's', b'u', b'm', b'\n']);
+        std::fs::write(&mixed, &bytes).unwrap();
+        assert!(read(&mixed).is_ok());
+        assert!(read_whole(&mixed).is_err(), "its stray byte would be written as UTF-8");
+        let latin = dir.join("latin.txt");
+        std::fs::write(&latin, [b'r', 0xE9, b's', b'u', b'm', b'\n']).unwrap();
+        assert_eq!(read_whole(&latin).unwrap(), ("résum\n".to_string(), Encoding::Windows1252));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn utf8_with_a_stray_byte_keeps_its_accents() {

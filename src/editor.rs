@@ -538,6 +538,9 @@ pub struct Editor {
     saving_by_itself: bool,
     /// What the file last held on disk, as far as Null knows, to recognise it moved.
     pub on_disk: Option<Fingerprint>,
+    /// The file's size and time when `on_disk` was taken: the same still, it wasn't
+    /// written since (and needn't be read again to know).
+    disk_stamp: Option<DiskStamp>,
     /// How the file's bytes are text, kept when saving.
     pub encoding: crate::encoding::Encoding,
     /// The view's height when last drawn, to keep the caret in view as it shrinks.
@@ -742,6 +745,14 @@ pub type Fingerprint = (usize, u64);
 /// (revision, caret) and the column found there with its name.
 type DataColumnCache = Option<((u64, usize), Option<(usize, Option<String>)>)>;
 
+/// A file's size and modification time.
+type DiskStamp = (u64, std::time::SystemTime);
+
+fn disk_stamp(path: &Path) -> Option<DiskStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
 pub fn fingerprint(text: &str) -> Fingerprint {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
@@ -797,6 +808,7 @@ impl Editor {
             disk_changed: false,
             saving_by_itself: false,
             on_disk: None,
+            disk_stamp: None,
             encoding: Default::default(),
             viewport_height: None,
             reading: false,
@@ -935,6 +947,7 @@ impl Editor {
         let (text, encoding) = read.unwrap_or_default();
         let mut editor = Self::new(Buffer::from_text(&text), Some(path), cx);
         editor.on_disk = Some(fingerprint(&text));
+        editor.disk_stamp = disk_stamp(&editor.path.clone().unwrap_or_default());
         editor.encoding = encoding;
         editor.reload_git_base(cx);
         if let Some(lsp) = lsp {
@@ -973,7 +986,14 @@ impl Editor {
             }
             self.preview = None;
         }
+        // Not written since Null read or wrote it: nothing to read again (and the encoding
+        // it was reopened in isn't guessed again).
+        let stamp = disk_stamp(path);
+        if !discard_edits && self.on_disk.is_some() && stamp.is_some() && stamp == self.disk_stamp {
+            return;
+        }
         let Ok((text, encoding)) = read else { return };
+        self.disk_stamp = stamp;
         // What Null itself last wrote (the watcher saw a save, typing has gone on since):
         // nothing changed on disk, unless another app wrote it in another encoding.
         if !discard_edits && self.on_disk == Some(fingerprint(&text)) {
@@ -1027,6 +1047,14 @@ impl Editor {
             cx.global::<Settings>()
                 .indent_for(language_pick::by_path(&path).map_or(language_pick::PLAIN, |k| k.name())),
         );
+        // What's there now (moved: the same file; saved as over another: that one, which
+        // the save goes over as asked): what a later save checks the disk against.
+        self.on_disk = std::fs::read(&path).ok().and_then(|bytes| {
+            crate::encoding::decode_exactly(&bytes, self.encoding)
+                .or_else(|| crate::encoding::decode_as(bytes, self.encoding))
+                .map(|text| fingerprint(&text))
+        });
+        self.disk_stamp = disk_stamp(&path);
         self.path = Some(path);
         // A name that says nothing: the first line may (`run.sh` renamed `run`).
         self.first_line_language = if self.path.as_deref().and_then(language_pick::by_path).is_none() {
@@ -1427,11 +1455,21 @@ impl Editor {
         self.search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(150)).await;
             this.update(cx, |this, cx| {
+                this.search_task = None;
                 this.refresh_search();
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// The matches as the text is now, before going to one or replacing it: a search still
+    /// waiting for typing to pause (a big file) runs first, so no match from before an
+    /// edit is taken for one now.
+    fn search_now(&mut self) {
+        if self.search_task.take().is_some() {
+            self.refresh_search();
+        }
     }
 
     fn refresh_search(&mut self) {
@@ -1479,6 +1517,7 @@ impl Editor {
     }
 
     fn step_match(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.search_now();
         if self.search.is_none() {
             let query = self.known_query(cx);
             if query.text.is_empty() {
@@ -1515,6 +1554,7 @@ impl Editor {
 
     /// Replaces the selected match (if the selection is one), then moves to the next.
     pub fn replace_next_match(&mut self, replacement: &str, cx: &mut Context<Self>) {
+        self.search_now();
         let selection = self.selection.range();
         let Some(search) = &self.search else { return };
         if let (Some(regex), true) = (&search.regex, search.matches.contains(&selection)) {
@@ -2513,7 +2553,8 @@ impl Editor {
         let mut previous = None;
         let mut count = 0;
         let mut line = 0;
-        for (i, c) in text.chars().enumerate() {
+        let mut chars = text.chars().enumerate().peekable();
+        while let Some((i, c)) = chars.next() {
             match c {
                 ' ' | '\t' => {
                     trailing.get_or_insert(i);
@@ -2530,7 +2571,8 @@ impl Editor {
                     {
                         edits.push((i..i, "\r".into()));
                     }
-                    if c == '\n' {
+                    // Lines counted as the buffer counts them: a lone "\r" ends one too.
+                    if c == '\n' || chars.peek().is_none_or(|(_, next)| *next != '\n') {
                         line += 1;
                     }
                 }
@@ -2856,6 +2898,7 @@ impl Editor {
         }
         self.encoding = encoding;
         self.on_disk = Some(fingerprint(&text));
+        self.disk_stamp = disk_stamp(&path);
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.last_edit = None;
@@ -2929,14 +2972,23 @@ impl Editor {
             return false;
         }
         // Changed on disk since it was read, unseen (a file outside the project, a change the
-        // watcher missed): asked about, as one seen is, not written over.
+        // watcher missed): asked about, as one seen is, not written over. Read only when its
+        // size or time changed, and as its own encoding (one reopened in isn't guessed again).
         if let (Some(path), Some(read)) = (&self.path, self.on_disk)
-            && let Ok((now, _)) = crate::encoding::read(path)
-            && fingerprint(&now) != read
+            && disk_stamp(path) != self.disk_stamp
+            && let Ok(bytes) = std::fs::read(path)
         {
-            self.disk_changed = true;
-            cx.emit(EditorEvent::SaveConflict);
-            return false;
+            let now = crate::encoding::decode_exactly(&bytes, self.encoding)
+                .or_else(|| crate::encoding::decode_as(bytes, self.encoding))
+                .map(|text| fingerprint(&text));
+            if now != Some(read) {
+                // Known now: saving over it once asked ("Save Mine") goes ahead.
+                self.on_disk = now;
+                self.disk_stamp = disk_stamp(path);
+                self.disk_changed = true;
+                cx.emit(EditorEvent::SaveConflict);
+                return false;
+            }
         }
         let by_itself = self.saving_by_itself;
         self.tidy_for_save(by_itself, cx);
@@ -2962,6 +3014,7 @@ impl Editor {
         match crate::fs_ops::write_file(path, &bytes) {
             Ok(()) => {
                 self.on_disk = Some(fingerprint(&text));
+                self.disk_stamp = disk_stamp(path);
                 self.missing = false;
                 self.disk_changed = false;
                 self.buffer.mark_saved();
@@ -4915,6 +4968,28 @@ mod tests {
         // Across the rope's pieces, a word cut in two is one.
         let (n, carried) = count_words("hel", 0, false);
         assert_eq!(count_words("lo world", n, carried), (1, true));
+    }
+
+    /// In a big file (searched again once typing pauses), Replace pressed quickly replaces
+    /// matches as they are now, never text that was one before the last replace.
+    #[gpui::test]
+    fn replacing_quickly_in_a_big_file_replaces_only_matches(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let filler = "y".repeat(80) + "\n";
+        let text = format!("foo a foo b foo\n{}", filler.repeat((1 << 20) / filler.len() + 1));
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(PathBuf::from("x.txt")), cx));
+        e.update(cx, |e, cx| {
+            e.selection = Selection::caret(0);
+            e.set_search(SearchQuery { text: "foo".into(), ..SearchQuery::default() }, cx);
+            for _ in 0..3 {
+                e.replace_next_match("x", cx);
+            }
+            assert!(e.buffer.to_string().starts_with("x a x b x\n"), "{:?}", e.buffer.slice(0..20));
+        });
     }
 
     /// ⌘E: the word at the caret is searched for; ⌘G goes to its next use.

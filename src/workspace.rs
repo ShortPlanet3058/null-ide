@@ -852,12 +852,24 @@ impl Workspace {
             }
             if !window.is_window_active() {
                 // Off to another app: files save now when they save by themselves.
+                // As files save by themselves: the line being typed on keeps its spaces, and
+                // one changed on disk waits for a save that asks.
                 if cx.global::<Settings>().auto_save != AutoSave::Off {
-                    this.save_named_tabs(cx);
+                    let editors: Vec<Entity<Editor>> = this.tabs.iter().map(|t| t.editor.clone()).collect();
+                    for editor in &editors {
+                        Self::save_if_named(editor, cx);
+                    }
                 }
                 this.save_session(cx);
             }
         }));
+        // settings.json couldn't be read at launch: said, not left to pass for the defaults.
+        if let Some(why) = Settings::unreadable() {
+            workspace.show_notice(
+                format!("settings.json can't be read ({why}): the defaults are used until it's put right"),
+                cx,
+            );
+        }
         workspace
     }
 
@@ -1123,14 +1135,22 @@ impl Workspace {
                 tab.editor.update(cx, |editor, cx| editor.check_missing(cx));
             }
         }
-        // What git counts: ignored files (a build's output, node_modules) change nothing it says.
+        // What git counts: ignored files (a build's output, node_modules) change nothing it
+        // says, unless git has them all the same (added by force: one it lists, or one open).
         let root = self.tree.read(cx).root().to_path_buf();
+        let open: HashSet<PathBuf> =
+            self.tabs.iter().filter_map(|t| t.editor.read(cx).path().map(Path::to_path_buf)).collect();
         let counted: Vec<PathBuf> = visible
             .iter()
-            .filter(|p| !crate::project_index::is_ignored(&self.ignore_rules, &root, p))
+            .filter(|p| {
+                !crate::project_index::is_ignored(&self.ignore_rules, &root, p)
+                    || open.contains(*p)
+                    || self.git_status.iter().any(|(listed, _)| listed == *p)
+            })
             .cloned()
             .collect();
-        self.follow_moves(&counted, cx);
+        // Moves among ignored files too: a tab open on one follows it.
+        self.follow_moves(&visible, cx);
         cx.notify();
         if git_changed {
             self.refresh_git(cx);
@@ -2278,6 +2298,9 @@ impl Workspace {
                 if let Err(error) = result {
                     return this.show_notice(error, cx);
                 }
+                // Its tabs moved with it now, not once the tree's word of it arrives (after
+                // this): edits to the moved file itself go to its open tab, not the disk.
+                this.paths_renamed(&from, &to, cx);
                 // What every server asked for, as one, at the files where they are now: the
                 // files changed and those that couldn't be.
                 let changed = (!edits.is_empty()).then(|| {
@@ -2623,13 +2646,20 @@ impl Workspace {
                 EditorEvent::ReadFromDisk => {
                     // Its other copy has what's on disk too (reloaded itself, or given it now):
                     // the read isn't replayed on it as an edit (that doubled its end).
-                    let (text, saved) = {
+                    let (text, saved, on_disk) = {
                         let e = editor.read(cx);
-                        (e.buffer.rope().clone(), !e.buffer.is_dirty())
+                        (e.buffer.rope().clone(), !e.buffer.is_dirty(), e.on_disk)
                     };
                     for twin in this.twins_of(editor, cx) {
                         if *twin.read(cx).buffer.rope() != text {
                             twin.update(cx, |t, cx| t.apply_twin_edits(None, &text, saved, cx));
+                        }
+                        // What's on disk, as this copy has it: no change on disk left to ask about.
+                        if saved {
+                            twin.update(cx, |t, _| {
+                                t.on_disk = on_disk;
+                                t.disk_changed = false;
+                            });
                         }
                         this.twin_seen.insert(twin.entity_id(), twin.read(cx).buffer.revision());
                     }
@@ -2637,7 +2667,8 @@ impl Workspace {
                 }
                 EditorEvent::Saved => {
                     // Saved while an AI task works: that file's change is yours too.
-                    if let Some(run) = this.ai_task.as_mut().filter(|r| !matches!(r.state, TaskState::Review(_)))
+                    // (Not the saves that start it: those are in the copy it's compared with.)
+                    if let Some(run) = this.ai_task.as_mut().filter(|r| matches!(r.state, TaskState::Running(_)))
                         && let Some(path) = editor.read(cx).path()
                     {
                         run.yours.insert(path.to_path_buf());
@@ -4680,7 +4711,11 @@ impl Workspace {
                     files += (count > 0) as usize;
                 }
                 None => {
-                    let Ok((text, encoding)) = crate::encoding::read(path) else { continue };
+                    // Not one that would come back changed where nothing was replaced.
+                    let Ok((text, encoding)) = crate::encoding::read_whole(path) else {
+                        failed.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                        continue;
+                    };
                     let edits = crate::project_search::replacements(&text, query, replacement, *line);
                     if edits.is_empty() {
                         continue;
@@ -6021,9 +6056,14 @@ impl Workspace {
     /// Labels told apart: a second "qa" is "qa 2" (two terminals in one folder).
     fn distinct_labels(labels: Vec<String>) -> Vec<String> {
         let mut out: Vec<String> = Vec::with_capacity(labels.len());
-        for (i, label) in labels.iter().enumerate() {
-            let before = labels[..i].iter().filter(|l| *l == label).count();
-            out.push(if before == 0 { label.clone() } else { format!("{label} {}", before + 1) });
+        for label in &labels {
+            // The next number no tab has, shown or named so ("qa 2" named by you).
+            let (mut shown, mut n) = (label.clone(), 1);
+            while out.contains(&shown) || (n > 1 && labels.contains(&shown)) {
+                n += 1;
+                shown = format!("{label} {n}");
+            }
+            out.push(shown);
         }
         out
     }
@@ -6416,7 +6456,7 @@ impl Workspace {
             if let Some(tab) = self.tabs.iter().find(|t| t.editor.read(cx).path() == Some(path.as_path())) {
                 tab.editor.update(cx, |editor, cx| editor.apply_lsp_edits(&edits, cx));
             } else {
-                let written = crate::encoding::read(&path).and_then(|(text, encoding)| {
+                let written = crate::encoding::read_whole(&path).and_then(|(text, encoding)| {
                     let mut buffer = crate::buffer::Buffer::from_text(&text);
                     crate::editor::apply_edits(&mut buffer, &edits);
                     let bytes = crate::encoding::encode(&buffer.to_string(), encoding)
@@ -9215,6 +9255,36 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Changed on disk with no word of it (another app, a watcher that missed it): saving
+    /// asks, once; Save Mine then writes.
+    #[gpui::test]
+    fn saving_over_an_unseen_change_asks_once(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("save-unseen");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(file.clone(), window, cx));
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+        editor.update(cx, |e, cx| e.restore_unsaved("mine\n", cx));
+        std::fs::write(&file, "theirs, unseen\n").unwrap();
+        editor.update(cx, |e, cx| e.save_to_disk(cx));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "asked before writing over it");
+        cx.simulate_prompt_answer("Save Mine");
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt(), "not asked again");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Switching where changes here would be overwritten: asked, they come along.
     #[gpui::test]
     #[cfg(unix)]
@@ -10109,6 +10179,9 @@ mod tests {
         assert_eq!(Workspace::terminal_name("cargo run"), "cargo run");
         let labels = Workspace::distinct_labels(vec!["qa".into(), "api".into(), "qa".into(), "qa".into()]);
         assert_eq!(labels, ["qa", "api", "qa 2", "qa 3"]);
+        // One you named "qa 2" keeps it; another "qa" takes the next number free.
+        let labels = Workspace::distinct_labels(vec!["qa".into(), "qa".into(), "qa 2".into()]);
+        assert_eq!(labels, ["qa", "qa 3", "qa 2"]);
     }
 
     /// A command's output in the terminal: its problems in files that exist join the list

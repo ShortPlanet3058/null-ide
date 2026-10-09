@@ -381,7 +381,11 @@ impl Settings {
             // Not JSON at all: left as it is, and not written over, until it's put right.
             Err(err) => {
                 eprintln!("null: can't read {}: {err}", path.display());
-                std::fs::copy(&path, path.with_extension("unreadable.json")).ok();
+                // A copy of it as it was (once: an earlier one may be of settings that read).
+                let copy = path.with_extension("unreadable.json");
+                if !copy.exists() {
+                    std::fs::copy(&path, copy).ok();
+                }
                 *FILE.lock().unwrap_or_else(|e| e.into_inner()) =
                     FileState { path: Some(path), unreadable: Some(err.to_string()), skipped: Vec::new() };
                 None
@@ -458,9 +462,20 @@ impl Settings {
                 }
             }
         }
-        let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
-            crate::fs_ops::write_file(&path, (serde_json::to_string_pretty(&out).unwrap_or_default() + "\n").as_bytes())
-        });
+        // Into the file as written (its comments, its order), only what changed; else whole.
+        let before = std::fs::read_to_string(&path).ok();
+        let text = before
+            .as_deref()
+            .zip(out.as_object())
+            .and_then(|(text, out)| written_into(text, out, &defaults))
+            .unwrap_or_else(|| serde_json::to_string_pretty(&out).unwrap_or_default() + "\n");
+        if before.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        let result = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| crate::fs_ops::write_file(&path, text.as_bytes()));
         if let Err(err) = result {
             eprintln!("null: couldn't save settings to {}: {err}", path.display());
         }
@@ -538,6 +553,11 @@ pub fn init(cx: &mut App) {
 
 /// Changes settings, saves them, and applies the theme.
 pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
+    // Couldn't be read: put right since (in another editor)? Read now, so the change goes
+    // into what it says, not into the defaults used meanwhile.
+    if Settings::unreadable().is_some() {
+        reload(cx);
+    }
     let mut settings = cx.global::<Settings>().clone();
     change(&mut settings);
     settings.font_size = settings.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
@@ -554,6 +574,169 @@ pub fn reload(cx: &mut App) {
     if settings != *cx.global::<Settings>() {
         apply(settings, cx);
     }
+}
+
+/// `out` written into `text` (settings.json as it is): each value that differs replaced
+/// where it is, and those it doesn't have (unless at their defaults) added at its end, so
+/// its comments and order stay. None when the text isn't one object this can follow, or
+/// doesn't read back as `out`.
+fn written_into(
+    text: &str,
+    out: &serde_json::Map<String, serde_json::Value>,
+    defaults: &serde_json::Value,
+) -> Option<String> {
+    use serde_json::Value;
+    let (open, members) = json_members(text)?;
+    let indent_at = |at: usize| {
+        let line = text[..at].rfind('\n').map_or(0, |n| n + 1);
+        text[line..at].chars().take_while(|c| *c == ' ' || *c == '\t').collect::<String>()
+    };
+    // Nested values (objects, lists) indented as the line their key is on.
+    let shown = |value: &Value, indent: &str| {
+        serde_json::to_string_pretty(value).ok().map(|v| v.replace('\n', &format!("\n{indent}")))
+    };
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    for (key, range) in &members {
+        let Some(value) = out.get(key) else { continue };
+        let written: Option<Value> = serde_json::from_str(&crate::snippets::without_comments(&text[range.clone()])).ok();
+        if !written.as_ref().is_some_and(|w| same_json(w, value)) {
+            edits.push((range.clone(), shown(value, &indent_at(range.start))?));
+        }
+    }
+    let indent = members.first().map_or_else(|| "  ".to_string(), |(_, r)| indent_at(r.start));
+    let mut added = String::new();
+    for (key, value) in out {
+        if members.iter().any(|(k, _)| k == key) || defaults.get(key) == Some(value) {
+            continue;
+        }
+        if !members.is_empty() || !added.is_empty() {
+            added.push(',');
+        }
+        added.push_str(&format!("\n{indent}{}: {}", serde_json::to_string(key).ok()?, shown(value, &indent)?));
+    }
+    if !added.is_empty() {
+        match members.last() {
+            Some((_, last)) => edits.push((last.end..last.end, added)),
+            None => edits.push((open + 1..open + 1, added + "\n")),
+        }
+    }
+    let mut new = text.to_string();
+    edits.sort_by_key(|(r, _)| r.start);
+    for (range, with) in edits.into_iter().rev() {
+        new.replace_range(range, &with);
+    }
+    // Reads back as `out` (a key left out reads as its default), or not used.
+    let read: Value = serde_json::from_str(&crate::snippets::without_comments(&new)).ok()?;
+    let read = read.as_object()?;
+    let same = out.iter().all(|(k, v)| read.get(k).or(defaults.get(k)).is_some_and(|r| same_json(r, v)))
+        && read.keys().all(|k| out.contains_key(k));
+    same.then_some(new)
+}
+
+/// The same JSON, a number the same however it's written (`15` and `15.0`).
+fn same_json(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+        (Value::Array(a), Value::Array(b)) => a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_json(a, b)),
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|w| same_json(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
+/// A key in a JSON object, and where its value is.
+type Member = (String, std::ops::Range<usize>);
+
+/// The keys of the object `text` is (comments and trailing commas allowed) with where each
+/// value is, and where the object opens. None when it isn't one object.
+fn json_members(text: &str) -> Option<(usize, Vec<Member>)> {
+    let b = text.as_bytes();
+    let space = |mut i: usize| loop {
+        while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        if b[i.min(b.len())..].starts_with(b"//") {
+            while b.get(i).is_some_and(|c| *c != b'\n') {
+                i += 1;
+            }
+        } else if b[i.min(b.len())..].starts_with(b"/*") {
+            i = text[i + 2..].find("*/").map_or(b.len(), |n| i + 2 + n + 2);
+        } else {
+            return i;
+        }
+    };
+    let string_end = |mut i: usize| {
+        i += 1;
+        while i < b.len() {
+            match b[i] {
+                b'\\' => i += 2,
+                b'"' => return Some(i + 1),
+                _ => i += 1,
+            }
+        }
+        None
+    };
+    let value_end = |mut i: usize| -> Option<usize> {
+        match *b.get(i)? {
+            b'"' => string_end(i),
+            b'{' | b'[' => {
+                let mut depth = 0;
+                loop {
+                    i = space(i);
+                    match *b.get(i)? {
+                        b'"' => i = string_end(i)?,
+                        b'{' | b'[' => {
+                            depth += 1;
+                            i += 1;
+                        }
+                        b'}' | b']' => {
+                            depth -= 1;
+                            i += 1;
+                            if depth == 0 {
+                                return Some(i);
+                            }
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            _ => {
+                while b.get(i).is_some_and(|c| !matches!(c, b',' | b'}' | b']' | b'/') && !c.is_ascii_whitespace()) {
+                    i += 1;
+                }
+                Some(i)
+            }
+        }
+    };
+    let open = space(0);
+    if b.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut members = Vec::new();
+    let mut i = open + 1;
+    loop {
+        i = space(i);
+        match *b.get(i)? {
+            b'}' => break,
+            b',' => i += 1,
+            b'"' => {
+                let key_end = string_end(i)?;
+                let key: String = serde_json::from_str(&text[i..key_end]).ok()?;
+                i = space(key_end);
+                if b.get(i) != Some(&b':') {
+                    return None;
+                }
+                let start = space(i + 1);
+                let end = value_end(start)?;
+                members.push((key, start..end));
+                i = end;
+            }
+            _ => return None,
+        }
+    }
+    (space(i + 1) == b.len()).then_some((open, members))
 }
 
 fn apply(settings: Settings, cx: &mut App) {
@@ -625,10 +808,24 @@ mod tests {
         assert_eq!(settings.font_size, 15.);
         settings.word_wrap = !settings.word_wrap;
         settings.save_to(&path);
-        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&crate::snippets::without_comments(&std::fs::read_to_string(&path).unwrap())).unwrap();
         assert_eq!(saved["from_the_future"], serde_json::json!([1, 2]), "unknown, kept");
         assert_eq!(saved["theme"], "neon", "couldn't be read, kept as written");
         assert_eq!(saved["word_wrap"], settings.word_wrap);
+        // Written into the file as it was: its comment and order kept, only the change added.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("{\n  // mine\n  \"theme\": \"neon\",\n  \"font_size\": 15,"), "{text}");
+        assert!(!text.contains("\"tab_size\"") && !text.contains("\"indent_size\""), "defaults not added: {text}");
+        // A value that's a map, changed in place, indented as its line.
+        settings.keys.insert("ctrl-cmd-l".into(), Some("editor::SelectAllOccurrences".into()));
+        settings.save_to(&path);
+        settings.font_size = 16.;
+        settings.save_to(&path);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("  // mine\n") && text.contains("\"font_size\": 16"), "{text}");
+        assert!(text.contains("\"keys\": {\n    \"ctrl-cmd-l\""), "{text}");
+        assert_eq!(Settings::load_from(&path).unwrap().keys, settings.keys);
         // Broken: not read, and not written over.
         std::fs::write(&path, "{ \"font_size\": 15 \"oops\" }").unwrap();
         assert!(Settings::load_from(&path).is_none());
