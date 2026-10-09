@@ -11,6 +11,7 @@ pub enum Mode {
     Insert,
     Visual,
     VisualLine,
+    VisualBlock,
 }
 
 impl Mode {
@@ -20,11 +21,12 @@ impl Mode {
             Mode::Insert => "Insert",
             Mode::Visual => "Visual",
             Mode::VisualLine => "Visual Line",
+            Mode::VisualBlock => "Visual Block",
         }
     }
 
     fn visual(self) -> bool {
-        matches!(self, Mode::Visual | Mode::VisualLine)
+        matches!(self, Mode::Visual | Mode::VisualLine | Mode::VisualBlock)
     }
 }
 
@@ -107,6 +109,24 @@ pub struct Vim {
     placed: usize,
     /// The keymap registration this state belongs to (switched off and on: a fresh one).
     epoch: u64,
+    /// "a to "z (and "0, the last yank).
+    registers: std::collections::HashMap<char, Register>,
+    /// The register named for the next command ("a), and whether it was named just now.
+    register_name: Option<char>,
+    name_fresh: bool,
+    /// ma to mz: line and column.
+    marks: std::collections::HashMap<char, (usize, usize)>,
+    /// Where the last jump (G, %, n, a mark) left from, for '' and ``.
+    jump_back: Option<(usize, usize)>,
+    /// qa … q: the register recorded into, and the keys so far.
+    recording: Option<(char, Vec<gpui::Keystroke>)>,
+    macros: std::collections::HashMap<char, Vec<gpui::Keystroke>>,
+    last_macro: Option<char>,
+    /// Macros played since the last key typed by hand (one that plays itself stops).
+    macro_runs: usize,
+    in_replay: bool,
+    /// 3i, 2o: what's typed is typed this many more times (on new lines, for o and O).
+    insert_repeat: Option<(usize, bool)>,
 }
 
 /// A key as Vim reads it.
@@ -160,6 +180,11 @@ impl Editor {
         on(cx).then_some(self.vim.mode)
     }
 
+    /// The register a macro is being recorded into (qa).
+    pub fn vim_recording(&self) -> Option<char> {
+        self.vim.recording.as_ref().map(|(name, _)| *name)
+    }
+
     /// Where the caret shows: in Visual mode, on the character at the moving end (the
     /// selection itself ends after it).
     pub fn shown_caret(&self, cx: &App) -> usize {
@@ -181,6 +206,13 @@ impl Editor {
         if self.vim.epoch != epoch {
             self.vim = Vim { epoch, ..Vim::default() };
         }
+        if !self.vim.in_replay {
+            self.vim.macro_runs = 0;
+        }
+        // Recording a macro: every key, typing included.
+        if let Some((_, keys)) = &mut self.vim.recording {
+            keys.push(keystroke.clone());
+        }
         if self.vim.mode == Mode::Insert {
             let leaves = (keystroke.key == "escape" && !m.control && !m.alt)
                 || (m.control && matches!(keystroke.key.as_str(), "[" | "c"));
@@ -195,7 +227,7 @@ impl Editor {
         let key = if m.control {
             match keystroke.key.chars().next() {
                 // Null's Emacs keys edit or move (⌃O opens a line, ⌃Y yanks): not here.
-                Some(c) if keystroke.key.chars().count() == 1 && "aehknoptvy".contains(c) => return true,
+                Some(c) if keystroke.key.chars().count() == 1 && "aehknopty".contains(c) => return true,
                 Some(c) if keystroke.key.chars().count() == 1 => Key::Ctrl(c),
                 _ => return false,
             }
@@ -228,13 +260,32 @@ impl Editor {
     fn vim_leave_insert(&mut self, cx: &mut Context<Self>) {
         self.close_completion(cx);
         self.single_cursor();
-        let head = self.selection.head;
+        let mut head = self.selection.head;
         // What was typed after the change began, for `.` to type again.
         if let Some(from) = self.vim.insert_from.take()
             && from <= head
         {
-            self.vim.last_insert = Some(self.buffer.slice(from..head));
+            let typed = self.buffer.slice(from..head);
+            // 3i, 2o: typed again, as many more times.
+            if let Some((more, lines)) = self.vim.insert_repeat.take()
+                && !typed.is_empty()
+                && !self.vim.replaying
+            {
+                let text = if lines {
+                    let line = self.buffer.point(head).0;
+                    let indent: String =
+                        self.buffer.line_text(line).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+                    format!("{}{indent}{typed}", self.style.line_ending.text()).repeat(more)
+                } else {
+                    typed.repeat(more)
+                };
+                let at = if lines { self.line_end(self.buffer.point(head).0) } else { head };
+                self.edit(at..at, &text, EditKind::Other, cx);
+                head = self.selection.head;
+            }
+            self.vim.last_insert = Some(typed);
         }
+        self.vim.insert_repeat = None;
         if !self.vim.replaying {
             self.vim_one_undo_step();
         }
@@ -262,6 +313,126 @@ impl Editor {
         self.selection = Selection::caret(at);
         self.goal_column = None;
         self.touch(cx);
+    }
+
+    /// Where a jump leaves from, for '' and `` to come back to.
+    fn vim_note_jump(&mut self) {
+        self.vim.jump_back = Some(self.buffer.point(self.vim_at()));
+    }
+
+    /// @a: the keys recorded in "a, `count` times, as if typed (once this key is done).
+    fn vim_play(&mut self, name: char, count: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(keys) = self.vim.macros.get(&name).cloned() else { return };
+        self.vim.last_macro = Some(name);
+        // One that plays itself would never end.
+        self.vim.macro_runs += 1;
+        if self.vim.macro_runs > 100 || keys.is_empty() {
+            return;
+        }
+        let keys: Vec<gpui::Keystroke> = keys.iter().cloned().cycle().take(keys.len() * count.min(1000)).collect();
+        let editor = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            editor.update(cx, |e, _| e.vim.in_replay = true).ok();
+            for key in keys {
+                window.dispatch_keystroke(key, cx);
+            }
+            editor.update(cx, |e, _| e.vim.in_replay = false).ok();
+        });
+    }
+
+    /// Visual Block's lines, each with its part between the block's columns.
+    fn vim_block_ranges(&self) -> Vec<(usize, Range<usize>)> {
+        let len = self.buffer.len_chars();
+        let (anchor, head) = (self.buffer.point(self.vim.anchor.min(len)), self.buffer.point(self.vim.head.min(len)));
+        let (first, last) = (anchor.0.min(head.0), anchor.0.max(head.0));
+        let (left, right) = (anchor.1.min(head.1), anchor.1.max(head.1));
+        (first..=last)
+            .map(|line| {
+                let start = self.line_start(line);
+                let len = self.buffer.line_len(line);
+                (line, start + left.min(len)..start + (right + 1).min(len))
+            })
+            .collect()
+    }
+
+    /// A key in Visual Block mode: d x y c s I A act on every line of the block.
+    fn vim_block(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let ranges = self.vim_block_ranges();
+        let top_left = ranges.first().map_or(0, |(_, r)| r.start);
+        let left = self.buffer.point(top_left).1;
+        let text: String = ranges.iter().map(|(_, r)| self.buffer.slice(r.clone())).collect::<Vec<_>>().join("\n");
+        let carets = |this: &mut Self, at: &dyn Fn(&Range<usize>) -> Option<usize>| {
+            let cursors: Vec<(Cursor, bool)> = ranges
+                .iter()
+                .filter_map(|(_, r)| at(r))
+                .enumerate()
+                .map(|(i, at)| (Cursor::new(Selection::caret(at)), i == 0))
+                .collect();
+            if !cursors.is_empty() {
+                this.set_cursors(cursors);
+            }
+        };
+        match key {
+            Key::Char('d' | 'x' | 'y' | 'c' | 's') => {
+                let yank = key == Key::Char('y');
+                self.vim_yank(text, false, yank, cx);
+                if !yank {
+                    let edits: Vec<(Range<usize>, String)> =
+                        ranges.iter().filter(|(_, r)| !r.is_empty()).map(|(_, r)| (r.clone(), String::new())).collect();
+                    self.apply_char_edits(edits, cx);
+                }
+                self.single_cursor();
+                if matches!(key, Key::Char('c' | 's')) {
+                    // Typed on every line of the block (that reaches its columns).
+                    self.vim.mode = Mode::Insert;
+                    let lines: Vec<usize> = ranges.iter().map(|(l, _)| *l).collect();
+                    let cursors: Vec<(Cursor, bool)> = lines
+                        .iter()
+                        .filter(|l| self.buffer.line_len(**l) >= left)
+                        .enumerate()
+                        .map(|(i, l)| (Cursor::new(Selection::caret(self.line_start(*l) + left)), i == 0))
+                        .collect();
+                    if !cursors.is_empty() {
+                        self.set_cursors(cursors);
+                    }
+                    self.touch(cx);
+                } else {
+                    self.vim.mode = Mode::Normal;
+                    self.vim_place(top_left, cx);
+                }
+            }
+            Key::Char('I') => {
+                self.vim.mode = Mode::Insert;
+                let left_of = |r: &Range<usize>| Some(r.start);
+                carets(self, &left_of);
+                self.touch(cx);
+            }
+            Key::Char('A') => {
+                self.vim.mode = Mode::Insert;
+                let after = |r: &Range<usize>| (!r.is_empty()).then_some(r.end);
+                carets(self, &after);
+                self.touch(cx);
+            }
+            Key::Char('o') => {
+                std::mem::swap(&mut self.vim.anchor, &mut self.vim.head);
+                self.vim_show_visual(cx);
+            }
+            Key::Char('v') => {
+                self.vim.mode = Mode::Visual;
+                self.single_cursor();
+                self.vim_show_visual(cx);
+            }
+            Key::Char('V') => {
+                self.vim.mode = Mode::VisualLine;
+                self.single_cursor();
+                self.vim_show_visual(cx);
+            }
+            Key::Ctrl('v') => self.vim_end_visual(cx),
+            Key::Char(_) => {}
+            _ => return false,
+        }
+        let _ = window;
+        true
     }
 
     /// Where Vim acts from: Visual mode's moving end, else the caret (never past the text).
@@ -445,6 +616,11 @@ impl Editor {
                 };
                 return self.vim_find(kind, ch, n, true);
             }
+            // 50%: half way down the file.
+            Key::Char('%') if count.is_some() => {
+                let to = (n.min(100) * (last + 1)).div_ceil(100).saturating_sub(1);
+                Motion { to: self.first_non_blank(to), linewise: true, inclusive: false }
+            }
             Key::Char('%') => inclusive(self.vim_matching_bracket(at)?),
             Key::Char('^') => exclusive(self.first_non_blank(line)),
             Key::Char('$') => {
@@ -477,6 +653,12 @@ impl Editor {
         let taken = self.vim_step(key, window, cx);
         let waiting = self.vim.count.is_some() || self.vim.operator.is_some() || self.vim.pending.is_some();
         if !waiting {
+            // A register named ("a): for the command after it, then no more.
+            if self.vim.name_fresh {
+                self.vim.name_fresh = false;
+            } else {
+                self.vim.register_name = None;
+            }
             let typed = std::mem::take(&mut self.vim.typed);
             // Undo, redo and . itself (the command's key, not a character it took: ct. is a change).
             let command = typed.iter().find(|k| !matches!(k, Key::Char('0'..='9')));
@@ -510,7 +692,7 @@ impl Editor {
             },
             other => other,
         };
-        if !self.extra.is_empty() {
+        if !self.extra.is_empty() && self.vim.mode != Mode::VisualBlock {
             self.single_cursor();
         }
         // Visual's selection changed by other means (a click, ⌘X, an undo): taken as it is.
@@ -584,7 +766,7 @@ impl Editor {
                 return true;
             }
             // g (gg), f t F T (to a character), i a (a text object): one more key.
-            if let Key::Char(c @ ('g' | 'f' | 'F' | 't' | 'T' | 'i' | 'a')) = key {
+            if let Key::Char(c @ ('g' | 'f' | 'F' | 't' | 'T' | 'i' | 'a' | '\'' | '`')) = key {
                 self.vim.operator = Some((operator, total));
                 self.vim.pending = Some(c);
                 return true;
@@ -610,6 +792,9 @@ impl Editor {
             }
             return true;
         }
+        if matches!(key, Key::Char('G' | '%')) {
+            self.vim_note_jump();
+        }
         if let Some(motion) = self.vim_motion(&key, count, false) {
             if matches!(key, Key::Ctrl('d' | 'u' | 'f' | 'b')) {
                 let lines = self.buffer.point(motion.to).0 as f32 - self.buffer.point(self.selection.head).0 as f32;
@@ -627,12 +812,23 @@ impl Editor {
             Key::Char(c) if Operator::of(c).is_some() => {
                 self.vim.operator = Operator::of(c).map(|op| (op, count));
             }
-            Key::Char(c @ ('g' | 'r' | 'f' | 'F' | 't' | 'T')) => {
+            Key::Char(c @ ('g' | 'r' | 'f' | 'F' | 't' | 'T' | 'm' | '\'' | '`' | '"' | '@')) => {
                 self.vim.count = count;
                 self.vim.pending = Some(c);
             }
+            // q: stops a recording; else starts one (into the register after it).
+            Key::Char('q') => match self.vim.recording.take() {
+                Some((name, mut keys)) => {
+                    keys.pop();
+                    self.vim.macros.insert(name, keys);
+                    cx.notify();
+                }
+                None => self.vim.pending = Some('q'),
+            },
+            Key::Ctrl('v') => self.vim_start_visual(Mode::VisualBlock, cx),
             Key::Char('.') => self.vim_repeat(count, window, cx),
             Key::Char(c @ ('/' | '?')) => {
+                self.vim_note_jump();
                 self.vim.search_back = c == '?';
                 self.vim.before_search = Some(head);
                 // Found from after the caret: the match it's on isn't the one looked for.
@@ -640,26 +836,37 @@ impl Editor {
                 self.deploy_find_bar(false, window, cx);
             }
             Key::Char(c @ ('n' | 'N')) => {
+                self.vim_note_jump();
                 for _ in 0..n {
                     self.vim_next_match((c == 'n') != self.vim.search_back, cx);
                 }
             }
-            Key::Char(c @ ('*' | '#')) => self.vim_search_word(c == '#', n, cx),
+            Key::Char(c @ ('*' | '#')) => {
+                self.vim_note_jump();
+                self.vim_search_word(c == '#', n, cx)
+            }
             Key::Char(':') => cx.emit(EditorEvent::VimCommandLine),
-            Key::Char('i') => self.vim_insert_at(head, cx),
-            Key::Char('a') => {
-                let at = if self.buffer.line_len(line) == 0 { head } else { (head + 1).min(self.line_end(line)) };
-                self.vim_insert_at(at, cx)
-            }
-            Key::Char('I') => self.vim_insert_at(self.first_non_blank(line), cx),
-            Key::Char('A') => self.vim_insert_at(self.line_end(line), cx),
-            Key::Char('o') => {
-                self.vim.mode = Mode::Insert;
-                self.newline_below(&NewlineBelow, window, cx);
-            }
-            Key::Char('O') => {
-                self.vim.mode = Mode::Insert;
-                self.newline_above(&NewlineAbove, window, cx);
+            Key::Char(c @ ('i' | 'a' | 'I' | 'A' | 'o' | 'O')) => {
+                // 3ifoo: typed three times; 2o: on two new lines.
+                self.vim.insert_repeat = (n > 1).then_some((n - 1, matches!(c, 'o' | 'O')));
+                match c {
+                    'i' => self.vim_insert_at(head, cx),
+                    'a' => {
+                        let at =
+                            if self.buffer.line_len(line) == 0 { head } else { (head + 1).min(self.line_end(line)) };
+                        self.vim_insert_at(at, cx)
+                    }
+                    'I' => self.vim_insert_at(self.first_non_blank(line), cx),
+                    'A' => self.vim_insert_at(self.line_end(line), cx),
+                    'o' => {
+                        self.vim.mode = Mode::Insert;
+                        self.newline_below(&NewlineBelow, window, cx);
+                    }
+                    _ => {
+                        self.vim.mode = Mode::Insert;
+                        self.newline_above(&NewlineAbove, window, cx);
+                    }
+                }
             }
             Key::Char('v') => self.vim_start_visual(Mode::Visual, cx),
             Key::Char('V') => self.vim_start_visual(Mode::VisualLine, cx),
@@ -739,7 +946,41 @@ impl Editor {
         let operator = operator.map(|(op, _)| op);
         let n = count.unwrap_or(1).max(1);
         match (pending, key) {
+            ('m', Key::Char(c)) if c.is_ascii_lowercase() => {
+                let mark = self.buffer.point(self.vim_at());
+                self.vim.marks.insert(c, mark);
+            }
+            (jump @ ('\'' | '`'), Key::Char(c)) => {
+                let to = if c == '\'' || c == '`' { self.vim.jump_back } else { self.vim.marks.get(&c).copied() };
+                if let Some((line, column)) = to {
+                    let line = line.min(self.vim_last_line());
+                    let motion = if jump == '\'' {
+                        Motion { to: self.first_non_blank(line), linewise: true, inclusive: false }
+                    } else {
+                        Motion { to: self.buffer.offset(line, column), linewise: false, inclusive: false }
+                    };
+                    self.vim_note_jump();
+                    self.vim_go(motion, operator, window, cx);
+                }
+            }
+            ('"', Key::Char(c)) if c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '*' | '"') => {
+                self.vim.register_name = (c != '"').then_some(c);
+                self.vim.name_fresh = true;
+                // The count before it goes on to the command.
+                self.vim.count = count;
+            }
+            ('q', Key::Char(c)) if c.is_ascii_alphanumeric() => {
+                self.vim.recording = Some((c.to_ascii_lowercase(), Vec::new()));
+                cx.notify();
+            }
+            ('@', Key::Char(c)) => {
+                let name = if c == '@' { self.vim.last_macro } else { Some(c.to_ascii_lowercase()) };
+                if let Some(name) = name {
+                    self.vim_play(name, n, window, cx);
+                }
+            }
             ('g', Key::Char('g')) => {
+                self.vim_note_jump();
                 let last = self.vim_last_line();
                 let to = count.map_or(0, |c| c.saturating_sub(1).min(last));
                 let motion = Motion { to: self.first_non_blank(to), linewise: true, inclusive: false };
@@ -1199,16 +1440,42 @@ impl Editor {
 
     /// The text of `range`, kept to put back (and on the clipboard, as Vim with
     /// `clipboard=unnamed` has it).
-    fn vim_yank(&mut self, text: String, linewise: bool, cx: &mut Context<Self>) {
+    fn vim_yank(&mut self, text: String, linewise: bool, yanked: bool, cx: &mut Context<Self>) {
+        let name = self.vim.register_name;
+        // "_: kept nowhere.
+        if name == Some('_') {
+            return;
+        }
+        let register = Register { text, linewise };
+        match name {
+            // "A: added to "a.
+            Some(c) if c.is_ascii_uppercase() => {
+                let kept = self.vim.registers.entry(c.to_ascii_lowercase()).or_insert(Register { text: String::new(), linewise });
+                kept.text.push_str(&register.text);
+                kept.linewise |= linewise;
+            }
+            Some(c) if c.is_ascii_alphanumeric() => {
+                self.vim.registers.insert(c, register.clone());
+            }
+            _ => {}
+        }
+        if yanked {
+            self.vim.registers.insert('0', register.clone());
+        }
         #[cfg(not(test))]
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(register.text.clone()));
         #[cfg(test)]
         let _ = cx;
-        self.vim.register = Some(Register { text, linewise });
+        self.vim.register = Some(register);
     }
 
     /// What p puts: the clipboard when something else was copied since, else the register.
     fn vim_register(&self, cx: &App) -> Option<Register> {
+        match self.vim.register_name {
+            Some('_') => return None,
+            Some(c) if c.is_ascii_alphanumeric() => return self.vim.registers.get(&c.to_ascii_lowercase()).cloned(),
+            _ => {}
+        }
         #[cfg(not(test))]
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
             && self.vim.register.as_ref().is_none_or(|r| r.text != text)
@@ -1244,7 +1511,7 @@ impl Editor {
             Operator::Delete | Operator::Change => {
                 let text = self.buffer.slice(range.clone());
                 if !text.is_empty() {
-                    self.vim_yank(text, false, cx);
+                    self.vim_yank(text, false, false, cx);
                     self.edit(range.clone(), "", EditKind::Other, cx);
                 }
                 if operator == Operator::Change {
@@ -1255,7 +1522,7 @@ impl Editor {
             }
             Operator::Yank => {
                 let text = self.buffer.slice(range.clone());
-                self.vim_yank(text, false, cx);
+                self.vim_yank(text, false, true, cx);
                 self.vim_place(range.start, cx);
             }
             Operator::Indent | Operator::Outdent => {
@@ -1280,12 +1547,12 @@ impl Editor {
         let text: String = (first..=last).map(|l| self.buffer.line_text(l) + "\n").collect();
         match operator {
             Operator::Yank => {
-                self.vim_yank(text, true, cx);
+                self.vim_yank(text, true, true, cx);
                 let at = if self.buffer.point(self.selection.head).0 > first { start } else { self.selection.head };
                 self.vim_place(at.max(start), cx);
             }
             Operator::Delete => {
-                self.vim_yank(text, true, cx);
+                self.vim_yank(text, true, false, cx);
                 // The last lines: the break before them goes with them.
                 let range = if after >= self.buffer.len_chars() && after == self.line_end(last) && first > 0 {
                     self.line_end(first - 1)..after
@@ -1300,7 +1567,7 @@ impl Editor {
                 self.vim_place(at, cx);
             }
             Operator::Change => {
-                self.vim_yank(text, true, cx);
+                self.vim_yank(text, true, false, cx);
                 // Its indentation stays, the text goes.
                 let indent = self.first_non_blank(first) - start;
                 let range = start + indent..self.line_end(last);
@@ -1365,6 +1632,15 @@ impl Editor {
     fn vim_show_visual(&mut self, cx: &mut Context<Self>) {
         let len = self.buffer.len_chars();
         let (anchor, head) = (self.vim.anchor.min(len), self.vim.head.min(len));
+        if self.vim.mode == Mode::VisualBlock {
+            // A selection on each line of the block, between its columns: Null's cursors.
+            let cursors: Vec<(Cursor, bool)> =
+                self.vim_block_ranges().into_iter().map(|(line, range)| (Cursor::new(Selection { anchor: range.start, head: range.end }), line == self.buffer.point(head).0)).collect();
+            self.set_cursors(cursors);
+            self.vim.shown = Some((self.selection, self.buffer.revision()));
+            self.goal_column = None;
+            return self.touch(cx);
+        }
         self.selection = if self.vim.mode == Mode::VisualLine {
             let (a, h) = (self.buffer.point(anchor).0, self.buffer.point(head).0);
             if h >= a {
@@ -1383,6 +1659,7 @@ impl Editor {
     }
 
     fn vim_end_visual(&mut self, cx: &mut Context<Self>) {
+        self.single_cursor();
         self.vim.mode = Mode::Normal;
         let at = self.vim.head;
         self.vim_place(at, cx);
@@ -1390,7 +1667,7 @@ impl Editor {
 
     /// A key in Visual mode: a motion moves the head; an operator acts on the selection.
     fn vim_visual(&mut self, key: Key, count: Option<usize>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if let Key::Char(c @ ('g' | 'i' | 'a' | 'f' | 'F' | 't' | 'T')) = key {
+        if let Key::Char(c @ ('g' | 'i' | 'a' | 'f' | 'F' | 't' | 'T' | '\'' | '`' | '"')) = key {
             self.vim.count = count;
             self.vim.pending = Some(c);
             return true;
@@ -1399,6 +1676,14 @@ impl Editor {
             let goal = self.vim.goal;
             self.vim.head = self.vim_clamp(motion.to);
             self.vim.goal = goal;
+            self.vim_show_visual(cx);
+            return true;
+        }
+        if self.vim.mode == Mode::VisualBlock {
+            return self.vim_block(key, window, cx);
+        }
+        if key == Key::Ctrl('v') {
+            self.vim.mode = Mode::VisualBlock;
             self.vim_show_visual(cx);
             return true;
         }
@@ -1473,7 +1758,7 @@ impl Editor {
                 self.edit(range.clone(), &text, EditKind::Other, cx);
                 // What was there is what p puts next (as Vim's unnamed register has it).
                 if key == Key::Char('p') {
-                    self.vim_yank(replaced, lines, cx);
+                    self.vim_yank(replaced, lines, false, cx);
                 }
                 self.vim.mode = Mode::Normal;
                 self.vim_place(range.start, cx);
@@ -1843,6 +2128,79 @@ mod tests {
         // ⌃O (Null's open line) edits nothing here.
         cx.simulate_keystrokes("ctrl-o");
         assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "one\n  two\n");
+    }
+
+    #[gpui::test]
+    fn counts_on_typing_and_percent(cx: &mut TestAppContext) {
+        let (e, cx) = vim("|x\n", cx);
+        cx.simulate_keystrokes("3 i a b escape");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "abababx\n");
+        cx.simulate_keystrokes("2 o - escape");
+        assert_eq!(shown(&e, cx), "abababx\n-\n|-\n");
+        let ten: String = (1..=10).map(|n| format!("line {n}\n")).collect();
+        let (e, cx) = vim(&format!("|{ten}"), &mut cx.cx);
+        cx.simulate_keystrokes("5 0 %");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.point(e.selection.head).0), 4, "half way: line 5");
+    }
+
+    #[gpui::test]
+    fn marks_and_jumps_back(cx: &mut TestAppContext) {
+        let (e, cx) = vim("one\n  t|wo\nthree\nfour\n", cx);
+        cx.simulate_keystrokes("m a G");
+        assert_eq!(shown(&e, cx), "one\n  two\nthree\n|four\n");
+        cx.simulate_keystrokes("` a");
+        assert_eq!(shown(&e, cx), "one\n  t|wo\nthree\nfour\n", "exactly where it was");
+        cx.simulate_keystrokes("' '");
+        assert_eq!(shown(&e, cx), "one\n  two\nthree\n|four\n", "back where the jump left");
+        cx.simulate_keystrokes("' a");
+        assert_eq!(shown(&e, cx), "one\n  |two\nthree\nfour\n", "the line's first character");
+        cx.simulate_keystrokes("d ' a");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "one\nthree\nfour\n");
+    }
+
+    #[gpui::test]
+    fn named_registers(cx: &mut TestAppContext) {
+        let (e, cx) = vim("|alpha\nbeta\ngamma\n", cx);
+        cx.simulate_keystrokes("\" a y y j \" b y y");
+        cx.simulate_keystrokes("G \" a p");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "alpha\nbeta\ngamma\nalpha\n");
+        // "_ keeps nothing: p still puts what was yanked.
+        cx.simulate_keystrokes("\" _ d d g g p");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "alpha\nbeta\nbeta\ngamma\n");
+        // "0: the last yank, whatever was deleted since.
+        cx.simulate_keystrokes("G d d g g \" 0 P");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "beta\nalpha\nbeta\nbeta\n");
+    }
+
+    #[gpui::test]
+    fn macros(cx: &mut TestAppContext) {
+        let (e, cx) = vim("|a\nb\nc\nd\n", cx);
+        cx.simulate_keystrokes("q a");
+        e.read_with(cx, |e, _| assert_eq!(e.vim_recording(), Some('a')));
+        cx.simulate_keystrokes("A ; escape j q");
+        e.read_with(cx, |e, _| assert_eq!(e.vim_recording(), None));
+        cx.simulate_keystrokes("2 @ a");
+        cx.run_until_parked();
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "a;\nb;\nc;\nd\n");
+        cx.simulate_keystrokes("@ @");
+        cx.run_until_parked();
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "a;\nb;\nc;\nd;\n");
+    }
+
+    #[gpui::test]
+    fn visual_block(cx: &mut TestAppContext) {
+        let (e, cx) = vim("|abcd\nefgh\nij\n", cx);
+        cx.simulate_keystrokes("l ctrl-v l j");
+        assert_eq!(e.read_with(cx, |e, _| e.extra.len()), 1, "a selection on each line");
+        e.read_with(cx, |e, cx| assert_eq!(e.vim_mode(cx), Some(Mode::VisualBlock)));
+        cx.simulate_keystrokes("d");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "ad\neh\nij\n");
+        cx.simulate_keystrokes("g g ctrl-v j I # escape");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "#ad\n#eh\nij\n", "typed on each line");
+        e.read_with(cx, |e, cx| {
+            assert_eq!(e.vim_mode(cx), Some(Mode::Normal));
+            assert!(e.extra.is_empty());
+        });
     }
 
     #[test]

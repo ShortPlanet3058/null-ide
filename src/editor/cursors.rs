@@ -13,7 +13,7 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    fn new(selection: Selection) -> Self {
+    pub(super) fn new(selection: Selection) -> Self {
         Self { selection, goal: None }
     }
 }
@@ -100,7 +100,7 @@ impl Editor {
     }
 
     /// Replaces all cursors, merging any that overlap. The flagged one becomes the main cursor.
-    fn set_cursors(&mut self, mut cursors: Vec<(Cursor, bool)>) {
+    pub(super) fn set_cursors(&mut self, mut cursors: Vec<(Cursor, bool)>) {
         cursors.sort_by_key(|(c, _)| (c.selection.range().start, c.selection.range().end));
         let mut merged: Vec<(Cursor, bool)> = Vec::with_capacity(cursors.len());
         for (cursor, primary) in cursors {
