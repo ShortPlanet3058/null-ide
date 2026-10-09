@@ -215,7 +215,8 @@ impl Editor {
     pub fn problems(&self, cx: &App) -> Rc<Vec<Problem>> {
         let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return Rc::default() };
         let lsp = lsp.read(cx);
-        let key = (lsp.diagnostics_version(), self.buffer.revision());
+        // (This file's own: another file's problems changing doesn't change these.)
+        let key = (lsp.diagnostics_version_of(path), self.buffer.revision());
         if let Some((k, problems)) = &*self.problems_cache.borrow()
             && *k == key
         {

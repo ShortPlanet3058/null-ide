@@ -370,9 +370,21 @@ impl Editor {
         if mid_line && !use_fill {
             return;
         }
-        let request =
-            std::rc::Rc::new(self.suggestion_request(ai_settings, use_fill, before, after, mid_line, key, cx));
-        self.request_suggestion(request, false, cx);
+        // What's sent (the file around, the project's names) put together once typing
+        // pauses, not on every keystroke.
+        let (offset, version) = (self.selection.head, self.buffer.version());
+        self.ghost_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PAUSE).await;
+            this.update(cx, |this, cx| {
+                if this.selection.head != offset || this.buffer.version() != version {
+                    return;
+                }
+                let request =
+                    std::rc::Rc::new(this.suggestion_request(ai_settings, use_fill, before, after, mid_line, key, cx));
+                this.request_suggestion(request, false, true, cx);
+            })
+            .ok();
+        }));
     }
 
     /// The text before and after the caret, cut to size, for the cache.
@@ -489,9 +501,17 @@ impl Editor {
     /// Asks the AI. As a first suggestion it waits for the typing to pause and shows the
     /// answer as it streams; as another option (⌥⇥) it asks for something different and
     /// adds it to the ones already seen.
-    fn request_suggestion(&mut self, request: std::rc::Rc<SuggestionRequest>, another: bool, cx: &mut Context<Self>) {
+    /// Asks for a suggestion: `another` one (warmer), or after typing pauses (unless that
+    /// was `waited` for already).
+    fn request_suggestion(
+        &mut self,
+        request: std::rc::Rc<SuggestionRequest>,
+        another: bool,
+        waited: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.ghost_task = Some(cx.spawn(async move |this, cx| {
-            if !another {
+            if !another && !waited {
                 cx.background_executor().timer(PAUSE).await;
             }
             let (offset, version) = (request.offset, request.version);
@@ -697,7 +717,7 @@ impl Editor {
             return cx.notify();
         }
         if let Some(request) = ghost.request.clone() {
-            self.request_suggestion(request, true, cx);
+            self.request_suggestion(request, true, false, cx);
         }
     }
 

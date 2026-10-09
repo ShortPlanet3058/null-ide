@@ -187,6 +187,9 @@ pub struct LspStore {
     diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
     /// Goes up whenever any diagnostics change, so views can keep what they derived.
     diagnostics_version: u64,
+    /// The version each file's diagnostics last changed at: a file's own problems aren't
+    /// worked out again when another file's change.
+    diagnostics_versions: HashMap<PathBuf, u64>,
     /// Goes up when a server says what names are has changed (it finished reading the
     /// project): files ask again.
     semantic_refresh: u64,
@@ -205,14 +208,16 @@ impl LspStore {
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
             diagnostics_version: 0,
+            diagnostics_versions: HashMap::new(),
             semantic_refresh: 0,
             progress: HashMap::new(),
             _tasks: Vec::new(),
         }
     }
 
-    pub fn diagnostics_version(&self) -> u64 {
-        self.diagnostics_version
+    /// When `path`'s own diagnostics last changed (0: never).
+    pub fn diagnostics_version_of(&self, path: &Path) -> u64 {
+        self.diagnostics_versions.get(path).copied().unwrap_or(0)
     }
 
     pub fn semantic_refresh(&self) -> u64 {
@@ -504,8 +509,9 @@ impl LspStore {
                 "textDocument/publishDiagnostics" => {
                     let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(params) else { return };
                     let Some(path) = path_for(&params.uri) else { return };
-                    self.diagnostics.insert(path, params.diagnostics);
                     self.diagnostics_version += 1;
+                    self.diagnostics_versions.insert(path.clone(), self.diagnostics_version);
+                    self.diagnostics.insert(path, params.diagnostics);
                     cx.emit(LspEvent::DiagnosticsChanged);
                     cx.notify();
                 }
@@ -1152,8 +1158,9 @@ impl LspStore {
     /// Problems for a file, as a server would publish them.
     #[cfg(test)]
     pub fn set_diagnostics(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>) {
-        self.diagnostics.insert(path, diagnostics);
         self.diagnostics_version += 1;
+        self.diagnostics_versions.insert(path.clone(), self.diagnostics_version);
+        self.diagnostics.insert(path, diagnostics);
     }
 
     /// The files the servers report an error in (each looked at once, however many).
@@ -1185,6 +1192,20 @@ impl LspStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file's own problems keep their version when another file's change.
+    #[test]
+    fn each_file_s_problems_have_their_own_version() {
+        let mut store = LspStore::new(PathBuf::from("/p"));
+        let (a, b) = (PathBuf::from("/p/a.rs"), PathBuf::from("/p/b.rs"));
+        assert_eq!(store.diagnostics_version_of(&a), 0);
+        store.set_diagnostics(a.clone(), Vec::new());
+        let of_a = store.diagnostics_version_of(&a);
+        assert!(of_a > 0);
+        store.set_diagnostics(b.clone(), Vec::new());
+        assert_eq!(store.diagnostics_version_of(&a), of_a, "b's don't touch a's");
+        assert!(store.diagnostics_version_of(&b) > of_a);
+    }
 
     /// rust-analyzer's answer for a macro, as it sends it, and no macro there.
     #[test]

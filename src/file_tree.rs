@@ -401,6 +401,10 @@ impl FileTree {
 
     /// Highlights `path` and expands its folders so it's visible.
     pub fn set_active(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        // Already the one shown and picked: nothing to lay out again.
+        if self.active == path && path.is_some() && self.selected == path && self.also.is_empty() {
+            return;
+        }
         if let Some(path) = &path {
             self.expand_to(path);
             // Another file shown: the one picked now (not along with others picked before).
