@@ -505,6 +505,8 @@ pub struct Workspace {
     sidebar_outline: bool,
     /// The sidebar shows the project's tests (see `crate::test_at::discover`).
     sidebar_tests: bool,
+    /// The project's own Python environment (`.venv`), if it has one.
+    python_env: Option<PathBuf>,
     /// The tests found (None: not looked for yet), and the search for them.
     tests: Option<std::rc::Rc<Vec<crate::test_at::FileTests>>>,
     tests_task: Option<Task<()>>,
@@ -767,6 +769,7 @@ impl Workspace {
             sidebar_search: Transition::new(false),
             sidebar_outline: false,
             sidebar_tests: false,
+            python_env: None,
             tests: None,
             tests_task: None,
             test_status: std::collections::HashMap::new(),
@@ -897,6 +900,7 @@ impl Workspace {
                 this.save_session(cx);
             }
         }));
+        workspace.python_env = crate::python_env::find(workspace.tree.read(cx).root());
         // settings.json couldn't be read at launch: said, not left to pass for the defaults.
         if let Some(why) = Settings::unreadable() {
             workspace.show_notice(
@@ -1162,6 +1166,10 @@ impl Workspace {
         // The project's settings, changed (by hand, by another app): in use as they are now.
         let root = self.tree.read(cx).root().to_path_buf();
         // (Only when they're the ones in use: another window's in front, they wait for this one.)
+        // An environment made or removed (`python -m venv .venv`): known from now.
+        if visible.iter().any(|p| [".venv", "venv", "env"].iter().any(|f| p.starts_with(root.join(f)) || *p == root.join(f))) {
+            self.python_env = crate::python_env::find(&root);
+        }
         let settings_changed = visible.contains(&crate::settings::project_file(&root))
             || visible.contains(&crate::settings::vscode_file(&root));
         if settings_changed && crate::settings::project_in_use(&root) {
@@ -3018,6 +3026,7 @@ impl Workspace {
         if self.sidebar_tests {
             self.find_tests(cx);
         }
+        self.python_env = crate::python_env::find(&path);
         let mut session = crate::session::Session::load(&path);
         session.window = self.window_state;
         self.restore_session(session, window, cx);
@@ -4920,8 +4929,8 @@ impl Workspace {
         // pytest says which passed only when asked to (-v).
         let command = command
             .split("; ")
-            .map(|part| match part.strip_prefix("python3 -m pytest") {
-                Some(rest) if !rest.starts_with(" -v") => format!("python3 -m pytest -v{rest}"),
+            .map(|part| match part.split_once(" -m pytest") {
+                Some((python, rest)) if !rest.starts_with(" -v") => format!("{python} -m pytest -v{rest}"),
                 _ => part.to_string(),
             })
             .collect::<Vec<_>>()
@@ -6259,6 +6268,17 @@ impl Workspace {
     }
 
     fn add_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // In a Python project with its own environment: made the shell's, as activating does.
+        let root = self.tree.read(cx).root().to_path_buf();
+        let activate = (dir.starts_with(&root))
+            .then(|| crate::python_env::find(&root))
+            .flatten()
+            .map(|env| {
+                let shell = std::env::var("SHELL").ok().or_else(crate::terminal_watch::account_shell).unwrap_or_default();
+                // From where the shell starts: short when it's the project's folder.
+                let env = env.strip_prefix(&dir).map(Path::to_path_buf).unwrap_or(env);
+                crate::python_env::activate_command(&env, &shell)
+            });
         let shell = match Shell::start(dir) {
             Ok(shell) => shell,
             Err(err) => {
@@ -6266,7 +6286,13 @@ impl Workspace {
                 return false;
             }
         };
-        let terminal = cx.new(|cx| TerminalView::new(shell, cx));
+        let terminal = cx.new(|cx| {
+            let mut view = TerminalView::new(shell, cx);
+            if let Some(command) = &activate {
+                view.run_command(command, cx);
+            }
+            view
+        });
         let subscription = cx.subscribe_in(&terminal, window, |this, terminal, event, window, cx| match event {
             TerminalEvent::TitleChanged => cx.notify(),
             // The shell exited (e.g. `exit`): its tab goes; with none left, so does the panel.
@@ -7986,8 +8012,17 @@ impl Render for Workspace {
                 (vec![shorten_path(&shown, STATUS_PATH_CHARS)], (0, 0))
             }
         };
-        let language =
-            self.active_editor().map(|e| e.read(cx)).filter(|e| e.preview.is_none()).map(|e| e.language_name());
+        // Python with the project's own environment: which one ("Python (.venv)").
+        let root_now = self.tree.read(cx).root().to_path_buf();
+        let language = self.active_editor().map(|e| e.read(cx)).filter(|e| e.preview.is_none()).map(|e| {
+            let name = e.language_name();
+            match (name, &self.python_env) {
+                ("Python", Some(env)) => {
+                    format!("{name} ({})", env.strip_prefix(&root_now).unwrap_or(env).to_string_lossy())
+                }
+                _ => name.to_string(),
+            }
+        });
         let split = self.is_split();
         let stacked = split && self.stacked;
         let tabs_left = self.render_tabs(0, cx);

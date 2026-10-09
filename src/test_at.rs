@@ -47,7 +47,7 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
             let module = ancestor_with(dir, "go.mod")?;
             Some(format!("go test {}-v ./...", in_dir(root, &module, |d| format!("-C {} ", quote(d)))))
         }
-        "Python" => Some("python3 -m pytest".into()),
+        "Python" => Some(format!("{} -m pytest", crate::python_env::python(root))),
         "JavaScript" | "TypeScript" | "TSX" => {
             let project = ancestor_with(dir, "package.json")?;
             // Each test's own line, as runs of many files don't print by themselves.
@@ -388,10 +388,11 @@ pub fn find(language: &str, root: &Path, path: &Path, text: &str, tree: &Tree, b
             match byte {
                 Some(byte) => {
                     let (id, name) = python_test(text, tree, byte)?;
-                    let command = format!("python3 -m pytest {}", quote(&format!("{relative}::{id}")));
+                    let python = crate::python_env::python(root);
+                    let command = format!("{python} -m pytest {}", quote(&format!("{relative}::{id}")));
                     Some(TestRun { command, name })
                 }
-                None => Some(all(format!("python3 -m pytest {}", quote(&relative)))),
+                None => Some(all(format!("{} -m pytest {}", crate::python_env::python(root), quote(&relative)))),
             }
         }
         "JavaScript" | "TypeScript" | "TSX" => {

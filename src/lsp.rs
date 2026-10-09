@@ -114,6 +114,8 @@ impl LanguageServer {
         let mut child = Command::new(program)
             .args(args)
             .current_dir(root)
+            // A Python project's own environment first (pyright reads its packages from there).
+            .envs(crate::python_env::variables(root))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
