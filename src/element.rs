@@ -369,6 +369,9 @@ pub struct Prepaint {
     selection: Vec<Bounds<Pixels>>,
     /// Spaces (a dot) and tabs (a dash) inside the selection, so what's selected shows.
     whitespace: Vec<Bounds<Pixels>>,
+    /// Characters that can't be seen as themselves, each in a dashed box (narrow for one
+    /// with no width), red for one that turns text around.
+    invisibles: Vec<(Bounds<Pixels>, crate::editor::invisible::Invisible)>,
     matches: Vec<(Bounds<Pixels>, bool)>,
     /// Other uses of the symbol at the caret.
     symbol_marks: Vec<Bounds<Pixels>>,
@@ -1301,6 +1304,33 @@ impl Element for EditorElement {
                     }
                 }
             }
+            // Characters that can't be seen as themselves (a zero-width space, a direction
+            // mark, a no-break space in code): marked, whatever the whitespace setting.
+            let mut invisibles = Vec::new();
+            let prose = editor.is_prose();
+            for (i, r) in row_layouts.iter().enumerate() {
+                if r.row.block.is_some() || r.text.is_ascii() {
+                    continue;
+                }
+                let kinds: Vec<(usize, crate::editor::invisible::Invisible)> = r
+                    .text
+                    .chars()
+                    .enumerate()
+                    .filter_map(|(col, c)| Some((col, crate::editor::invisible::marked(c, prose)?)))
+                    .collect();
+                if kinds.is_empty() {
+                    continue;
+                }
+                let found: Vec<(usize, bool)> = kinds.iter().map(|(col, _)| (*col, false)).collect();
+                let top = row_top(visible.start + i);
+                for ((x0, x1, _), &(_, kind)) in whitespace_xs(r, &found).into_iter().zip(&kinds) {
+                    let (x0, x1) = (origin.x + r.x + x0, origin.x + r.x + x1);
+                    let (y0, y1) = (top + line_height * 0.15, top + line_height * 0.85);
+                    // No width of its own: a narrow box where it is.
+                    let (x0, x1) = if x1 - x0 < px(3.) { (x0 - px(2.), x0 + px(2.)) } else { (x0, x1) };
+                    invisibles.push((Bounds::from_corners(point(x0, y0), point(x1, y1)), kind));
+                }
+            }
             // The bracket next to the caret and its partner get a thin outline; so do a tag's
             // name with the caret in it and its pair's (HTML, JSX).
             let mut bracket_boxes: Vec<Bounds<Pixels>> = editor
@@ -1610,6 +1640,7 @@ impl Element for EditorElement {
                 lines,
                 selection,
                 whitespace,
+                invisibles,
                 matches,
                 symbol_marks,
                 link,
@@ -1713,6 +1744,13 @@ impl Element for EditorElement {
             }
             for mark in &prepaint.whitespace {
                 window.paint_quad(fill(*mark, theme.faint).corner_radii(px(1.)));
+            }
+            for (mark, kind) in &prepaint.invisibles {
+                let color = match kind {
+                    crate::editor::invisible::Invisible::Direction => theme.error,
+                    _ => theme.warning.opacity(0.8),
+                };
+                window.paint_quad(gpui::outline(*mark, color, gpui::BorderStyle::Dashed).corner_radii(px(2.)));
             }
             for (line, origin) in &prepaint.lines {
                 line.paint(*origin, line_height, window, cx).ok();
