@@ -7558,9 +7558,18 @@ impl Render for Workspace {
                                 _ if editor.reading => "Preview".into(),
                                 // Vim's keys: the mode first ("Normal · Ln 4, Col 9").
                                 0 => match editor.vim_mode(cx) {
-                                    Some(mode) => format!("{} · {}", mode.label(), position_label(editor, line, col)),
+                                    Some(mode) => match editor.vim_recording() {
+                                        Some(name) => {
+                                            format!("{} · Recording @{name} · {}", mode.label(), position_label(editor, line, col))
+                                        }
+                                        None => format!("{} · {}", mode.label(), position_label(editor, line, col)),
+                                    },
                                     None => position_label(editor, line, col),
                                 },
+                                // Vim's block: its cursors are the block's lines.
+                                n if editor.vim_mode(cx) == Some(crate::editor::vim::Mode::VisualBlock) => {
+                                    format!("Visual Block · {} lines", n + 1)
+                                }
                                 n => format!("{} cursors · Esc for one", n + 1),
                             },
                         ],
