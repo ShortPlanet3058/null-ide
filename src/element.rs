@@ -575,7 +575,7 @@ impl Element for EditorElement {
                 Bounds::from_corners(point(bounds.left() + gutter_width, bounds.top()), bounds.bottom_right());
             let viewport_height = f32::from(bounds.size.height);
             // (Vim's Visual mode: on the last character selected, not after it.)
-            let (caret_line, caret_col) = editor.buffer.point(editor.shown_caret());
+            let (caret_line, caret_col) = editor.buffer.point(editor.shown_caret(cx));
             let text_width = f32::from(text_bounds.size.width) - TEXT_PADDING;
             let cw = f32::from(char_width);
 

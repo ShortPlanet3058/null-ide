@@ -222,8 +222,8 @@ impl FindBar {
 
     fn find_next(&mut self, _: &FindNext, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_search(cx);
-        // Vim: ↵ ends the search, on the match.
-        if crate::editor::vim::on(cx) {
+        // Vim's / or ?: ↵ ends the search, on the match (⌘G, ⌘F's ↵: the next one).
+        if crate::editor::vim::on(cx) && self.editor.upgrade().is_some_and(|e| e.read(cx).vim_searching()) {
             self.editor.update(cx, |editor, cx| editor.vim_search_done(true, window, cx)).ok();
             return;
         }
