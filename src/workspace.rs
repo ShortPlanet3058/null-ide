@@ -1174,8 +1174,13 @@ impl Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         // (Only when they're the ones in use: another window's in front, they wait for this one.)
         // An environment made or removed (`python -m venv .venv`): known from now.
-        if visible.iter().any(|p| [".venv", "venv", "env"].iter().any(|f| p.starts_with(root.join(f)) || *p == root.join(f))) {
-            self.python_env = crate::python_env::find(&root);
+        if visible.iter().any(|p| [".venv", "venv", "env"].iter().any(|f| p.starts_with(root.join(f)))) {
+            let now = crate::python_env::find(&root);
+            // Another environment: Python's language server reads its packages from it.
+            if now != self.python_env {
+                self.python_env = now;
+                self.lsp.update(cx, |lsp, cx| lsp.restart_python(cx));
+            }
         }
         let settings_changed = visible.contains(&crate::settings::project_file(&root))
             || visible.contains(&crate::settings::vscode_file(&root));
@@ -3578,18 +3583,34 @@ impl Workspace {
         }
     }
 
-    /// Cmd+N: an empty file with no name yet; saving asks where to put it.
-    /// What the language servers said about themselves, in a tab of its own (not a file).
+    /// What the language servers said about themselves, in a tab of its own (not a file):
+    /// the one already open, brought up to date.
     fn show_server_log(&mut self, _: &ShowServerLog, window: &mut Window, cx: &mut Context<Self>) {
+        const NAME: &str = "Language server log";
         let log = crate::server_log::text();
         let body = if log.is_empty() { "Nothing yet: no language server has started.".to_string() } else { log };
         let text = format!("{body}\n");
-        let editor = cx.new(|cx| {
-            let mut editor = Editor::new(crate::buffer::Buffer::from_text(&text), None, cx);
-            editor.untitled_name = Some("Language server log".into());
-            editor
-        });
-        self.add_tab(editor.clone(), window, cx);
+        let open = self.tabs.iter().position(|t| t.editor.read(cx).untitled_name.as_deref() == Some(NAME));
+        let editor = match open {
+            Some(ix) => {
+                let editor = self.tabs[ix].editor.clone();
+                editor.update(cx, |e, cx| {
+                    e.restore_unsaved(&text, cx);
+                    e.buffer.mark_saved();
+                });
+                self.activate(ix, window, cx);
+                editor
+            }
+            None => {
+                let editor = cx.new(|cx| {
+                    let mut editor = Editor::new(crate::buffer::Buffer::from_text(&text), None, cx);
+                    editor.untitled_name = Some(NAME.into());
+                    editor
+                });
+                self.add_tab(editor.clone(), window, cx);
+                editor
+            }
+        };
         // At its end: the latest.
         editor.update(cx, |e, cx| {
             let last = e.buffer.len_lines().saturating_sub(1);
@@ -3597,6 +3618,7 @@ impl Workspace {
         });
     }
 
+    /// Cmd+N: an empty file with no name yet; saving asks where to put it.
     fn new_untitled(&mut self, _: &NewUntitled, window: &mut Window, cx: &mut Context<Self>) {
         let editor = cx.new(|cx| Editor::new(Default::default(), None, cx));
         self.add_tab(editor, window, cx);
@@ -6318,8 +6340,12 @@ impl Workspace {
         let activate = (dir.starts_with(&root))
             .then(|| crate::python_env::find(&root))
             .flatten()
-            .map(|env| {
-                let shell = std::env::var("SHELL").ok().or_else(crate::terminal_watch::account_shell).unwrap_or_default();
+            .and_then(|env| {
+                let shell = std::env::var("SHELL")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(crate::terminal_watch::account_shell)
+                    .unwrap_or_default();
                 // From where the shell starts: short when it's the project's folder.
                 let env = env.strip_prefix(&dir).map(Path::to_path_buf).unwrap_or(env);
                 crate::python_env::activate_command(&env, &shell)
@@ -6334,7 +6360,7 @@ impl Workspace {
         let terminal = cx.new(|cx| {
             let mut view = TerminalView::new(shell, cx);
             if let Some(command) = &activate {
-                view.run_command(command, cx);
+                view.prepare(command, cx);
             }
             view
         });
@@ -8430,8 +8456,8 @@ impl Render for Workspace {
                             div()
                                 .id("status-place")
                                 .debug_selector(|| "status-place".into())
-                                .flex_shrink()
-                                .min_w_0()
+                                // The file first: it keeps its room (it's cut short already).
+                                .flex_none()
                                 .truncate()
                                 .when(file_path.is_some(), |d| {
                                     d.cursor_pointer().hover(|s| s.text_color(theme.foreground))
@@ -8446,13 +8472,17 @@ impl Render for Workspace {
                         }))
                         .children(trail.iter().enumerate().map(|(i, (name, row))| {
                             let row = *row;
+                            // Names give way when there's no room (the deepest last to).
                             div()
-                                .flex_none()
+                                .flex_shrink()
+                                .min_w_0()
                                 .flex()
-                                .child(div().px(px(5.)).text_color(theme.faint).child("›"))
+                                .child(div().flex_none().px(px(5.)).text_color(theme.faint).child("›"))
                                 .child(
                                     div()
                                         .id(("status-trail", i))
+                                        .min_w_0()
+                                        .truncate()
                                         .debug_selector(move || format!("status-trail {i}"))
                                         .cursor_pointer()
                                         .hover(|s| s.text_color(theme.foreground))

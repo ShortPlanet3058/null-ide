@@ -19,6 +19,11 @@ pub enum ServerMessage {
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
+/// Whether a server is one of Python's (it runs with the project's environment).
+fn is_python_server(name: &str) -> bool {
+    matches!(name, "pyright" | "pyright-langserver" | "basedpyright" | "pylsp" | "ruff" | "jedi-language-server")
+}
+
 /// With `NULL_LSP_LOG=/some/file` set, every message to and from language
 /// servers is appended there. For figuring out why a server misbehaves.
 fn trace(direction: &str, message: &str) {
@@ -126,8 +131,9 @@ impl LanguageServer {
         let mut child = Command::new(program)
             .args(args)
             .current_dir(root)
-            // A Python project's own environment first (pyright reads its packages from there).
-            .envs(crate::python_env::variables(root))
+            // A Python project's own environment first, for Python's server (pyright reads its
+            // packages from there); other servers keep the PATH they'd have.
+            .envs(if is_python_server(name) { crate::python_env::variables(root) } else { Vec::new() })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -139,8 +145,18 @@ impl LanguageServer {
             let name = name.to_string();
             std::thread::Builder::new().name("lsp-stderr".into()).spawn(move || {
                 use std::io::BufRead;
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    crate::server_log::append(&name, &line);
+                // Read to the end whatever comes (not UTF-8, say): a pipe left unread would stop
+                // the server when it next writes to it.
+                let mut reader = BufReader::new(stderr);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    match reader.read_until(b'\n', &mut line) {
+                        Ok(0) => break,
+                        Ok(_) => crate::server_log::append(&name, &String::from_utf8_lossy(&line)),
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
                 }
             })?;
         }

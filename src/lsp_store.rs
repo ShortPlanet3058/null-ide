@@ -1191,6 +1191,30 @@ impl LspStore {
     }
 
     /// Stops every server politely.
+    /// Python's language server started again (the project's environment changed: it reads
+    /// the packages from the new one), its open files handed to it again.
+    pub fn restart_python(&mut self, cx: &mut Context<Self>) {
+        let running: Vec<&'static str> =
+            self.servers.keys().copied().filter(|name| matches!(*name, "pyright" | "basedpyright" | "pylsp")).collect();
+        for name in running {
+            if let Some(ServerState::Running { server }) = self.servers.remove(name) {
+                drop(server.request::<Shutdown>(()));
+                server.notify::<Exit>(());
+            }
+            crate::server_log::append(name, "restarting: the project's Python environment changed");
+            let open: Vec<(PathBuf, Rope)> = self
+                .documents
+                .iter()
+                .filter(|(p, _)| config_for(p).is_some_and(|c| c.name == name))
+                .map(|(p, t)| (p.clone(), t.clone()))
+                .collect();
+            for (path, text) in open {
+                self.open(&path, text, cx);
+            }
+        }
+        cx.notify();
+    }
+
     pub fn shutdown(&mut self) {
         for state in self.servers.values() {
             if let ServerState::Running { server } = state {

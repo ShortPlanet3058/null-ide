@@ -283,6 +283,9 @@ pub struct TerminalView {
     origin: Point<Pixels>,
     /// Commands waiting for a new shell to finish starting, so they aren't echoed early.
     queued: Vec<String>,
+    /// Typed once the shell is ready, before anything queued, and not followed as a run of
+    /// its own (activating a Python environment).
+    setup: Option<String>,
     /// Whether the shell has started (its output went quiet after the first prompt).
     settled: bool,
     /// Whether the shell has written anything yet.
@@ -437,6 +440,7 @@ impl TerminalView {
             scroll_rest: 0.,
             origin: Point::default(),
             queued: Vec::new(),
+            setup: None,
             settled: false,
             spoke: false,
             settle_task: None,
@@ -465,11 +469,27 @@ impl TerminalView {
         self.settle_after(wait, cx);
     }
 
+    /// Typed into the shell as it starts, before any command: not a run of its own (no
+    /// notice, nothing read from what it prints), and what's run after waits for it.
+    pub fn prepare(&mut self, command: &str, cx: &mut Context<Self>) {
+        if self.settled {
+            return self.write(format!("{command}\r").into_bytes());
+        }
+        self.setup = Some(command.to_string());
+        let wait = if self.spoke { SETTLE_QUIET } else { SETTLE_AT_MOST };
+        self.settle_after(wait, cx);
+    }
+
     /// The shell counts as started once its output has been quiet a moment.
     fn settle_after(&mut self, wait: std::time::Duration, cx: &mut Context<Self>) {
         self.settle_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
-            this.update(cx, |this, _| {
+            this.update(cx, |this, cx| {
+                // Its setup first; what's queued once the shell is quiet again after it.
+                if let Some(setup) = this.setup.take() {
+                    this.write(format!("{setup}\r").into_bytes());
+                    return this.settle_after(SETTLE_AT_MOST, cx);
+                }
                 this.settled = true;
                 for command in std::mem::take(&mut this.queued) {
                     this.run = Some(this.run_start(Some(&command)));
