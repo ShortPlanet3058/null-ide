@@ -397,6 +397,8 @@ pub enum EditorEvent {
     Saved,
     /// Save was asked for, but the buffer has no file yet.
     NeedsPath,
+    /// Vim's `:`: its command line, to open.
+    VimCommandLine,
     /// The file changed on disk while there were unsaved edits here.
     ChangedOnDisk,
     /// Save was asked for, but the file changed on disk under the unsaved edits: saving

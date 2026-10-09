@@ -84,6 +84,8 @@ pub enum PaletteKind {
     Run,
     /// Projects opened lately, to open one.
     Projects,
+    /// Vim's command line (:w, :q, :42, :%s/a/b/g).
+    Ex,
 }
 
 /// What a place in the list is.
@@ -122,6 +124,7 @@ impl PaletteKind {
             PaletteKind::Branch => "Switch to branch, or name a new one",
             PaletteKind::Run => "Run a task, or type a command",
             PaletteKind::Projects => "Open a recent project",
+            PaletteKind::Ex => ":",
         }
     }
 }
@@ -350,6 +353,8 @@ pub enum PaletteEvent {
     Preview(PathBuf, lsp_types::Position),
     /// Start an AI task with this description.
     StartTask(String),
+    /// A Vim command typed after `:`.
+    Ex(String),
     /// Commit with this message: every change but the files left out.
     Commit(String, Vec<PathBuf>),
     /// ⌘I in the commit list: a message written by AI from these files' changes.
@@ -485,7 +490,7 @@ impl Palette {
         match self.kind {
             PaletteKind::Files => self.file_rows(split_place(&query).0),
             PaletteKind::Quick => self.quick_rows(&query),
-            PaletteKind::Line | PaletteKind::Task => {}
+            PaletteKind::Line | PaletteKind::Task | PaletteKind::Ex => {}
             // What's typed is the message: every changed file stays listed under it.
             PaletteKind::Commit => {
                 for i in 0..self.locations.len() {
@@ -866,6 +871,10 @@ impl Palette {
                 if !self.query.is_empty() {
                     cx.emit(PaletteEvent::StartTask(self.query.clone()));
                 }
+                return;
+            }
+            PaletteKind::Ex => {
+                cx.emit(PaletteEvent::Ex(self.query.clone()));
                 return;
             }
             PaletteKind::Commit => {
@@ -1291,6 +1300,7 @@ impl Palette {
             PaletteKind::Files => "↵ open",
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
+            PaletteKind::Ex => "↵ run",
             PaletteKind::Commit if self.left_out.is_empty() => "↵ commit",
             PaletteKind::Commit => "↵ commit these",
             PaletteKind::Run => "↵ run",
@@ -1390,6 +1400,11 @@ impl Render for Palette {
         }
         let eased = 1. - (1. - t).powi(3);
         let list = match self.kind {
+            PaletteKind::Ex => Some(self.render_message(
+                "w save · q close · wq · wa · qa · 42 line · s/a/b/ this line · %s/a/b/g every line".into(),
+                false,
+                cx,
+            )),
             PaletteKind::Line => {
                 let text = match (self.line_target(), self.line_count) {
                     (Some(n), Some(total)) if n > total => format!("Line {n} (the file has {total})"),

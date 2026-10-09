@@ -220,8 +220,13 @@ impl FindBar {
         self.show(None, true, window, cx);
     }
 
-    fn find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+    fn find_next(&mut self, _: &FindNext, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_search(cx);
+        // Vim: ↵ ends the search, on the match.
+        if crate::editor::vim::on(cx) {
+            self.editor.update(cx, |editor, cx| editor.vim_search_done(true, window, cx)).ok();
+            return;
+        }
         self.editor.update(cx, |editor, cx| editor.select_next_match(cx)).ok();
     }
 
@@ -238,6 +243,11 @@ impl FindBar {
 
     fn close(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_search(cx);
+        // Vim: Esc goes back where / started.
+        if crate::editor::vim::on(cx) {
+            self.editor.update(cx, |editor, cx| editor.vim_search_done(false, window, cx)).ok();
+            return;
+        }
         self.editor.update(cx, |editor, cx| editor.close_find(window, cx)).ok();
     }
 
