@@ -20,6 +20,31 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// What a breakpoint's field says, read: a condition it stops on ("i == 3"), the time it's
+/// reached it stops at ("5", ">= 5"), or a message it prints without stopping ("log x is
+/// {x}").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BreakWhen<'a> {
+    Condition(&'a str),
+    Hit(&'a str),
+    Log(&'a str),
+}
+
+impl<'a> BreakWhen<'a> {
+    pub fn read(text: &'a str) -> Self {
+        let text = text.trim();
+        if let Some(message) = text.strip_prefix("log ").or_else(|| text.strip_prefix("log:")) {
+            return BreakWhen::Log(message.trim());
+        }
+        // A count (lldb's "ignore this many times first"): digits, maybe after >= or ==.
+        let count = text.trim_start_matches(['>', '=', ' ']);
+        if !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()) {
+            return BreakWhen::Hit(count);
+        }
+        BreakWhen::Condition(text)
+    }
+}
+
 /// A breakpoint: its line (from 0), and when it only stops if something holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Breakpoint {
@@ -129,7 +154,7 @@ impl Editor {
         let Some(line) = self.breakpoint_click(event.position) else { return };
         let current = self.breakpoint_conditions.iter().find(|(l, _)| *l == line).map(|(_, c)| c.clone());
         let input = cx.new(|cx| {
-            let mut input = TextInput::new("Stop when… (like i == 3)", cx);
+            let mut input = TextInput::new("Stop when i == 3 · 5: the 5th time · log x is {x}: print, don't stop", cx);
             if let Some(text) = &current {
                 input.set_text(text, cx);
             }
@@ -204,6 +229,16 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_breakpoint_s_field_is_read() {
+        assert_eq!(BreakWhen::read(" i == 3 "), BreakWhen::Condition("i == 3"));
+        assert_eq!(BreakWhen::read("5"), BreakWhen::Hit("5"));
+        assert_eq!(BreakWhen::read(">= 12"), BreakWhen::Hit("12"));
+        assert_eq!(BreakWhen::read("log total is {total}"), BreakWhen::Log("total is {total}"));
+        assert_eq!(BreakWhen::read("log: hi"), BreakWhen::Log("hi"));
+        assert_eq!(BreakWhen::read("logged == 3"), BreakWhen::Condition("logged == 3"), "a name starting with log");
+    }
 
     /// With the mouse: a right-click in the strip left of the line numbers opens the
     /// condition field; typed into and ↵, that line's breakpoint stops only then.

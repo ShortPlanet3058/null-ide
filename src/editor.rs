@@ -36,7 +36,7 @@ pub mod vim;
 
 pub use assist::{Block, BlockKind};
 pub use bookmarks::{NextBookmark, PreviousBookmark, ToggleBookmark};
-pub use breakpoints::{Breakpoint, ToggleBreakpoint};
+pub use breakpoints::{BreakWhen, Breakpoint, ToggleBreakpoint};
 pub use completion::CompletionMenu;
 
 /// Markdown for `html` copied along with `text`, when it's the same words (not left over
