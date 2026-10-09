@@ -23,7 +23,11 @@ pub enum Invisible {
 /// out: emoji and some scripts are written with them.)
 pub fn invisible(c: char) -> Option<Invisible> {
     match c {
-        '\u{200B}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}' | '\u{180E}' => Some(Invisible::ZeroWidth),
+        '\u{200B}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}' | '\u{180E}' | '\u{034F}' | '\u{2061}'..='\u{2064}' => {
+            Some(Invisible::ZeroWidth)
+        }
+        // Hangul fillers: blank, and allowed in names (the "invisible variable" trick).
+        '\u{3164}' | '\u{115F}' | '\u{1160}' | '\u{FFA0}' => Some(Invisible::ZeroWidth),
         '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}' => {
             Some(Invisible::Direction)
         }
@@ -41,6 +45,9 @@ pub fn name(c: char) -> &'static str {
         '\u{2060}' => "word joiner",
         '\u{FEFF}' => "zero-width no-break space",
         '\u{00AD}' => "soft hyphen",
+        '\u{034F}' => "combining grapheme joiner",
+        '\u{2061}'..='\u{2064}' => "invisible operator",
+        '\u{3164}' | '\u{115F}' | '\u{1160}' | '\u{FFA0}' => "Hangul filler",
         '\u{180E}' => "Mongolian vowel separator",
         '\u{202A}' => "left-to-right embedding",
         '\u{202B}' => "right-to-left embedding",
@@ -62,9 +69,11 @@ pub fn name(c: char) -> &'static str {
 }
 
 /// Whether `c` is marked in a file that `prose` or not: odd spaces are how prose is
-/// written (a French "?" has one before it), not code.
+/// written (a French "?" has one before it), and so are the marks that say which way a
+/// right-to-left language's words go; not code.
 pub fn marked(c: char, prose: bool) -> Option<Invisible> {
-    invisible(c).filter(|kind| !(prose && *kind == Invisible::OddSpace))
+    let written_so = matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}');
+    invisible(c).filter(|kind| !(prose && (*kind == Invisible::OddSpace || written_so)))
 }
 
 impl Editor {
@@ -88,17 +97,25 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = if self.selection.is_empty() { 0..self.buffer.len_chars() } else { self.selection.range() };
+        // Every selection (each cursor's), or the whole file when none selects anything.
+        let selected: Vec<std::ops::Range<usize>> =
+            self.all_selections().iter().map(|s| s.range()).filter(|r| !r.is_empty()).collect();
+        let ranges = if selected.is_empty() { vec![0..self.buffer.len_chars()] } else { selected };
         let prose = self.is_prose();
-        let text = self.buffer.slice(range.clone());
         let mut edits = Vec::new();
-        for (i, c) in text.chars().enumerate() {
-            match marked(c, prose) {
-                Some(Invisible::OddSpace) => edits.push((range.start + i..range.start + i + 1, " ".to_string())),
-                Some(_) => edits.push((range.start + i..range.start + i + 1, String::new())),
-                None => {}
+        for range in &ranges {
+            let text = self.buffer.slice(range.clone());
+            for (i, c) in text.chars().enumerate() {
+                match marked(c, prose) {
+                    Some(Invisible::OddSpace) => edits.push((range.start + i..range.start + i + 1, " ".to_string())),
+                    Some(_) => edits.push((range.start + i..range.start + i + 1, String::new())),
+                    None => {}
+                }
             }
         }
+        // The caret stays by the same text: less what's taken out before it.
+        let head = self.selection.head;
+        let gone_before = edits.iter().filter(|(r, with)| with.is_empty() && r.end <= head).count();
         let count = edits.len();
         let message = match count {
             0 => "No invisible characters here".to_string(),
@@ -107,6 +124,7 @@ impl Editor {
         };
         if count > 0 {
             self.apply_char_edits(edits, cx);
+            self.selection = super::Selection::caret(head - gone_before);
         }
         self.show_notice(self.selection.head, message, cx);
     }
@@ -128,6 +146,9 @@ mod tests {
         assert_eq!(invisible('\u{202E}'), Some(Invisible::Direction));
         assert_eq!(invisible('\u{00A0}'), Some(Invisible::OddSpace));
         assert_eq!(invisible('\u{200D}'), None, "joiners make emoji");
+        assert_eq!(invisible('\u{3164}'), Some(Invisible::ZeroWidth), "a blank Hangul filler, allowed in names");
+        assert_eq!(marked('\u{200F}', true), None, "right-to-left prose writes them");
+        assert_eq!(marked('\u{200F}', false), Some(Invisible::Direction));
         assert_eq!(invisible(' '), None);
         assert_eq!(invisible('é'), None);
         // Prose has its odd spaces (French: "Quoi ?"), not its zero-width ones.
@@ -151,6 +172,7 @@ mod tests {
             assert_eq!(e.invisible_at_caret(), None);
             e.remove_invisible_characters(&RemoveInvisibleCharacters, window, cx);
             assert_eq!(e.buffer.to_string(), "let a = 1;\nif admin { }\n");
+            assert_eq!(e.selection.head, 1, "the caret by the same text");
             // One step back.
             e.undo(&crate::editor::Undo, window, cx);
             assert_eq!(e.buffer.to_string(), text);

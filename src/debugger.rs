@@ -301,12 +301,7 @@ impl Debugger {
                 .filter(|f| f.contains("throw"))
                 .map(str::to_string)
                 .collect();
-            let stop_on_errors = this
-                .update(cx, |this, _| {
-                    this.throw_filters = filters;
-                    this.stop_on_errors
-                })
-                .unwrap_or(false);
+            this.update(cx, |this, _| this.throw_filters = filters).ok();
             let cwd_text = cwd.display().to_string();
             let launch = adapter.request(
                 "launch",
@@ -321,8 +316,10 @@ impl Debugger {
             for (path, lines) in breakpoints {
                 adapter.request("setBreakpoints", Self::breakpoint_args(&path, &lines)).await.ok();
             }
+            // As it is now (it may have been switched while starting).
+            let (stop_on_errors, filters) =
+                this.update(cx, |this, _| (this.stop_on_errors, this.throw_filters.clone())).unwrap_or_default();
             if stop_on_errors {
-                let filters = this.update(cx, |this, _| this.throw_filters.clone()).unwrap_or_default();
                 for (command, arguments) in Self::error_stops(true, &filters) {
                     adapter.request(command, arguments).await.ok();
                 }
@@ -352,11 +349,11 @@ impl Debugger {
             .map(|b| {
                 use crate::editor::BreakWhen;
                 match b.condition.as_deref().map(BreakWhen::read) {
+                    Some(BreakWhen::Condition("")) | None => json!({ "line": b.line + 1 }),
                     Some(BreakWhen::Condition(condition)) => json!({ "line": b.line + 1, "condition": condition }),
-                    Some(BreakWhen::Hit(count)) => json!({ "line": b.line + 1, "hitCondition": count }),
+                    Some(BreakWhen::Hit(count)) => json!({ "line": b.line + 1, "hitCondition": count.to_string() }),
                     // Prints (with {x} worked out), doesn't stop.
                     Some(BreakWhen::Log(message)) => json!({ "line": b.line + 1, "logMessage": message }),
-                    None => json!({ "line": b.line + 1 }),
                 }
             })
             .collect();
@@ -675,6 +672,11 @@ mod tests {
             ],
         );
         assert_eq!(args["breakpoints"][0], json!({ "line": 1, "hitCondition": "5" }));
+        let plain = Debugger::breakpoint_args(
+            Path::new("/a.rs"),
+            &[crate::editor::Breakpoint { line: 0, condition: Some("log:".into()) }],
+        );
+        assert_eq!(plain["breakpoints"][0], json!({ "line": 1 }), "an empty message: a plain breakpoint");
         assert_eq!(args["breakpoints"][1], json!({ "line": 2, "logMessage": "x is {x}" }));
         // Stopping on errors: a Rust panic, and what's thrown; off, neither.
         let on = Debugger::error_stops(true, &["cpp_throw".into()]);
@@ -694,7 +696,7 @@ mod tests {
         let source = dir.join("main.c");
         std::fs::write(
             &source,
-            "#include <stdio.h>\nint main(void) {\n    int total = 0;\n    for (int i = 1; i <= 3; i++) {\n        total += i;\n    }\n    printf(\"total %d\\n\", total);\n    return 0;\n}\n",
+            "#include <stdio.h>\nint main(void) {\n    int total = 0;\n    for (int i = 1; i <= 4; i++) {\n        total += i;\n    }\n    printf(\"total %d\\n\", total);\n    return 0;\n}\n",
         )
         .unwrap();
         let program = dir.join("main");
@@ -706,7 +708,7 @@ mod tests {
         debugger.update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![log])], Vec::new(), cx));
         assert!(wait_for(cx, &debugger, |d| d.state == DebugState::Idle), "stopped, or never ended");
         let output = debugger.read_with(cx, |d, _| d.output.clone());
-        assert!(output.contains("i is 1") && output.contains("i is 3") && output.contains("total 6"), "{output}");
+        assert!(output.contains("i is 1") && output.contains("i is 4") && output.contains("total 10"), "{output}");
         // A count: stops the third time only (i is 3, total 1 + 2).
         let debugger = cx.new(|_| Debugger::default());
         let third = crate::editor::Breakpoint { line: 4, condition: Some("3".into()) };
@@ -717,6 +719,12 @@ mod tests {
             _ => unreachable!(),
         });
         assert!(locals.iter().any(|(name, value)| name == "total" && value == "3"), "{locals:?}");
+        // On from there: the count was reached, it stops every time after too (lldb's).
+        debugger.update(cx, |d, cx| d.resume("continue", cx));
+        let again = |d: &Debugger| {
+            matches!(&d.state, DebugState::Stopped(s) if s.locals.iter().any(|(n, v)| n == "total" && v == "6"))
+        };
+        assert!(wait_for(cx, &debugger, again), "from the 3rd time on");
         debugger.update(cx, |d, cx| d.stop(cx));
         std::fs::remove_dir_all(&dir).ok();
     }

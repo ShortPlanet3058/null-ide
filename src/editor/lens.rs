@@ -76,10 +76,27 @@ pub fn action_of(lens: &lsp_types::CodeLens, offset: usize) -> Option<LensItem> 
             if cargo.is_empty() {
                 return None;
             }
-            let mut line = format!("cargo {}", shell_line(&cargo));
+            let program = args.get("overrideCargo").and_then(|v| v.as_str()).unwrap_or("cargo");
+            let mut line = format!("{program} {}", shell_line(&cargo));
             let after = strings("executableArgs");
             if !after.is_empty() {
                 line.push_str(&format!(" -- {}", shell_line(&after)));
+            }
+            // What it's run with (UPDATE_EXPECT=1 to update a test's snapshot), and where.
+            let environment: Vec<String> = args
+                .get("environment")
+                .and_then(|v| v.as_object())
+                .map(|vars| {
+                    vars.iter().filter_map(|(k, v)| Some(format!("{k}={}", shell_line(&[v.as_str()?.to_string()])))).collect()
+                })
+                .unwrap_or_default();
+            if !environment.is_empty() {
+                line = format!("{} {line}", environment.join(" "));
+            }
+            let folder = args.get("cwd").or_else(|| args.get("workspaceRoot")).and_then(|v| v.as_str());
+            if let Some(folder) = folder {
+                // In a subshell: the terminal stays where it was.
+                line = format!("(cd {} && {line})", shell_line(&[folder.to_string()]));
             }
             LensAction::Run(line)
         }
@@ -111,7 +128,11 @@ impl Editor {
                         cx.background_executor().timer(NOT_READY).await;
                     }
                     _ => {
-                        this.update(cx, |this, _| this.lenses.answered = Some(revision)).ok();
+                        this.update(cx, |this, _| {
+                            this.lenses.answered = Some(revision);
+                            this.lenses.task = None;
+                        })
+                        .ok();
                         return;
                     }
                 }
@@ -131,6 +152,11 @@ impl Editor {
             })
             .ok();
         }));
+    }
+
+    /// After an edit: asked again once typing pauses (from the last keystroke, not the first).
+    pub(super) fn lenses_after_edit(&mut self) {
+        self.lenses.task = None;
     }
 
     /// The lens of `line` (the caret's), its words asked for if the server left them out:
@@ -201,6 +227,7 @@ impl Editor {
         let Some(action) = self.lenses.hits.iter().find(|(b, _)| b.contains(&position)).map(|(_, a)| a.clone()) else {
             return false;
         };
+        self.single_cursor();
         match action {
             LensAction::References(offset) => {
                 self.selection = Selection::caret(offset);
@@ -267,6 +294,11 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(*ran.borrow(), ["cargo test -- adds --exact"]);
+        // Where, and with what, as rust-analyzer says.
+        let run = lens("Update Test", "rust-analyzer.runSingle", Some(vec![serde_json::json!({
+            "args": { "cargoArgs": ["test"], "cwd": "/a b", "environment": { "UPDATE_EXPECT": "1" } }
+        })]));
+        assert_eq!(action_of(&run, 0).unwrap().action, LensAction::Run("(cd '/a b' && UPDATE_EXPECT=1 cargo test)".into()));
     }
 
     #[test]
