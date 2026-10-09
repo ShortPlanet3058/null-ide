@@ -48,6 +48,7 @@ mod punctuation;
 mod python_env;
 mod search;
 mod servers;
+mod server_log;
 mod session;
 mod settings;
 mod settings_panel;
