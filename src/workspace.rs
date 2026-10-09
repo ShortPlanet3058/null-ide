@@ -3917,6 +3917,7 @@ impl Workspace {
                 (Lines, "Insert Line Above".into(), Box::new(crate::editor::NewlineAbove)),
                 (Lines, "Join Lines".into(), Box::new(crate::editor::JoinLines)),
                 (Lines, "Sort Lines".into(), Box::new(crate::editor::SortLines)),
+                (Edit, "Remove Invisible Characters".into(), Box::new(crate::editor::RemoveInvisibleCharacters)),
                 (Lines, "Reverse Lines".into(), Box::new(crate::editor::ReverseLines)),
                 (Lines, "Remove Duplicate Lines".into(), Box::new(crate::editor::RemoveDuplicateLines)),
                 (Lines, "Rewrap Comment or Paragraph".into(), Box::new(crate::editor::Rewrap)),
@@ -7929,6 +7930,12 @@ impl Render for Workspace {
                             path,
                             match editor.extra.len() {
                                 _ if editor.reading => "Preview".into(),
+                                // A character that can't be seen, at the caret: named.
+                                0 if editor.invisible_at_caret().is_some() => format!(
+                                    "{} · {}",
+                                    position_label(editor, line, col),
+                                    editor.invisible_at_caret().unwrap_or_default()
+                                ),
                                 // Vim's keys: the mode first ("Normal · Ln 4, Col 9").
                                 0 => match editor.vim_mode(cx) {
                                     Some(mode) => match editor.vim_recording() {

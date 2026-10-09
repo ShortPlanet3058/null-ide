@@ -15,6 +15,7 @@ mod fold;
 mod ghost;
 mod hints;
 mod intel;
+pub mod invisible;
 mod language_pick;
 mod links;
 mod mac_keys;
@@ -81,6 +82,7 @@ pub use numbers::{Decrement, Increment};
 pub use refactor::{
     FindReferences, FormatDocument, FormatSelection, InsertFootnote, InsertTableOfContents, RenameSymbol, apply_edits,
 };
+pub use invisible::RemoveInvisibleCharacters;
 pub use review::{KeepHunk, UndoHunk};
 pub use rewrap::Rewrap;
 pub use structure::{
@@ -4312,6 +4314,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::reverse_lines))
             .on_action(cx.listener(Self::remove_duplicate_lines))
             .on_action(cx.listener(Self::sort_lines))
+            .on_action(cx.listener(Self::remove_invisible_characters))
             .on_action(cx.listener(Self::upper_case))
             .on_action(cx.listener(Self::lower_case))
             .on_action(cx.listener(Self::snake_case))
