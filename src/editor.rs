@@ -30,6 +30,7 @@ mod snippet;
 mod spelling;
 mod structure;
 mod tags;
+pub mod vim;
 
 pub use assist::{Block, BlockKind};
 pub use bookmarks::{NextBookmark, PreviousBookmark, ToggleBookmark};
@@ -572,6 +573,9 @@ pub struct Editor {
     goal_column: Option<usize>,
     pub extra: Vec<Cursor>,
     batch: Option<cursors::Batch>,
+    /// Vim's mode and what's pending, when its keys are in use.
+    vim: vim::Vim,
+    _vim_keys: Subscription,
     /// The word ⌘D picked from a bare caret: its occurrences must be whole words too.
     word_pick: Option<Range<usize>>,
     occurrence_whole_word: bool,
@@ -825,6 +829,8 @@ impl Editor {
             goal_column: None,
             extra: Vec::new(),
             batch: None,
+            vim: vim::Vim::default(),
+            _vim_keys: vim::listen(cx),
             word_pick: None,
             occurrence_whole_word: false,
             marked: None,
@@ -3989,9 +3995,14 @@ impl EntityInputHandler for Editor {
         &mut self,
         range_utf16: Option<Range<usize>>,
         text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Vim, not typing: what an accent key (`^` on a French keyboard) gave is a key.
+        if self.vim_takes_text(cx) {
+            self.marked = None;
+            return self.vim_text(text, window, cx);
+        }
         let explicit = range_utf16.is_some();
         let range = range_utf16
             .map(|r| self.buffer.utf16_to_char(r.start)..self.buffer.utf16_to_char(r.end))
@@ -4047,6 +4058,10 @@ impl EntityInputHandler for Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Vim, not typing: an accent being composed isn't text (it's a key once done).
+        if self.vim_takes_text(cx) {
+            return;
+        }
         let range = range_utf16
             .map(|r| self.buffer.utf16_to_char(r.start)..self.buffer.utf16_to_char(r.end))
             .or(self.marked.clone())

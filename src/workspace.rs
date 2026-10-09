@@ -7477,7 +7477,7 @@ impl Render for Workspace {
         });
         let (status_items, problems): (Vec<String>, (usize, usize)) = match self.active_editor().map(|e| e.read(cx)) {
             Some(editor) => {
-                let (line, col) = editor.caret_point();
+                let (line, col) = editor.buffer.point(editor.shown_caret());
                 let path = editor.path().map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string());
                 let problems = editor.problems(cx);
                 let count = |s| problems.iter().filter(|p| p.severity == s).count();
@@ -7497,7 +7497,11 @@ impl Render for Workspace {
                             path,
                             match editor.extra.len() {
                                 _ if editor.reading => "Preview".into(),
-                                0 => position_label(editor, line, col),
+                                // Vim's keys: the mode first ("Normal · Ln 4, Col 9").
+                                0 => match editor.vim_mode(cx) {
+                                    Some(mode) => format!("{} · {}", mode.label(), position_label(editor, line, col)),
+                                    None => position_label(editor, line, col),
+                                },
                                 n => format!("{} cursors · Esc for one", n + 1),
                             },
                         ],

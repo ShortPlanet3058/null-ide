@@ -574,7 +574,8 @@ impl Element for EditorElement {
             let text_bounds =
                 Bounds::from_corners(point(bounds.left() + gutter_width, bounds.top()), bounds.bottom_right());
             let viewport_height = f32::from(bounds.size.height);
-            let (caret_line, caret_col) = editor.caret_point();
+            // (Vim's Visual mode: on the last character selected, not after it.)
+            let (caret_line, caret_col) = editor.buffer.point(editor.shown_caret());
             let text_width = f32::from(text_bounds.size.width) - TEXT_PADDING;
             let cw = f32::from(char_width);
 
@@ -1510,13 +1511,24 @@ impl Element for EditorElement {
                     }
                 }
             };
-            let caret = Some((
-                Bounds::new(
-                    point(origin.x + visual.x - px(1.), origin.y + visual.y + (line_height - caret_height) / 2.),
-                    size(px(2.), caret_height),
-                ),
-                opacity,
-            ));
+            // Vim out of Insert mode: a block over the character, faint enough to read it.
+            let caret = Some(if editor.block_caret(cx) {
+                (
+                    Bounds::new(
+                        point(origin.x + visual.x, origin.y + visual.y + (line_height - caret_height) / 2.),
+                        size(char_width, caret_height),
+                    ),
+                    opacity * 0.45,
+                )
+            } else {
+                (
+                    Bounds::new(
+                        point(origin.x + visual.x - px(1.), origin.y + visual.y + (line_height - caret_height) / 2.),
+                        size(px(2.), caret_height),
+                    ),
+                    opacity,
+                )
+            });
 
             let thumb_emphasis = if editor.scrollbar_dragging() {
                 0.9
