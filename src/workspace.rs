@@ -517,6 +517,10 @@ pub struct Workspace {
     tests_scroll: UniformListScrollHandle,
     /// The outline last read: whose (an editor), at which revision of its text.
     outline: Option<(gpui::EntityId, u64, std::rc::Rc<Vec<crate::outline::Item>>)>,
+    /// When the outline was last worked out, and the redraw asked for once typing pauses
+    /// (a big file's isn't worked out again on every keystroke).
+    outline_at: Instant,
+    outline_later: Option<Task<()>>,
     outline_scroll: UniformListScrollHandle,
     /// The item the caret was in when last drawn: the list follows it to another.
     outline_followed: Option<(gpui::EntityId, usize)>,
@@ -776,6 +780,8 @@ impl Workspace {
             tests_running: None,
             tests_scroll: UniformListScrollHandle::new(),
             outline: None,
+            outline_at: Instant::now(),
+            outline_later: None,
             outline_scroll: UniformListScrollHandle::new(),
             outline_followed: None,
             tabs: Vec::new(),
@@ -5204,22 +5210,41 @@ impl Workspace {
         &mut self,
         editor: &Entity<Editor>,
         longest: usize,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> Option<std::rc::Rc<Vec<crate::outline::Item>>> {
+        const AGAIN_AFTER: Duration = Duration::from_millis(300);
         let e = editor.read(cx);
         let (id, revision) = (editor.entity_id(), e.buffer.revision());
         if let Some((i, r, items)) = &self.outline
             && *i == id
-            && *r == revision
         {
-            return Some(items.clone());
+            if *r == revision {
+                return Some(items.clone());
+            }
+            // Typing in a big file: the outline of a moment ago, worked out again at most
+            // every so often (and once typing pauses).
+            if e.buffer.len_chars() > 50_000 && self.outline_at.elapsed() < AGAIN_AFTER {
+                if self.outline_later.is_none() {
+                    self.outline_later = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(AGAIN_AFTER).await;
+                        this.update(cx, |this, cx| {
+                            this.outline_later = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    }));
+                }
+                return Some(items.clone());
+            }
         }
+        let e = editor.read(cx);
         if e.buffer.len_chars() > longest {
             return None;
         }
         let path = e.path().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(e.file_name()));
         let items = std::rc::Rc::new(crate::outline::outline(&path, &e.buffer.to_string()));
         self.outline = Some((id, revision, items.clone()));
+        self.outline_at = Instant::now();
         Some(items)
     }
 
