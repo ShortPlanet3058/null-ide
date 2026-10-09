@@ -136,7 +136,20 @@ fn jetbrains_platform_keys() -> Vec<KeyBinding> {
 }
 
 /// Registers every shortcut for `keymap`, replacing whatever was there.
+/// Counts the times the keys were bound (a keymap picked, shortcuts changed): Vim's state
+/// from before is let go.
+#[derive(Default)]
+struct Epoch(u64);
+
+impl gpui::Global for Epoch {}
+
+pub fn epoch(cx: &App) -> u64 {
+    cx.try_global::<Epoch>().map_or(0, |e| e.0)
+}
+
 pub fn register(keymap: Keymap, cx: &mut App) {
+    let next = epoch(cx) + 1;
+    cx.set_global(Epoch(next));
     cx.clear_key_bindings();
     crate::editor::bind_keys(cx);
     crate::workspace::bind_keys(cx);

@@ -1134,8 +1134,10 @@ impl Workspace {
         self.reindex(&visible, cx);
         // The project's settings, changed (by hand, by another app): in use as they are now.
         let root = self.tree.read(cx).root().to_path_buf();
-        if visible.contains(&crate::settings::project_file(&root)) || visible.contains(&crate::settings::vscode_file(&root))
-        {
+        // (Only when they're the ones in use: another window's in front, they wait for this one.)
+        let settings_changed = visible.contains(&crate::settings::project_file(&root))
+            || visible.contains(&crate::settings::vscode_file(&root));
+        if settings_changed && crate::settings::project_in_use(&root) {
             crate::settings::use_project(&root, cx);
         }
         let changed: HashSet<&PathBuf> = visible.iter().collect();
@@ -2723,6 +2725,12 @@ impl Workspace {
                         || path == Some(crate::settings::vscode_file(&root).as_path())
                     {
                         settings::use_project(&root, cx);
+                        if settings::project_unreadable() {
+                            this.show_notice(
+                                ".null/settings.json can't be read: it's left as it is until it's put right".into(),
+                                cx,
+                            );
+                        }
                     }
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
                         settings::reload(cx);
@@ -6651,7 +6659,14 @@ impl Workspace {
         match command {
             "w" | "write" => editor.update(cx, |e, cx| e.save_from_keyboard(cx)),
             "wa" | "wall" => self.save_all(&SaveAll, window, cx),
-            "q" | "q!" | "quit" | "close" => self.close_tab(&CloseTab, window, cx),
+            "q" | "quit" | "close" => self.close_tab(&CloseTab, window, cx),
+            // Without saving: the changes go (from disk again), then the tab.
+            "q!" | "quit!" => {
+                if editor.read(cx).path().is_some() {
+                    editor.update(cx, |e, cx| e.revert_to_disk(cx));
+                }
+                self.close_tab(&CloseTab, window, cx);
+            }
             "wq" | "x" | "xit" => {
                 if save(&editor, cx) {
                     self.close_tab(&CloseTab, window, cx);
@@ -7521,7 +7536,7 @@ impl Render for Workspace {
         });
         let (status_items, problems): (Vec<String>, (usize, usize)) = match self.active_editor().map(|e| e.read(cx)) {
             Some(editor) => {
-                let (line, col) = editor.buffer.point(editor.shown_caret());
+                let (line, col) = editor.buffer.point(editor.shown_caret(cx));
                 let path = editor.path().map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string());
                 let problems = editor.problems(cx);
                 let count = |s| problems.iter().filter(|p| p.severity == s).count();
