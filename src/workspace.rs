@@ -139,6 +139,7 @@ actions!(
         ReplaceInProject,
         ShowFiles,
         ShowOutline,
+        ShowTests,
         ToggleAutocomplete,
         ToggleTerminal,
         NewTerminal,
@@ -421,6 +422,14 @@ struct AiTaskRun {
     _task: Option<Task<()>>,
 }
 
+/// How a test did when last run from the list (or a run that printed its name).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestStatus {
+    Running,
+    Passed,
+    Failed,
+}
+
 enum TaskState {
     /// Saving open files and copying the project, to compare with afterwards.
     Starting,
@@ -492,6 +501,16 @@ pub struct Workspace {
     sidebar_search: Transition,
     /// The sidebar shows the open file's outline instead of the files (when not searching).
     sidebar_outline: bool,
+    /// The sidebar shows the project's tests (see `crate::test_at::discover`).
+    sidebar_tests: bool,
+    /// The tests found (None: not looked for yet), and the search for them.
+    tests: Option<Vec<crate::test_at::FileTests>>,
+    tests_task: Option<Task<()>>,
+    /// How each test (file, name) did when last run.
+    test_status: std::collections::HashMap<(PathBuf, String), TestStatus>,
+    /// The tests run from the list, and the command running them.
+    tests_running: Option<(String, Vec<(PathBuf, String)>)>,
+    tests_scroll: UniformListScrollHandle,
     /// The outline last read: whose (an editor), at which revision of its text.
     outline: Option<(gpui::EntityId, u64, std::rc::Rc<Vec<crate::outline::Item>>)>,
     outline_scroll: UniformListScrollHandle,
@@ -745,6 +764,12 @@ impl Workspace {
             project_search,
             sidebar_search: Transition::new(false),
             sidebar_outline: false,
+            sidebar_tests: false,
+            tests: None,
+            tests_task: None,
+            test_status: std::collections::HashMap::new(),
+            tests_running: None,
+            tests_scroll: UniformListScrollHandle::new(),
             outline: None,
             outline_scroll: UniformListScrollHandle::new(),
             outline_followed: None,
@@ -2681,6 +2706,10 @@ impl Workspace {
                     this.twin_seen.insert(editor.entity_id(), editor.read(cx).buffer.revision());
                 }
                 EditorEvent::Saved => {
+                    if let Some(path) = editor.read(cx).path().map(Path::to_path_buf) {
+                        let text = editor.read(cx).buffer.to_string();
+                        this.tests_saved(path, text, cx);
+                    }
                     // Saved while an AI task works: that file's change is yours too.
                     // (Not the saves that start it: those are in the copy it's compared with.)
                     if let Some(run) = this.ai_task.as_mut().filter(|r| matches!(r.state, TaskState::Running(_)))
@@ -3780,6 +3809,7 @@ impl Workspace {
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
             (View, "Show Outline".into(), Box::new(ShowOutline)),
+            (View, "Show Tests".into(), Box::new(ShowTests)),
             (
                 View,
                 toggle(settings.word_wrap_for(language), "Stop Wrapping Lines", "Wrap Lines"),
@@ -4787,6 +4817,7 @@ impl Workspace {
 
     fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_outline = false;
+        self.sidebar_tests = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
@@ -4795,11 +4826,257 @@ impl Workspace {
 
     fn show_outline(&mut self, _: &ShowOutline, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_outline = true;
+        self.sidebar_tests = false;
         self.outline_followed = None;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
         cx.notify();
+    }
+
+    /// The project's tests in the sidebar, looked for again (they may have changed).
+    fn show_tests(&mut self, _: &ShowTests, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_tests = true;
+        self.sidebar_outline = false;
+        self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        self.leave_hidden_focus(window, cx);
+        self.find_tests(cx);
+        cx.notify();
+    }
+
+    /// Looks through the project for tests, off the main thread.
+    fn find_tests(&mut self, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        self.tests_task = Some(cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async move { crate::test_at::discover(&root) }).await;
+            this.update(cx, |this, cx| {
+                this.tests = Some(found);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// A file saved while the tests show: its own tests read again.
+    fn tests_saved(&mut self, path: PathBuf, text: String, cx: &mut Context<Self>) {
+        if self.tests.is_none() {
+            return;
+        }
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { crate::test_at::tests_in_file(&root, &path, &text) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let Some(tests) = &mut this.tests else { return };
+                tests.retain(|f| f.path != path);
+                if let Some(found) = found {
+                    let at = tests.partition_point(|f| f.path < found.path);
+                    tests.insert(at, found);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Runs `command` in the terminal for `which` tests: they show as running until what it
+    /// prints says how they did.
+    fn run_tests(&mut self, command: String, which: Vec<(PathBuf, String)>, window: &mut Window, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            if tab.editor.read(cx).buffer.is_dirty() && tab.editor.read(cx).path().is_some() {
+                tab.editor.update(cx, |e, cx| e.save_to_disk(cx));
+            }
+        }
+        // pytest says which passed only when asked to (-v).
+        let command = match command.strip_prefix("python3 -m pytest ") {
+            Some(rest) if !rest.starts_with("-v ") => format!("python3 -m pytest -v {rest}"),
+            _ => command,
+        };
+        for test in &which {
+            self.test_status.insert(test.clone(), TestStatus::Running);
+        }
+        self.tests_running = Some((command.clone(), which));
+        self.run_in_terminal(command, None, window, cx);
+        cx.notify();
+    }
+
+    /// How the tests did, from what a run printed (one run from the list, or typed).
+    fn read_test_results(&mut self, ran: &crate::terminal::Ran) {
+        let results = crate::test_at::results(&ran.output);
+        let ours = self.tests_running.as_ref().is_some_and(|(command, _)| *command == ran.command);
+        let running = if ours { self.tests_running.take().map(|(_, which)| which) } else { None };
+        if results.is_empty() && running.is_none() {
+            return;
+        }
+        let known: Vec<(PathBuf, String)> = self
+            .tests
+            .iter()
+            .flatten()
+            .flat_map(|f| f.tests.iter().map(|t| (f.path.clone(), t.name.clone())))
+            .collect();
+        for (name, passed) in results {
+            let status = if passed { TestStatus::Passed } else { TestStatus::Failed };
+            // The ones run, when it was from the list; any of that name, when typed.
+            let targets: Vec<&(PathBuf, String)> = match &running {
+                Some(which) => which.iter().filter(|(_, n)| *n == name).collect(),
+                None => known.iter().filter(|(_, n)| *n == name).collect(),
+            };
+            for target in targets {
+                self.test_status.insert(target.clone(), status);
+            }
+        }
+        // Run, and not said how they did (it didn't build, say): not known.
+        for test in running.into_iter().flatten() {
+            if self.test_status.get(&test) == Some(&TestStatus::Running) {
+                self.test_status.remove(&test);
+            }
+        }
+    }
+
+    fn render_tests(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.global::<Theme>().clone();
+        let quiet = |text: &str| {
+            div().px(px(18.)).pt(px(14.)).text_size(px(ui::T_MD)).text_color(theme.faint).child(text.to_string()).into_any_element()
+        };
+        let Some(files) = self.tests.clone() else { return quiet("Looking for tests…") };
+        if files.is_empty() {
+            return quiet("No tests in this project (Rust, Go, Python, JavaScript, TypeScript)");
+        }
+        // A row for each file, then one for each of its tests.
+        let rows: Vec<(usize, Option<usize>)> = files
+            .iter()
+            .enumerate()
+            .flat_map(|(f, file)| std::iter::once((f, None)).chain((0..file.tests.len()).map(move |t| (f, Some(t)))))
+            .collect();
+        let root = self.tree.read(cx).root().to_path_buf();
+        let status = self.test_status.clone();
+        let files = std::rc::Rc::new(files);
+        uniform_list(
+            "tests",
+            rows.len(),
+            cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
+                let theme = cx.global::<Theme>().clone();
+                range
+                    .map(|ix| {
+                        let (f, t) = rows[ix];
+                        let file = &files[f];
+                        let path = file.path.clone();
+                        let group: SharedString = format!("test-row-{ix}").into();
+                        let run = |command: Option<String>, which: Vec<(PathBuf, String)>| {
+                            div()
+                                .id(("test-run", ix))
+                                .flex_none()
+                                .size(px(20.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(ui::R_KEY))
+                                .cursor_pointer()
+                                .invisible()
+                                .group_hover(group.clone(), |s| s.visible())
+                                .hover(|s| s.bg(theme.hairline))
+                                .child(svg().path("icons/play.svg").size(px(10.)).text_color(theme.muted))
+                                .when_some(command, |d, command| {
+                                    d.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        this.run_tests(command.clone(), which.clone(), window, cx)
+                                    }))
+                                })
+                        };
+                        let line = match t {
+                            None => {
+                                let shown = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().into_owned();
+                                let which: Vec<(PathBuf, String)> =
+                                    file.tests.iter().map(|t| (path.clone(), t.name.clone())).collect();
+                                div()
+                                    .id(("test-file", ix))
+                                    .group(group.clone())
+                                    .h(px(ui::ROW))
+                                    .pl(px(12.))
+                                    .pr(px(6.))
+                                    .mt(px(if ix == 0 { 0. } else { 6. }))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .rounded(px(ui::R_ROW))
+                                    .cursor_pointer()
+                                    .text_size(px(ui::T_SM))
+                                    .text_color(theme.faint)
+                                    .hover(|s| s.bg(theme.hairline.opacity(0.6)))
+                                    .child(div().flex_1().min_w_0().truncate().child(shown))
+                                    .child(run(file.command.clone(), which))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                        this.open_file(path.clone(), window, cx)
+                                    }))
+                            }
+                            Some(t) => {
+                                let test = &file.tests[t];
+                                let key = (path.clone(), test.name.clone());
+                                let dot = match status.get(&key) {
+                                    Some(TestStatus::Passed) => theme.git_added,
+                                    Some(TestStatus::Failed) => theme.error,
+                                    Some(TestStatus::Running) => theme.caret,
+                                    None => theme.line_strong,
+                                };
+                                let at = lsp_types::Position::new(test.line as u32, 0);
+                                div()
+                                    .id(("test", ix))
+                                    .group(group.clone())
+                                    .h(px(ui::ROW))
+                                    .pl(px(22.))
+                                    .pr(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .rounded(px(ui::R_ROW))
+                                    .cursor_pointer()
+                                    .text_size(px(ui::T_MD))
+                                    .text_color(theme.muted)
+                                    .hover(|s| s.bg(theme.hairline.opacity(0.6)).text_color(theme.foreground))
+                                    .child(div().flex_none().size(px(7.)).rounded(px(4.)).bg(dot))
+                                    // Its own name first; the class it's in (pytest's TestCart::), faint after.
+                                    .child({
+                                        let (class, own) = test.name.rsplit_once("::").unwrap_or(("", &test.name));
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_baseline()
+                                            .gap(px(6.))
+                                            .child(div().flex_none().max_w_full().truncate().code_font(cx).child(own.to_string()))
+                                            .when(!class.is_empty(), |d| {
+                                                d.child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_size(px(ui::T_SM))
+                                                        .text_color(theme.faint)
+                                                        .child(class.replace("::", " › ")),
+                                                )
+                                            })
+                                    })
+                                    .child(run(Some(test.command.clone()), vec![key]))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                        this.go_to(path.clone(), lsp_types::Range::new(at, at), window, cx)
+                                    }))
+                            }
+                        };
+                        div().w_full().px(px(6.)).child(line).into_any_element()
+                    })
+                    .collect()
+            }),
+        )
+        .track_scroll(self.tests_scroll.clone())
+        .size_full()
+        .pt(px(6.))
+        .into_any_element()
     }
 
     /// Goes to line `row` of the open file from its outline, the text taking the keys.
@@ -5000,6 +5277,7 @@ impl Workspace {
         let theme = cx.global::<Theme>();
         let searching = self.sidebar_search.on;
         let outlining = !searching && self.sidebar_outline;
+        let testing = !searching && self.sidebar_tests;
         let tab = |id: &'static str, label: &'static str, on: bool| {
             ui::segment(on, theme)
                 .id(id)
@@ -5015,11 +5293,14 @@ impl Workspace {
             .pt(px(10.))
             .child(
                 ui::segmented(theme)
-                    .child(tab("files", "Files", !searching && !outlining).active(|s| s.opacity(0.7)).on_click(
+                    .child(tab("files", "Files", !searching && !outlining && !testing).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
                     ))
                     .child(tab("outline", "Outline", outlining).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.show_outline(&ShowOutline, window, cx)),
+                    ))
+                    .child(tab("tests", "Tests", testing).active(|s| s.opacity(0.7)).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_tests(&ShowTests, window, cx)),
                     ))
                     .child(tab("search", "Search", searching).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
@@ -5901,7 +6182,10 @@ impl Workspace {
                     this.show_notice(message, cx);
                 }
             }
-            TerminalEvent::Ran(ran) => this.read_reported(ran, cx),
+            TerminalEvent::Ran(ran) => {
+                this.read_test_results(ran);
+                this.read_reported(ran, cx);
+            }
             TerminalEvent::OpenFile(path, line, column) => {
                 this.open_file(path.clone(), window, cx);
                 if let Some(editor) = this.active_editor().cloned() {
@@ -7514,6 +7798,8 @@ impl Render for Workspace {
         } else if self.sidebar_outline && sidebar_width > 0.5 {
             // (Read only while it shows.)
             div().flex_1().min_h_0().child(self.render_outline(cx))
+        } else if self.sidebar_tests && sidebar_width > 0.5 {
+            div().flex_1().min_h_0().child(self.render_tests(cx))
         } else {
             div().flex_1().min_h_0().child(self.tree.clone())
         };
@@ -8383,6 +8669,7 @@ impl Render for Workspace {
                 this.switch_tab(true, held, window, cx)
             }))
             .on_action(cx.listener(Self::show_outline))
+            .on_action(cx.listener(Self::show_tests))
             .on_action(cx.listener(Self::quit))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             // In Focus mode, only a strip to drag the window by.
@@ -10357,6 +10644,66 @@ mod tests {
         // One you named "qa 2" keeps it; another "qa" takes the next number free.
         let labels = Workspace::distinct_labels(vec!["qa".into(), "qa".into(), "qa 2".into()]);
         assert_eq!(labels, ["qa", "qa 3", "qa 2"]);
+    }
+
+    /// The Tests view finds the project's tests; a run's output says how each did, those
+    /// run from the list and, typed by hand, any of that name.
+    #[gpui::test]
+    fn tests_are_listed_and_their_results_read(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("tests-view");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+        let code = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {}\n    #[test]\n    fn takes() {}\n}\n";
+        std::fs::write(dir.join("src/cart.rs"), code).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.show_tests(&ShowTests, window, cx));
+        cx.run_until_parked();
+        let path = dir.join("src/cart.rs");
+        let names = workspace.read_with(cx, |w, _| {
+            w.tests.clone().unwrap().iter().flat_map(|f| f.tests.iter().map(|t| t.name.clone())).collect::<Vec<_>>()
+        });
+        assert_eq!(names, ["adds", "takes"]);
+        let ran = |command: &str, output: &str| crate::terminal::Ran {
+            name: "cargo".into(),
+            command: command.to_string(),
+            folder: dir.clone(),
+            output: output.to_string(),
+        };
+        workspace.update(cx, |w, _| {
+            let command = "cargo test -- --exact cart::tests::adds".to_string();
+            w.tests_running = Some((command.clone(), vec![(path.clone(), "adds".into())]));
+            w.test_status.insert((path.clone(), "adds".into()), TestStatus::Running);
+            w.read_test_results(&ran(&command, "test cart::tests::adds ... FAILED\n"));
+            assert_eq!(w.test_status.get(&(path.clone(), "adds".into())), Some(&TestStatus::Failed));
+            // Typed by hand: every test it names.
+            w.read_test_results(&ran("cargo test", "test cart::tests::adds ... ok\ntest cart::tests::takes ... ok\n"));
+            assert_eq!(w.test_status.get(&(path.clone(), "adds".into())), Some(&TestStatus::Passed));
+            assert_eq!(w.test_status.get(&(path.clone(), "takes".into())), Some(&TestStatus::Passed));
+            // Run from the list but not said (it didn't build): not known.
+            w.tests_running = Some(("cargo test x".into(), vec![(path.clone(), "takes".into())]));
+            w.test_status.insert((path.clone(), "takes".into()), TestStatus::Running);
+            w.read_test_results(&ran("cargo test x", "error[E0425]: cannot find value\n"));
+            assert_eq!(w.test_status.get(&(path.clone(), "takes".into())), None);
+        });
+        // A test added and saved: listed.
+        workspace.update_in(cx, |w, window, cx| w.open_file(path.clone(), window, cx));
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+        let more = code.replace("    fn takes() {}\n", "    fn takes() {}\n    #[test]\n    fn more() {}\n");
+        editor.update(cx, |e, cx| {
+            e.restore_unsaved(&more, cx);
+            e.save_to_disk(cx);
+        });
+        cx.run_until_parked();
+        let count = workspace.read_with(cx, |w, _| w.tests.as_ref().unwrap()[0].tests.len());
+        assert_eq!(count, 3);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A command's output in the terminal: its problems in files that exist join the list
