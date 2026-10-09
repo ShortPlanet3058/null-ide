@@ -106,10 +106,22 @@ impl LanguageServer {
     }
 
     /// Starts `program` in `root` and returns it with a stream of its messages.
+    #[cfg(test)]
     pub fn spawn(
         program: &Path,
         args: &[&str],
         root: &Path,
+    ) -> io::Result<(Self, mpsc::UnboundedReceiver<ServerMessage>)> {
+        let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Self::spawn_named(program, args, root, &name)
+    }
+
+    /// As `spawn`, what it prints on its error output kept in the server log as `name`'s.
+    pub fn spawn_named(
+        program: &Path,
+        args: &[&str],
+        root: &Path,
+        name: &str,
     ) -> io::Result<(Self, mpsc::UnboundedReceiver<ServerMessage>)> {
         let mut child = Command::new(program)
             .args(args)
@@ -118,10 +130,21 @@ impl LanguageServer {
             .envs(crate::python_env::variables(root))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
+        // What it says about itself (why it fails, often): into the server log.
+        if let Some(stderr) = child.stderr.take() {
+            let name = name.to_string();
+            std::thread::Builder::new().name("lsp-stderr".into()).spawn(move || {
+                use std::io::BufRead;
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    crate::server_log::append(&name, &line);
+                }
+            })?;
+        }
+        let stopped_name = name.to_string();
         let pending: Pending = Arc::default();
         let (tx, rx) = mpsc::unbounded();
 
@@ -155,6 +178,7 @@ impl LanguageServer {
             }
             // The server exited: fail whatever is still waiting.
             replies.lock().unwrap().clear();
+            crate::server_log::append(&stopped_name, "(stopped)");
         })?;
 
         let server = Self {

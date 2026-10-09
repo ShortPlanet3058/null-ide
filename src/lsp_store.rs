@@ -338,10 +338,12 @@ impl LspStore {
 
     fn start(&mut self, config: &'static ServerConfig, cx: &mut Context<Self>) -> ServerState {
         let Some(program) = crate::servers::find(config) else { return ServerState::Missing };
-        let (server, mut messages) = match LanguageServer::spawn(&program, config.args, &self.root) {
+        crate::server_log::append(config.name, &format!("starting {}", program.display()));
+        let (server, mut messages) = match LanguageServer::spawn_named(&program, config.args, &self.root, config.name) {
             Ok(started) => started,
             Err(err) => {
                 eprintln!("null: couldn't start {}: {err}", config.name);
+                crate::server_log::append(config.name, &format!("couldn't start: {err}"));
                 return ServerState::Unavailable;
             }
         };
@@ -494,6 +496,7 @@ impl LspStore {
                     }
                     Err(err) => {
                         eprintln!("null: {} failed to start: {err}", config.name);
+                        crate::server_log::append(config.name, &format!("failed to start: {err}"));
                         this.servers.insert(config.name, ServerState::Unavailable);
                     }
                 }
@@ -506,6 +509,16 @@ impl LspStore {
     fn handle_message(&mut self, config: &'static ServerConfig, message: ServerMessage, cx: &mut Context<Self>) {
         match message {
             ServerMessage::Notification { method, params } => match method.as_str() {
+                // What it says (rust-analyzer: "failed to load workspace…"): into the log.
+                "window/logMessage" | "window/showMessage" => {
+                    let kind = match params.get("type").and_then(|t| t.as_u64()) {
+                        Some(1) => "error: ",
+                        Some(2) => "warning: ",
+                        _ => "",
+                    };
+                    let text = params.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+                    crate::server_log::append(config.name, &format!("{kind}{text}"));
+                }
                 "textDocument/publishDiagnostics" => {
                     let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(params) else { return };
                     let Some(path) = path_for(&params.uri) else { return };

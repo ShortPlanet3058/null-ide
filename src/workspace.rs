@@ -96,6 +96,7 @@ actions!(
         ToggleSpellCheck,
         ToggleInlayHints,
         ToggleCodeLens,
+        ShowServerLog,
         ToggleBracketColours,
         ToggleProblemsAtLineEnds,
         ToggleFocusMode,
@@ -3578,6 +3579,24 @@ impl Workspace {
     }
 
     /// Cmd+N: an empty file with no name yet; saving asks where to put it.
+    /// What the language servers said about themselves, in a tab of its own (not a file).
+    fn show_server_log(&mut self, _: &ShowServerLog, window: &mut Window, cx: &mut Context<Self>) {
+        let log = crate::server_log::text();
+        let body = if log.is_empty() { "Nothing yet: no language server has started.".to_string() } else { log };
+        let text = format!("{body}\n");
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::new(crate::buffer::Buffer::from_text(&text), None, cx);
+            editor.untitled_name = Some("Language server log".into());
+            editor
+        });
+        self.add_tab(editor.clone(), window, cx);
+        // At its end: the latest.
+        editor.update(cx, |e, cx| {
+            let last = e.buffer.len_lines().saturating_sub(1);
+            e.set_caret_point((last, 0), cx);
+        });
+    }
+
     fn new_untitled(&mut self, _: &NewUntitled, window: &mut Window, cx: &mut Context<Self>) {
         let editor = cx.new(|cx| Editor::new(Default::default(), None, cx));
         self.add_tab(editor, window, cx);
@@ -3789,6 +3808,7 @@ impl Workspace {
             ),
             (View, toggle(settings.inlay_hints, "Hide Type Hints", "Show Type Hints"), Box::new(ToggleInlayHints)),
             (View, toggle(settings.code_lens, "Hide Code Lens", "Show Code Lens"), Box::new(ToggleCodeLens)),
+            (View, "Show Language Server Log".into(), Box::new(ShowServerLog)),
             (
                 View,
                 toggle(settings.bracket_colours, "Plain Brackets", "Colour Bracket Pairs"),
@@ -8732,6 +8752,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_recent))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::start_debugging))
+            .on_action(cx.listener(Self::show_server_log))
             .on_action(cx.listener(|this, _: &ToggleStopOnErrors, _, cx| {
                 // Where the program fails (a Rust panic, a thrown exception): stopped at.
                 let on = !this.debugger.read(cx).stop_on_errors;

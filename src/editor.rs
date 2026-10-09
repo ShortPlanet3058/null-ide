@@ -536,6 +536,8 @@ pub struct Editor {
     longest_line: std::cell::Cell<(u64, usize)>,
     /// Set for an image or a file that isn't text, shown instead of the text.
     pub preview: Option<crate::preview::Preview>,
+    /// What a tab with no file is called, when it's one Null opened ("Language server log").
+    pub untitled_name: Option<String>,
     /// A file that isn't text, as its bytes (the first `HEX_LIMIT` of them), to show in hex.
     binary: Option<std::sync::Arc<Vec<u8>>>,
     hex_scroll: gpui::UniformListScrollHandle,
@@ -819,6 +821,7 @@ impl Editor {
             spans_for: None,
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
             preview: None,
+            untitled_name: None,
             binary: None,
             hex_scroll: gpui::UniformListScrollHandle::new(),
             missing: false,
@@ -1113,6 +1116,7 @@ impl Editor {
             .as_deref()
             .and_then(Path::file_name)
             .map(|name| name.to_string_lossy().into_owned())
+            .or_else(|| self.untitled_name.clone())
             .unwrap_or_else(|| "Untitled".into())
     }
 
