@@ -57,6 +57,8 @@ struct ProjectFile {
     path: Option<PathBuf>,
     values: JsonMap,
     shadowed: JsonMap,
+    /// What its own file (`path`) says, of `values` (the rest is from `.vscode`).
+    own: JsonMap,
 }
 
 thread_local! {
@@ -73,6 +75,11 @@ pub fn project_file(root: &std::path::Path) -> PathBuf {
     root.join(".null").join("settings.json")
 }
 
+/// Where VS Code keeps a project's settings, also read (`.null`'s win over them).
+pub fn vscode_file(root: &std::path::Path) -> PathBuf {
+    root.join(".vscode").join("settings.json")
+}
+
 /// A project's settings as written (comments allowed): none when there's no such file, or
 /// it isn't an object.
 fn read_project(path: &std::path::Path) -> JsonMap {
@@ -83,6 +90,87 @@ fn read_project(path: &std::path::Path) -> JsonMap {
         .unwrap_or_default()
 }
 
+/// A project's `.vscode/settings.json`, in Null's words: the editing settings projects
+/// share that way (indentation, formatting, wrapping), for each language too.
+fn vscode_settings(root: &std::path::Path) -> JsonMap {
+    use serde_json::Value;
+    let written = read_project(&vscode_file(root));
+    // The settings a language can have of its own, as VS Code names them.
+    let editing = |from: &JsonMap| {
+        let mut out = JsonMap::new();
+        if let Some(Value::Number(n)) = from.get("editor.tabSize") {
+            out.insert("indent_size".into(), Value::Number(n.clone()));
+        }
+        if let Some(Value::Bool(spaces)) = from.get("editor.insertSpaces") {
+            out.insert("indent_with_tabs".into(), Value::Bool(!spaces));
+        }
+        for (theirs, ours) in [("editor.formatOnSave", "format_on_save"), ("editor.formatOnPaste", "format_on_paste")] {
+            if let Some(Value::Bool(on)) = from.get(theirs) {
+                out.insert(ours.into(), Value::Bool(*on));
+            }
+        }
+        if let Some(Value::String(wrap)) = from.get("editor.wordWrap") {
+            out.insert("word_wrap".into(), Value::Bool(wrap != "off"));
+        }
+        out
+    };
+    let mut out = editing(&written);
+    if let Some(Value::Bool(on)) = written.get("editor.bracketPairColorization.enabled") {
+        out.insert("bracket_colours".into(), Value::Bool(*on));
+    }
+    let mut languages = JsonMap::new();
+    for (key, value) in &written {
+        // "[python]", or several at once: "[javascript][typescript]".
+        let (Some(ids), Some(set)) = (key.strip_prefix('[').and_then(|k| k.strip_suffix(']')), value.as_object())
+        else {
+            continue;
+        };
+        let set = editing(set);
+        if set.is_empty() {
+            continue;
+        }
+        for id in ids.split("][") {
+            let name = match id {
+                "typescriptreact" => "TSX",
+                "javascriptreact" => "JavaScript",
+                "cpp" => "C++",
+                "shellscript" => "Shell",
+                "jsonc" => "JSON",
+                other => other,
+            };
+            languages.insert(name.to_string(), Value::Object(set.clone()));
+        }
+    }
+    if !languages.is_empty() {
+        out.insert("languages".into(), Value::Object(languages));
+    }
+    out
+}
+
+/// `under` with `over` on top: its languages' settings added to each language's.
+fn layered(mut under: JsonMap, over: &JsonMap) -> JsonMap {
+    use serde_json::Value;
+    for (key, value) in over {
+        match (under.get_mut(key), value) {
+            (Some(Value::Object(langs)), Value::Object(theirs)) if key == "languages" => {
+                for (lang, set) in theirs {
+                    let same = langs.keys().find(|k| k.eq_ignore_ascii_case(lang)).cloned();
+                    match (same.and_then(|k| langs.get_mut(&k)), set) {
+                        (Some(Value::Object(mine)), Value::Object(set)) => mine.extend(set.clone()),
+                        _ => {
+                            langs.insert(lang.clone(), set.clone());
+                        }
+                    }
+                }
+            }
+            _ => {
+                under.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    under
+}
+
 /// `user` with `project` over it: each setting it gives wins (one that can't be read is
 /// left out); a map of them (`languages`, `keys`) gains its entries instead. With what
 /// was under them.
@@ -91,10 +179,20 @@ fn merged(user: &Settings, project: &JsonMap) -> (Settings, JsonMap) {
     let mut value = serde_json::to_value(user).unwrap_or_default();
     let mut shadowed = JsonMap::new();
     for (key, theirs) in project {
-        let Some(mine) = value.get(key).cloned() else { continue };
+        // Not written when empty or unset (`languages`, `own_theme`): an empty one of yours.
+        let mine = value.get(key).cloned().unwrap_or_else(|| match theirs {
+            Value::Object(_) => Value::Object(JsonMap::new()),
+            _ => Value::Null,
+        });
         let mut attempt = value.clone();
         match (&mut attempt[key], theirs) {
-            (Value::Object(mine), Value::Object(theirs)) => mine.extend(theirs.clone()),
+            // An entry named in another case ("python", "Python") is the same one.
+            (Value::Object(mine), Value::Object(theirs)) => {
+                for (entry, value) in theirs {
+                    mine.retain(|k, _| !k.eq_ignore_ascii_case(entry));
+                    mine.insert(entry.clone(), value.clone());
+                }
+            }
             (slot, _) => *slot = theirs.clone(),
         }
         if serde_json::from_value::<Settings>(attempt.clone()).is_ok() {
@@ -116,10 +214,12 @@ fn unmerged(settings: &Settings, project: &ProjectFile) -> Settings {
         match (&mut value[key], theirs, mine) {
             (Value::Object(now), Value::Object(theirs), Value::Object(mine)) => {
                 for entry in theirs.keys() {
-                    match mine.get(entry) {
-                        Some(v) => now.insert(entry.clone(), v.clone()),
-                        None => now.remove(entry),
-                    };
+                    now.remove(entry);
+                }
+                for (entry, value) in mine {
+                    if theirs.keys().any(|t| t.eq_ignore_ascii_case(entry)) {
+                        now.insert(entry.clone(), value.clone());
+                    }
                 }
             }
             (slot, _, _) => *slot = mine.clone(),
@@ -152,7 +252,9 @@ fn parted(out: &mut JsonMap, project: &ProjectFile) -> (JsonMap, JsonMap) {
                     }
                 }
                 // Taken away here (not one of the project's): gone from yours.
-                mine.retain(|entry, _| now.contains_key(entry) || theirs.contains_key(entry));
+                mine.retain(|entry, _| {
+                    now.contains_key(entry) || theirs.keys().any(|t| t.eq_ignore_ascii_case(entry))
+                });
                 theirs_now.insert(key.clone(), Value::Object(theirs));
                 Value::Object(mine)
             }
@@ -578,10 +680,17 @@ impl Settings {
         let defaults = serde_json::to_value(Self::default()).unwrap_or_default();
         if let (Some(project), Some(out)) = (project, out.as_object_mut()) {
             let (theirs, shadowed) = parted(out, &project);
-            if theirs != project.values
+            // Into its own file: what it says already, and what changed (one from .vscode
+            // too: that file isn't Null's to write).
+            let own: JsonMap = theirs
+                .iter()
+                .filter(|(k, v)| project.own.contains_key(*k) || project.values.get(*k) != Some(*v))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if own != project.own
                 && let Some(file) = &project.path
             {
-                save_project(file, &theirs);
+                save_project(file, &own);
             }
             with_project(|p| {
                 if let Some(p) = p.as_mut()
@@ -589,6 +698,7 @@ impl Settings {
                 {
                     p.values = theirs;
                     p.shadowed = shadowed;
+                    p.own = own;
                 }
             });
         }
@@ -730,6 +840,9 @@ pub fn reload(cx: &mut App) {
 
 /// The project's settings, written into its file as it's written.
 fn save_project(file: &std::path::Path, values: &JsonMap) {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
     let before = std::fs::read_to_string(file).ok();
     let text = before
         .as_deref()
@@ -746,16 +859,17 @@ fn save_project(file: &std::path::Path, values: &JsonMap) {
 /// of another project's. Read again each time: put right since, they're taken as they are.
 pub fn use_project(root: &std::path::Path, cx: &mut App) {
     let path = project_file(root);
-    let values = read_project(&path);
+    let own = read_project(&path);
+    let values = layered(vscode_settings(root), &own);
     let before = with_project(|p| p.take()).unwrap_or_default();
     // Nothing of either's, or the same as in use: nothing changes.
     if before.values.is_empty() && values.is_empty() || before.path.as_ref() == Some(&path) && before.values == values {
-        with_project(|p| *p = Some(ProjectFile { path: Some(path), ..before }));
+        with_project(|p| *p = Some(ProjectFile { path: Some(path), own, ..before }));
         return;
     }
     let user = unmerged(cx.global::<Settings>(), &before);
     let (settings, shadowed) = merged(&user, &values);
-    with_project(|p| *p = Some(ProjectFile { path: Some(path), values, shadowed }));
+    with_project(|p| *p = Some(ProjectFile { path: Some(path), values, shadowed, own }));
     if settings != *cx.global::<Settings>() {
         apply(settings, cx);
     }
@@ -1004,7 +1118,7 @@ mod tests {
         assert!(now.word_wrap, "what it doesn't set is yours");
         assert_eq!(now.theme, user.theme, "one that can't be read is left out");
         assert_eq!(now.languages.keys().collect::<Vec<_>>(), ["go", "python"], "its languages added to yours");
-        let project = ProjectFile { path: Some(project_path.clone()), values, shadowed };
+        let project = ProjectFile { path: Some(project_path.clone()), own: values.clone(), values, shadowed };
         assert_eq!(unmerged(&now, &project), user, "yours come back as they were");
         // Changed while in use.
         let mut changed = now.clone();
@@ -1020,6 +1134,47 @@ mod tests {
         let theirs = std::fs::read_to_string(&project_path).unwrap();
         assert!(theirs.contains("// ours") && theirs.contains("\"indent_size\": 3"), "{theirs}");
         assert!(theirs.contains("\"go\"") && !theirs.contains("python"), "{theirs}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A project's .vscode/settings.json, as far as Null has the same settings: its
+    /// editing ones, for each language too (by VS Code's names for them).
+    #[test]
+    fn a_project_s_vscode_settings_are_read() {
+        let dir = crate::tools::test_dir("settings-vscode");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".vscode")).unwrap();
+        std::fs::write(
+            vscode_file(&dir),
+            r#"{
+                // shared with the team
+                "editor.tabSize": 2,
+                "editor.insertSpaces": true,
+                "editor.formatOnSave": true,
+                "editor.wordWrap": "bounded",
+                "workbench.colorTheme": "Solarized",
+                "[python]": { "editor.tabSize": 4 },
+                "[typescript][typescriptreact]": { "editor.formatOnSave": false },
+                "[markdown]": { "files.trimTrailingWhitespace": false },
+            }"#,
+        )
+        .unwrap();
+        let read = vscode_settings(&dir);
+        let user = Settings::default();
+        let (now, _) = merged(&user, &read);
+        assert_eq!((now.indent_size, now.indent_with_tabs, now.format_on_save, now.word_wrap), (2, false, true, true));
+        assert_eq!(now.theme, user.theme, "only the editing settings");
+        assert_eq!(now.indent_for("Python"), crate::file_style::Indent::Spaces(4));
+        assert!(!now.format_on_save_for("TypeScript") && !now.format_on_save_for("TSX"));
+        assert!(now.format_on_save_for("Rust"));
+        assert!(!now.languages.contains_key("markdown"), "nothing Null has for it");
+        // .null's own win, a language's settings added to its.
+        let own = serde_json::from_str::<JsonMap>(r#"{ "indent_size": 3, "languages": { "Python": { "word_wrap": false } } }"#)
+            .unwrap();
+        let (now, _) = merged(&user, &layered(read, &own));
+        assert_eq!(now.indent_size, 3);
+        assert_eq!(now.indent_for("python"), crate::file_style::Indent::Spaces(4));
+        assert!(!now.word_wrap_for("Python"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

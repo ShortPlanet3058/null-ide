@@ -1134,7 +1134,8 @@ impl Workspace {
         self.reindex(&visible, cx);
         // The project's settings, changed (by hand, by another app): in use as they are now.
         let root = self.tree.read(cx).root().to_path_buf();
-        if visible.contains(&crate::settings::project_file(&root)) {
+        if visible.contains(&crate::settings::project_file(&root)) || visible.contains(&crate::settings::vscode_file(&root))
+        {
             crate::settings::use_project(&root, cx);
         }
         let changed: HashSet<&PathBuf> = visible.iter().collect();
@@ -2717,7 +2718,10 @@ impl Workspace {
                         this.theme_saved(&name, cx);
                     }
                     let root = this.tree.read(cx).root().to_path_buf();
-                    if editor.read(cx).path() == Some(crate::settings::project_file(&root).as_path()) {
+                    let path = editor.read(cx).path();
+                    if path == Some(crate::settings::project_file(&root).as_path())
+                        || path == Some(crate::settings::vscode_file(&root).as_path())
+                    {
                         settings::use_project(&root, cx);
                     }
                     if editor.read(cx).path().is_some_and(|p| Some(p) == Settings::path().as_deref()) {
@@ -6635,7 +6639,7 @@ impl Workspace {
             let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
                 crate::fs_ops::write_file(
                     &path,
-                    b"{\n  // Settings for this project only, over yours: \"indent_size\": 2, \"format_on_save\": true\n}\n",
+                    b"{\n  // Settings for this project only, over yours: \"indent_size\": 2, \"format_on_save\": true\n  // (Its .vscode/settings.json, if it has one, is read too: these win over it.)\n}\n",
                 )
             });
             if let Err(err) = made {
@@ -9322,6 +9326,35 @@ mod tests {
         std::fs::write(&file, "{ \"indent_size\": 2 }\n").unwrap();
         cx.update(|_, cx| crate::settings::use_project(&ours, cx));
         assert_eq!(cx.update(|_, cx| cx.global::<Settings>().indent_size), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A project's .vscode/settings.json is used too; changed in Settings, the change goes
+    /// to .null/settings.json (made for it), never into VS Code's file.
+    #[gpui::test]
+    fn a_project_s_vscode_settings_are_used(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("project-vscode");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".vscode")).unwrap();
+        let vscode = "{ \"editor.tabSize\": 2, \"editor.formatOnSave\": true }\n";
+        std::fs::write(crate::settings::vscode_file(&dir), vscode).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings { indent_size: 4, format_on_save: false, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (_workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let now = cx.update(|_, cx| (cx.global::<Settings>().indent_size, cx.global::<Settings>().format_on_save));
+        assert_eq!(now, (2, true));
+        cx.update(|_, cx| settings::update(cx, |s| s.format_on_save = false));
+        assert_eq!(std::fs::read_to_string(crate::settings::vscode_file(&dir)).unwrap(), vscode, "VS Code's, untouched");
+        let own = std::fs::read_to_string(crate::settings::project_file(&dir)).unwrap();
+        assert!(own.contains("\"format_on_save\": false") && !own.contains("indent_size"), "{own}");
+        // Read again (the watcher saw it): the same.
+        cx.update(|_, cx| crate::settings::use_project(&dir, cx));
+        let now = cx.update(|_, cx| (cx.global::<Settings>().indent_size, cx.global::<Settings>().format_on_save));
+        assert_eq!(now, (2, false));
         std::fs::remove_dir_all(&dir).ok();
     }
 
