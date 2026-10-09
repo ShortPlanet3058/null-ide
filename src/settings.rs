@@ -47,6 +47,126 @@ struct FileState {
 static FILE: std::sync::Mutex<FileState> =
     std::sync::Mutex::new(FileState { path: None, unreadable: None, skipped: Vec::new() });
 
+type JsonMap = serde_json::Map<String, serde_json::Value>;
+
+/// The settings of the project in front (`.null/settings.json` in it): over yours while
+/// its window is the one in use. `shadowed` is what yours were under them, so they come
+/// back, and so saving knows which values are the project's and which are yours.
+#[derive(Clone, Debug, Default)]
+struct ProjectFile {
+    path: Option<PathBuf>,
+    values: JsonMap,
+    shadowed: JsonMap,
+}
+
+thread_local! {
+    // All on the main thread (in tests, each test's own: one's project isn't another's).
+    static PROJECT: std::cell::RefCell<Option<ProjectFile>> = const { std::cell::RefCell::new(None) };
+}
+
+fn with_project<R>(f: impl FnOnce(&mut Option<ProjectFile>) -> R) -> R {
+    PROJECT.with(|project| f(&mut project.borrow_mut()))
+}
+
+/// Where a project keeps its own settings.
+pub fn project_file(root: &std::path::Path) -> PathBuf {
+    root.join(".null").join("settings.json")
+}
+
+/// A project's settings as written (comments allowed): none when there's no such file, or
+/// it isn't an object.
+fn read_project(path: &std::path::Path) -> JsonMap {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&crate::snippets::without_comments(&text)).ok())
+        .and_then(|value: serde_json::Value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// `user` with `project` over it: each setting it gives wins (one that can't be read is
+/// left out); a map of them (`languages`, `keys`) gains its entries instead. With what
+/// was under them.
+fn merged(user: &Settings, project: &JsonMap) -> (Settings, JsonMap) {
+    use serde_json::Value;
+    let mut value = serde_json::to_value(user).unwrap_or_default();
+    let mut shadowed = JsonMap::new();
+    for (key, theirs) in project {
+        let Some(mine) = value.get(key).cloned() else { continue };
+        let mut attempt = value.clone();
+        match (&mut attempt[key], theirs) {
+            (Value::Object(mine), Value::Object(theirs)) => mine.extend(theirs.clone()),
+            (slot, _) => *slot = theirs.clone(),
+        }
+        if serde_json::from_value::<Settings>(attempt.clone()).is_ok() {
+            value = attempt;
+            shadowed.insert(key.clone(), mine);
+        }
+    }
+    let settings = serde_json::from_value(value).unwrap_or_else(|_| user.clone());
+    (settings, shadowed)
+}
+
+/// `settings` without the project's over them: yours, as they were under them.
+fn unmerged(settings: &Settings, project: &ProjectFile) -> Settings {
+    use serde_json::Value;
+    let mut value = serde_json::to_value(settings).unwrap_or_default();
+    let defaults = serde_json::to_value(Settings::default()).unwrap_or_default();
+    for (key, theirs) in &project.values {
+        let Some(mine) = project.shadowed.get(key) else { continue };
+        match (&mut value[key], theirs, mine) {
+            (Value::Object(now), Value::Object(theirs), Value::Object(mine)) => {
+                for entry in theirs.keys() {
+                    match mine.get(entry) {
+                        Some(v) => now.insert(entry.clone(), v.clone()),
+                        None => now.remove(entry),
+                    };
+                }
+            }
+            (slot, _, _) => *slot = mine.clone(),
+        }
+    }
+    serde_json::from_value(value).unwrap_or_else(|_| serde_json::from_value(defaults).unwrap_or_default())
+}
+
+/// `out` (the settings in use, as JSON) parted: the project's own values go to it (the
+/// project's settings as they're now, returned), and in `out` yours take their place
+/// (also returned, as what's under the project's now).
+fn parted(out: &mut JsonMap, project: &ProjectFile) -> (JsonMap, JsonMap) {
+    use serde_json::Value;
+    let mut theirs_now = project.values.clone();
+    let mut shadowed = JsonMap::new();
+    for (key, theirs) in &project.values {
+        // Only those in use (one that couldn't be read is neither theirs nor yours here).
+        let (Some(now), Some(mine)) = (out.get(key).cloned(), project.shadowed.get(key)) else {
+            continue;
+        };
+        let mine = match (&now, theirs, mine) {
+            (Value::Object(now), Value::Object(theirs), Value::Object(mine)) => {
+                let mut mine = mine.clone();
+                let mut theirs = theirs.clone();
+                for (entry, value) in now {
+                    if theirs.contains_key(entry) {
+                        theirs.insert(entry.clone(), value.clone());
+                    } else {
+                        mine.insert(entry.clone(), value.clone());
+                    }
+                }
+                // Taken away here (not one of the project's): gone from yours.
+                mine.retain(|entry, _| now.contains_key(entry) || theirs.contains_key(entry));
+                theirs_now.insert(key.clone(), Value::Object(theirs));
+                Value::Object(mine)
+            }
+            _ => {
+                theirs_now.insert(key.clone(), now);
+                mine.clone()
+            }
+        };
+        out.insert(key.clone(), mine.clone());
+        shadowed.insert(key.clone(), mine);
+    }
+    (theirs_now, shadowed)
+}
+
 /// Everything Null remembers between launches. Stored as JSON so it can be
 /// edited by hand; missing or unknown fields fall back to defaults.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -433,11 +553,18 @@ impl Settings {
     /// Never over a file that can't be read: that waits until it's put right.
     fn save(&self) {
         if let Some(path) = Self::path() {
-            self.save_to(&path);
+            let project = with_project(|p| p.clone()).filter(|p| !p.values.is_empty());
+            self.save_with(&path, project);
         }
     }
 
+    #[cfg(test)]
     fn save_to(&self, path: &std::path::Path) {
+        self.save_with(path, None);
+    }
+
+    /// Saves into `path`; the values that are `project`'s (in use over yours) into its file.
+    fn save_with(&self, path: &std::path::Path, project: Option<ProjectFile>) {
         let path = path.to_path_buf();
         // What's known of this file (another's says nothing about it).
         let state = Some(FILE.lock().unwrap_or_else(|e| e.into_inner()).clone())
@@ -449,6 +576,22 @@ impl Settings {
         }
         let mut out = serde_json::to_value(self).unwrap_or_default();
         let defaults = serde_json::to_value(Self::default()).unwrap_or_default();
+        if let (Some(project), Some(out)) = (project, out.as_object_mut()) {
+            let (theirs, shadowed) = parted(out, &project);
+            if theirs != project.values
+                && let Some(file) = &project.path
+            {
+                save_project(file, &theirs);
+            }
+            with_project(|p| {
+                if let Some(p) = p.as_mut()
+                    && p.path == project.path
+                {
+                    p.values = theirs;
+                    p.shadowed = shadowed;
+                }
+            });
+        }
         let written: Option<serde_json::Value> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&crate::snippets::without_comments(&text)).ok());
@@ -571,9 +714,56 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
 pub fn reload(cx: &mut App) {
     // Can't be read: the settings stay as they were (see `Settings::unreadable`).
     let Some(settings) = Settings::load() else { return };
+    // The project's still over them.
+    let settings = with_project(|project| match project.as_mut() {
+        Some(project) if !project.values.is_empty() => {
+            let (settings, shadowed) = merged(&settings, &project.values);
+            project.shadowed = shadowed;
+            settings
+        }
+        _ => settings,
+    });
     if settings != *cx.global::<Settings>() {
         apply(settings, cx);
     }
+}
+
+/// The project's settings, written into its file as it's written.
+fn save_project(file: &std::path::Path, values: &JsonMap) {
+    let before = std::fs::read_to_string(file).ok();
+    let text = before
+        .as_deref()
+        .and_then(|text| written_into(text, values, &serde_json::Value::Object(JsonMap::new())))
+        .unwrap_or_else(|| serde_json::to_string_pretty(values).unwrap_or_default() + "\n");
+    if before.as_deref() != Some(text.as_str())
+        && let Err(err) = crate::fs_ops::write_file(file, text.as_bytes())
+    {
+        eprintln!("null: couldn't save {}: {err}", file.display());
+    }
+}
+
+/// The settings of the project at `root` (its window in front now): over yours, in place
+/// of another project's. Read again each time: put right since, they're taken as they are.
+pub fn use_project(root: &std::path::Path, cx: &mut App) {
+    let path = project_file(root);
+    let values = read_project(&path);
+    let before = with_project(|p| p.take()).unwrap_or_default();
+    // Nothing of either's, or the same as in use: nothing changes.
+    if before.values.is_empty() && values.is_empty() || before.path.as_ref() == Some(&path) && before.values == values {
+        with_project(|p| *p = Some(ProjectFile { path: Some(path), ..before }));
+        return;
+    }
+    let user = unmerged(cx.global::<Settings>(), &before);
+    let (settings, shadowed) = merged(&user, &values);
+    with_project(|p| *p = Some(ProjectFile { path: Some(path), values, shadowed }));
+    if settings != *cx.global::<Settings>() {
+        apply(settings, cx);
+    }
+}
+
+/// The project's settings as in use now: their names, for saying where a value comes from.
+pub fn project_keys() -> Vec<String> {
+    with_project(|p| p.as_ref().map(|p| p.values.keys().cloned().collect()).unwrap_or_default())
 }
 
 /// `out` written into `text` (settings.json as it is): each value that differs replaced
@@ -789,6 +979,48 @@ mod tests {
         // Written back as given, nothing added.
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains(r#""python":{"indent_size":2,"word_wrap":true}"#), "{json}");
+    }
+
+    /// A project's settings are used over yours, its languages added to yours; changed
+    /// while in use, its own go back to its file (comments kept) and the rest to yours.
+    #[test]
+    fn a_project_s_settings_go_over_yours_and_stay_its_own() {
+        let dir = crate::tools::test_dir("settings-project");
+        let _ = std::fs::remove_dir_all(&dir);
+        let project_path = project_file(&dir.join("project"));
+        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &project_path,
+            "{\n  // ours\n  \"indent_size\": 2,\n  \"languages\": { \"go\": { \"word_wrap\": true } },\n  \"theme\": \"no such\"\n}\n",
+        )
+        .unwrap();
+        let user_path = dir.join("settings.json");
+        let mut user = Settings { word_wrap: true, theme: ThemeName::Paper, ..Settings::default() };
+        user.languages.insert("python".into(), LanguageSettings { indent_size: Some(8), ..Default::default() });
+        user.save_to(&user_path);
+        let values = read_project(&project_path);
+        let (now, shadowed) = merged(&user, &values);
+        assert_eq!(now.indent_size, 2);
+        assert!(now.word_wrap, "what it doesn't set is yours");
+        assert_eq!(now.theme, user.theme, "one that can't be read is left out");
+        assert_eq!(now.languages.keys().collect::<Vec<_>>(), ["go", "python"], "its languages added to yours");
+        let project = ProjectFile { path: Some(project_path.clone()), values, shadowed };
+        assert_eq!(unmerged(&now, &project), user, "yours come back as they were");
+        // Changed while in use.
+        let mut changed = now.clone();
+        changed.indent_size = 3;
+        changed.font_size = 17.;
+        changed.languages.get_mut("python").unwrap().indent_size = Some(6);
+        changed.save_with(&user_path, Some(project));
+        let yours = Settings::load_from(&user_path).unwrap();
+        assert_eq!((yours.indent_size, yours.font_size), (Settings::default().indent_size, 17.));
+        assert_eq!(yours.languages.keys().collect::<Vec<_>>(), ["python"]);
+        assert_eq!(yours.languages["python"].indent_size, Some(6));
+        assert_eq!(yours.theme, ThemeName::Paper, "not the project's (unreadable) theme, nor the default");
+        let theirs = std::fs::read_to_string(&project_path).unwrap();
+        assert!(theirs.contains("// ours") && theirs.contains("\"indent_size\": 3"), "{theirs}");
+        assert!(theirs.contains("\"go\"") && !theirs.contains("python"), "{theirs}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Saving writes into the file as it's written: keys this Null doesn't know, and values
