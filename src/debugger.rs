@@ -170,6 +170,10 @@ pub struct Debugger {
     watch_task: Option<Task<()>>,
     /// The program being debugged, for the panel.
     pub program: Option<PathBuf>,
+    /// Stop where the program fails: a Rust panic, a thrown exception.
+    pub stop_on_errors: bool,
+    /// What the adapter can stop on when thrown (lldb-dap: cpp_throw, objc_throw…).
+    throw_filters: Vec<String>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -183,6 +187,8 @@ impl Default for Debugger {
             stop_task: None,
             watch_task: None,
             program: None,
+            stop_on_errors: false,
+            throw_filters: Vec::new(),
             _tasks: Vec::new(),
         }
     }
@@ -279,10 +285,28 @@ impl Debugger {
                     "supportsRunInTerminalRequest": false,
                 }),
             );
-            if let Err(error) = init.await {
-                this.update(cx, |this, cx| this.fail(&format!("The debugger didn't start: {error}"), cx)).ok();
-                return;
-            }
+            let capabilities = match init.await {
+                Ok(capabilities) => capabilities,
+                Err(error) => {
+                    this.update(cx, |this, cx| this.fail(&format!("The debugger didn't start: {error}"), cx)).ok();
+                    return;
+                }
+            };
+            // What it can stop on when thrown: the "throw" ones (not every catch).
+            let filters: Vec<String> = capabilities["exceptionBreakpointFilters"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f["filter"].as_str())
+                .filter(|f| f.contains("throw"))
+                .map(str::to_string)
+                .collect();
+            let stop_on_errors = this
+                .update(cx, |this, _| {
+                    this.throw_filters = filters;
+                    this.stop_on_errors
+                })
+                .unwrap_or(false);
             let cwd_text = cwd.display().to_string();
             let launch = adapter.request(
                 "launch",
@@ -296,6 +320,12 @@ impl Debugger {
             }
             for (path, lines) in breakpoints {
                 adapter.request("setBreakpoints", Self::breakpoint_args(&path, &lines)).await.ok();
+            }
+            if stop_on_errors {
+                let filters = this.update(cx, |this, _| this.throw_filters.clone()).unwrap_or_default();
+                for (command, arguments) in Self::error_stops(true, &filters) {
+                    adapter.request(command, arguments).await.ok();
+                }
             }
             adapter.request("configurationDone", json!({})).await.ok();
             match launch.await {
@@ -319,12 +349,40 @@ impl Debugger {
     fn breakpoint_args(path: &Path, lines: &[crate::editor::Breakpoint]) -> Value {
         let breakpoints: Vec<Value> = lines
             .iter()
-            .map(|b| match &b.condition {
-                Some(condition) => json!({ "line": b.line + 1, "condition": condition }),
-                None => json!({ "line": b.line + 1 }),
+            .map(|b| {
+                use crate::editor::BreakWhen;
+                match b.condition.as_deref().map(BreakWhen::read) {
+                    Some(BreakWhen::Condition(condition)) => json!({ "line": b.line + 1, "condition": condition }),
+                    Some(BreakWhen::Hit(count)) => json!({ "line": b.line + 1, "hitCondition": count }),
+                    // Prints (with {x} worked out), doesn't stop.
+                    Some(BreakWhen::Log(message)) => json!({ "line": b.line + 1, "logMessage": message }),
+                    None => json!({ "line": b.line + 1 }),
+                }
             })
             .collect();
         json!({ "source": { "path": path.display().to_string() }, "breakpoints": breakpoints })
+    }
+
+    /// The requests that make the program stop where it fails (`on`), or no longer: a
+    /// Rust panic (its `rust_panic`), and what the adapter can stop on when thrown.
+    fn error_stops(on: bool, filters: &[String]) -> Vec<(&'static str, Value)> {
+        let functions = if on { json!([{ "name": "rust_panic" }]) } else { json!([]) };
+        let filters = if on { json!(filters) } else { json!([]) };
+        vec![
+            ("setFunctionBreakpoints", json!({ "breakpoints": functions })),
+            ("setExceptionBreakpoints", json!({ "filters": filters })),
+        ]
+    }
+
+    /// Stopping where the program fails, on or off (at once, when it's running).
+    pub fn set_stop_on_errors(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.stop_on_errors = on;
+        if let (Some(adapter), true) = (&self.adapter, self.is_active()) {
+            for (command, arguments) in Self::error_stops(on, &self.throw_filters) {
+                drop(adapter.request(command, arguments));
+            }
+        }
+        cx.notify();
     }
 
     /// While debugging: the breakpoints of one file changed.
@@ -602,6 +660,106 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         false
+    }
+
+    /// A count, a message printed without stopping, and stopping on errors: as the adapter
+    /// reads them.
+    #[test]
+    fn breakpoints_are_sent_as_the_adapter_reads_them() {
+        // A count, and a message printed without stopping.
+        let args = Debugger::breakpoint_args(
+            Path::new("/a.rs"),
+            &[
+                crate::editor::Breakpoint { line: 0, condition: Some("5".into()) },
+                crate::editor::Breakpoint { line: 1, condition: Some("log x is {x}".into()) },
+            ],
+        );
+        assert_eq!(args["breakpoints"][0], json!({ "line": 1, "hitCondition": "5" }));
+        assert_eq!(args["breakpoints"][1], json!({ "line": 2, "logMessage": "x is {x}" }));
+        // Stopping on errors: a Rust panic, and what's thrown; off, neither.
+        let on = Debugger::error_stops(true, &["cpp_throw".into()]);
+        assert_eq!(on[0].1, json!({ "breakpoints": [{ "name": "rust_panic" }] }));
+        assert_eq!(on[1].1, json!({ "filters": ["cpp_throw"] }));
+        assert_eq!(Debugger::error_stops(false, &["cpp_throw".into()])[1].1, json!({ "filters": [] }));
+    }
+
+    /// Needs lldb-dap and clang (they come with Xcode):
+    /// `cargo test log_points_print_and_counts_stop -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn log_points_print_and_counts_stop(cx: &mut TestAppContext) {
+        let dir = crate::tools::test_dir("debug-log");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("main.c");
+        std::fs::write(
+            &source,
+            "#include <stdio.h>\nint main(void) {\n    int total = 0;\n    for (int i = 1; i <= 3; i++) {\n        total += i;\n    }\n    printf(\"total %d\\n\", total);\n    return 0;\n}\n",
+        )
+        .unwrap();
+        let program = dir.join("main");
+        let built = std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+        assert!(built.unwrap().success());
+        // A log point on `total += i;`: prints each time, never stops.
+        let debugger = cx.new(|_| Debugger::default());
+        let log = crate::editor::Breakpoint { line: 4, condition: Some("log i is {i}".into()) };
+        debugger.update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![log])], Vec::new(), cx));
+        assert!(wait_for(cx, &debugger, |d| d.state == DebugState::Idle), "stopped, or never ended");
+        let output = debugger.read_with(cx, |d, _| d.output.clone());
+        assert!(output.contains("i is 1") && output.contains("i is 3") && output.contains("total 6"), "{output}");
+        // A count: stops the third time only (i is 3, total 1 + 2).
+        let debugger = cx.new(|_| Debugger::default());
+        let third = crate::editor::Breakpoint { line: 4, condition: Some("3".into()) };
+        debugger.update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![third])], Vec::new(), cx));
+        assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
+        let locals = debugger.read_with(cx, |d, _| match &d.state {
+            DebugState::Stopped(stop) => stop.locals.clone(),
+            _ => unreachable!(),
+        });
+        assert!(locals.iter().any(|(name, value)| name == "total" && value == "3"), "{locals:?}");
+        debugger.update(cx, |d, cx| d.stop(cx));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Needs lldb-dap and clang (they come with Xcode):
+    /// `cargo test stops_where_the_program_fails -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn stops_where_the_program_fails(cx: &mut TestAppContext) {
+        let dir = crate::tools::test_dir("debug-throw");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("main.cpp");
+        std::fs::write(&source, "#include <stdexcept>\nint main() {\n    throw std::runtime_error(\"no\");\n}\n").unwrap();
+        let program = dir.join("main");
+        let built = std::process::Command::new("xcrun").args(["clang++", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+        assert!(built.unwrap().success());
+        let debugger = cx.new(|_| Debugger::default());
+        debugger.update(cx, |d, cx| {
+            d.set_stop_on_errors(true, cx);
+            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), cx)
+        });
+        assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
+        let reason = debugger.read_with(cx, |d, _| match &d.state {
+            DebugState::Stopped(stop) => stop.reason.clone(),
+            _ => unreachable!(),
+        });
+        assert!(reason == "exception" || reason == "breakpoint", "{reason}");
+        debugger.update(cx, |d, cx| d.stop(cx));
+        // A Rust panic.
+        let source = dir.join("main.rs");
+        std::fs::write(&source, "fn main() {\n    let v: Vec<u8> = Vec::new();\n    println!(\"{}\", v[3]);\n}\n").unwrap();
+        let program = dir.join("panics");
+        let built = std::process::Command::new("rustc").args(["-g", "-o"]).arg(&program).arg(&source).status();
+        assert!(built.unwrap().success());
+        let debugger = cx.new(|_| Debugger::default());
+        debugger.update(cx, |d, cx| {
+            d.set_stop_on_errors(true, cx);
+            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), cx)
+        });
+        assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped at the panic");
+        debugger.update(cx, |d, cx| d.stop(cx));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Needs lldb-dap and clang (they come with Xcode):

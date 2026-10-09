@@ -106,6 +106,7 @@ actions!(
         OpenRecent,
         NewWindow,
         StartDebugging,
+        ToggleStopOnErrors,
         StopDebugging,
         StepOver,
         StepInto,
@@ -3858,6 +3859,15 @@ impl Workspace {
             (View, "Run Tests in File".into(), Box::new(RunTestsInFile)),
             (Go, "Start Debugging".into(), Box::new(StartDebugging)),
             (Go, "Stop Debugging".into(), Box::new(StopDebugging)),
+            (
+                Go,
+                toggle(
+                    self.debugger.read(cx).stop_on_errors,
+                    "Don't Stop on Errors While Debugging",
+                    "Stop on Errors While Debugging",
+                ),
+                Box::new(ToggleStopOnErrors),
+            ),
             (Edit, "Toggle Breakpoint".into(), Box::new(crate::editor::ToggleBreakpoint)),
             (
                 View,
@@ -8658,6 +8668,13 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_recent))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::start_debugging))
+            .on_action(cx.listener(|this, _: &ToggleStopOnErrors, _, cx| {
+                // Where the program fails (a Rust panic, a thrown exception): stopped at.
+                let on = !this.debugger.read(cx).stop_on_errors;
+                this.debugger.update(cx, |d, cx| d.set_stop_on_errors(on, cx));
+                let notice = if on { "Debugging stops where the program fails" } else { "Debugging no longer stops on errors" };
+                this.show_notice(notice.into(), cx);
+            }))
             .on_action(cx.listener(|this, _: &StopDebugging, _, cx| {
                 this.debugger.update(cx, |d, cx| d.stop(cx));
             }))

@@ -351,7 +351,9 @@ pub struct Prepaint {
     line_height: Pixels,
     current_line: Option<Bounds<Pixels>>,
     /// The debugger's breakpoints: a dot each, in the gutter (a ring for one with a condition).
-    breakpoint_dots: Vec<(Bounds<Pixels>, bool)>,
+    /// Each breakpoint's dot, and what kind: 0 plain, 1 with a condition or count, 2 a
+    /// log point (prints, doesn't stop).
+    breakpoint_dots: Vec<(Bounds<Pixels>, u8)>,
     /// Bookmarked lines when line numbers are hidden (shown, the number takes the accent).
     bookmark_dots: Vec<Bounds<Pixels>>,
     /// The line the debugger stopped on: a band across it, and a mark in the gutter.
@@ -1128,7 +1130,7 @@ impl Element for EditorElement {
             });
             // Breakpoints: a dot left of the line number, on the line's first row.
             let dot = px(8.);
-            let breakpoint_dots: Vec<(Bounds<Pixels>, bool)> = editor
+            let breakpoint_dots: Vec<(Bounds<Pixels>, u8)> = editor
                 .breakpoints
                 .iter()
                 .filter(|&&line| lines_shown.contains(&line))
@@ -1136,8 +1138,12 @@ impl Element for EditorElement {
                     let rows = rows_of(line..line + 1);
                     (!rows.is_empty()).then(|| {
                         let y = row_top(rows.start) + (line_height - dot) / 2.;
-                        let conditional = editor.breakpoint_conditions.iter().any(|(l, _)| *l == line);
-                        (Bounds::new(point(bounds.left() + px(5.), y), size(dot, dot)), conditional)
+                        let kind = match editor.breakpoint_conditions.iter().find(|(l, _)| *l == line) {
+                            Some((_, text)) if matches!(crate::editor::BreakWhen::read(text), crate::editor::BreakWhen::Log(_)) => 2,
+                            Some(_) => 1,
+                            None => 0,
+                        };
+                        (Bounds::new(point(bounds.left() + px(5.), y), size(dot, dot)), kind)
                     })
                 })
                 .collect();
@@ -1729,13 +1735,17 @@ impl Element for EditorElement {
             window.paint_quad(fill(band, theme.warning.opacity(0.14)));
             window.paint_quad(fill(mark, theme.warning));
         }
-        for (dot, conditional) in &prepaint.breakpoint_dots {
-            let quad = if *conditional {
-                fill(*dot, gpui::transparent_black()).border_widths(px(1.5)).border_color(theme.error)
-            } else {
-                fill(*dot, theme.error)
+        for (dot, kind) in &prepaint.breakpoint_dots {
+            let quad = match kind {
+                // A log point: a square, as it doesn't stop.
+                2 => fill(dot.dilate(px(-1.)), theme.warning).corner_radii(px(1.5)),
+                1 => fill(*dot, gpui::transparent_black())
+                    .border_widths(px(1.5))
+                    .border_color(theme.error)
+                    .corner_radii(px(4.)),
+                _ => fill(*dot, theme.error).corner_radii(px(4.)),
             };
-            window.paint_quad(quad.corner_radii(px(4.)));
+            window.paint_quad(quad);
         }
         for dot in &prepaint.bookmark_dots {
             window.paint_quad(fill(*dot, theme.caret).corner_radii(dot.size.width / 2.));
