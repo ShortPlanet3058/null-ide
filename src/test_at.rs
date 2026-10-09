@@ -25,7 +25,50 @@ pub struct Found {
 pub struct FileTests {
     pub path: PathBuf,
     pub command: Option<String>,
+    /// What runs every test of its kind there (its crate's, module's, package's).
+    pub every: Option<String>,
     pub tests: Vec<Found>,
+}
+
+/// What runs every test of `language` where `path` is: `cargo test` for its crate, `go test
+/// ./...` for its module, pytest for the project, the package's JS runner.
+pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
+    let dir = path.parent()?;
+    match language {
+        "Rust" => {
+            let krate = ancestor_with(dir, "Cargo.toml")?;
+            let manifest = in_dir(root, &krate, |d| format!(" --manifest-path {}", quote(&format!("{d}/Cargo.toml"))));
+            Some(format!("cargo test{manifest}"))
+        }
+        "Go" => {
+            let module = ancestor_with(dir, "go.mod")?;
+            Some(format!("go test {}./...", in_dir(root, &module, |d| format!("-C {} ", quote(d)))))
+        }
+        "Python" => Some("python3 -m pytest".into()),
+        "JavaScript" | "TypeScript" | "TSX" => {
+            let project = ancestor_with(dir, "package.json")?;
+            let chdir = in_dir(root, &project, |d| format!("cd {} && ", quote(d)));
+            let command = match js_runner(&project) {
+                JsRunner::Vitest(x) => format!("{x} vitest run"),
+                JsRunner::Jest(x) => format!("{x} jest"),
+                JsRunner::Node => "node --test".into(),
+            };
+            Some(format!("{chdir}{command}"))
+        }
+        _ => None,
+    }
+}
+
+/// What runs every test found, each kind once: one command, the parts after each other
+/// (one failing doesn't keep the others from running).
+pub fn run_everything(files: &[FileTests]) -> Option<String> {
+    let mut commands: Vec<&str> = Vec::new();
+    for every in files.iter().filter_map(|f| f.every.as_deref()) {
+        if !commands.contains(&every) {
+            commands.push(every);
+        }
+    }
+    (!commands.is_empty()).then(|| commands.join("; "))
 }
 
 /// How many files are looked through, at most, and how big one can be.
@@ -114,7 +157,8 @@ pub fn tests_in_file(root: &Path, path: &Path, text: &str) -> Option<FileTests> 
         return None;
     }
     let command = find(language.name, root, path, text, &tree, None).map(|run| run.command);
-    Some(FileTests { path: path.to_path_buf(), command, tests })
+    let every = every_test(language.name, root, path);
+    Some(FileTests { path: path.to_path_buf(), command, every, tests })
 }
 
 /// A test at `node`: its name as runs report it, and a byte inside it.
@@ -582,6 +626,8 @@ mod tests {
         assert_eq!(rust.tests[0].command, "cargo test -- --exact cart::tests::adds_up");
         assert_eq!(rust.command.as_deref(), Some("cargo test -- cart::"));
         assert_eq!(files[2].tests[0].command, "cd web && npx jest cart.test.js -t 'cart adds items'");
+        // Everything: each kind once.
+        assert_eq!(run_everything(&files).as_deref(), Some("cargo test; python3 -m pytest; cd web && npx jest"));
     }
 
     #[test]

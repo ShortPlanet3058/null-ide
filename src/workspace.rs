@@ -4895,10 +4895,14 @@ impl Workspace {
             }
         }
         // pytest says which passed only when asked to (-v).
-        let command = match command.strip_prefix("python3 -m pytest ") {
-            Some(rest) if !rest.starts_with("-v ") => format!("python3 -m pytest -v {rest}"),
-            _ => command,
-        };
+        let command = command
+            .split("; ")
+            .map(|part| match part.strip_prefix("python3 -m pytest") {
+                Some(rest) if !rest.starts_with(" -v") => format!("python3 -m pytest -v{rest}"),
+                _ => part.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
         for test in &which {
             self.test_status.insert(test.clone(), TestStatus::Running);
         }
@@ -4949,6 +4953,54 @@ impl Workspace {
         if files.is_empty() {
             return quiet("No tests in this project (Rust, Go, Python, JavaScript, TypeScript)");
         }
+        // Above the list: how many, how many failed, and running them all (or the failed).
+        let all: Vec<(PathBuf, String)> =
+            files.iter().flat_map(|f| f.tests.iter().map(|t| (f.path.clone(), t.name.clone()))).collect();
+        let failed: Vec<(PathBuf, String)> =
+            all.iter().filter(|k| self.test_status.get(*k) == Some(&TestStatus::Failed)).cloned().collect();
+        let everything = crate::test_at::run_everything(&files);
+        let failed_command: Vec<String> = files
+            .iter()
+            .flat_map(|f| f.tests.iter().filter(|t| failed.contains(&(f.path.clone(), t.name.clone()))).map(|t| t.command.clone()))
+            .collect();
+        let count = if all.len() == 1 { "1 test".to_string() } else { format!("{} tests", all.len()) };
+        let summary = if failed.is_empty() { count } else { format!("{count} · {} failed", failed.len()) };
+        let button = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .px(px(6.))
+                .py(px(2.))
+                .rounded(px(ui::R_KEY))
+                .cursor_pointer()
+                .text_color(theme.muted)
+                .hover(|s| s.text_color(theme.foreground).bg(theme.hairline))
+                .active(|s| s.opacity(0.7))
+                .child(label)
+        };
+        let header = div()
+            .flex_none()
+            .h(px(ui::ROW))
+            .mx(px(6.))
+            .pl(px(12.))
+            .pr(px(4.))
+            .mt(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .text_size(px(ui::T_SM))
+            .child(div().flex_1().min_w_0().truncate().text_color(theme.faint).child(summary))
+            .when(!failed.is_empty(), |d| {
+                let (command, which) = (failed_command.join("; "), failed.clone());
+                d.child(button("tests-run-failed", "Run failed").on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| this.run_tests(command.clone(), which.clone(), window, cx),
+                )))
+            })
+            .when_some(everything, |d, command| {
+                let which = all.clone();
+                d.child(button("tests-run-all", "Run all").on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| this.run_tests(command.clone(), which.clone(), window, cx),
+                )))
+            });
         // A row for each file, then one for each of its tests.
         let rows: Vec<(usize, Option<usize>)> = files
             .iter()
@@ -4958,7 +5010,7 @@ impl Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         let status = self.test_status.clone();
         let files = std::rc::Rc::new(files);
-        uniform_list(
+        let list = uniform_list(
             "tests",
             rows.len(),
             cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
@@ -5074,9 +5126,10 @@ impl Workspace {
             }),
         )
         .track_scroll(self.tests_scroll.clone())
-        .size_full()
-        .pt(px(6.))
-        .into_any_element()
+        .flex_1()
+        .min_h_0()
+        .pt(px(2.));
+        div().size_full().flex().flex_col().child(header).child(list).into_any_element()
     }
 
     /// Goes to line `row` of the open file from its outline, the text taking the keys.
