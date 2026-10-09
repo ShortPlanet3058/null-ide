@@ -504,7 +504,7 @@ pub struct Workspace {
     /// The sidebar shows the project's tests (see `crate::test_at::discover`).
     sidebar_tests: bool,
     /// The tests found (None: not looked for yet), and the search for them.
-    tests: Option<Vec<crate::test_at::FileTests>>,
+    tests: Option<std::rc::Rc<Vec<crate::test_at::FileTests>>>,
     tests_task: Option<Task<()>>,
     /// How each test (file, name) did when last run.
     test_status: std::collections::HashMap<(PathBuf, String), TestStatus>,
@@ -3001,12 +3001,20 @@ impl Workspace {
         });
         self.recent_files.clear();
         self.recently_closed.clear();
+        // Another project's tests: looked for again, if they show.
+        self.tests = None;
+        self.tests_task = None;
+        self.test_status.clear();
+        self.tests_running = None;
         self.refresh_git(cx);
         self.watch(path.clone(), cx);
         self.tree.update(cx, |tree, cx| tree.set_root(path.clone(), cx));
         self.ignore_rules = crate::project_index::ignore_rules(&path);
         self.reindex_pending.clear();
         self.build_index(cx);
+        if self.sidebar_tests {
+            self.find_tests(cx);
+        }
         let mut session = crate::session::Session::load(&path);
         session.window = self.window_state;
         self.restore_session(session, window, cx);
@@ -4851,7 +4859,7 @@ impl Workspace {
         self.tests_task = Some(cx.spawn(async move |this, cx| {
             let found = cx.background_executor().spawn(async move { crate::test_at::discover(&root) }).await;
             this.update(cx, |this, cx| {
-                this.tests = Some(found);
+                this.tests = Some(std::rc::Rc::new(found));
                 cx.notify();
             })
             .ok();
@@ -4860,10 +4868,10 @@ impl Workspace {
 
     /// A file saved while the tests show: its own tests read again.
     fn tests_saved(&mut self, path: PathBuf, text: String, cx: &mut Context<Self>) {
-        if self.tests.is_none() {
+        let root = self.tree.read(cx).root().to_path_buf();
+        if self.tests.is_none() || !path.starts_with(&root) {
             return;
         }
-        let root = self.tree.read(cx).root().to_path_buf();
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_executor()
@@ -4874,6 +4882,7 @@ impl Workspace {
                 .await;
             this.update(cx, |this, cx| {
                 let Some(tests) = &mut this.tests else { return };
+                let tests = std::rc::Rc::make_mut(tests);
                 tests.retain(|f| f.path != path);
                 if let Some(found) = found {
                     let at = tests.partition_point(|f| f.path < found.path);
@@ -4903,6 +4912,14 @@ impl Workspace {
             })
             .collect::<Vec<_>>()
             .join("; ");
+        // One run at a time is followed: what an earlier one ran and didn't report is unknown.
+        if let Some((_, earlier)) = self.tests_running.take() {
+            for test in earlier {
+                if self.test_status.get(&test) == Some(&TestStatus::Running) {
+                    self.test_status.remove(&test);
+                }
+            }
+        }
         for test in &which {
             self.test_status.insert(test.clone(), TestStatus::Running);
         }
@@ -4914,7 +4931,11 @@ impl Workspace {
     /// How the tests did, from what a run printed (one run from the list, or typed).
     fn read_test_results(&mut self, ran: &crate::terminal::Ran) {
         let results = crate::test_at::results(&ran.output);
-        let ours = self.tests_running.as_ref().is_some_and(|(command, _)| *command == ran.command);
+        // The terminal reports the command from its first program on (`(cd web && npx jest x)`
+        // comes back as `npx jest x`): ours if it ends ours.
+        let ours = self.tests_running.as_ref().is_some_and(|(command, _)| {
+            *command == ran.command || (ran.command.len() >= 8 && command.ends_with(ran.command.as_str()))
+        });
         let running = if ours { self.tests_running.take().map(|(_, which)| which) } else { None };
         if results.is_empty() && running.is_none() {
             return;
@@ -4922,15 +4943,23 @@ impl Workspace {
         let known: Vec<(PathBuf, String)> = self
             .tests
             .iter()
-            .flatten()
-            .flat_map(|f| f.tests.iter().map(|t| (f.path.clone(), t.name.clone())))
+            .flat_map(|files| files.iter())
+            .flat_map(|f| f.tests.iter().map(|t| (f.path.clone(), t.id.clone())))
             .collect();
-        for (name, passed) in results {
+        // A test reported more than once (each case of a parametrized one): failed if any did.
+        let mut outcomes: Vec<(String, bool)> = Vec::new();
+        for (id, passed) in results {
+            match outcomes.iter_mut().find(|(known, _)| *known == id) {
+                Some((_, ok)) => *ok &= passed,
+                None => outcomes.push((id, passed)),
+            }
+        }
+        for (id, passed) in outcomes {
             let status = if passed { TestStatus::Passed } else { TestStatus::Failed };
             // The ones run, when it was from the list; any of that name, when typed.
             let targets: Vec<&(PathBuf, String)> = match &running {
-                Some(which) => which.iter().filter(|(_, n)| *n == name).collect(),
-                None => known.iter().filter(|(_, n)| *n == name).collect(),
+                Some(which) => which.iter().filter(|(_, n)| *n == id).collect(),
+                None => known.iter().filter(|(_, n)| *n == id).collect(),
             };
             for target in targets {
                 self.test_status.insert(target.clone(), status);
@@ -4955,13 +4984,20 @@ impl Workspace {
         }
         // Above the list: how many, how many failed, and running them all (or the failed).
         let all: Vec<(PathBuf, String)> =
-            files.iter().flat_map(|f| f.tests.iter().map(|t| (f.path.clone(), t.name.clone()))).collect();
+            files.iter().flat_map(|f| f.tests.iter().map(|t| (f.path.clone(), t.id.clone()))).collect();
         let failed: Vec<(PathBuf, String)> =
             all.iter().filter(|k| self.test_status.get(*k) == Some(&TestStatus::Failed)).cloned().collect();
+        let failed_set: std::collections::HashSet<&(PathBuf, String)> = failed.iter().collect();
         let everything = crate::test_at::run_everything(&files);
         let failed_command: Vec<String> = files
             .iter()
-            .flat_map(|f| f.tests.iter().filter(|t| failed.contains(&(f.path.clone(), t.name.clone()))).map(|t| t.command.clone()))
+            .flat_map(|f| {
+                let failed_set = &failed_set;
+                f.tests
+                    .iter()
+                    .filter(move |t| failed_set.contains(&(f.path.clone(), t.id.clone())))
+                    .map(|t| t.command.clone())
+            })
             .collect();
         let count = if all.len() == 1 { "1 test".to_string() } else { format!("{} tests", all.len()) };
         let summary = if failed.is_empty() { count } else { format!("{count} · {} failed", failed.len()) };
@@ -5009,7 +5045,6 @@ impl Workspace {
             .collect();
         let root = self.tree.read(cx).root().to_path_buf();
         let status = self.test_status.clone();
-        let files = std::rc::Rc::new(files);
         let list = uniform_list(
             "tests",
             rows.len(),
@@ -5046,14 +5081,13 @@ impl Workspace {
                             None => {
                                 let shown = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().into_owned();
                                 let which: Vec<(PathBuf, String)> =
-                                    file.tests.iter().map(|t| (path.clone(), t.name.clone())).collect();
+                                    file.tests.iter().map(|t| (path.clone(), t.id.clone())).collect();
                                 div()
                                     .id(("test-file", ix))
                                     .group(group.clone())
                                     .h(px(ui::ROW))
                                     .pl(px(12.))
                                     .pr(px(6.))
-                                    .mt(px(if ix == 0 { 0. } else { 6. }))
                                     .flex()
                                     .items_center()
                                     .gap(px(6.))
@@ -5070,7 +5104,7 @@ impl Workspace {
                             }
                             Some(t) => {
                                 let test = &file.tests[t];
-                                let key = (path.clone(), test.name.clone());
+                                let key = (path.clone(), test.id.clone());
                                 let dot = match status.get(&key) {
                                     Some(TestStatus::Passed) => theme.git_added,
                                     Some(TestStatus::Failed) => theme.error,
@@ -7907,7 +7941,10 @@ impl Render for Workspace {
                                 },
                                 // Vim's block: its cursors are the block's lines.
                                 n if editor.vim_mode(cx) == Some(crate::editor::vim::Mode::VisualBlock) => {
-                                    format!("Visual Block · {} lines", n + 1)
+                                    match editor.vim_recording() {
+                                        Some(name) => format!("Visual Block · Recording @{name} · {} lines", n + 1),
+                                        None => format!("Visual Block · {} lines", n + 1),
+                                    }
                                 }
                                 n => format!("{} cursors · Esc for one", n + 1),
                             },
@@ -10720,9 +10757,9 @@ mod tests {
         cx.run_until_parked();
         let path = dir.join("src/cart.rs");
         let names = workspace.read_with(cx, |w, _| {
-            w.tests.clone().unwrap().iter().flat_map(|f| f.tests.iter().map(|t| t.name.clone())).collect::<Vec<_>>()
+            w.tests.clone().unwrap().iter().flat_map(|f| f.tests.iter().map(|t| t.id.clone())).collect::<Vec<_>>()
         });
-        assert_eq!(names, ["adds", "takes"]);
+        assert_eq!(names, ["cart::tests::adds", "cart::tests::takes"]);
         let ran = |command: &str, output: &str| crate::terminal::Ran {
             name: "cargo".into(),
             command: command.to_string(),
@@ -10731,19 +10768,19 @@ mod tests {
         };
         workspace.update(cx, |w, _| {
             let command = "cargo test -- --exact cart::tests::adds".to_string();
-            w.tests_running = Some((command.clone(), vec![(path.clone(), "adds".into())]));
-            w.test_status.insert((path.clone(), "adds".into()), TestStatus::Running);
+            w.tests_running = Some((command.clone(), vec![(path.clone(), "cart::tests::adds".into())]));
+            w.test_status.insert((path.clone(), "cart::tests::adds".into()), TestStatus::Running);
             w.read_test_results(&ran(&command, "test cart::tests::adds ... FAILED\n"));
-            assert_eq!(w.test_status.get(&(path.clone(), "adds".into())), Some(&TestStatus::Failed));
+            assert_eq!(w.test_status.get(&(path.clone(), "cart::tests::adds".into())), Some(&TestStatus::Failed));
             // Typed by hand: every test it names.
             w.read_test_results(&ran("cargo test", "test cart::tests::adds ... ok\ntest cart::tests::takes ... ok\n"));
-            assert_eq!(w.test_status.get(&(path.clone(), "adds".into())), Some(&TestStatus::Passed));
-            assert_eq!(w.test_status.get(&(path.clone(), "takes".into())), Some(&TestStatus::Passed));
+            assert_eq!(w.test_status.get(&(path.clone(), "cart::tests::adds".into())), Some(&TestStatus::Passed));
+            assert_eq!(w.test_status.get(&(path.clone(), "cart::tests::takes".into())), Some(&TestStatus::Passed));
             // Run from the list but not said (it didn't build): not known.
-            w.tests_running = Some(("cargo test x".into(), vec![(path.clone(), "takes".into())]));
-            w.test_status.insert((path.clone(), "takes".into()), TestStatus::Running);
+            w.tests_running = Some(("cargo test x".into(), vec![(path.clone(), "cart::tests::takes".into())]));
+            w.test_status.insert((path.clone(), "cart::tests::takes".into()), TestStatus::Running);
             w.read_test_results(&ran("cargo test x", "error[E0425]: cannot find value\n"));
-            assert_eq!(w.test_status.get(&(path.clone(), "takes".into())), None);
+            assert_eq!(w.test_status.get(&(path.clone(), "cart::tests::takes".into())), None);
         });
         // A test added and saved: listed.
         workspace.update_in(cx, |w, window, cx| w.open_file(path.clone(), window, cx));

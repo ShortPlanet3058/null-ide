@@ -16,6 +16,9 @@ pub struct TestRun {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub name: String,
+    /// What runs report it by: its full name ("cart::tests::adds", "tests/test_x.py::test_y",
+    /// "cart adds items"), so two tests with one name are told apart.
+    pub id: String,
     pub line: usize,
     pub command: String,
 }
@@ -42,21 +45,27 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
         }
         "Go" => {
             let module = ancestor_with(dir, "go.mod")?;
-            Some(format!("go test {}./...", in_dir(root, &module, |d| format!("-C {} ", quote(d)))))
+            Some(format!("go test {}-v ./...", in_dir(root, &module, |d| format!("-C {} ", quote(d)))))
         }
         "Python" => Some("python3 -m pytest".into()),
         "JavaScript" | "TypeScript" | "TSX" => {
             let project = ancestor_with(dir, "package.json")?;
-            let chdir = in_dir(root, &project, |d| format!("cd {} && ", quote(d)));
+            // Each test's own line, as runs of many files don't print by themselves.
             let command = match js_runner(&project) {
-                JsRunner::Vitest(x) => format!("{x} vitest run"),
-                JsRunner::Jest(x) => format!("{x} jest"),
+                JsRunner::Vitest(x) => format!("{x} vitest run --reporter=verbose"),
+                JsRunner::Jest(x) => format!("{x} jest --verbose"),
                 JsRunner::Node => "node --test".into(),
             };
-            Some(format!("{chdir}{command}"))
+            Some(in_package(root, &project, command))
         }
         _ => None,
     }
+}
+
+/// `command` run in the package at `project`: in a subshell, so the terminal stays where it
+/// was (a `cd` typed into it would last).
+fn in_package(root: &Path, project: &Path, command: String) -> String {
+    if project == root { command } else { format!("(cd {} && {command})", quote(&relative(root, project))) }
 }
 
 /// What runs every test found, each kind once: one command, the parts after each other
@@ -76,7 +85,7 @@ const MAX_FILES: usize = 20_000;
 const MAX_BYTES: u64 = 1 << 20;
 
 /// Whether a file's name says it may hold tests (Rust's: any file, read to see).
-fn may_hold_tests(path: &Path) -> bool {
+pub fn may_hold_tests(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let in_tests_folder = path.components().any(|c| c.as_os_str() == "__tests__");
     match path.extension().and_then(|x| x.to_str()) {
@@ -94,6 +103,9 @@ fn may_hold_tests(path: &Path) -> bool {
 /// off the main thread.
 pub fn discover(root: &Path) -> Vec<FileTests> {
     let mut files: Vec<FileTests> = ignore::WalkBuilder::new(root)
+        // .gitignore read outside a git repository too; packages and builds never looked in.
+        .require_git(false)
+        .filter_entry(|e| !matches!(e.file_name().to_str(), Some("node_modules" | "target" | ".venv" | "venv")))
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()) && may_hold_tests(e.path()))
@@ -111,7 +123,7 @@ pub fn discover(root: &Path) -> Vec<FileTests> {
 /// The tests in one file (None: none, or not a kind of file Null runs tests of).
 pub fn tests_in_file(root: &Path, path: &Path, text: &str) -> Option<FileTests> {
     // Rust files without a test attribute: not even parsed.
-    if path.extension().is_some_and(|x| x == "rs") && !text.contains("test") {
+    if !may_hold_tests(path) || (path.extension().is_some_and(|x| x == "rs") && !text.contains("test")) {
         return None;
     }
     let language = crate::languages::for_path(path)?;
@@ -150,7 +162,14 @@ pub fn tests_in_file(root: &Path, path: &Path, text: &str) -> Option<FileTests> 
         .filter_map(|(name, byte)| {
             let run = find(language.name, root, path, text, &tree, Some(byte))?;
             let line = text[..byte.min(text.len())].matches('\n').count();
-            Some(Found { name, line, command: run.command })
+            let id = match language.name {
+                // The path `--exact` is given: what cargo prints.
+                "Rust" => run.command.rsplit_once("--exact ").map_or(name.clone(), |(_, id)| id.to_string()),
+                "Python" => format!("{}::{name}", relative(root, path)),
+                "JavaScript" | "TypeScript" | "TSX" => js_test(text, &tree, byte).unwrap_or_else(|| name.clone()),
+                _ => name.clone(),
+            };
+            Some(Found { name, id, line, command: run.command })
         })
         .collect();
     if tests.is_empty() {
@@ -170,11 +189,14 @@ fn test_named(language: &str, node: Node, text: &str) -> Option<(String, usize)>
         }
         "Python" if node.kind() == "function_definition" => {
             let name = node.child_by_field_name("name")?;
-            // test_x, in no class or in Test classes, as pytest collects them.
+            // test_x, in no class or in Test classes (or unittest's TestCase ones), as pytest
+            // collects them; not one inside another function.
             let in_tests = ancestors(node).skip(1).filter(|n| n.kind() == "class_definition").all(|class| {
                 class.child_by_field_name("name").is_some_and(|n| node_text(n, text).starts_with("Test"))
+                    || class.child_by_field_name("superclasses").is_some_and(|b| node_text(b, text).contains("TestCase"))
             });
-            if !node_text(name, text).starts_with("test") || !in_tests {
+            let nested = ancestors(node).skip(1).any(|n| n.kind() == "function_definition");
+            if !node_text(name, text).starts_with("test") || !in_tests || nested {
                 return None;
             }
             // pytest's id: the classes around it, then its name ("TestCart::test_total").
@@ -196,73 +218,140 @@ fn test_named(language: &str, node: Node, text: &str) -> Option<(String, usize)>
                 return None;
             }
             let first = node.child_by_field_name("arguments")?.named_child(0)?;
-            matches!(first.kind(), "string" | "template_string")
-                .then(|| (node_text(first, text).trim_matches(['"', '\'', '`']).to_string(), first.start_byte()))
+            let title = js_title(first, text)?;
+            Some((title, first.start_byte()))
         }
         _ => None,
     }
 }
 
+/// A test's title as written in a string (its quotes off, its escapes read); None for one
+/// made as it runs (`${n}`).
+fn js_title(node: Node, text: &str) -> Option<String> {
+    let raw = node_text(node, text);
+    let inside = match node.kind() {
+        "string" => raw.get(1..raw.len().saturating_sub(1))?,
+        "template_string" if !raw.contains("${") => raw.get(1..raw.len().saturating_sub(1))?,
+        _ => return None,
+    };
+    let mut out = String::with_capacity(inside.len());
+    let mut chars = inside.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(other) => out.push(other),
+                None => {}
+            },
+            _ => out.push(c),
+        }
+    }
+    Some(out)
+}
+
 /// What a test run printed, read: each test's name as `Found` has it, and whether it passed.
 /// cargo test, go test -v, pytest -v, and jest, vitest or node's runner.
 pub fn results(output: &str) -> Vec<(String, bool)> {
-    let mut found = Vec::new();
+    let mut found: Vec<(String, bool)> = Vec::new();
+    // jest's and node's suites, by how far in they're written: what a test's title follows.
+    let mut suites: Vec<(usize, String)> = Vec::new();
+    let mut in_jest_file = false;
     for line in output.lines() {
         let line = line.trim_end_matches('\r');
         let trimmed = line.trim();
-        // cargo: "test editor::tests::adds_up ... ok"
+        let indent = line.len() - line.trim_start().len();
+        // cargo: "test editor::tests::adds_up ... ok" ("- should panic" after it, sometimes)
         if let Some(rest) = trimmed.strip_prefix("test ")
             && let Some((path, outcome)) = rest.split_once(" ... ")
         {
-            let name = path.rsplit("::").next().unwrap_or(path).to_string();
+            let id = path.split(" - ").next().unwrap_or(path).trim().to_string();
             match outcome.trim() {
-                "ok" => found.push((name, true)),
-                o if o.starts_with("FAILED") => found.push((name, false)),
+                "ok" => found.push((id, true)),
+                o if o.starts_with("FAILED") => found.push((id, false)),
                 _ => {}
             }
             continue;
         }
-        // go: "--- PASS: TestTotal (0.00s)"
+        // go -v: "--- PASS: TestTotal (0.00s)"
         if let Some(rest) = trimmed.strip_prefix("--- PASS: ").or_else(|| trimmed.strip_prefix("--- FAIL: ")) {
             let name = rest.split_whitespace().next().unwrap_or("").to_string();
             found.push((name, trimmed.starts_with("--- PASS")));
             continue;
         }
-        // pytest -v: "tests/test_cart.py::TestCart::test_total PASSED [ 50%]"
+        // pytest -v: "tests/test_cart.py::TestCart::test_total PASSED [ 50%]" (test_x[1-2]
+        // for each of a parametrized test's cases: the test, failed if any case did)
         if let Some((id, outcome)) = trimmed.split_once(' ')
             && id.contains("::")
             && (outcome.starts_with("PASSED") || outcome.starts_with("FAILED"))
         {
-            let name = id.split_once("::").map_or(id, |(_, rest)| rest).to_string();
-            found.push((name, outcome.starts_with("PASSED")));
+            let id = match id.find('[') {
+                Some(open) if id.ends_with(']') => &id[..open],
+                _ => id,
+            };
+            found.push((id.to_string(), outcome.starts_with("PASSED")));
             continue;
         }
-        // jest, vitest, node: "✓ adds two items (3 ms)", "✕ …", "× …"
+        // jest: "PASS src/cart.test.js" starts a file's tests; a blank line ends them.
+        if trimmed.starts_with("PASS ") || trimmed.starts_with("FAIL ") {
+            in_jest_file = true;
+            suites.clear();
+            continue;
+        }
+        if trimmed.is_empty() {
+            in_jest_file = false;
+            suites.clear();
+            continue;
+        }
         let mut chars = trimmed.chars();
         let passed = match chars.next() {
             Some('✓' | '✔' | '√') => true,
             Some('✕' | '✖' | '×') => false,
+            // node: "▶ cart" opens a suite; jest: a line in a file's tests that isn't one.
+            Some('▶') => {
+                suites.retain(|(at, _)| *at < indent);
+                suites.push((indent, without_time(chars.as_str().trim()).to_string()));
+                continue;
+            }
+            _ if in_jest_file && indent >= 2 => {
+                suites.retain(|(at, _)| *at < indent);
+                suites.push((indent, trimmed.to_string()));
+                continue;
+            }
             _ => continue,
         };
-        let mut name = chars.as_str().trim();
-        if let Some(open) = name.rfind(" (")
-            && name.ends_with("ms)")
-        {
-            name = &name[..open];
-        }
-        // (vitest's "2ms", unbracketed)
-        if let Some((rest, last)) = name.rsplit_once(' ')
-            && last.strip_suffix("ms").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-        {
-            name = rest;
-        }
-        // vitest's "file > describe > test": the test's own title.
-        let name = name.rsplit(" > ").next().unwrap_or(name).trim();
-        if !name.is_empty() {
-            found.push((name.to_string(), passed));
+        let title = without_time(chars.as_str().trim());
+        // vitest: "src/a.test.ts > cart > adds": the file, then the suites and the test.
+        let id = if title.contains(" > ") {
+            let mut parts: Vec<&str> = title.split(" > ").collect();
+            if parts.first().is_some_and(|f| f.contains(".test.") || f.contains(".spec.")) {
+                parts.remove(0);
+            }
+            parts.join(" ")
+        } else {
+            suites.retain(|(at, _)| *at < indent);
+            suites.iter().map(|(_, s)| s.as_str()).chain(std::iter::once(title)).collect::<Vec<_>>().join(" ")
+        };
+        if !id.trim().is_empty() {
+            found.push((id.trim().to_string(), passed));
         }
     }
     found
+}
+
+/// A test's title without how long it took: "(3 ms)", "(0.5ms)", or vitest's "2ms".
+fn without_time(title: &str) -> &str {
+    if let Some(open) = title.rfind(" (")
+        && title.ends_with("ms)")
+    {
+        return &title[..open];
+    }
+    if let Some((rest, last)) = title.rsplit_once(' ')
+        && last.strip_suffix("ms").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    {
+        return rest;
+    }
+    title
 }
 
 /// The test the caret (`byte`) is in, or with `byte` None, all of the file's tests.
@@ -283,14 +372,14 @@ pub fn find(language: &str, root: &Path, path: &Path, text: &str, tree: &Tree, b
             match byte {
                 Some(byte) => {
                     let name = names.into_iter().find(|(_, r)| r.contains(&byte))?.0;
-                    let command = format!("go test {chdir}-run {} {package}", quote(&format!("^{name}$")));
+                    let command = format!("go test {chdir}-v -run {} {package}", quote(&format!("^{name}$")));
                     Some(TestRun { command, name })
                 }
                 None if names.is_empty() => None,
                 None => {
                     let list: Vec<String> = names.into_iter().map(|(n, _)| n).collect();
                     let pattern = format!("^({})$", list.join("|"));
-                    Some(all(format!("go test {chdir}-run {} {package}", quote(&pattern))))
+                    Some(all(format!("go test {chdir}-v -run {} {package}", quote(&pattern))))
                 }
             }
         }
@@ -309,16 +398,15 @@ pub fn find(language: &str, root: &Path, path: &Path, text: &str, tree: &Tree, b
             let project = ancestor_with(path.parent()?, "package.json")?;
             let runner = js_runner(&project);
             let relative = relative(&project, path);
-            let chdir = in_dir(root, &project, |d| format!("cd {} && ", quote(d)));
             let pattern = match byte {
                 Some(byte) => Some(js_test(text, tree, byte)?),
                 None => None,
             };
             let command = match (runner, &pattern) {
                 (JsRunner::Vitest(x), Some(p)) => {
-                    format!("{x} vitest run {} -t {}", quote(&relative), quote(&regex_escape(p)))
+                    format!("{x} vitest run --reporter=verbose {} -t {}", quote(&relative), quote(&regex_escape(p)))
                 }
-                (JsRunner::Vitest(x), None) => format!("{x} vitest run {}", quote(&relative)),
+                (JsRunner::Vitest(x), None) => format!("{x} vitest run --reporter=verbose {}", quote(&relative)),
                 (JsRunner::Jest(x), Some(p)) => format!("{x} jest {} -t {}", quote(&relative), quote(&regex_escape(p))),
                 (JsRunner::Jest(x), None) => format!("{x} jest {}", quote(&relative)),
                 (JsRunner::Node, Some(p)) => {
@@ -327,7 +415,7 @@ pub fn find(language: &str, root: &Path, path: &Path, text: &str, tree: &Tree, b
                 (JsRunner::Node, None) => format!("node --test {}", quote(&relative)),
             };
             let name = pattern.unwrap_or_else(|| format!("the tests in {file}"));
-            Some(TestRun { command: format!("{chdir}{command}"), name })
+            Some(TestRun { command: in_package(root, &project, command), name })
         }
         _ => None,
     }
@@ -457,8 +545,7 @@ fn js_test(text: &str, tree: &Tree, byte: usize) -> Option<String> {
             }
             let arguments = call.child_by_field_name("arguments")?;
             let first = arguments.named_child(0)?;
-            matches!(first.kind(), "string" | "template_string")
-                .then(|| node_text(first, text).trim_matches(['"', '\'', '`']).to_string())
+            js_title(first, text)
         })
         .collect();
     names.reverse();
@@ -625,23 +712,46 @@ mod tests {
         assert_eq!(rust.tests[0].line, 4);
         assert_eq!(rust.tests[0].command, "cargo test -- --exact cart::tests::adds_up");
         assert_eq!(rust.command.as_deref(), Some("cargo test -- cart::"));
-        assert_eq!(files[2].tests[0].command, "cd web && npx jest cart.test.js -t 'cart adds items'");
+        assert_eq!(files[2].tests[0].command, "(cd web && npx jest cart.test.js -t 'cart adds items')");
+        // Each told apart by its full name.
+        assert_eq!(rust.tests[0].id, "cart::tests::adds_up");
+        assert_eq!(files[1].tests[0].id, "tests/test_cart.py::TestCart::test_total");
+        assert_eq!(files[2].tests[0].id, "cart adds items");
         // Everything: each kind once.
-        assert_eq!(run_everything(&files).as_deref(), Some("cargo test; python3 -m pytest; cd web && npx jest"));
+        assert_eq!(
+            run_everything(&files).as_deref(),
+            Some("cargo test; python3 -m pytest; (cd web && npx jest --verbose)")
+        );
     }
 
     #[test]
     fn results_are_read_from_what_runs_print() {
-        let output = "running 2 tests\ntest editor::tests::adds_up ... ok\ntest tests::fails ... FAILED\n\
+        let output = "running 3 tests\ntest editor::tests::adds_up ... ok\ntest tests::fails ... FAILED\n\
+            test tests::panics - should panic ... ok\n\
             --- PASS: TestTotal (0.00s)\n    --- FAIL: TestSub (0.01s)\n\
             tests/test_cart.py::TestCart::test_total PASSED   [ 50%]\ntests/test_cart.py::test_free FAILED  [100%]\n\
-            \u{2003} ✓ adds items (3 ms)\n  ✕ later\n ✓ src/a.test.ts > cart > counts 2ms\n";
+            tests/test_cart.py::test_sum[1-2] PASSED\n\n\
+            PASS web/cart.test.js\n  cart\n    ✓ adds items (3 ms)\n    ✕ times out after 100ms (105 ms)\n\n\
+            ✓ src/a.test.ts > cart > counts 2ms\n\
+            ▶ basket\n  ✔ empties (0.5ms)\n";
         let results = results(output);
-        assert!(results.contains(&("adds_up".into(), true)) && results.contains(&("fails".into(), false)));
-        assert!(results.contains(&("TestTotal".into(), true)) && results.contains(&("TestSub".into(), false)));
-        assert!(results.contains(&("TestCart::test_total".into(), true)) && results.contains(&("test_free".into(), false)));
-        assert!(results.contains(&("adds items".into(), true)) && results.contains(&("later".into(), false)));
-        assert!(results.contains(&("counts".into(), true)));
+        let has = |id: &str, ok: bool| results.contains(&(id.to_string(), ok));
+        assert!(has("editor::tests::adds_up", true) && has("tests::fails", false) && has("tests::panics", true));
+        assert!(has("TestTotal", true) && has("TestSub", false));
+        assert!(has("tests/test_cart.py::TestCart::test_total", true) && has("tests/test_cart.py::test_free", false));
+        assert!(has("tests/test_cart.py::test_sum", true), "a parametrized case, as its test");
+        assert!(has("cart adds items", true) && has("cart times out after 100ms", false), "{results:?}");
+        assert!(has("cart counts", true) && has("basket empties", true), "{results:?}");
+    }
+
+    /// A title as written, its quotes and escapes read; one made as it runs isn't a test to find.
+    #[test]
+    fn js_titles_are_read_as_they_run() {
+        let js = "it('it\\'s \"x\"', () => {});\ntest(`adds ${n}`, () => {});\ntest(`plain`, () => {});\n";
+        let root = project("js-titles", &[("package.json", "{}"), ("a.test.js", js)]);
+        let names: Vec<String> =
+            tests_in_file(&root, &root.join("a.test.js"), js).unwrap().tests.into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["it's \"x\"", "plain"]);
     }
 
     #[test]
@@ -649,9 +759,9 @@ mod tests {
         let go = "package cart\n\nfunc TestTotal(t *testing.T) {\n\tt.Log(1)\n}\n\nfunc Testify() {}\n";
         let root = project("go", &[("go.mod", "module x\n"), ("cart/cart_test.go", go)]);
         let run = at("Go", &root, "cart/cart_test.go", go, "t.Log").unwrap();
-        assert_eq!(run.command, "go test -run '^TestTotal$' ./cart");
+        assert_eq!(run.command, "go test -v -run '^TestTotal$' ./cart");
         let file = find("Go", &root, &root.join("cart/cart_test.go"), go, &tree("a.go", go), None).unwrap();
-        assert_eq!(file.command, "go test -run '^(TestTotal)$' ./cart");
+        assert_eq!(file.command, "go test -v -run '^(TestTotal)$' ./cart");
 
         let py = "class TestCart:\n    def test_total(self):\n        assert 1\n\ndef test_free():\n    pass\n";
         let root = project("py", &[("tests/test_cart.py", py)]);
@@ -663,7 +773,7 @@ mod tests {
         let root =
             project("js", &[("package.json", r#"{"devDependencies":{"vitest":"1"}}"#), ("src/cart.test.ts", js)]);
         let run = at("TypeScript", &root, "src/cart.test.ts", js, "expect").unwrap();
-        assert_eq!(run.command, r"npx vitest run src/cart.test.ts -t 'cart adds \(two\) items'");
+        assert_eq!(run.command, r"npx vitest run --reporter=verbose src/cart.test.ts -t 'cart adds \(two\) items'");
         assert_eq!(run.name, "cart adds (two) items");
     }
 }

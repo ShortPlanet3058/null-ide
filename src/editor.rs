@@ -992,14 +992,20 @@ impl Editor {
         if self.preview.is_some() {
             let text = read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind());
             let now = crate::preview::of(path, &text);
-            // Readable now (its permissions were fixed): it opens as text after all.
+            // Readable now (its permissions were fixed), or text now (written again as text): it
+            // opens as text after all.
             let readable_now = now.is_none() && read.is_ok();
-            if !(readable_now && matches!(self.preview, Some(crate::preview::Preview::Unreadable { .. }))) {
+            let was = matches!(
+                self.preview,
+                Some(crate::preview::Preview::Unreadable { .. } | crate::preview::Preview::NotText { .. })
+            );
+            if !(readable_now && was) {
                 self.preview = now.or(self.preview.take());
                 self.read_bytes();
                 return cx.notify();
             }
             self.preview = None;
+            self.binary = None;
         }
         // Not written since Null read or wrote it: nothing to read again (and the encoding
         // it was reopened in isn't guessed again).
@@ -3283,6 +3289,7 @@ impl Editor {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
+        self.vim_clicked();
         self.close_hover(cx);
         self.close_completion(cx);
         if self.scrollbar_mouse_down(event.position, cx) {
@@ -4678,8 +4685,6 @@ impl Editor {
             .into_any_element()
     }
 
-    /// An image at its own size (smaller if it doesn't fit), or a line saying the file
-    /// isn't text.
     /// A file that isn't text: its bytes read, for the hex view (none for anything else).
     fn read_bytes(&mut self) {
         use std::io::Read;
@@ -4759,6 +4764,8 @@ impl Editor {
             .into_any_element()
     }
 
+    /// An image at its own size (smaller if it doesn't fit), a file that isn't text in hex,
+    /// or a line saying it couldn't be read.
     fn render_preview(&self, preview: &crate::preview::Preview, cx: &Context<Self>) -> AnyElement {
         if let (crate::preview::Preview::NotText { .. }, Some(bytes)) = (preview, &self.binary) {
             return self.render_hex(bytes.clone(), preview, cx);
@@ -4841,7 +4848,8 @@ fn hex_row(bytes: &[u8], row: usize, digits: usize) -> (String, String, String) 
         }
     }
     let chars: String = chunk.iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
-    (format!("{start:0digits$x}"), hex.trim_end().to_string(), chars)
+    // (The last row padded as the others: its characters line up under theirs.)
+    (format!("{start:0digits$x}"), hex, chars)
 }
 
 /// Prose files bigger than this don't show their word count.
@@ -5097,10 +5105,11 @@ mod tests {
         let bytes: Vec<u8> = (0..20).map(|i| if i == 1 { b'A' } else { i }).collect();
         let (offset, hex, chars) = hex_row(&bytes, 0, 8);
         assert_eq!(offset, "00000000");
-        assert_eq!(hex, "00 41 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f");
+        assert_eq!(hex.trim_end(), "00 41 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f");
         assert_eq!(chars, ".A..............");
         let (offset, hex, chars) = hex_row(&bytes, 1, 8);
-        assert_eq!((offset.as_str(), hex.as_str(), chars.as_str()), ("00000010", "10 11 12 13", "...."));
+        assert_eq!((offset.as_str(), hex.trim_end(), chars.as_str()), ("00000010", "10 11 12 13", "...."));
+        assert_eq!(hex.len(), hex_row(&bytes, 0, 8).1.len(), "as wide as a full row");
     }
 
     #[test]
