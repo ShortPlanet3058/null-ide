@@ -45,6 +45,7 @@ mod problem_matcher;
 mod project_index;
 mod project_search;
 mod punctuation;
+mod python_env;
 mod search;
 mod servers;
 mod session;
