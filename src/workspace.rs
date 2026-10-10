@@ -161,6 +161,8 @@ actions!(
         CancelTerminalName,
         CloseAllTabs,
         CloseOtherTabs,
+        CloseSavedTabs,
+        SaveWithoutFormatting,
         UseNvidia,
         UseOllama,
         UseOpenAiCompatible,
@@ -255,6 +257,7 @@ enum TabMenuItem {
     Close,
     CloseOthers,
     CloseToTheRight,
+    CloseSaved,
     CopyPath,
     CopyRelativePath,
     Reveal,
@@ -276,6 +279,7 @@ impl TabMenuItem {
             TabMenuItem::Close => "Close",
             TabMenuItem::CloseOthers => "Close Others",
             TabMenuItem::CloseToTheRight => "Close Tabs to the Right",
+            TabMenuItem::CloseSaved => "Close Saved Tabs",
             TabMenuItem::CopyPath => "Copy Path",
             TabMenuItem::CopyRelativePath => "Copy Relative Path",
             TabMenuItem::Reveal => crate::file_tree::REVEAL_LABEL,
@@ -3606,6 +3610,12 @@ impl Workspace {
         self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
     }
 
+    /// The tabs with nothing unsaved (and not pinned): closing them asks nothing.
+    fn close_saved_tabs(&mut self, _: &CloseSavedTabs, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = self.unpinned().filter(|e| !e.read(cx).buffer.is_dirty()).collect();
+        self.confirm_unsaved(CloseAction::CloseTabs(saved), window, cx);
+    }
+
     /// The tabs that aren't pinned: what closing "all" or "the others" means.
     fn unpinned(&self) -> impl Iterator<Item = Entity<Editor>> + '_ {
         self.tabs.iter().filter(|t| !t.pinned).map(|t| t.editor.clone())
@@ -3710,6 +3720,12 @@ impl Workspace {
     fn save_active(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor().cloned() {
             editor.update(cx, |editor, cx| editor.save_from_keyboard(cx));
+        }
+    }
+
+    fn save_without_formatting(&mut self, _: &SaveWithoutFormatting, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor().cloned() {
+            editor.update(cx, |editor, cx| editor.save_as_is(cx));
         }
     }
 
@@ -4047,9 +4063,11 @@ impl Workspace {
                 (File, "Save As…".into(), Box::new(SaveAs)),
                 (File, "Revert to Saved".into(), Box::new(RevertToSaved)),
                 (File, "Save All".into(), Box::new(SaveAll)),
+                (File, "Save Without Formatting".into(), Box::new(SaveWithoutFormatting)),
                 (File, "Close Tab".into(), Box::new(CloseTab)),
                 (File, "Close All Tabs".into(), Box::new(CloseAllTabs)),
                 (File, "Close Other Tabs".into(), Box::new(CloseOtherTabs)),
+                (File, "Close Saved Tabs".into(), Box::new(CloseSavedTabs)),
                 (Edit, "Undo".into(), Box::new(Undo)),
                 (Edit, "Redo".into(), Box::new(Redo)),
                 (Edit, "Select All".into(), Box::new(SelectAll)),
@@ -7609,6 +7627,11 @@ impl Workspace {
         if side.last() != Some(&ix) {
             items.push(CloseToTheRight);
         }
+        // (Only when some are saved and some aren't: otherwise it's "Close All".)
+        let dirty = |t: &Tab| t.editor.read(cx).buffer.is_dirty();
+        if self.tabs.iter().any(|t| !t.pinned && !dirty(t)) && self.tabs.iter().any(dirty) {
+            items.push(CloseSaved);
+        }
         // To a side of its own: right of the others, or below them; or back.
         if self.tabs.len() > 1 {
             if self.tabs[ix].side == 0 {
@@ -7644,6 +7667,7 @@ impl Workspace {
                 let editors = after.filter(|&&i| !self.tabs[i].pinned).map(|&i| self.tabs[i].editor.clone()).collect();
                 self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
             }
+            TabMenuItem::CloseSaved => self.close_saved_tabs(&CloseSavedTabs, window, cx),
             TabMenuItem::CopyPath => self.copy_path(path.as_deref(), false, cx),
             TabMenuItem::CopyRelativePath => self.copy_path(path.as_deref(), true, cx),
             TabMenuItem::Reveal => {
@@ -9136,9 +9160,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::save_as))
             .on_action(cx.listener(Self::save_active))
             .on_action(cx.listener(Self::save_all))
+            .on_action(cx.listener(Self::save_without_formatting))
             .on_action(cx.listener(Self::reopen_closed_tab))
             .on_action(cx.listener(Self::close_all_tabs))
             .on_action(cx.listener(Self::close_other_tabs))
+            .on_action(cx.listener(Self::close_saved_tabs))
             .on_action(cx.listener(Self::use_nvidia))
             .on_action(cx.listener(Self::use_ollama))
             .on_action(cx.listener(Self::use_openai_compatible))
@@ -11414,6 +11440,58 @@ mod tests {
             // The same command again, clean: they go.
             w.read_reported(&ran("make", "nothing to be done\n"), cx);
             assert!(w.problem_places(cx).is_empty());
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// "Close Saved Tabs" leaves the ones with unsaved changes (and pinned ones), asking
+    /// nothing; "Save Without Formatting" writes the text as it is, untidied.
+    #[gpui::test]
+    fn closing_saved_tabs_and_saving_as_is(cx: &mut gpui::TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        let dir = crate::tools::test_dir("close-saved");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            std::fs::write(dir.join(name), "x  \n").unwrap();
+        }
+        std::fs::write(dir.join(".editorconfig"), "root = true\n[*]\ntrim_trailing_whitespace = true\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let names =
+            |w: &Workspace, cx: &App| -> Vec<String> { w.tabs.iter().map(|t| t.editor.read(cx).file_name()).collect() };
+        workspace.update_in(cx, |w, window, cx| {
+            for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+                w.open_file(dir.join(name), window, cx);
+            }
+            let a = w.tabs[0].editor.clone();
+            w.set_pinned(&a, true, cx);
+            // Nothing unsaved: the same as "Close All", so not offered.
+            assert!(!w.tab_menu_items(&a, cx).contains(&TabMenuItem::CloseSaved));
+            let c = w.tabs.iter().find(|t| t.editor.read(cx).file_name() == "c.txt").unwrap().editor.clone();
+            c.update(cx, |e, cx| e.replace_text_in_range(None, "y", window, cx));
+            assert!(w.tab_menu_items(&a, cx).contains(&TabMenuItem::CloseSaved));
+            w.close_saved_tabs(&CloseSavedTabs, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt(), "nothing asked");
+        workspace.update_in(cx, |w, window, cx| {
+            assert_eq!(names(w, cx), ["a.txt", "c.txt"], "the pinned one and the unsaved one");
+            // As it is: the spaces .editorconfig would take away stay.
+            w.show_tab(1, true, window, cx);
+            w.save_without_formatting(&SaveWithoutFormatting, window, cx);
+            assert_eq!(std::fs::read_to_string(dir.join("c.txt")).unwrap(), "yx  \n");
+            assert!(!w.active_editor().unwrap().read(cx).buffer.is_dirty());
+            // Saved as usual, tidied.
+            w.active_editor().unwrap().update(cx, |e, cx| e.replace_text_in_range(None, "z", window, cx));
+            w.save_active(&Save, window, cx);
+            assert_eq!(std::fs::read_to_string(dir.join("c.txt")).unwrap(), "yzx\n");
         });
         std::fs::remove_dir_all(&dir).ok();
     }
