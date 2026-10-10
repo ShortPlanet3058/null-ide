@@ -274,7 +274,7 @@ impl ProjectSearch {
         // The files field counts only while it shows.
         let files = if self.show_replace { self.files_input.read(cx).text().to_string() } else { String::new() };
         let unsaved = cx.try_global::<UnsavedFiles>().map(|u| u.0.clone()).unwrap_or_default();
-        let hide = cx.global::<crate::settings::Settings>().hide.clone();
+        let hide = cx.global::<crate::settings::Settings>().hidden_paths();
         let only: Option<std::collections::HashSet<PathBuf>> =
             self.open_only.then(|| self.open_files.iter().cloned().collect());
         let cancel = Arc::new(AtomicBool::new(false));

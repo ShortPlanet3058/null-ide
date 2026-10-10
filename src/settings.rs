@@ -140,7 +140,7 @@ fn vscode_settings(root: &std::path::Path) -> JsonMap {
             .map(|(glob, _)| Value::String(glob.clone()))
             .collect();
         if !hidden.is_empty() {
-            out.insert("hide".into(), Value::Array(hidden));
+            out.insert("files_exclude".into(), Value::Array(hidden));
         }
     }
     if let Some(Value::Bool(on)) = written.get("editor.bracketPairColorization.enabled") {
@@ -465,6 +465,9 @@ pub struct Settings {
     /// Paths kept out of the files, ⌘P and project search, written as `.gitignore` writes
     /// them (`*.pyc`, `build/`): beyond what `.gitignore` leaves out.
     pub hide: Vec<String>,
+    /// A project's `.vscode/settings.json` `files.exclude`: hidden too, with `hide` (not
+    /// in its place).
+    pub files_exclude: Vec<String>,
     /// Typing a bracket or quote types its partner too, steps over one already there, and
     /// wraps what's selected.
     pub auto_close: bool,
@@ -527,6 +530,7 @@ impl Default for Settings {
             symbol_marks: true,
             auto_close: true,
             hide: Vec::new(),
+            files_exclude: Vec::new(),
             ai: Default::default(),
         }
     }
@@ -620,6 +624,11 @@ impl AutoSave {
 }
 
 impl Settings {
+    /// What's kept out of the files, ⌘P and search: `hide`, and a project's `files.exclude`.
+    pub fn hidden_paths(&self) -> Vec<String> {
+        self.hide.iter().chain(&self.files_exclude).cloned().collect()
+    }
+
     /// The indentation new files get, and files that don't show their own.
     pub fn default_indent(&self) -> crate::file_style::Indent {
         if self.indent_with_tabs {
@@ -1319,7 +1328,11 @@ mod tests {
         let (now, _) = merged(&user, &read);
         assert_eq!((now.indent_size, now.indent_with_tabs, now.format_on_save, now.word_wrap), (2, false, true, true));
         assert_eq!(now.theme, user.theme, "only the editing settings");
-        assert_eq!(now.hide, ["**/*.pyc"], "the files it hides");
+        assert_eq!(now.files_exclude, ["**/*.pyc"], "the files it hides");
+        // With yours, not in their place.
+        let mine = Settings { hide: vec!["*.log".into()], ..Settings::default() };
+        let (with_mine, _) = merged(&mine, &vscode_settings(&dir));
+        assert_eq!(with_mine.hidden_paths(), ["*.log", "**/*.pyc"]);
         assert_eq!(now.indent_for("Python"), crate::file_style::Indent::Spaces(4));
         assert!(!now.format_on_save_for("TypeScript") && !now.format_on_save_for("TSX"));
         assert!(now.format_on_save_for("Rust"));

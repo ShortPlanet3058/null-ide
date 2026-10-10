@@ -2149,7 +2149,7 @@ impl Editor {
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
         self.for_each_cursor(cx, |this, cx| {
-            if this.empty_pair_around_caret() {
+            if this.empty_pair_around_caret(cx) {
                 let head = this.selection.head;
                 return this.edit(head - 1..head + 1, "", EditKind::Deleting, cx);
             }

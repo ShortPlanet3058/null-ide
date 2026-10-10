@@ -738,7 +738,7 @@ impl Workspace {
             let mut tree = FileTree::new(root, cx);
             // Renaming a file can update the code that names it: the workspace sees to it.
             tree.ask_before_renaming = true;
-            tree.set_hidden(&cx.global::<Settings>().hide.clone(), cx);
+            tree.set_hidden(&cx.global::<Settings>().hidden_paths(), cx);
             tree
         });
         let subscriptions = vec![
@@ -4584,7 +4584,7 @@ impl Workspace {
     /// Brings the window in line with settings after they change.
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
         let settings = cx.global::<Settings>().clone();
-        self.tree.update(cx, |tree, cx| tree.set_hidden(&settings.hide, cx));
+        self.tree.update(cx, |tree, cx| tree.set_hidden(&settings.hidden_paths(), cx));
         self.sidebar.set(settings.sidebar_visible, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         if !settings.fade_bars_while_typing {
             self.chrome.set(true, FADE_IN, FADE_OUT);

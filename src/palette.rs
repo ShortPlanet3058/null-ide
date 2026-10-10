@@ -421,7 +421,7 @@ impl Palette {
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_rows(cx));
         if kind == PaletteKind::Files {
             let root = options.root.clone();
-            let hide = cx.global::<crate::settings::Settings>().hide.clone();
+            let hide = cx.global::<crate::settings::Settings>().hidden_paths();
             cx.spawn(async move |this, cx| {
                 let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
                 this.update(cx, |this, cx| {
@@ -494,8 +494,9 @@ impl Palette {
         let query = self.query.clone();
         self.rows.clear();
         match self.kind {
-            // A hidden extra, as `:42` is: `@` lists the open file's symbols instead.
-            PaletteKind::Files if query.starts_with('@') => {
+            // A hidden extra, as `:42` is: `@` lists the open file's symbols instead (with a
+            // file open; `@scope/pkg` is a path).
+            PaletteKind::Files if query.starts_with('@') && self.line_count.is_some() && !query.contains('/') => {
                 cx.emit(PaletteEvent::SymbolsHere(query[1..].to_string()));
             }
             PaletteKind::Files => self.file_rows(split_place(&query).0),

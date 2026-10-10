@@ -89,7 +89,8 @@ impl SearchQuery {
 
 /// A regex replacement with its groups filled in (`$1`, `${name}`), and its case changed
 /// as VS Code and Sublime do: `\u` the next letter upper case, `\l` lower case, `\U` or
-/// `\L` everything up to `\E` (or the end). `\u$1` capitalises the first group.
+/// `\L` everything up to `\E` (or the end). `\u$1` capitalises the first group; `\\u` is a
+/// backslash and a u.
 pub fn expand_cased(caps: &regex::Captures, replacement: &str) -> String {
     #[derive(Clone, Copy)]
     enum Case {
@@ -101,15 +102,32 @@ pub fn expand_cased(caps: &regex::Captures, replacement: &str) -> String {
     let mut case = Case::Same;
     // `\u` or `\l` waiting for a letter to change: upper case if true.
     let mut next: Option<bool> = None;
-    let mut rest = replacement;
-    loop {
-        let marker = rest
-            .match_indices('\\')
-            .find(|(i, _)| rest[i + 1..].starts_with(['u', 'l', 'U', 'L', 'E']))
-            .map(|(i, _)| i);
-        let piece = &rest[..marker.unwrap_or(rest.len())];
+    // The replacement in pieces, each followed by its mark (or none, the last).
+    let mut pieces: Vec<(String, Option<char>)> = Vec::new();
+    let mut piece = String::new();
+    let mut chars = replacement.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek().copied()) {
+            ('\\', Some(mark @ ('u' | 'l' | 'U' | 'L' | 'E'))) => {
+                chars.next();
+                pieces.push((std::mem::take(&mut piece), Some(mark)));
+            }
+            // An escaped backslash: one, and the letter after it as it is.
+            ('\\', Some('\\')) => {
+                chars.next();
+                piece.push('\\');
+                if let Some(&letter @ ('u' | 'l' | 'U' | 'L' | 'E')) = chars.peek() {
+                    piece.push(letter);
+                    chars.next();
+                }
+            }
+            _ => piece.push(c),
+        }
+    }
+    pieces.push((piece, None));
+    for (piece, marker) in pieces {
         let mut expanded = String::new();
-        caps.expand(piece, &mut expanded);
+        caps.expand(&piece, &mut expanded);
         let mut expanded = match case {
             Case::Same => expanded,
             Case::Upper => expanded.to_uppercase(),
@@ -123,15 +141,14 @@ pub fn expand_cased(caps: &regex::Captures, replacement: &str) -> String {
             next = None;
         }
         out.push_str(&expanded);
-        let Some(at) = marker else { break };
-        match rest.as_bytes()[at + 1] {
-            b'u' => next = Some(true),
-            b'l' => next = Some(false),
-            b'U' => case = Case::Upper,
-            b'L' => case = Case::Lower,
-            _ => case = Case::Same,
+        match marker {
+            Some('u') => next = Some(true),
+            Some('l') => next = Some(false),
+            Some('U') => case = Case::Upper,
+            Some('L') => case = Case::Lower,
+            Some(_) => case = Case::Same,
+            None => {}
         }
-        rest = &rest[at + 2..];
     }
     out
 }
@@ -164,8 +181,9 @@ mod tests {
         assert_eq!(expand_cased(&caps, r"\U$1\E_$2"), "GET_name");
         assert_eq!(expand_cased(&caps, r"\u\L$1"), "Get");
         assert_eq!(expand_cased(&caps, r"${2}_$1"), "name_get", "no marks: as before");
-        // A backslash not followed by a mark stays.
+        // A backslash not followed by a mark stays; two make one, the letter after kept.
         assert_eq!(expand_cased(&caps, r"a\nb"), r"a\nb");
+        assert_eq!(expand_cased(&caps, r"C:\\Users\\$1"), r"C:\Users\get");
     }
 
     #[test]

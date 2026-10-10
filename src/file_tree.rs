@@ -393,6 +393,7 @@ impl FileTree {
 
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.expanded = HashSet::from([root.clone()]);
+        self.hidden = crate::project_index::hidden_rules(&root, &self.hide);
         self.root = root;
         self.children.clear();
         self.active = None;

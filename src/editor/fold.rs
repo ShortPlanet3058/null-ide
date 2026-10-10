@@ -14,14 +14,27 @@ const IMPORTS: [&str; 7] = ["use ", "pub use ", "import ", "from ", "#include ",
 /// A run of comment or import lines this long or longer can fold.
 const RUN: usize = 3;
 
-/// Runs of lines all comments (starting with `comment`) or all imports, as regions that
-/// fold to their first line: from it to the line after the run.
-fn runs<'a>(lines: impl Iterator<Item = &'a str>, comment: Option<&str>) -> Vec<Range<usize>> {
-    #[derive(PartialEq, Clone, Copy)]
-    enum Kind {
-        Comment,
-        Import,
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum Kind {
+    Comment,
+    Import,
+}
+
+/// Whether a line (its text from the indentation on) is a comment (starting with
+/// `comment`), an import, or neither.
+fn line_kind(text: &str, comment: Option<&str>) -> Option<Kind> {
+    if comment.is_some_and(|c| text.starts_with(c)) {
+        Some(Kind::Comment)
+    } else if IMPORTS.iter().any(|k| text.starts_with(k)) {
+        Some(Kind::Import)
+    } else {
+        None
     }
+}
+
+/// Runs of lines all comments or all imports (each line's kind, in order), as regions
+/// that fold to their first line: from it to the line after the run.
+fn runs(kinds: impl Iterator<Item = Option<Kind>>) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut run: Option<(usize, usize, Kind)> = None;
     let close = |run: Option<(usize, usize, Kind)>, out: &mut Vec<Range<usize>>| {
@@ -31,15 +44,7 @@ fn runs<'a>(lines: impl Iterator<Item = &'a str>, comment: Option<&str>) -> Vec<
             out.push(first..last + 1);
         }
     };
-    for (i, line) in lines.enumerate() {
-        let text = line.trim_start();
-        let kind = if comment.is_some_and(|c| text.starts_with(c)) {
-            Some(Kind::Comment)
-        } else if IMPORTS.iter().any(|k| text.starts_with(k)) {
-            Some(Kind::Import)
-        } else {
-            None
-        };
+    for (i, kind) in kinds.enumerate() {
         run = match (run, kind) {
             (Some((first, _, was)), Some(kind)) if was == kind => Some((first, i, kind)),
             (before, kind) => {
@@ -128,13 +133,15 @@ impl Editor {
             // folds already). Only each line's start is looked at.
             if (self.highlighter.is_some() || basic) && !self.is_prose() {
                 let comment = self.comment_marks().and_then(|(line, _)| line);
-                let starts: Vec<String> = self
-                    .buffer
-                    .rope()
-                    .lines()
-                    .map(|l| l.chars().skip_while(|c| *c == ' ' || *c == '\t').take(12).collect())
-                    .collect();
-                for run in runs(starts.iter().map(String::as_str), comment) {
+                // (Each line's start into one buffer, not a string per line.)
+                let mut start = String::new();
+                let mut kinds = Vec::with_capacity(self.buffer.len_lines());
+                for line in self.buffer.rope().lines() {
+                    start.clear();
+                    start.extend(line.chars().skip_while(|c| *c == ' ' || *c == '\t').take(12));
+                    kinds.push(line_kind(&start, comment));
+                }
+                for run in runs(kinds.into_iter()) {
                     if run.end < self.buffer.len_lines() && !ranges.iter().any(|r| r.start == run.start) {
                         ranges.push(run);
                     }
@@ -176,7 +183,12 @@ impl Editor {
     pub(super) fn fold(&mut self, _: &Fold, _: &mut Window, cx: &mut Context<Self>) {
         // Lines selected: those fold, behind the first.
         let range = self.selection.range();
-        let (first, last) = (self.buffer.point(range.start).0, self.buffer.point(range.end).0);
+        let (first, mut last) = (self.buffer.point(range.start).0, self.buffer.point(range.end));
+        // (Whole lines selected end at the next one's start: that one isn't selected.)
+        if last.1 == 0 && last.0 > first {
+            last.0 -= 1;
+        }
+        let last = last.0;
         if last > first {
             return self.set_folded(first..last + 1, true, cx);
         }
@@ -354,10 +366,11 @@ mod tests {
 
     #[test]
     fn runs_of_comments_and_imports_fold() {
+        let kinds = |lines: &[&str]| lines.iter().map(|l| line_kind(l, Some("//"))).collect::<Vec<_>>();
         let lines = ["use a;", "use b;", "use c;", "", "// one", "// two", "fn f() {}", "// a", "// b", "// c", "x"];
-        assert_eq!(runs(lines.into_iter(), Some("//")), vec![0..3, 7..10]);
+        assert_eq!(runs(kinds(&lines).into_iter()), vec![0..3, 7..10]);
         // A run of two, or of two kinds: no.
-        assert!(runs(["// a", "use b;", "// c"].into_iter(), Some("//")).is_empty());
+        assert!(runs(kinds(&["// a", "use b;", "// c"]).into_iter()).is_empty());
     }
 
     #[test]
