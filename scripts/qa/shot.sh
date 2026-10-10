@@ -5,6 +5,8 @@
 #
 #   scripts/qa/shot.sh STEPS OUT.png [PROJECT] [WAIT_SECONDS]
 #
+# NULL_QA_SETTINGS='"keymap": "vim", "word_wrap": true' adds settings to its own.
+#
 # Needs `cargo build` first (target/debug/null). The window comes to the front for the
 # few seconds it runs: macOS doesn't redraw a window that's covered, so one left behind
 # would show its first frame only. (NULL_QA_FRONT=0 leaves it behind.)
@@ -26,10 +28,12 @@ fi
 
 home="$(mktemp -d)"
 mkdir -p "$home/.config/null"
-printf '{ "welcomed": true }\n' > "$home/.config/null/settings.json"
+printf '{ "welcomed": true%s }\n' "${NULL_QA_SETTINGS:+, $NULL_QA_SETTINGS}" > "$home/.config/null/settings.json"
 log="$home/qa.log"
 trap 'kill "$pid" 2>/dev/null || true; rm -rf "$home"' EXIT
 
+# (Rust's tools still find their toolchains, in the real home: only read.)
+RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
 HOME="$home" XDG_CONFIG_HOME= XDG_DATA_HOME= NULL_DATA_DIR="$home/data" NULL_QA="$steps" \
     NULL_QA_FRONT="${NULL_QA_FRONT:-1}" \
     "$bin" "$project" > "$log" 2>&1 &
