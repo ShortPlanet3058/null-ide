@@ -26,12 +26,19 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", SubmitPrompt, Some("AiPrompt")),
         KeyBinding::new("escape", CancelPrompt, Some("AiPrompt")),
-        // While it writes the keys are the editor's (its field is gone): Esc stops it.
-        KeyBinding::new("escape", CancelPrompt, Some("Editor && ai_writing")),
         KeyBinding::new("tab", KeepChange, Some("Editor && ai_change")),
         KeyBinding::new("escape", UndoChange, Some("Editor && ai_change")),
         KeyBinding::new("escape", CloseNote, Some("Editor && ai_note")),
     ]);
+}
+
+/// Where the keys go once the AI has written (see `Editor::keys_after_writing`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeysAfter {
+    /// The change is written: the code, to keep or undo it.
+    Code,
+    /// It didn't come: the field, to ask again.
+    Field,
 }
 
 /// Items a ⌘I without a selection works on, smallest first.
@@ -206,7 +213,8 @@ impl Editor {
             return;
         }
         if let Some(prompt) = &self.prompt {
-            return window.focus(&prompt.input.focus_handle(cx));
+            let keys = if prompt.writing { self.writing_focus.clone() } else { prompt.input.focus_handle(cx) };
+            return window.focus(&keys);
         }
         let mut previous = String::new();
         let mut lines = None;
@@ -290,9 +298,9 @@ impl Editor {
         if prompt.ask_only || is_question(&typed) {
             return self.ask_question(instruction, window, cx);
         }
-        // The field goes while the change is written: the keys come here (Esc stops it, ⇥
-        // and Esc keep or undo what's written).
-        window.focus(&self.focus_handle);
+        // The field goes while the change is written: the keys go to its "Writing…" bar,
+        // where Esc stops it and nothing typed reaches the code being rewritten.
+        window.focus(&self.writing_focus);
         self.write_change(instruction, cx);
     }
 
@@ -370,7 +378,7 @@ impl Editor {
                             if let Some(prompt) = &mut this.prompt {
                                 prompt.writing = false;
                                 prompt.failed = Some(message);
-                                this.focus_prompt = true;
+                                this.keys_after_writing = Some(KeysAfter::Field);
                             }
                             cx.notify();
                         })
@@ -401,7 +409,7 @@ impl Editor {
                 "Nothing to change there."
             };
             self.prompt = Some(Prompting { writing: false, failed: Some(failed.into()), task: None, ..prompt });
-            self.focus_prompt = true;
+            self.keys_after_writing = Some(KeysAfter::Field);
             return cx.notify();
         }
         let lines = prompt.lines.clone();
@@ -411,7 +419,7 @@ impl Editor {
         if self.buffer.slice(range.clone()) != prompt.original {
             let failed = "The code changed while the answer came. Ask again.";
             self.prompt = Some(Prompting { writing: false, failed: Some(failed.into()), task: None, ..prompt });
-            self.focus_prompt = true;
+            self.keys_after_writing = Some(KeysAfter::Field);
             return cx.notify();
         }
         self.record_undo(EditKind::Other);
@@ -457,6 +465,7 @@ impl Editor {
             lines: lines.start..lines.start + new_lines,
             instruction,
         });
+        self.keys_after_writing = Some(KeysAfter::Code);
         self.rebuild_blocks();
         self.touch(cx);
         cx.notify();
@@ -653,21 +662,27 @@ impl Editor {
         lines
     }
 
-    /// See `focus_prompt`.
-    pub(super) fn focus_prompt_if_asked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.focus_prompt)
-            && let Some(prompt) = self.prompt.as_ref().filter(|p| !p.writing)
-        {
-            window.focus(&prompt.input.focus_handle(cx));
+    /// See `keys_after_writing`: done when next drawn, and only if the keys are still on the
+    /// "Writing…" bar or nowhere (not taken from the terminal, the other side...).
+    pub(super) fn keys_back_after_writing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(after) = self.keys_after_writing.take() else { return };
+        let here = window.focused(cx).is_none_or(|f| f == self.writing_focus);
+        if !here {
+            return;
+        }
+        match after {
+            KeysAfter::Code => window.focus(&self.focus_handle),
+            KeysAfter::Field => {
+                if let Some(prompt) = self.prompt.as_ref().filter(|p| !p.writing) {
+                    window.focus(&prompt.input.focus_handle(cx));
+                }
+            }
         }
     }
 
     pub(super) fn ai_key_context(&self, context: &mut gpui::KeyContext) {
         if self.ai_change.is_some() {
             context.add("ai_change");
-        }
-        if self.prompt.as_ref().is_some_and(|p| p.writing) {
-            context.add("ai_writing");
         }
         if self.review.is_some() {
             context.add("review");
@@ -714,6 +729,8 @@ impl Editor {
                     let failed_long = prompt.failed.as_ref().filter(|f| f.len() > 60).cloned();
                     out.push(
                         place(div())
+                            // While it writes, the keys are here (see `writing_focus`).
+                            .when(prompt.writing, |d| d.track_focus(&self.writing_focus))
                             .key_context("AiPrompt")
                             .on_action(cx.listener(Self::submit_prompt))
                             .on_action(cx.listener(Self::cancel_prompt))
