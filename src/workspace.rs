@@ -310,6 +310,20 @@ struct TabMenu {
 
 /// The program `cargo build` makes for a project: its first `[[bin]]`, or the package
 /// named in Cargo.toml, in target/debug.
+/// The program `cargo build --message-format=json` says it built: the one named as
+/// `expected` is (its file name), else the first; None when it built none.
+fn built_program(messages: &str, expected: Option<&Path>) -> Option<PathBuf> {
+    let programs: Vec<PathBuf> = messages
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|m| m["reason"] == "compiler-artifact")
+        .filter(|m| m["target"]["kind"].as_array().is_some_and(|kinds| kinds.iter().any(|k| k == "bin")))
+        .filter_map(|m| m["executable"].as_str().map(PathBuf::from))
+        .collect();
+    let wanted = expected.and_then(Path::file_name);
+    programs.iter().find(|p| p.file_name() == wanted).or(programs.first()).cloned()
+}
+
 fn cargo_program(root: &Path) -> Option<PathBuf> {
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
     let mut section = String::new();
@@ -5800,12 +5814,23 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
-                    let built = std::process::Command::new(cargo).arg("build").current_dir(&cwd).output();
+                    // (Its messages say where each program went: a target folder set
+                    // elsewhere, a workspace's.)
+                    let built = std::process::Command::new(cargo)
+                        .args(["build", "--message-format=json-render-diagnostics"])
+                        .current_dir(&cwd)
+                        .output();
                     // Rust's own formatters, so its strings and collections show their contents.
                     (built, crate::debugger::rust_formatters())
                 })
                 .await;
             let (built, formatters) = built;
+            // Where cargo says it put the program, else where it usually goes.
+            let program = built
+                .as_ref()
+                .ok()
+                .and_then(|output| built_program(&String::from_utf8_lossy(&output.stdout), program.as_deref()))
+                .or(program);
             this.update(cx, |this, cx| {
                 let message = match (&built, &program) {
                     (Ok(output), _) if !output.status.success() => {
@@ -9069,6 +9094,27 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The program cargo built, where it says it put it (a target folder set elsewhere).
+    #[test]
+    fn the_built_program_is_where_cargo_says() {
+        let artifact = |kind: &str, exe: Option<&str>| {
+            serde_json::json!({ "reason": "compiler-artifact", "target": { "kind": [kind] }, "executable": exe })
+                .to_string()
+        };
+        let messages = [
+            artifact("lib", None),
+            "{\"reason\":\"build-finished\",\"success\":true}".to_string(),
+            artifact("bin", Some("/elsewhere/debug/helper")),
+            artifact("bin", Some("/elsewhere/debug/app")),
+            "not json".to_string(),
+        ]
+        .join("\n");
+        let expected = PathBuf::from("/p/target/debug/app");
+        assert_eq!(built_program(&messages, Some(&expected)), Some(PathBuf::from("/elsewhere/debug/app")));
+        assert_eq!(built_program(&messages, None), Some(PathBuf::from("/elsewhere/debug/helper")), "the first");
+        assert_eq!(built_program(&artifact("lib", None), None), None, "no program");
+    }
 
     #[test]
     fn a_moved_file_is_found_by_its_text() {
