@@ -12,6 +12,8 @@ actions!(
         ExpandSelection,
         ShrinkSelection,
         GoToMatchingBracket,
+        SelectToBracket,
+        DuplicateSelection,
         NewlineBelow,
         NewlineAbove,
         JoinLines,
@@ -42,6 +44,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(expand, ExpandSelection, ctx),
         KeyBinding::new(shrink, ShrinkSelection, ctx),
         KeyBinding::new("secondary-shift-\\", GoToMatchingBracket, ctx),
+        KeyBinding::new("secondary-shift-d", DuplicateSelection, ctx),
         KeyBinding::new("secondary-enter", NewlineBelow, ctx),
         KeyBinding::new("secondary-shift-enter", NewlineAbove, ctx),
         KeyBinding::new("ctrl-j", JoinLines, ctx),
@@ -230,7 +233,7 @@ impl Editor {
                 // From either side of one bracket to the same side of the other.
                 if head == at + 1 { other + 1 } else { other }
             }
-            None => match self.enclosing_open_bracket() {
+            None => match self.enclosing_open_bracket(self.selection.head) {
                 Some(open) => open,
                 None => return,
             },
@@ -240,11 +243,68 @@ impl Editor {
         self.touch(cx);
     }
 
-    fn enclosing_open_bracket(&self) -> Option<usize> {
-        const LIMIT: usize = 20_000;
-        let mut chars = self.buffer.rope().chars_at(self.selection.head);
+    /// The brackets around the caret and what's between them, selected; again, the ones
+    /// around those. On a bracket: it and its partner.
+    pub(super) fn select_to_bracket(&mut self, _: &SelectToBracket, _: &mut Window, cx: &mut Context<Self>) {
+        self.single_cursor();
+        let range = self.selection.range();
+        let pair = match self.matching_brackets().filter(|_| range.is_empty()) {
+            Some((a, b)) => Some((a.min(b), a.max(b))),
+            None => self.enclosing_open_bracket(range.start).and_then(|open| {
+                let close = self.closing_bracket(open)?;
+                // (Inside the selection still: the next ones out.)
+                (close + 1 >= range.end).then_some((open, close))
+            }),
+        };
+        let Some((open, close)) = pair else { return };
+        self.selection = Selection { anchor: open, head: close + 1 };
+        self.goal_column = None;
+        self.touch(cx);
+    }
+
+    /// The bracket closing the one opening at `open`.
+    fn closing_bracket(&self, open: usize) -> Option<usize> {
+        const LIMIT: usize = 200_000;
         let mut depth = 0i32;
-        let mut i = self.selection.head;
+        for (k, c) in self.buffer.rope().chars_at(open).take(LIMIT).enumerate() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + k);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// ⌘⇧D: each selection copied just after itself, the copy selected, as Sublime does;
+    /// with nothing selected, the line.
+    pub(super) fn duplicate_selection(&mut self, _: &DuplicateSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if self.all_selections().iter().all(|s| s.is_empty()) {
+            return self.duplicate_lines(true, cx);
+        }
+        self.for_each_cursor(cx, |this, cx| {
+            let range = this.selection.range();
+            if range.is_empty() {
+                return;
+            }
+            let text = this.buffer.slice(range.clone());
+            let len = text.chars().count();
+            this.edit(range.end..range.end, &text, EditKind::Other, cx);
+            this.selection = Selection { anchor: range.end, head: range.end + len };
+        });
+        self.touch(cx);
+    }
+
+    fn enclosing_open_bracket(&self, from: usize) -> Option<usize> {
+        const LIMIT: usize = 20_000;
+        let mut chars = self.buffer.rope().chars_at(from);
+        let mut depth = 0i32;
+        let mut i = from;
         for _ in 0..LIMIT {
             let c = chars.prev()?;
             i -= 1;
@@ -592,6 +652,31 @@ mod tests {
 
     fn selected(e: &Editor) -> String {
         e.buffer.slice(e.selection.range())
+    }
+
+    /// Select to Matching Bracket: the pair around the caret, then the one around that.
+    /// Duplicate Selection: the copy just after, selected; with nothing selected, the line.
+    #[gpui::test]
+    fn brackets_selected_and_selections_duplicated(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "f(a, [b, c]);\n");
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(7);
+            e.select_to_bracket(&SelectToBracket, window, cx);
+            assert_eq!(selected(e), "[b, c]");
+            e.select_to_bracket(&SelectToBracket, window, cx);
+            assert_eq!(selected(e), "(a, [b, c])");
+            e.select_to_bracket(&SelectToBracket, window, cx);
+            assert_eq!(selected(e), "(a, [b, c])", "none further out");
+            // Two selections, each copied after itself.
+            e.selection = Selection { anchor: 2, head: 3 };
+            e.extra = vec![crate::editor::Cursor { selection: Selection { anchor: 6, head: 7 }, goal: None }];
+            e.duplicate_selection(&DuplicateSelection, window, cx);
+            assert_eq!(e.buffer.to_string(), "f(aa, [bb, c]);\n");
+            e.extra.clear();
+            e.selection = Selection::caret(0);
+            e.duplicate_selection(&DuplicateSelection, window, cx);
+            assert_eq!(e.buffer.to_string(), "f(aa, [bb, c]);\nf(aa, [bb, c]);\n");
+        });
     }
 
     /// Trim Trailing Whitespace, the indentation made another, and ⌘/ on an empty line: each

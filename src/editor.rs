@@ -87,9 +87,9 @@ pub use invisible::RemoveInvisibleCharacters;
 pub use review::{KeepHunk, UndoHunk};
 pub use rewrap::Rewrap;
 pub use structure::{
-    CamelCase, ExpandSelection, GoToMatchingBracket, JoinLines, KebabCase, LowerCase, NewlineAbove, NewlineBelow,
+    CamelCase, DuplicateSelection, ExpandSelection, GoToMatchingBracket, JoinLines, KebabCase, LowerCase, NewlineAbove, NewlineBelow,
     NextChange, PascalCase, PreviousChange, RemoveDuplicateLines, ReverseLines, ShrinkSelection, SnakeCase, SortLines,
-    TitleCase, TrimTrailingWhitespace, UpperCase,
+    SelectToBracket, TitleCase, TrimTrailingWhitespace, UpperCase,
 };
 
 use crate::buffer::Buffer;
@@ -4405,6 +4405,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::reverse_lines))
             .on_action(cx.listener(Self::remove_duplicate_lines))
             .on_action(cx.listener(Self::sort_lines))
+            .on_action(cx.listener(Self::select_to_bracket))
+            .on_action(cx.listener(Self::duplicate_selection))
             .on_action(cx.listener(Self::trim_trailing_whitespace))
             .on_action(cx.listener(Self::remove_invisible_characters))
             .on_action(cx.listener(Self::upper_case))
