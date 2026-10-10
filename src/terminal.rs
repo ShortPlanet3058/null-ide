@@ -184,6 +184,18 @@ struct RunStart {
     seen: bool,
 }
 
+/// Clears a terminal as ⌘K does: the cursor's line to the top, nothing above it, no
+/// scrollback, shown from the bottom.
+fn clear_above_cursor<T: EventListener>(term: &mut Term<T>) {
+    use alacritty_terminal::vte::ansi::{ClearMode, Handler};
+    let line = term.grid().cursor.point.line.0.max(0);
+    term.scroll_up(line as usize);
+    term.goto_line(0);
+    term.clear_screen(ClearMode::Saved);
+    term.scroll_display(Scroll::Bottom);
+    term.selection = None;
+}
+
 /// A command too quick to be seen running is taken as done this long after Return.
 const QUICK_RUN: std::time::Duration = std::time::Duration::from_millis(600);
 
@@ -661,9 +673,24 @@ impl TerminalView {
         self.write(bytes.into_bytes());
     }
 
+    /// ⌘K: everything above the line being typed on goes, the scrollback too, as in the
+    /// Mac's Terminal; that line moves to the top. Done here, not asked of the shell (a
+    /// command still running keeps running). A full-screen program (vim, htop) is asked to
+    /// draw itself again instead.
     fn clear(&mut self, _: &Clear, _: &mut Window, cx: &mut Context<Self>) {
-        // Ctrl+L redraws the prompt at the top; the scrollback stays.
-        self.write(b"\x0c".to_vec());
+        let full_screen = self.term.lock().mode().contains(TermMode::ALT_SCREEN);
+        if full_screen {
+            self.write(b"\x0c".to_vec());
+        } else {
+            clear_above_cursor(&mut self.term.lock());
+            // What a running command printed before is gone: its output starts here.
+            if let Some(run) = &mut self.run {
+                run.mark = 0;
+            }
+            if self.find.is_some() {
+                self.search(false, cx);
+            }
+        }
         cx.notify();
     }
 
@@ -1680,6 +1707,27 @@ fn shell_words(paths: &[std::path::PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⌘K: the line being typed on goes to the top; what was above it, scrollback
+    /// included, goes.
+    #[test]
+    fn clearing_takes_the_scrollback_too() {
+        let config = Config { scrolling_history: 100, ..Default::default() };
+        let mut term = Term::new(config, &GridSize { columns: 20, lines: 5 }, alacritty_terminal::event::VoidListener);
+        let mut parser = alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        let output: String = (0..10).map(|i| format!("line {i}\r\n")).collect();
+        parser.advance(&mut term, format!("{output}$ ls -la").as_bytes());
+        assert!(term.grid().history_size() > 0);
+        clear_above_cursor(&mut term);
+        let grid = term.grid();
+        assert_eq!(grid.history_size(), 0, "no scrollback");
+        assert_eq!(row_text(grid, Line(0)).trim_end(), "$ ls -la", "the line typed on, at the top");
+        assert_eq!(grid.cursor.point, GridPoint::new(Line(0), Column(8)), "the caret where it was on it");
+        assert!((1..5).all(|l| row_text(grid, Line(l)).trim().is_empty()), "nothing below");
+        // What comes next follows it.
+        parser.advance(&mut term, b"\r\nnext".as_slice());
+        assert_eq!(row_text(term.grid(), Line(1)).trim_end(), "next");
+    }
 
     /// A line of words is one piece of text to draw, not one per word; what looks different
     /// (another colour, not plain ASCII, not right after) starts another.
