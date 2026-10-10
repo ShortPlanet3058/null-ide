@@ -5635,7 +5635,7 @@ impl Workspace {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
     }
 
-    /// ⌥Z: wrapping on or off for the kind of file at hand, prose or code.
+    /// ⌃⌥Z (⌥Z off a Mac): wrapping on or off for the kind of file at hand, prose or code.
     fn toggle_word_wrap(&mut self, _: &ToggleWordWrap, _: &mut Window, cx: &mut Context<Self>) {
         if self.active_editor().is_some_and(|e| e.read(cx).is_prose()) {
             return settings::update(cx, |s| s.wrap_prose = !s.wrap_prose);
@@ -10074,7 +10074,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Markdown wraps while code doesn't; ⌥Z in each switches its own kind.
+    /// Markdown wraps while code doesn't; ⌃⌥Z in each switches its own kind.
     #[gpui::test]
     fn prose_wraps_on_its_own_setting(cx: &mut gpui::TestAppContext) {
         let dir = crate::tools::test_dir("prose-wrap");
@@ -10099,7 +10099,7 @@ mod tests {
         };
         assert!(wraps(cx, "notes.md"), "Markdown wraps by default");
         assert!(!wraps(cx, "main.rs"), "code doesn't");
-        // ⌥Z in the Markdown file: prose stops wrapping, code is left as it was.
+        // ⌃⌥Z in the Markdown file: prose stops wrapping, code is left as it was.
         wraps(cx, "notes.md");
         cx.simulate_keystrokes(if cfg!(target_os = "macos") { "ctrl-alt-z" } else { "alt-z" });
         cx.run_until_parked();

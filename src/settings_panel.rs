@@ -648,7 +648,11 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Wrap Markdown and text",
-                Some("Paragraphs fit the window, whatever code does. ⌥Z in one of these files switches this"),
+                Some(if cfg!(target_os = "macos") {
+                    "Paragraphs fit the window, whatever code does. ⌃⌥Z in one of these files switches this"
+                } else {
+                    "Paragraphs fit the window, whatever code does. Alt+Z in one of these files switches this"
+                }),
                 Self::toggle("wrap-prose", s.wrap_prose, &theme, cx, |s| s.wrap_prose = !s.wrap_prose),
                 &theme,
             ),

@@ -179,7 +179,7 @@ impl Editor {
         self.touch(cx);
     }
 
-    /// ⌥⇧I: a cursor at the end of each line the selection covers.
+    /// ⌃⇧L (⌥⇧I off a Mac): a cursor at the end of each line the selection covers.
     pub(super) fn cursors_at_line_ends(&mut self, cx: &mut Context<Self>) {
         let lines = self.selected_lines();
         if lines.len() < 2 {
