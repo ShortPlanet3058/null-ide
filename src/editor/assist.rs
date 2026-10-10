@@ -583,8 +583,14 @@ impl Editor {
         // Text lines wrapped to the width; blank lines between paragraphs are only small gaps.
         let body: usize =
             text.lines().filter(|l| !l.trim().is_empty()).map(|l| l.chars().count().div_ceil(per_row)).sum();
-        let gaps = text.lines().filter(|l| l.trim().is_empty()).count().div_ceil(2);
-        (body + gaps + 1).clamp(2, NOTE_MAX_ROWS)
+        let gaps = text.lines().filter(|l| l.trim().is_empty()).count();
+        let paragraphs = text.lines().filter(|l| !l.trim().is_empty()).count();
+        // As it's drawn (see the Note block): its paddings (3 + 6, above and below), the
+        // question's line, 20 a line of text, 4 around each paragraph, half a line a gap;
+        // in the editor's rows, rounded up so nothing is cut off.
+        let needed = 18. + 20. + 20. * body as f32 + 4. * paragraphs as f32 + 10. * gaps as f32;
+        let row = f32::from(self.line_height()).max(1.);
+        ((needed / row).ceil() as usize).clamp(2, NOTE_MAX_ROWS)
     }
 
     pub(super) fn rebuild_blocks(&mut self) {
