@@ -20,7 +20,7 @@ pub enum ServerMessage {
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
 /// Whether a server is one of Python's (it runs with the project's environment).
-fn is_python_server(name: &str) -> bool {
+pub fn is_python_server(name: &str) -> bool {
     matches!(name, "pyright" | "pyright-langserver" | "basedpyright" | "pylsp" | "ruff" | "jedi-language-server")
 }
 

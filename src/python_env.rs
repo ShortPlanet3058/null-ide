@@ -58,6 +58,29 @@ pub fn owner_for(root: &Path, path: &Path) -> Option<(PathBuf, PathBuf)> {
         .find_map(|dir| find(dir).map(|env| (dir.to_path_buf(), env)))
 }
 
+/// The folders under `root` with an environment of their own (a monorepo's packages), and
+/// it: each its own workspace folder for Python's language server, which reads that
+/// package's imports from it. Not far down, and not many.
+pub fn packages(root: &Path) -> Vec<(PathBuf, PathBuf)> {
+    const SKIPPED: [&str; 8] = [".git", "node_modules", "target", "__pycache__", ".venv", "venv", "env", "build"];
+    ignore::WalkBuilder::new(root)
+        .require_git(false)
+        .max_depth(Some(3))
+        .filter_entry(|e| !e.file_name().to_str().is_some_and(|n| SKIPPED.contains(&n)))
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|t| t.is_dir()) && e.path() != root)
+        .take(2_000)
+        .filter_map(|e| find(e.path()).map(|env| (e.path().to_path_buf(), env)))
+        .take(50)
+        .collect()
+}
+
+/// The Python inside an environment.
+pub fn interpreter(env: &Path) -> PathBuf {
+    python_in(env)
+}
+
 /// Whether a change at `path` (in the project at `root`) can make or remove an
 /// environment: its folder, Poetry's files.
 pub fn may_change(root: &Path, path: &Path) -> bool {
@@ -325,6 +348,7 @@ mod tests {
         assert!(!may_change(&dir, &dir.join("api/app.py")) && !may_change(&dir, &dir.join("environment.py")));
         assert!(!may_change(&dir.join("api"), &dir.join("api/app.py")), "a folder above the project isn't one");
         assert_eq!(owner_for(&dir, &dir.join("api/tests/test_a.py")), Some((dir.join("api"), dir.join("api/.venv"))));
+        assert_eq!(packages(&dir), vec![(dir.join("api"), dir.join("api/.venv"))], "not the project's own");
         let memo = remembering(|| find_for(&dir, &dir.join("web/x.py")));
         assert_eq!(memo, Some(dir.join(".venv")), "remembered: the same");
         std::fs::remove_dir_all(&dir).ok();

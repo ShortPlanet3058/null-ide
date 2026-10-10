@@ -358,16 +358,23 @@ impl LspStore {
         }));
 
         let root_uri = uri_for(&self.root);
+        // Python's: a package with its own environment is a folder of its own, so its
+        // imports are read from its environment (see the answer to workspace/configuration).
+        let python = crate::lsp::is_python_server(config.name);
+        let packages = if python { crate::python_env::packages(&self.root) } else { Vec::new() };
+        let folder = |dir: &Path| {
+            Some(WorkspaceFolder {
+                uri: uri_for(dir)?,
+                name: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            })
+        };
+        let folders: Vec<WorkspaceFolder> =
+            std::iter::once(self.root.as_path()).chain(packages.iter().map(|(dir, _)| dir.as_path())).filter_map(folder).collect();
         #[allow(deprecated)] // root_uri is deprecated in favour of workspace folders, but some servers still read it
         let params = InitializeParams {
             process_id: Some(std::process::id()),
             root_uri: root_uri.clone(),
-            workspace_folders: root_uri.map(|uri| {
-                vec![WorkspaceFolder {
-                    uri,
-                    name: self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                }]
-            }),
+            workspace_folders: root_uri.map(|_| folders),
             capabilities: ClientCapabilities {
                 text_document: Some(TextDocumentClientCapabilities {
                     hover: Some(HoverClientCapabilities {
@@ -461,6 +468,9 @@ impl LspStore {
                 })),
                 workspace: Some(lsp_types::WorkspaceClientCapabilities {
                     apply_edit: Some(true),
+                    // Python's are told which Python each folder has (others keep their defaults).
+                    configuration: python.then_some(true),
+                    workspace_folders: python.then_some(true),
                     semantic_tokens: Some(lsp_types::SemanticTokensWorkspaceClientCapabilities {
                         refresh_support: Some(true),
                     }),
@@ -559,8 +569,8 @@ impl LspStore {
                 // Answer what servers ask during startup so they don't wait on us.
                 let result = match method.as_str() {
                     "workspace/configuration" => {
-                        let count = params["items"].as_array().map_or(0, Vec::len);
-                        Value::Array(vec![Value::Null; count])
+                        let items = params["items"].as_array().cloned().unwrap_or_default();
+                        Value::Array(items.iter().map(|item| self.configuration(config.name, item)).collect())
                     }
                     "workspace/applyEdit" => {
                         let edit = serde_json::from_value::<lsp_types::ApplyWorkspaceEditParams>(params);
@@ -584,6 +594,19 @@ impl LspStore {
                     server.respond(id, result);
                 }
             }
+        }
+    }
+
+    /// A server's setting asked for (workspace/configuration): for Python's, the Python of
+    /// the folder asked about (its package's environment, else the project's); nothing else
+    /// is set, so servers keep their own defaults.
+    fn configuration(&self, server: &str, item: &Value) -> Value {
+        let python = crate::lsp::is_python_server(server) && item["section"].as_str() == Some("python");
+        let scope = item["scopeUri"].as_str().and_then(|uri| uri.parse().ok()).and_then(|uri| path_for(&uri));
+        let env = python.then(|| crate::python_env::find_for(&self.root, scope.as_deref().unwrap_or(&self.root))).flatten();
+        match env {
+            Some(env) => serde_json::json!({ "pythonPath": crate::python_env::interpreter(&env) }),
+            None => Value::Null,
         }
     }
 
@@ -1229,6 +1252,29 @@ impl LspStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Python's server is told each folder's Python: a package's own environment, else the
+    /// project's; other servers and settings, nothing (their defaults).
+    #[test]
+    fn python_s_server_is_told_each_folder_s_python() {
+        let root = crate::tools::test_dir("lsp-python-config");
+        let _ = std::fs::remove_dir_all(&root);
+        for env in [".venv", "api/.venv"] {
+            std::fs::create_dir_all(root.join(env).join("bin")).unwrap();
+            std::fs::write(root.join(env).join("bin/python"), "").unwrap();
+        }
+        let store = LspStore::new(root.clone());
+        let ask = |server: &str, scope: &Path, section: &str| {
+            let uri = uri_for(scope).unwrap();
+            store.configuration(server, &serde_json::json!({ "scopeUri": uri.as_str(), "section": section }))
+        };
+        let python = |env: &str| serde_json::json!({ "pythonPath": root.join(env).join("bin/python") });
+        assert_eq!(ask("pyright", &root.join("api"), "python"), python("api/.venv"));
+        assert_eq!(ask("basedpyright", &root, "python"), python(".venv"));
+        assert_eq!(ask("pyright", &root, "python.analysis"), Value::Null);
+        assert_eq!(ask("rust-analyzer", &root, "python"), Value::Null);
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     /// A file's own problems keep their version when another file's change.
     #[test]
