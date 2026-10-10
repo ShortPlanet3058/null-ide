@@ -351,6 +351,8 @@ pub enum PaletteEvent {
     /// Change a setting and stay open, so its effect shows at once.
     Apply(Box<dyn Action>),
     GoToLine(usize),
+    /// `@` typed in the files: the open file's symbols, filtered by what follows it.
+    SymbolsHere(String),
     OpenLocation(PathBuf, lsp_types::Position),
     /// The keyboard is on a place in the open file: show it, without going there yet.
     Preview(PathBuf, lsp_types::Position),
@@ -492,6 +494,10 @@ impl Palette {
         let query = self.query.clone();
         self.rows.clear();
         match self.kind {
+            // A hidden extra, as `:42` is: `@` lists the open file's symbols instead.
+            PaletteKind::Files if query.starts_with('@') => {
+                cx.emit(PaletteEvent::SymbolsHere(query[1..].to_string()));
+            }
             PaletteKind::Files => self.file_rows(split_place(&query).0),
             PaletteKind::Quick => self.quick_rows(&query),
             PaletteKind::Line | PaletteKind::Task | PaletteKind::Ex => {}

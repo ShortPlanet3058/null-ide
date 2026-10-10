@@ -4472,6 +4472,15 @@ impl Workspace {
                     editor.update(cx, |editor, cx| editor.preview_lsp_range(range, cx));
                 }
             }
+            PaletteEvent::SymbolsHere(typed) => {
+                let typed = typed.clone();
+                this.go_to_symbol(&GoToSymbol, window, cx);
+                if let Some((palette, _)) = &this.palette
+                    && palette.read(cx).kind() == PaletteKind::Locations
+                {
+                    palette.update(cx, |palette, cx| palette.set_query(&typed, cx));
+                }
+            }
             PaletteEvent::GoToLine(line) => {
                 let line = *line;
                 this.close_palette(window, cx);
@@ -11511,6 +11520,37 @@ mod tests {
             // The same command again, clean: they go.
             w.read_reported(&ran("make", "nothing to be done\n"), cx);
             assert!(w.problem_places(cx).is_empty());
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `@` typed in ⌘P: the open file's symbols, what follows it kept as the search.
+    #[gpui::test]
+    fn at_in_the_files_lists_the_file_s_symbols(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("at-symbols");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn main() {}\nfn helper() {}\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.rs"), window, cx);
+            w.open_palette(PaletteKind::Files, window, cx);
+            let (palette, _) = w.palette.as_ref().unwrap();
+            palette.update(cx, |p, cx| p.set_query("@hel", cx));
+        });
+        cx.run_until_parked();
+        workspace.update(cx, |w, cx| {
+            let (palette, _) = w.palette.as_ref().expect("a list open");
+            let palette = palette.read(cx);
+            assert_eq!(palette.kind(), PaletteKind::Locations);
+            assert_eq!(palette.query(), "hel");
         });
         std::fs::remove_dir_all(&dir).ok();
     }
