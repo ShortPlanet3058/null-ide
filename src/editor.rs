@@ -438,6 +438,9 @@ pub enum EditorEvent {
     BreakpointsChanged,
     /// The bookmarks changed (set, removed, or moved by an edit).
     BookmarksChanged,
+    /// A right-click in the text, at this place in the window: the workspace shows what can
+    /// be done there.
+    TextMenu(Point<Pixels>),
     /// Several places to choose from (implementations): the workspace lists them.
     ShowLocations {
         title: String,
@@ -3260,6 +3263,31 @@ impl Editor {
     // ---------- mouse ----------
 
     /// Char offset under a window position, using last frame's layout.
+    /// Whether a language server knows this file (for what only it can do: definitions...).
+    pub fn has_language_server(&self, cx: &App) -> bool {
+        match (&self.lsp, &self.path) {
+            (Some(lsp), Some(path)) => lsp.read(cx).has_server_for(path),
+            _ => false,
+        }
+    }
+
+    /// A right-click in the text: the caret there first, unless it's in what's selected (what
+    /// the menu then acts on), then the workspace shows the menu.
+    fn show_text_menu(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if self.layout.as_ref().is_none_or(|l| !l.text_bounds.contains(&event.position)) {
+            return;
+        }
+        let at = self.offset_at(event.position);
+        let range = self.selection.range();
+        if range.is_empty() || !(range.start..=range.end).contains(&at) {
+            self.single_cursor();
+            self.selection = Selection::caret(at);
+            self.goal_column = None;
+            self.touch(cx);
+        }
+        cx.emit(EditorEvent::TextMenu(event.position));
+    }
+
     fn offset_at(&self, position: Point<Pixels>) -> usize {
         let Some(layout) = &self.layout else { return self.selection.head };
         let y = (position.y - layout.text_origin.y) / layout.line_height;

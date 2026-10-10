@@ -163,7 +163,8 @@ impl Editor {
     /// Right-click in the breakpoint strip: a field to make that line's breakpoint stop
     /// only when something holds.
     pub(super) fn on_right_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(line) = self.breakpoint_click(event.position) else { return };
+        // In the text: what can be done there (see `show_text_menu`).
+        let Some(line) = self.breakpoint_click(event.position) else { return self.show_text_menu(event, cx) };
         let current = self.breakpoint_conditions.iter().find(|(l, _)| *l == line).map(|(_, c)| c.clone());
         let input = cx.new(|cx| {
             let mut input =
