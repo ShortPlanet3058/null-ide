@@ -1340,7 +1340,49 @@ fn resolve(color: Color, colors: &alacritty_terminal::term::color::Colors, theme
 }
 
 /// Cells waiting to be drawn as one piece of text: text, first column, line, font, color, underline.
-type PendingRun = Option<(String, usize, i32, Font, Hsla, Option<UnderlineStyle>)>;
+/// Cells with the same look, side by side, drawn as one piece of text.
+struct Pending {
+    text: String,
+    column: usize,
+    line: i32,
+    font: Font,
+    color: Hsla,
+    underline: Option<UnderlineStyle>,
+    /// How many cells it takes (its chars, all plain ASCII while `ascii`).
+    cells: usize,
+    ascii: bool,
+}
+
+type PendingRun = Option<Pending>;
+
+impl Pending {
+    fn new(column: usize, line: i32, font: Font, color: Hsla, underline: Option<UnderlineStyle>) -> Self {
+        Pending { text: String::new(), column, line, font, color, underline, cells: 0, ascii: true }
+    }
+
+    /// Whether the cell at (`line`, `column`) goes on the end of it: right after it, plain
+    /// ASCII one cell wide (the code font draws those exactly a cell wide; other characters
+    /// can be a little wider or narrower, so each sits on its own cell instead of pushing the
+    /// rest along), and looking the same. A space only has to be right after it (its colour
+    /// and font don't show) and not underlined differently.
+    fn takes(&self, c: char, line: i32, column: usize, font: &Font, color: Hsla, underline: Option<UnderlineStyle>) -> bool {
+        let next = self.line == line && self.column + self.cells == column && self.ascii && c.is_ascii();
+        if c == ' ' {
+            return next && self.underline == underline;
+        }
+        next && self.font == *font && self.color == color && self.underline == underline
+    }
+
+    fn push(&mut self, c: char, zero_width: Option<&[char]>) {
+        self.text.push(c);
+        self.cells += 1;
+        self.ascii &= c.is_ascii();
+        if let Some(extra) = zero_width {
+            self.text.extend(extra);
+            self.ascii = false;
+        }
+    }
+}
 
 struct TerminalElement {
     view: Entity<TerminalView>,
@@ -1445,9 +1487,13 @@ impl Element for TerminalElement {
         // Consecutive cells with the same look are drawn as one piece of text.
         let mut pending: PendingRun = None;
         let mut flush = |pending: &mut PendingRun| {
-            if let Some((text, column, line, font, color, underline)) = pending.take() {
-                let len = text.len();
-                let mut r = run(len, font, color);
+            if let Some(Pending { text, column, line, font, color, underline, .. }) = pending.take() {
+                // (Spaces at its end draw nothing, unless they're underlined.)
+                let text = if underline.is_none() { text.trim_end_matches(' ').to_string() } else { text };
+                if text.is_empty() {
+                    return;
+                }
+                let mut r = run(text.len(), font, color);
                 r.underline = underline;
                 let shaped = text_system.shape_line(text.into(), font_size, &[r], None);
                 let at = point(origin.x + cell_width * column as f32, origin.y + line_height * line as f32);
@@ -1481,10 +1527,7 @@ impl Element for TerminalElement {
                 backgrounds.push((cell_bounds, bg));
             }
             let c = cell.c;
-            if c == ' ' || c == '\t' || cell.flags.contains(Flags::HIDDEN) {
-                flush(&mut pending);
-                continue;
-            }
+            let blank = c == ' ' || c == '\t' || cell.flags.contains(Flags::HIDDEN);
             let mut cell_font = base.clone();
             if cell.flags.contains(Flags::BOLD) {
                 cell_font.weight = FontWeight::BOLD;
@@ -1497,28 +1540,21 @@ impl Element for TerminalElement {
                 thickness: px(1.),
                 wavy: cell.flags.contains(Flags::UNDERCURL),
             });
-            // Only plain ASCII joins a run: the code font draws it exactly one cell wide. Other
-            // characters (box drawing, arrows, symbols from a fallback font) can be a little
-            // wider or narrower, so each sits on its own cell instead of pushing the rest along.
-            let continues = c.is_ascii()
-                && pending.as_ref().is_some_and(|(text, start, l, f, color, u)| {
-                    *l == line
-                        && *start + text.chars().count() == column
-                        && text.is_ascii()
-                        && *f == cell_font
-                        && *color == fg
-                        && *u == underline
-                        && wide == 1.
-                });
+            // A blank goes on the text before it (one piece for a line of words, not one per
+            // word), or nowhere.
+            let shown = if blank { ' ' } else { c };
+            let continues =
+                wide == 1. && pending.as_ref().is_some_and(|p| p.takes(shown, line, column, &cell_font, fg, underline));
+            if blank && !continues {
+                flush(&mut pending);
+                continue;
+            }
             if !continues {
                 flush(&mut pending);
-                pending = Some((String::new(), column, line, cell_font, fg, underline));
+                pending = Some(Pending::new(column, line, cell_font, fg, underline));
             }
-            if let Some((text, ..)) = pending.as_mut() {
-                text.push(c);
-                if let Some(extra) = cell.zerowidth() {
-                    text.extend(extra);
-                }
+            if let Some(p) = pending.as_mut() {
+                p.push(shown, if blank { None } else { cell.zerowidth() });
             }
             if wide > 1. {
                 flush(&mut pending);
@@ -1630,6 +1666,29 @@ fn shell_words(paths: &[std::path::PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line of words is one piece of text to draw, not one per word; what looks different
+    /// (another colour, not plain ASCII, not right after) starts another.
+    #[test]
+    fn a_line_of_words_is_one_piece() {
+        let font = gpui::font("Menlo");
+        let (white, red) = (gpui::white(), gpui::red());
+        let mut run = Pending::new(0, 0, font.clone(), white, None);
+        for c in "cargo".chars() {
+            run.push(c, None);
+        }
+        assert!(run.takes(' ', 0, 5, &font, red, None), "a space, whatever its colour");
+        run.push(' ', None);
+        assert!(run.takes('b', 0, 6, &font, white, None));
+        assert!(!run.takes('b', 0, 6, &font, red, None), "another colour");
+        assert!(!run.takes('b', 0, 7, &font, white, None), "not right after");
+        assert!(!run.takes('b', 1, 6, &font, white, None), "another line");
+        assert!(!run.takes('→', 0, 6, &font, white, None), "not plain ASCII: its own cell");
+        let underline = Some(gpui::UnderlineStyle { thickness: gpui::px(1.), color: None, wavy: false });
+        assert!(!run.takes(' ', 0, 6, &font, white, underline), "underlined differently");
+        run.push('é', None);
+        assert!(!run.takes('x', 0, 8, &font, white, None), "after what isn't ASCII");
+    }
 
     #[test]
     fn the_command_typed_on_a_prompt() {
