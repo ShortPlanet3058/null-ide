@@ -581,11 +581,19 @@ pub struct Hunk {
     pub lines: Range<usize>,
 }
 
+/// The changes from `before` to `after`, line by line (each line with its line break).
+/// The lines are compared as they are: as `TextDiff::from_lines` finds them, many times
+/// quicker on a long file (it's run as the text changes: a review, the gutter's marks).
+pub fn line_ops(before: &str, after: &str) -> Vec<similar::DiffOp> {
+    let old: Vec<&str> = before.split_inclusive('\n').collect();
+    let new: Vec<&str> = after.split_inclusive('\n').collect();
+    similar::capture_diff_slices(similar::Algorithm::Myers, &old, &new)
+}
+
 /// How the current text differs from `base`, line by line.
 pub fn diff(base: &str, current: &str) -> Vec<Hunk> {
-    use similar::{DiffOp, TextDiff};
-    let diff = TextDiff::from_lines(base, current);
-    diff.ops()
+    use similar::DiffOp;
+    line_ops(base, current)
         .iter()
         .filter_map(|op| match *op {
             DiffOp::Equal { .. } => None,
@@ -604,6 +612,23 @@ pub fn diff(base: &str, current: &str) -> Vec<Hunk> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// The quick comparison finds what the usual one does (lines changed, added, removed,
+    /// and a last line without its line break).
+    #[test]
+    fn lines_are_compared_as_text_diff_does() {
+        let cases = [
+            ("a\nb\nc\n", "a\nB\nc\nd\n"),
+            ("a\nb\nc", "a\nc"),
+            ("", "x\n"),
+            ("one\ntwo\n", "one\ntwo"),
+            ("x\ny\nx\ny\n", "y\nx\ny\nx\n"),
+        ];
+        for (before, after) in cases {
+            let usual = similar::TextDiff::from_lines(before, after).ops().to_vec();
+            assert_eq!(line_ops(before, after), usual, "{before:?} → {after:?}");
+        }
+    }
 
     #[test]
     #[cfg(unix)]

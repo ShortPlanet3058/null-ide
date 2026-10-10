@@ -112,9 +112,8 @@ impl Snapshot {
 
 /// Lines added and removed between two texts.
 pub fn line_counts(before: &str, after: &str) -> (usize, usize) {
-    let diff = similar::TextDiff::from_lines(before, after);
     let (mut added, mut removed) = (0, 0);
-    for op in diff.ops() {
+    for op in &crate::git::line_ops(before, after) {
         match *op {
             similar::DiffOp::Equal { .. } => {}
             similar::DiffOp::Delete { old_len, .. } => removed += old_len,
