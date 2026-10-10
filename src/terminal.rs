@@ -1364,7 +1364,7 @@ impl Pending {
     /// ASCII one cell wide (the code font draws those exactly a cell wide; other characters
     /// can be a little wider or narrower, so each sits on its own cell instead of pushing the
     /// rest along), and looking the same. A space only has to be right after it (its colour
-    /// and font don't show) and not underlined differently.
+    /// and font don't show) and underlined the same (an underlined one shows its line).
     fn takes(&self, c: char, line: i32, column: usize, font: &Font, color: Hsla, underline: Option<UnderlineStyle>) -> bool {
         let next = self.line == line && self.column + self.cells == column && self.ascii && c.is_ascii();
         if c == ' ' {
@@ -1542,10 +1542,11 @@ impl Element for TerminalElement {
             });
             // A blank goes on the text before it (one piece for a line of words, not one per
             // word), or nowhere.
+            // An underlined one is drawn as text is (its underline shows), even starting a piece.
             let shown = if blank { ' ' } else { c };
             let continues =
                 wide == 1. && pending.as_ref().is_some_and(|p| p.takes(shown, line, column, &cell_font, fg, underline));
-            if blank && !continues {
+            if blank && underline.is_none() && !continues {
                 flush(&mut pending);
                 continue;
             }
@@ -1686,6 +1687,10 @@ mod tests {
         assert!(!run.takes('→', 0, 6, &font, white, None), "not plain ASCII: its own cell");
         let underline = Some(gpui::UnderlineStyle { thickness: gpui::px(1.), color: None, wavy: false });
         assert!(!run.takes(' ', 0, 6, &font, white, underline), "underlined differently");
+        let mut underlined = Pending::new(0, 0, font.clone(), white, underline);
+        underlined.push('a', None);
+        assert!(underlined.takes(' ', 0, 1, &font, red, underline), "an underlined space, underlined the same");
+        assert!(!underlined.takes(' ', 0, 1, &font, white, None), "a plain one: no line under it");
         run.push('é', None);
         assert!(!run.takes('x', 0, 8, &font, white, None), "after what isn't ASCII");
     }

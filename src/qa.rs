@@ -1,6 +1,7 @@
 //! For looking at Null as it is while working on it (debug builds only): with
 //! `NULL_QA=<file>`, the steps in that file are done in the window once it's open, one a
-//! line, and `ready` says on stdout when to take the picture (`scripts/qa/shot.sh`).
+//! line, and `ready` says on stdout when to take the picture (`scripts/qa/shot.sh`, which
+//! keeps it apart from the person's settings, files and environment).
 //!
 //! Steps: `open <path>`, `goto <line>:<column>` (from 1), `keys <keystroke> ...`
 //! (`cmd-p`, `escape`), `type <text>`, `action terminal`, `run <command>` (in the
@@ -10,7 +11,6 @@
 
 use crate::workspace::Workspace;
 use gpui::{App, AppContext as _, Keystroke, Modifiers};
-use std::path::PathBuf;
 use std::time::Duration;
 
 pub fn run(cx: &mut App) {
@@ -42,6 +42,11 @@ pub fn run(cx: &mut App) {
             };
             let done = match step {
                 // Keys go to the window, not to the workspace (it's free to take them).
+                // (Not ⌘C, ⌘X, ⌘V: the Mac's clipboard is the person's, not this run's.)
+                "keys" if arg.split_whitespace().any(|k| matches!(k, "cmd-c" | "cmd-x" | "cmd-v")) => {
+                    eprintln!("null qa: no copying or pasting: the clipboard is the person's");
+                    Ok(())
+                }
                 "keys" | "type" => cx.update_window(handle.into(), |_, window, cx| {
                     let keys: Vec<Keystroke> = if step == "keys" {
                         arg.split_whitespace().filter_map(|k| Keystroke::parse(k).ok()).collect()
@@ -71,7 +76,11 @@ pub fn run(cx: &mut App) {
                     }
                 }),
                 "open" | "goto" | "run" => handle.update(cx, |workspace, window, cx| match step {
-                    "open" => workspace.open_file(PathBuf::from(arg), window, cx),
+                    // (A path from the project's folder, as a file of it is written.)
+                    "open" => {
+                        let path = workspace.root(cx).join(arg);
+                        workspace.open_file(path, window, cx)
+                    }
                     "run" => workspace.qa_run(arg.to_string(), window, cx),
                     _ => {
                         let (line, column) = arg.split_once(':').unwrap_or((arg, "1"));

@@ -984,8 +984,11 @@ impl Element for EditorElement {
                         // stays in view.
                         let note = match &lens_here {
                             Some(lens) if editor.wrap.is_on() => {
-                                let used = row.indent + crate::wrap::columns_of(&text);
-                                let room = (text_width / cw) as usize;
+                                // (Hints and swatches shown in the row take room too; the
+                                // scrollbar's edge isn't room.)
+                                let hinted: usize = hints.iter().map(|(_, h)| h.chars().count()).sum();
+                                let used = row.indent + crate::wrap::columns_of(&text) + hinted;
+                                let room = ((text_width - BAR) / cw).max(0.) as usize;
                                 let left = room.saturating_sub(used + lens.chars().count() + 1);
                                 shortened(note, left).unwrap_or_default()
                             }
