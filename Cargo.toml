@@ -61,8 +61,10 @@ url = "2"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std", "NSSpellChecker", "NSWorkspace",
     "NSColorPanel", "NSColor", "NSColorSpace", "NSPanel", "NSWindow", "NSResponder", "NSApplication", "NSPasteboard", "objc2-core-foundation",
+    # (QA runs post their own clicks to their window: src/qa.rs.)
+    "NSEvent", "NSGraphicsContext",
 ] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSRange", "NSArray", "NSURL", "NSUserDefaults"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSRange", "NSArray", "NSURL", "NSUserDefaults", "NSGeometry"] }
 # copyfile(3): a save keeps the file's tags, extended attributes and ACLs.
 libc = "0.2"
 

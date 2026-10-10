@@ -8,6 +8,9 @@
 //! `terminal` for the terminal), `run <command>` (in the
 //! terminal), `wait <ms>`, `rows` (the caret line's rows as drawn, with what's after its
 //! text, to stderr), `shot <name>` (a picture now, `<name>.png` beside the last one),
+//! `click [cmd|alt|shift|ctrl…] X Y`, `hover [mods] X Y`, `drag X1 Y1 X2 Y2` (the mouse,
+//! in the window's points: half a Retina screenshot's pixels; the keys named are held for
+//! the click, not pressed: what waits for ⌥ itself, as the hover's info, doesn't see them),
 //! `ready` (the last: steps after it aren't done). A line starting with `#` is a note.
 //!
 //! A run copies to and pastes from a clipboard of its own, never reads or changes the
@@ -77,6 +80,32 @@ pub fn run(cx: &mut App) {
                         window.dispatch_keystroke(key, cx);
                     }
                 }),
+                "click" | "hover" | "drag" => {
+                    let (modifiers, numbers) = mouse_args(arg);
+                    let (from, to) = match numbers[..] {
+                        [x, y] => ((x, y), None),
+                        [x1, y1, x2, y2] if step == "drag" => ((x1, y1), Some((x2, y2))),
+                        _ => {
+                            eprintln!("null qa: {step} needs a place: X Y");
+                            continue;
+                        }
+                    };
+                    post_mouse(Mouse::Move, from, &modifiers);
+                    if step != "hover" {
+                        post_mouse(Mouse::Down, from, &modifiers);
+                        // A drag a frame at a time, as a hand makes it.
+                        if let Some((x2, y2)) = to {
+                            for i in 1..=8 {
+                                cx.background_executor().timer(Duration::from_millis(16)).await;
+                                let t = i as f32 / 8.;
+                                post_mouse(Mouse::Drag, (from.0 + (x2 - from.0) * t, from.1 + (y2 - from.1) * t), &modifiers);
+                            }
+                            cx.background_executor().timer(Duration::from_millis(16)).await;
+                        }
+                        post_mouse(Mouse::Up, to.unwrap_or(from), &modifiers);
+                    }
+                    Ok(())
+                }
                 "action" => cx.update_window(handle.into(), |_, window, cx| {
                     let name = if arg == "terminal" { "workspace::ToggleTerminal" } else { arg };
                     match cx.build_action(name, None) {
@@ -125,4 +154,85 @@ pub fn run(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// The modifier keys named first (`cmd`, `alt`, `shift`, `ctrl`) and the numbers after.
+fn mouse_args(arg: &str) -> (Modifiers, Vec<f32>) {
+    let mut modifiers = Modifiers::default();
+    let mut numbers = Vec::new();
+    for word in arg.split_whitespace() {
+        match word {
+            "cmd" => modifiers.platform = true,
+            "alt" => modifiers.alt = true,
+            "shift" => modifiers.shift = true,
+            "ctrl" => modifiers.control = true,
+            n => numbers.extend(n.parse::<f32>().ok()),
+        }
+    }
+    (modifiers, numbers)
+}
+
+/// What the mouse does, for `post_mouse`.
+#[derive(Clone, Copy, PartialEq)]
+enum Mouse {
+    Move,
+    Down,
+    Drag,
+    Up,
+}
+
+/// The mouse, as the Mac would send it: an event posted to this app's own window (not the
+/// pointer, not another app), at (x, y) in the window's points from its top left. Seen by
+/// Null as a person's.
+#[cfg(target_os = "macos")]
+fn post_mouse(what: Mouse, (x, y): (f32, f32), modifiers: &Modifiers) {
+    use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
+    use objc2_foundation::{MainThreadMarker, NSPoint};
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    // Its window: the biggest one shown.
+    let windows = app.windows();
+    let area = |w: &objc2_app_kit::NSWindow| w.frame().size.width * w.frame().size.height;
+    let Some(window) = windows.iter().filter(|w| w.isVisible()).max_by(|a, b| area(a).total_cmp(&area(b))) else {
+        return eprintln!("null qa: no window to click in");
+    };
+    let mut flags = NSEventModifierFlags::empty();
+    for (on, flag) in [
+        (modifiers.platform, NSEventModifierFlags::Command),
+        (modifiers.alt, NSEventModifierFlags::Option),
+        (modifiers.shift, NSEventModifierFlags::Shift),
+        (modifiers.control, NSEventModifierFlags::Control),
+    ] {
+        if on {
+            flags |= flag;
+        }
+    }
+    let kind = match what {
+        Mouse::Move => NSEventType::MouseMoved,
+        Mouse::Down => NSEventType::LeftMouseDown,
+        Mouse::Drag => NSEventType::LeftMouseDragged,
+        Mouse::Up => NSEventType::LeftMouseUp,
+    };
+    // AppKit's window points go up from the bottom.
+    let place = NSPoint::new(x as f64, window.frame().size.height - y as f64);
+    let pressure = if matches!(what, Mouse::Down | Mouse::Drag) { 1. } else { 0. };
+    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        kind,
+        place,
+        flags,
+        0.,
+        window.windowNumber(),
+        None,
+        0,
+        1,
+        pressure,
+    );
+    if let Some(event) = event {
+        app.postEvent_atStart(&event, false);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn post_mouse(_: Mouse, _: (f32, f32), _: &Modifiers) {
+    eprintln!("null qa: the mouse steps are for macOS");
 }
