@@ -175,6 +175,11 @@ actions!(
     ]
 );
 
+/// ⌘1…⌘8: the tab at that place on the side in use; ⌘9: its last one.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct GoToTab(pub usize);
+
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Workspace");
     let mut keys = vec![
@@ -232,6 +237,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
         KeyBinding::new("secondary--", DecreaseFontSize, ctx),
         KeyBinding::new("secondary-0", ResetFontSize, ctx),
+        KeyBinding::new("secondary-1", GoToTab(1), ctx),
+        KeyBinding::new("secondary-2", GoToTab(2), ctx),
+        KeyBinding::new("secondary-3", GoToTab(3), ctx),
+        KeyBinding::new("secondary-4", GoToTab(4), ctx),
+        KeyBinding::new("secondary-5", GoToTab(5), ctx),
+        KeyBinding::new("secondary-6", GoToTab(6), ctx),
+        KeyBinding::new("secondary-7", GoToTab(7), ctx),
+        KeyBinding::new("secondary-8", GoToTab(8), ctx),
+        KeyBinding::new("secondary-9", GoToTab(9), ctx),
         KeyBinding::new("secondary-shift-backspace", GoToLastEdit, ctx),
     ];
     if cfg!(target_os = "macos") {
@@ -2761,6 +2775,16 @@ impl Workspace {
     }
 
     /// Tabs on `side`, by index.
+    /// ⌘1…⌘9 (see `GoToTab`).
+    fn go_to_tab(&mut self, &GoToTab(n): &GoToTab, window: &mut Window, cx: &mut Context<Self>) {
+        let side = self.active.map_or(0, |a| self.tabs[a].side);
+        let tabs = self.side_tabs(side);
+        let at = if n >= 9 { tabs.last() } else { tabs.get(n.saturating_sub(1)) };
+        if let Some(&ix) = at {
+            self.show_tab(ix, true, window, cx);
+        }
+    }
+
     fn side_tabs(&self, side: usize) -> Vec<usize> {
         (0..self.tabs.len()).filter(|&i| self.tabs[i].side == side).collect()
     }
@@ -9204,6 +9228,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::go_to_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
@@ -11521,6 +11546,40 @@ mod tests {
             w.read_reported(&ran("make", "nothing to be done\n"), cx);
             assert!(w.problem_places(cx).is_empty());
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ⌘2 shows the second tab, ⌘9 the last.
+    #[gpui::test]
+    fn number_keys_go_to_tabs(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("tab-numbers");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                w.open_file(dir.join(name), window, cx);
+            }
+        });
+        let shown = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.active_editor().map(|e| e.read(cx).file_name()).unwrap_or_default())
+        };
+        cx.simulate_keystrokes("cmd-2");
+        assert_eq!(shown(cx), "b.txt");
+        cx.simulate_keystrokes("cmd-9");
+        assert_eq!(shown(cx), "c.txt");
+        cx.simulate_keystrokes("cmd-1");
+        assert_eq!(shown(cx), "a.txt");
         std::fs::remove_dir_all(&dir).ok();
     }
 
