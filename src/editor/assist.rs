@@ -449,6 +449,8 @@ impl Editor {
             lines: lines.start..lines.start + new_lines,
             instruction,
         });
+        // (The prompt had the keys, and is gone: ⇥ and Esc are for the change now.)
+        self.refocus = true;
         self.rebuild_blocks();
         self.touch(cx);
         cx.notify();
