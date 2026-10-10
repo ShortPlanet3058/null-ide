@@ -69,7 +69,8 @@ impl SearchQuery {
     }
 
     /// The text that replaces the match at `range`. In regex mode `$1`, `${name}`
-    /// and `$0` refer to the match's groups; otherwise the replacement is literal, in the
+    /// and `$0` refer to the match's groups, and `\u` `\l` `\U…\E` `\L…\E` change case
+    /// (see [`expand_cased`]); otherwise the replacement is literal, in the
     /// match's case when it [keeps case](Self::keeps_case).
     pub fn replacement_for(&self, regex: &Regex, text: &str, range: Range<usize>, replacement: &str) -> String {
         if !self.regex {
@@ -79,15 +80,60 @@ impl SearchQuery {
             };
         }
         match regex.captures_at(text, range.start).filter(|c| c.get(0).map(|m| m.range()) == Some(range)) {
-            Some(caps) => {
-                let mut out = String::new();
-                caps.expand(replacement, &mut out);
-                out
-            }
+            Some(caps) => expand_cased(&caps, replacement),
             // Not expected, but never turn a replacement into a deletion.
             None => replacement.to_string(),
         }
     }
+}
+
+/// A regex replacement with its groups filled in (`$1`, `${name}`), and its case changed
+/// as VS Code and Sublime do: `\u` the next letter upper case, `\l` lower case, `\U` or
+/// `\L` everything up to `\E` (or the end). `\u$1` capitalises the first group.
+pub fn expand_cased(caps: &regex::Captures, replacement: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum Case {
+        Same,
+        Upper,
+        Lower,
+    }
+    let mut out = String::new();
+    let mut case = Case::Same;
+    // `\u` or `\l` waiting for a letter to change: upper case if true.
+    let mut next: Option<bool> = None;
+    let mut rest = replacement;
+    loop {
+        let marker = rest
+            .match_indices('\\')
+            .find(|(i, _)| rest[i + 1..].starts_with(['u', 'l', 'U', 'L', 'E']))
+            .map(|(i, _)| i);
+        let piece = &rest[..marker.unwrap_or(rest.len())];
+        let mut expanded = String::new();
+        caps.expand(piece, &mut expanded);
+        let mut expanded = match case {
+            Case::Same => expanded,
+            Case::Upper => expanded.to_uppercase(),
+            Case::Lower => expanded.to_lowercase(),
+        };
+        if let Some(upper) = next
+            && let Some(first) = expanded.chars().next()
+        {
+            let changed: String = if upper { first.to_uppercase().collect() } else { first.to_lowercase().collect() };
+            expanded.replace_range(..first.len_utf8(), &changed);
+            next = None;
+        }
+        out.push_str(&expanded);
+        let Some(at) = marker else { break };
+        match rest.as_bytes()[at + 1] {
+            b'u' => next = Some(true),
+            b'l' => next = Some(false),
+            b'U' => case = Case::Upper,
+            b'L' => case = Case::Lower,
+            _ => case = Case::Same,
+        }
+        rest = &rest[at + 2..];
+    }
+    out
 }
 
 /// `replacement` (all lower case) in the case of `matched`: "FOO" makes it all capitals,
@@ -109,6 +155,18 @@ pub fn in_case_of(matched: &str, replacement: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacements_change_case_as_asked() {
+        let regex = regex::Regex::new(r"(\w+)_(\w+)").unwrap();
+        let caps = regex.captures("get_name").unwrap();
+        assert_eq!(expand_cased(&caps, r"$1\u$2"), "getName");
+        assert_eq!(expand_cased(&caps, r"\U$1\E_$2"), "GET_name");
+        assert_eq!(expand_cased(&caps, r"\u\L$1"), "Get");
+        assert_eq!(expand_cased(&caps, r"${2}_$1"), "name_get", "no marks: as before");
+        // A backslash not followed by a mark stays.
+        assert_eq!(expand_cased(&caps, r"a\nb"), r"a\nb");
+    }
 
     #[test]
     fn replacing_keeps_the_case_of_each_match() {

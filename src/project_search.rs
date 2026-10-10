@@ -669,11 +669,7 @@ fn file_filter(root: &Path, written: &str) -> Option<ignore::overrides::Override
 /// case when `keep_case` (see `SearchQuery::keeps_case`).
 pub fn expand(regex: Option<&regex::Regex>, matched: &str, replacement: &str, keep_case: bool) -> String {
     match regex.and_then(|r| r.captures(matched)) {
-        Some(caps) => {
-            let mut out = String::new();
-            caps.expand(replacement, &mut out);
-            out
-        }
+        Some(caps) => crate::search::expand_cased(&caps, replacement),
         None if keep_case => crate::search::in_case_of(matched, replacement),
         None => replacement.to_string(),
     }
