@@ -15,6 +15,8 @@ pub struct Session {
     pub shown_right: Option<usize>,
     /// How much of the width the left side took, when split (of the height, stacked).
     pub split_ratio: Option<f32>,
+    /// The terminal's height, when dragged to another.
+    pub terminal_height: Option<f32>,
     /// Whether the two sides were one above the other.
     pub stacked: bool,
     /// Folders expanded in the file tree.

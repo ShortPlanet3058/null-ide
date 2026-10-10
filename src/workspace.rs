@@ -163,6 +163,7 @@ actions!(
         CloseAllTabs,
         CloseOtherTabs,
         CloseSavedTabs,
+        ToggleMaximizeTerminal,
         SaveWithoutFormatting,
         UseNvidia,
         UseOllama,
@@ -548,6 +549,9 @@ impl Render for TabGhost {
 #[derive(Clone)]
 struct DraggedDivider;
 
+/// The terminal's top edge, dragged to make it taller or shorter.
+struct DraggedTerminalEdge;
+
 /// A terminal being named: which one, the field, and the watch on the field losing focus.
 struct TerminalRename {
     terminal: gpui::EntityId,
@@ -611,6 +615,10 @@ pub struct Workspace {
     switching: Option<usize>,
     /// How much of the width the left side takes when split (of the height, stacked).
     split_ratio: f32,
+    /// The terminal's height, as dragged (`TERMINAL_HEIGHT` until then); and whether it
+    /// takes all the room it can, over the code.
+    terminal_height: f32,
+    terminal_maximized: bool,
     /// The two sides one above the other, rather than side by side.
     stacked: bool,
     sidebar: Transition,
@@ -867,6 +875,8 @@ impl Workspace {
             tabs: Vec::new(),
             shown: [None, None],
             split_ratio: 0.5,
+            terminal_height: TERMINAL_HEIGHT,
+            terminal_maximized: false,
             used: Vec::new(),
             switching: None,
             stacked: false,
@@ -1047,6 +1057,7 @@ impl Workspace {
             active: active.and_then(|p| tabs.iter().position(|t| t.path == p)),
             shown_right: right.and_then(|p| tabs.iter().position(|t| t.path == p)),
             split_ratio: self.is_split().then_some(self.split_ratio),
+            terminal_height: (self.terminal_height != TERMINAL_HEIGHT).then_some(self.terminal_height),
             stacked: self.is_split() && self.stacked,
             tabs,
             expanded: self.tree.read(cx).expanded_folders(),
@@ -1110,6 +1121,9 @@ impl Workspace {
         self.keep_pinned_first();
         if let Some(ratio) = session.split_ratio {
             self.split_ratio = ratio.clamp(0.2, 0.8);
+        }
+        if let Some(height) = session.terminal_height {
+            self.terminal_height = height.max(80.);
         }
         self.stacked = session.stacked;
         // What the right side showed, then the tab that had the keyboard.
@@ -4143,6 +4157,11 @@ impl Workspace {
             (Go, "Previous Conflict".into(), Box::new(crate::editor::PreviousConflict)),
             (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
+            (
+                View,
+                toggle(self.terminal_maximized, "Restore Terminal Size", "Maximize Terminal"),
+                Box::new(ToggleMaximizeTerminal),
+            ),
             (View, "New Terminal".into(), Box::new(NewTerminal)),
             (View, "Next Terminal".into(), Box::new(NextTerminal)),
             (View, "Split Terminal".into(), Box::new(SplitTerminal)),
@@ -6733,6 +6752,18 @@ impl Workspace {
         }
     }
 
+    /// The terminal as tall as it can be (over the code), or back to its height; shown first
+    /// if it was hidden.
+    fn toggle_maximize_terminal(&mut self, _: &ToggleMaximizeTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal_open.on {
+            self.toggle_terminal(&ToggleTerminal, window, cx);
+            self.terminal_maximized = true;
+        } else {
+            self.terminal_maximized = !self.terminal_maximized;
+        }
+        cx.notify();
+    }
+
     fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_open.on {
             let had_focus = self.terminal().is_some_and(|t| t.focus_handle(cx).is_focused(window));
@@ -6844,7 +6875,7 @@ impl Workspace {
         path.trim_end_matches('/').rsplit('/').next().unwrap_or("").trim()
     }
 
-    fn render_terminal_panel(&self, height: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_terminal_panel(&self, height: f32, full: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
         let terminal = self.terminal()?;
         if height < 0.5 {
             return None;
@@ -6986,7 +7017,26 @@ impl Workspace {
                 .border_t_1()
                 .border_color(theme.hairline)
                 .bg(theme.background)
-                .child(div().h(px(TERMINAL_HEIGHT)).flex().flex_col().child(header).child(match self.shown_pair() {
+                .relative()
+                // Its top edge: drag it to make it taller or shorter; a double-click makes it
+                // as tall as it can be, and back.
+                .child(
+                    div()
+                        .id("terminal-edge")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(4.))
+                        .cursor_row_resize()
+                        .on_drag(DraggedTerminalEdge, |_, _, _, cx| cx.new(|_| gpui::EmptyView))
+                        .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                            if event.click_count() == 2 {
+                                this.toggle_maximize_terminal(&ToggleMaximizeTerminal, window, cx);
+                            }
+                        })),
+                )
+                .child(div().h(px(full)).flex().flex_col().child(header).child(match self.shown_pair() {
                     // Two side by side, a click in one making it the current.
                     Some((left, right)) => {
                         let pane = |terminal: Entity<TerminalView>| {
@@ -8471,7 +8521,10 @@ impl Render for Workspace {
         let terminal_panel = match debug_panel {
             Some(panel) => Some(panel),
             None => {
-                (!self.focus_mode).then(|| self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx)).flatten()
+                // As dragged, or maximized: all the room but a little of the code's.
+                let room = f32::from(window.viewport_size().height) - 160.;
+                let full = if self.terminal_maximized { room } else { self.terminal_height.min(room) }.max(80.);
+                (!self.focus_mode).then(|| self.render_terminal_panel(full * terminal_shown, full, cx)).flatten()
             }
         };
         // One editor, or two side by side, each side making its tab current when clicked into.
@@ -9273,6 +9326,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::go_to_tab))
+            .on_action(cx.listener(Self::toggle_maximize_terminal))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
@@ -9359,6 +9413,16 @@ impl Render for Workspace {
                         .min_w_0()
                         .flex()
                         .flex_col()
+                        .on_drag_move::<DraggedTerminalEdge>(cx.listener(
+                            |this, event: &DragMoveEvent<DraggedTerminalEdge>, _, cx| {
+                                let height = f32::from(event.bounds.bottom() - event.event.position.y);
+                                let most = f32::from(event.bounds.size.height) - 80.;
+                                this.terminal_height = height.clamp(80., most.max(80.));
+                                this.terminal_maximized = false;
+                                this.schedule_session_save(cx);
+                                cx.notify();
+                            },
+                        ))
                         .child(div().flex_1().min_h_0().child(body))
                         .children(terminal_panel),
                 ),
