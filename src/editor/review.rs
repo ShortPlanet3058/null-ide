@@ -40,8 +40,7 @@ pub(super) struct Review {
 /// The changes between two texts, by lines.
 pub fn hunks(before: &str, after: &str) -> Vec<Hunk> {
     let old: Vec<&str> = before.split_inclusive('\n').collect();
-    similar::TextDiff::from_lines(before, after)
-        .ops()
+    crate::git::line_ops(before, after)
         .iter()
         .filter_map(|op| {
             let (old_range, new_range) = match *op {
