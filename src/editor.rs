@@ -564,6 +564,8 @@ pub struct Editor {
     /// The file's size and time when `on_disk` was taken: the same still, it wasn't
     /// written since (and needn't be read again to know).
     disk_stamp: Option<DiskStamp>,
+    /// The file can't be written (its permissions): saving would fail, its tab says so.
+    pub read_only: bool,
     /// How the file's bytes are text, kept when saving.
     pub encoding: crate::encoding::Encoding,
     /// The view's height when last drawn, to keep the caret in view as it shrinks.
@@ -781,6 +783,11 @@ type DataColumnCache = Option<((u64, usize), Option<(usize, Option<String>)>)>;
 /// A file's size and modification time.
 type DiskStamp = (u64, std::time::SystemTime);
 
+/// Whether the file can't be written (its permissions say so): its tab shows a lock.
+fn is_read_only(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly())
+}
+
 fn disk_stamp(path: &Path) -> Option<DiskStamp> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.len(), meta.modified().ok()?))
@@ -847,6 +854,7 @@ impl Editor {
             saving_as_is: false,
             on_disk: None,
             disk_stamp: None,
+            read_only: false,
             encoding: Default::default(),
             viewport_height: None,
             reading: false,
@@ -991,6 +999,7 @@ impl Editor {
         let mut editor = Self::new(Buffer::from_text(&text), Some(path), cx);
         editor.on_disk = Some(fingerprint(&text));
         editor.disk_stamp = disk_stamp(&editor.path.clone().unwrap_or_default());
+        editor.read_only = is_read_only(&editor.path.clone().unwrap_or_default());
         editor.encoding = encoding;
         // A notebook opens as it reads, its cells (its JSON isn't written by hand: ⌘⇧V
         // shows it); one that doesn't read as a notebook, as the text it is.
@@ -1042,6 +1051,8 @@ impl Editor {
         // Not written since Null read or wrote it: nothing to read again (and the encoding
         // it was reopened in isn't guessed again).
         let stamp = disk_stamp(path);
+        // (Made read-only, or writable, since: that changes no time on the file.)
+        self.read_only = is_read_only(path);
         if !discard_edits && self.on_disk.is_some() && stamp.is_some() && stamp == self.disk_stamp {
             return;
         }
@@ -1108,6 +1119,7 @@ impl Editor {
                 .map(|text| fingerprint(&text))
         });
         self.disk_stamp = disk_stamp(&path);
+        self.read_only = is_read_only(&path);
         self.path = Some(path);
         // A name that says nothing: the first line may (`run.sh` renamed `run`).
         self.first_line_language = if self.path.as_deref().and_then(language_pick::by_path).is_none() {
@@ -2963,6 +2975,7 @@ impl Editor {
         self.encoding = encoding;
         self.on_disk = Some(fingerprint(&text));
         self.disk_stamp = disk_stamp(&path);
+        self.read_only = is_read_only(&path);
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.last_edit = None;
@@ -3061,6 +3074,7 @@ impl Editor {
                 // Known now: saving over it once asked ("Save Mine") goes ahead.
                 self.on_disk = now;
                 self.disk_stamp = disk_stamp(path);
+                self.read_only = is_read_only(path);
                 self.disk_changed = true;
                 cx.emit(EditorEvent::SaveConflict);
                 return false;
@@ -3093,6 +3107,7 @@ impl Editor {
             Ok(()) => {
                 self.on_disk = Some(fingerprint(&text));
                 self.disk_stamp = disk_stamp(path);
+                self.read_only = is_read_only(path);
                 self.missing = false;
                 self.disk_changed = false;
                 self.buffer.mark_saved();

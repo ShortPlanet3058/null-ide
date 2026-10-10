@@ -7656,6 +7656,7 @@ impl Workspace {
                 let resting = shown && !active;
                 let dirty = editor.buffer.is_dirty();
                 let missing = editor.missing;
+                let read_only = editor.read_only;
                 let group = format!("tab-{ix}");
                 let pinned = tab.pinned;
                 let passing = tab.passing && cx.global::<Settings>().preview_tabs;
@@ -7756,6 +7757,17 @@ impl Workspace {
                                     .when(passing, |d| d.italic())
                                     .child(name),
                             )
+                            // Can't be written (its permissions): a lock, faintly.
+                            .when(read_only, |d| {
+                                d.child(
+                                    svg()
+                                        .path("icons/lock.svg")
+                                        .size(px(11.))
+                                        .flex_none()
+                                        .mt(px(3.))
+                                        .text_color(theme.faint),
+                                )
+                            })
                             .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
                     )
                     .child(close)
@@ -11717,6 +11729,20 @@ mod tests {
         assert_eq!(shown(cx), "c.txt");
         cx.simulate_keystrokes("cmd-1");
         assert_eq!(shown(cx), "a.txt");
+        // A file that can't be written says so (its tab shows a lock).
+        let locked = dir.join("locked.txt");
+        std::fs::write(&locked, "x").unwrap();
+        let mut permissions = std::fs::metadata(&locked).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&locked, permissions.clone()).unwrap();
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(locked.clone(), window, cx);
+            assert!(w.active_editor().unwrap().read(cx).read_only);
+            assert!(!w.tabs[0].editor.read(cx).read_only);
+        });
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&locked, permissions).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
