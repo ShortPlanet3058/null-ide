@@ -4,7 +4,8 @@
 //! keeps it apart from the person's settings, files and environment).
 //!
 //! Steps: `open <path>`, `goto <line>:<column>` (from 1), `keys <keystroke> ...`
-//! (`cmd-p`, `escape`), `type <text>`, `action terminal`, `run <command>` (in the
+//! (`cmd-p`, `escape`), `type <text>`, `action <name>` (`workspace::ShowOutline`;
+//! `terminal` for the terminal), `run <command>` (in the
 //! terminal), `wait <ms>`, `rows` (the caret line's rows as drawn, with what's after its
 //! text, to stderr), `shot <name>` (a picture now, `<name>.png` beside the last one),
 //! `ready`. A line starting with `#` is a note.
@@ -63,8 +64,12 @@ pub fn run(cx: &mut App) {
                         window.dispatch_keystroke(key, cx);
                     }
                 }),
-                "action" if arg == "terminal" => cx.update_window(handle.into(), |_, window, cx| {
-                    window.dispatch_action(Box::new(crate::workspace::ToggleTerminal), cx);
+                "action" => cx.update_window(handle.into(), |_, window, cx| {
+                    let name = if arg == "terminal" { "workspace::ToggleTerminal" } else { arg };
+                    match cx.build_action(name, None) {
+                        Ok(action) => window.dispatch_action(action, cx),
+                        Err(err) => eprintln!("null qa: no action {name}: {err}"),
+                    }
                 }),
                 "rows" => handle.update(cx, |workspace, _, cx| {
                     if let Some(editor) = workspace.qa_editor() {
