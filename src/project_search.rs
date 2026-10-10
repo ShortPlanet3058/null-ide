@@ -95,7 +95,7 @@ pub enum ProjectSearchEvent {
     /// to the next result.
     Open { path: PathBuf, line: usize, columns: Range<usize>, query: SearchQuery, keep_focus: bool },
     /// Replace the matches in these files (only on the given line, when there is one).
-    Replace { query: SearchQuery, replacement: String, targets: Vec<(PathBuf, Option<usize>)> },
+    Replace { query: SearchQuery, replacement: String, targets: Vec<(PathBuf, Option<Vec<usize>>)> },
 }
 
 /// Search across every file in the project. Lives in the sidebar.
@@ -126,6 +126,9 @@ pub struct ProjectSearch {
     show_replace: bool,
     /// The query compiled, for previewing replacements.
     compiled: Option<regex::Regex>,
+    /// Results taken off the list (a file's line, or the whole file), for this query: they
+    /// stay off when it runs again (after replacing).
+    dismissed: (SearchQuery, std::collections::HashSet<(PathBuf, Option<usize>)>),
     _subscription: Subscription,
     _replace_subscription: Subscription,
     _files_subscription: Subscription,
@@ -160,6 +163,7 @@ impl ProjectSearch {
             replace_input,
             files_input,
             show_replace: false,
+            dismissed: Default::default(),
             compiled: None,
             _subscription: subscription,
             _replace_subscription: replace_subscription,
@@ -206,6 +210,21 @@ impl ProjectSearch {
         cx.emit(ProjectSearchEvent::Replace { query: self.query.clone(), replacement: self.replacement(cx), targets });
     }
 
+    /// `file` without what was taken off the list (none of it, when it all was).
+    fn undismissed(&self, mut file: FileResult) -> Option<FileResult> {
+        let gone = &self.dismissed.1;
+        if gone.is_empty() {
+            return Some(file);
+        }
+        if gone.contains(&(file.path.clone(), None)) {
+            return None;
+        }
+        let before = file.matches.len();
+        file.matches.retain(|m| !gone.contains(&(file.path.clone(), Some(m.line))));
+        file.dismissed = file.matches.len() != before;
+        (!file.matches.is_empty()).then_some(file)
+    }
+
     /// The button on a file's row: its matches, in that file only.
     fn replace_file(&mut self, file: usize, cx: &mut Context<Self>) {
         let targets = replace_targets(&self.results[file]);
@@ -214,6 +233,9 @@ impl ProjectSearch {
 
     /// The ✕ on a result: off the list (not replaced by Replace All); on a file, all of it.
     fn dismiss(&mut self, file: usize, line_match: Option<usize>, cx: &mut Context<Self>) {
+        let path = self.results[file].path.clone();
+        let line = line_match.map(|m| self.results[file].matches[m].line);
+        self.dismissed.1.insert((path, line));
         match line_match {
             Some(m) => {
                 let result = &mut self.results[file];
@@ -236,8 +258,13 @@ impl ProjectSearch {
             Status::Searching => Status::Searching,
             Status::Invalid => Status::Invalid,
         };
-        self.selected = self.selected.filter(|&s| s < self.rows.len().saturating_sub(1));
         self.set_results(results, status, cx);
+        // The keyboard's place: on a result still listed, near where it was.
+        self.selected = self.selected.and_then(|s| {
+            let last = self.rows.len().checked_sub(1)?;
+            let s = s.min(last);
+            (s..=last).chain((0..s).rev()).find(|&i| matches!(self.rows[i], Row::Match(..)))
+        });
     }
 
     fn replace_line(&mut self, file: usize, line_match: usize, cx: &mut Context<Self>) {
@@ -246,7 +273,7 @@ impl ProjectSearch {
         cx.emit(ProjectSearchEvent::Replace {
             query: self.query.clone(),
             replacement: self.replacement(cx),
-            targets: vec![(file.path.clone(), Some(line))],
+            targets: vec![(file.path.clone(), Some(vec![line]))],
         });
     }
 
@@ -293,6 +320,9 @@ impl ProjectSearch {
         self.query = query.clone();
         self.compiled = query.build().ok();
         self.selected = None;
+        if self.dismissed.0 != query {
+            self.dismissed = (query.clone(), Default::default());
+        }
         self.cancel.store(true, Ordering::Relaxed);
         if query.text.is_empty() {
             self.task = None;
@@ -334,7 +364,7 @@ impl ProjectSearch {
                     fresh = false;
                     let status = match found {
                         Found::Files(files) => {
-                            results.extend(files);
+                            results.extend(files.into_iter().filter_map(|file| this.undismissed(file)));
                             Status::Searching
                         }
                         Found::Done { truncated } => {
@@ -736,13 +766,13 @@ fn file_filter(root: &Path, written: &str) -> Option<ignore::overrides::Override
 
 /// What replacing in `file`'s results changes: the whole file, or with some taken off the
 /// list, the lines still on it.
-fn replace_targets(file: &FileResult) -> Vec<(PathBuf, Option<usize>)> {
+fn replace_targets(file: &FileResult) -> Vec<(PathBuf, Option<Vec<usize>>)> {
     if !file.dismissed {
         return vec![(file.path.clone(), None)];
     }
     let mut lines: Vec<usize> = file.matches.iter().map(|m| m.line).collect();
     lines.dedup();
-    lines.into_iter().map(|line| (file.path.clone(), Some(line))).collect()
+    vec![(file.path.clone(), Some(lines))]
 }
 
 /// A match's replacement: `$1`-style groups filled in for a regex search, in the match's
@@ -756,14 +786,14 @@ pub fn expand(regex: Option<&regex::Regex>, matched: &str, replacement: &str, ke
 }
 
 /// The replacements to make in `text`: byte ranges and their new text, first to last,
-/// only on line `only_line` (zero-based) when given. Line by line, as the search found
+/// only on lines `only_lines` (zero-based) when given. Line by line, as the search found
 /// them: what the preview showed is what changes (a regex like `\s+$` never takes a line
 /// break, which would join lines or drop the blank ones).
 pub fn replacements(
     text: &str,
     query: &SearchQuery,
     replacement: &str,
-    only_line: Option<usize>,
+    only_lines: Option<&[usize]>,
 ) -> Vec<(Range<usize>, String)> {
     let Ok(regex) = query.build() else { return Vec::new() };
     let mut out = Vec::new();
@@ -771,13 +801,11 @@ pub fn replacements(
     for (n, piece) in text.split_inclusive('\n').enumerate() {
         // The line as `str::lines` gives it to the search: without its break.
         let line = piece.strip_suffix('\n').map_or(piece, |l| l.strip_suffix('\r').unwrap_or(l));
-        if only_line.is_none_or(|only| only == n) {
+        if only_lines.is_none_or(|only| only.contains(&n)) {
             for caps in regex.captures_iter(line) {
                 let Some(m) = caps.get(0).filter(|m| !m.is_empty()) else { continue };
                 let new = if query.regex {
-                    let mut new = String::new();
-                    caps.expand(replacement, &mut new);
-                    new
+                    crate::search::expand_cased(&caps, replacement)
                 } else if query.keeps_case(replacement) {
                     crate::search::in_case_of(m.as_str(), replacement)
                 } else {
@@ -1031,7 +1059,7 @@ mod tests {
         let text = "let a = old(1);\nlet b = old(2);\n";
         let plain = SearchQuery { text: "old".into(), ..Default::default() };
         assert_eq!(replacements(text, &plain, "new", None).len(), 2);
-        assert_eq!(replacements(text, &plain, "new", Some(1)), vec![(24..27, "new".into())]);
+        assert_eq!(replacements(text, &plain, "new", Some(&[1])), vec![(24..27, "new".into())]);
         // In every file too, a lower-case replacement takes each match's case.
         let names: Vec<String> =
             replacements("User user USER", &SearchQuery { text: "user".into(), ..Default::default() }, "client", None)
@@ -1045,7 +1073,7 @@ mod tests {
         let found = replacements(text, &regex, "new($1, 0)", None);
         assert_eq!(found[1].1, "new(2, 0)");
         // In a plain search, "$1" is just text.
-        assert_eq!(replacements(text, &plain, "$1", Some(0))[0].1, "$1");
+        assert_eq!(replacements(text, &plain, "$1", Some(&[0]))[0].1, "$1");
         // A regex never takes a line break: stripping trailing spaces leaves blank lines be,
         // in a Windows file too.
         let trailing = SearchQuery { text: r"\s+$".into(), regex: true, ..Default::default() };
@@ -1115,10 +1143,25 @@ mod tests {
             s.set_results(vec![file("a", vec![1, 2, 5]), file("b", vec![3])], Status::Idle, cx);
             assert_eq!(replace_targets(&s.results[0]), [(PathBuf::from("a"), None)]);
             s.dismiss(0, Some(1), cx);
-            assert_eq!(replace_targets(&s.results[0]), [(PathBuf::from("a"), Some(1)), (PathBuf::from("a"), Some(5))]);
+            assert_eq!(replace_targets(&s.results[0]), [(PathBuf::from("a"), Some(vec![1, 5]))]);
             s.dismiss(1, None, cx);
             assert_eq!(s.results.len(), 1);
             assert_eq!(s.rows.len(), 3, "a, a:1, a:5");
+            // Found again (the search running after a replace): still off the list.
+            assert!(s.undismissed(file("b", vec![3])).is_none());
+            let again = s.undismissed(file("a", vec![1, 2, 5])).unwrap();
+            assert_eq!(again.matches.iter().map(|m| m.line).collect::<Vec<_>>(), [1, 5]);
+            assert!(again.dismissed);
+        });
+        // The keyboard on a result below a file taken off: still on a result there, and ↑
+        // goes on from it.
+        search.update(cx, |s, cx| {
+            s.set_results(vec![file("a", vec![1, 2, 3]), file("b", vec![4, 5])], Status::Idle, cx);
+            s.selected = Some(5);
+            s.dismiss(0, None, cx);
+            assert!(s.selected.is_some_and(|i| i < s.rows.len() && matches!(s.rows[i], Row::Match(..))));
+            s.step(false, cx);
+            s.step(false, cx);
         });
     }
 

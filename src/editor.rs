@@ -783,9 +783,20 @@ type DataColumnCache = Option<((u64, usize), Option<(usize, Option<String>)>)>;
 /// A file's size and modification time.
 type DiskStamp = (u64, std::time::SystemTime);
 
-/// Whether the file can't be written (its permissions say so): its tab shows a lock.
+/// Whether the file can't be written by Null (its permissions, its owner, a read-only
+/// disk): its tab shows a lock.
 fn is_read_only(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly())
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+        // SAFETY: a NUL-ended path, read only for the call.
+        path.exists() && unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } != 0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly())
+    }
 }
 
 fn disk_stamp(path: &Path) -> Option<DiskStamp> {
@@ -2668,6 +2679,7 @@ impl Editor {
     /// Opens a second copy of `source` (the same file on the other side): its text (unsaved
     /// edits included), its caret, its style. The language server is left to the first.
     pub fn twin(source: TwinSource, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) -> Self {
+        let read_only = is_read_only(&source.path);
         let mut buffer = Buffer::from_text(&source.text);
         if source.dirty {
             buffer.mark_unsaved();
@@ -2676,6 +2688,7 @@ impl Editor {
         editor.style = source.style;
         editor.encoding = source.encoding;
         editor.lsp_follower = true;
+        editor.read_only = read_only;
         if let Some(lsp) = lsp {
             editor.attach_lsp(lsp, cx);
         }

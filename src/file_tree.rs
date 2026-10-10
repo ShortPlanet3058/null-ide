@@ -233,6 +233,23 @@ fn terminal_dir(target: Option<(&Path, bool)>, root: &Path) -> PathBuf {
     }
 }
 
+/// Whether opening the file with its app would run it: a script or a program (`.sh`,
+/// `.command`, or anything executable).
+fn runs_when_opened(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if matches!(ext.as_str(), "sh" | "command" | "tool" | "zsh" | "bash" | "app" | "pkg") {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Whether the file is a page or a picture a browser shows (HTML, SVG): it can open there.
 pub fn opens_in_browser(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
@@ -988,7 +1005,15 @@ impl FileTree {
         let Some(FileClipboard { paths, cut }) = cx.try_global::<FileClipboard>().cloned() else { return };
         let dir = self.dir_for(self.selected_entry().as_ref());
         let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.exists()).collect();
+        if paths.is_empty() {
+            cx.remove_global::<FileClipboard>();
+            return cx.emit(FileTreeEvent::Notice("What was copied isn't there any more".into()));
+        }
         if cut {
+            // Kept while nothing moves (pasted where it already is, or into itself).
+            if paths.iter().all(|p| p.parent() == Some(dir.as_path()) || dir.starts_with(p)) {
+                return;
+            }
             cx.remove_global::<FileClipboard>();
             self.move_into(paths, dir, cx);
         } else {
@@ -1292,7 +1317,8 @@ impl FileTree {
                 if opens_in_browser(&e.path) {
                     items.push(OpenInBrowser);
                 }
-                if !e.is_dir {
+                // (Not a script or a program: its app would run it.)
+                if !e.is_dir && !runs_when_opened(&e.path) {
                     items.push(OpenWithApp);
                 }
                 items.extend([

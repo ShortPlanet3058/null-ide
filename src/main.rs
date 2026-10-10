@@ -291,8 +291,8 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::
     }
 }
 
-/// Quitting: the next window with unsaved changes asks about them; once none is left,
-/// Null quits.
+/// Quitting: the next window with unsaved changes (or a command running in a terminal)
+/// asks about them; once none is left, Null quits.
 /// Quitting was called off in one window: none of them counts as done asking any more.
 pub(crate) fn quit_cancelled(cx: &mut gpui::App) {
     for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
@@ -305,7 +305,11 @@ pub(crate) fn quit_next(cx: &mut gpui::App) {
         .windows()
         .into_iter()
         .filter_map(|w| w.downcast::<Workspace>())
-        .find(|handle| handle.read(cx).is_ok_and(|workspace| !workspace.quitting && workspace.has_unsaved(cx)));
+        .find(|handle| {
+            handle.read(cx).is_ok_and(|workspace| {
+                !workspace.quitting && (workspace.has_unsaved(cx) || workspace.commands_running(cx).is_some())
+            })
+        });
     match waiting {
         Some(handle) => {
             handle

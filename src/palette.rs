@@ -839,11 +839,11 @@ impl Palette {
         self.adjust(1, cx);
     }
 
-    /// ⌘⌫ in the recent projects: what's typed goes, as in any field; with nothing typed,
-    /// the project picked leaves the list (the folder itself stays where it is).
+    /// ⌘⌫ in the recent projects: with something typed, as in any field; with nothing
+    /// typed, the project picked leaves the list (the folder itself stays where it is).
     fn forget_project(&mut self, _: &ForgetProject, _: &mut Window, cx: &mut Context<Self>) {
         if !self.query.is_empty() {
-            return self.input.update(cx, |input, cx| input.set_text("", cx));
+            return cx.propagate();
         }
         let Some(Item::Project(i)) = self.selected_item() else { return };
         let project = self.projects.remove(i);

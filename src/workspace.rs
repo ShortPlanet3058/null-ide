@@ -3365,12 +3365,18 @@ impl Workspace {
             })
             .map(|t| t.editor.clone())
             .collect();
+        // (Copies, not closed files: ⇧⌘T has nothing to bring back.)
+        let closed_before = self.recently_closed.len();
         for double in &doubles {
             if let Some(ix) = self.tabs.iter().position(|t| &t.editor == double) {
                 self.remove_tab(ix, window, cx);
             }
         }
+        self.recently_closed.truncate(closed_before);
+        // (One passing tab at most: the one already on this side stays so.)
+        let passing_here = self.tabs.iter().any(|t| t.side == 0 && t.passing);
         for tab in &mut self.tabs {
+            tab.passing &= tab.side == 0 || !passing_here;
             tab.side = 0;
         }
         self.shown = [None, None];
@@ -3949,7 +3955,7 @@ impl Workspace {
     }
 
     /// What's running in the terminals, as said before quitting: "cargo is still running".
-    fn commands_running(&self, cx: &App) -> Option<String> {
+    pub fn commands_running(&self, cx: &App) -> Option<String> {
         let running: Vec<String> = self.terminals.iter().filter_map(|(t, _)| t.read(cx).running.clone()).collect();
         still_running(&running)
     }
@@ -3957,7 +3963,9 @@ impl Workspace {
     /// The notices shown lately, newest first, with when: one picked is copied.
     fn recent_notices(&mut self, _: &RecentNotices, window: &mut Window, cx: &mut Context<Self>) {
         if self.past_notices.is_empty() {
-            return self.show_notice("Nothing to say yet".into(), cx);
+            self.show_notice("Nothing to say yet".into(), cx);
+            self.past_notices.clear();
+            return;
         }
         let seconds =
             |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
@@ -4255,6 +4263,9 @@ impl Workspace {
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
+        if self.is_split() {
+            commands.push((View, "Join Sides".into(), Box::new(JoinSides)));
+        }
         if self.active.is_some() {
             commands.extend([
                 (File, "Save".into(), Box::new(Save) as Box<dyn Action>),
@@ -4266,7 +4277,6 @@ impl Workspace {
                 (File, "Close All Tabs".into(), Box::new(CloseAllTabs)),
                 (File, "Close Other Tabs".into(), Box::new(CloseOtherTabs)),
                 (File, "Close Saved Tabs".into(), Box::new(CloseSavedTabs)),
-                (View, "Join Sides".into(), Box::new(JoinSides)),
                 (Edit, "Undo".into(), Box::new(Undo)),
                 (Edit, "Redo".into(), Box::new(Redo)),
                 (Edit, "Select All".into(), Box::new(SelectAll)),
@@ -5143,7 +5153,7 @@ impl Workspace {
         &mut self,
         query: &crate::search::SearchQuery,
         replacement: &str,
-        targets: &[(PathBuf, Option<usize>)],
+        targets: &[(PathBuf, Option<Vec<usize>>)],
         cx: &mut Context<Self>,
     ) {
         let (mut replaced, mut files, mut failed) = (0, 0, Vec::new());
@@ -5155,7 +5165,7 @@ impl Workspace {
                     let count = editor.update(cx, |editor, cx| {
                         let text = editor.buffer.to_string();
                         let rope = editor.buffer.rope().clone();
-                        let edits: Vec<_> = crate::project_search::replacements(&text, query, replacement, *line)
+                        let edits: Vec<_> = crate::project_search::replacements(&text, query, replacement, line.as_deref())
                             .into_iter()
                             .map(|(r, new)| (rope.byte_to_char(r.start)..rope.byte_to_char(r.end), new))
                             .collect();
@@ -5174,7 +5184,7 @@ impl Workspace {
                         failed.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                         continue;
                     };
-                    let edits = crate::project_search::replacements(&text, query, replacement, *line);
+                    let edits = crate::project_search::replacements(&text, query, replacement, line.as_deref());
                     if edits.is_empty() {
                         continue;
                     }
@@ -6860,6 +6870,7 @@ impl Workspace {
         if self.terminal_open.on {
             let had_focus = self.terminal().is_some_and(|t| t.focus_handle(cx).is_focused(window));
             self.terminal_open.set(false, TERMINAL_SLIDE, TERMINAL_SLIDE);
+            self.terminal_maximized = false;
             if had_focus {
                 self.focus_main(window, cx);
             }
@@ -8626,7 +8637,7 @@ impl Render for Workspace {
             Some(panel) => Some(panel),
             None => {
                 // As dragged, or maximized: all the room but a little of the code's.
-                let room = f32::from(window.viewport_size().height) - 160.;
+                let room = f32::from(window.viewport_size().height) - 170.;
                 let full = if self.terminal_maximized { room } else { self.terminal_height.min(room) }.max(80.);
                 (!self.focus_mode).then(|| self.render_terminal_panel(full * terminal_shown, full, cx)).flatten()
             }
@@ -9523,7 +9534,8 @@ impl Render for Workspace {
                         .on_drag_move::<DraggedTerminalEdge>(cx.listener(
                             |this, event: &DragMoveEvent<DraggedTerminalEdge>, _, cx| {
                                 let height = f32::from(event.bounds.bottom() - event.event.position.y);
-                                let most = f32::from(event.bounds.size.height) - 80.;
+                                // (As the drawing has it: some of the code always shows.)
+                                let most = f32::from(event.bounds.size.height) - 100.;
                                 this.terminal_height = height.clamp(80., most.max(80.));
                                 this.terminal_maximized = false;
                                 this.schedule_session_save(cx);
