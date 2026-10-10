@@ -308,6 +308,20 @@ struct TabMenu {
     position: Point<Pixels>,
 }
 
+/// A right-click in a file's text: what can be done there, where it was clicked.
+struct TextMenu {
+    editor: Entity<Editor>,
+    position: Point<Pixels>,
+}
+
+/// An item of the text's menu: what it's called, what it does, and whether a line sets it
+/// apart from the ones above.
+struct TextMenuItem {
+    label: &'static str,
+    action: Box<dyn Action>,
+    group: bool,
+}
+
 /// The program `cargo build` makes for a project: its first `[[bin]]`, or the package
 /// named in Cargo.toml, in target/debug.
 /// The program `cargo build --message-format=json` says it built: the one named as
@@ -598,6 +612,7 @@ pub struct Workspace {
     clipboard_list: Option<Vec<gpui::ClipboardItem>>,
     /// A tab's right-click menu, while open.
     tab_menu: Option<TabMenu>,
+    text_menu: Option<TextMenu>,
     /// Only the code: no sidebar, tabs, status bar or terminal, the text centered.
     focus_mode: bool,
     /// Places to go back and forward to, most recent last.
@@ -868,6 +883,7 @@ impl Workspace {
             debug_program: None,
             focus_mode: false,
             tab_menu: None,
+            text_menu: None,
             back: Vec::new(),
             forward: Vec::new(),
             navigating: false,
@@ -895,6 +911,13 @@ impl Workspace {
         .detach();
         workspace._subscriptions.push(debugger_events);
         workspace._subscriptions.push(debugger_changes);
+        // A key while a tab's or the text's menu is open: it closes, as menus do.
+        let menus_close = cx.observe_keystrokes(|this, _, _, cx| {
+            if this.text_menu.take().is_some() | this.tab_menu.take().is_some() {
+                cx.notify();
+            }
+        });
+        workspace._subscriptions.push(menus_close);
         workspace._subscriptions.push(cx.observe_window_bounds(window, |this, window, cx| {
             this.window_state = Some(window_state(window));
             this.schedule_session_save(cx);
@@ -2853,6 +2876,10 @@ impl Workspace {
                 }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
                 EditorEvent::VimCommandLine => this.open_palette(PaletteKind::Ex, window, cx),
+                EditorEvent::TextMenu(position) => {
+                    this.text_menu = Some(TextMenu { editor: editor.clone(), position: *position });
+                    cx.notify();
+                }
                 EditorEvent::SavedToClose => {
                     this.confirm_unsaved(CloseAction::CloseTabs(vec![editor.clone()]), window, cx);
                 }
@@ -7690,6 +7717,88 @@ impl Workspace {
         self.active_editor()?.read(cx).path().map(Path::to_path_buf)
     }
 
+    /// What the text's menu offers: the clipboard; with a language server, what it knows of
+    /// the name there; with AI, asking it to change the code; formatting.
+    fn text_menu_items(&self, editor: &Entity<Editor>, cx: &App) -> Vec<TextMenuItem> {
+        use crate::editor::{Copy, Cut, FindReferences, FormatDocument, GoToDefinition, InlineAssist, Paste, RenameSymbol};
+        let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group };
+        let editor = editor.read(cx);
+        let mut items = vec![item("Cut", Box::new(Cut), false), item("Copy", Box::new(Copy), false), item("Paste", Box::new(Paste), false)];
+        if editor.has_language_server(cx) {
+            items.push(item("Go to Definition", Box::new(GoToDefinition), true));
+            items.push(item("Find References", Box::new(FindReferences), false));
+            items.push(item("Rename…", Box::new(RenameSymbol), false));
+        }
+        if cx.global::<Settings>().ai.active() != ProviderId::Off {
+            items.push(item("Change with AI…", Box::new(InlineAssist), true));
+        }
+        items.push(item("Format Document", Box::new(FormatDocument), !items.last().is_some_and(|i| i.group)));
+        items
+    }
+
+    /// An item picked: the keys back in the text, and what it does done there.
+    fn run_text_menu_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.text_menu.take() else { return };
+        let Some(item) = self.text_menu_items(&menu.editor, cx).into_iter().nth(ix) else { return };
+        window.focus(&menu.editor.focus_handle(cx));
+        window.dispatch_action(item.action, cx);
+        cx.notify();
+    }
+
+    fn render_text_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.text_menu.as_ref()?;
+        let theme = cx.global::<Theme>();
+        let items = self.text_menu_items(&menu.editor, cx).into_iter().enumerate().map(|(i, item)| {
+            let keys = crate::palette::shortcut(item.action.as_ref(), cx);
+            div()
+                .when(item.group && i > 0, |d| d.mt(px(4.)).pt(px(4.)).border_t_1().border_color(theme.hairline))
+                .child(
+                    div()
+                        .id(("text-menu", i))
+                        .debug_selector(move || format!("text-menu {}", item.label))
+                        .h(px(26.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(24.))
+                        .rounded(px(ui::R_ROW))
+                        .cursor_pointer()
+                        .text_color(theme.foreground)
+                        .hover(|s| s.bg(theme.accent_soft))
+                        .child(item.label)
+                        .children(keys.map(|k| div().text_color(theme.faint).child(k)))
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.run_text_menu_item(i, window, cx)
+                        })),
+                )
+        });
+        Some(
+            gpui::deferred(
+                gpui::anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(
+                    div()
+                        .occlude()
+                        .min_w(px(220.))
+                        .p(px(4.))
+                        .rounded(px(ui::R_POPOVER))
+                        .bg(theme.raised)
+                        .border_1()
+                        .border_color(theme.hairline)
+                        .shadow_lg()
+                        .text_size(px(ui::T_MD))
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.text_menu = None;
+                            cx.notify();
+                        }))
+                        .children(items),
+                ),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
     fn render_tab_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.tab_menu.as_ref()?;
         let theme = cx.global::<Theme>();
@@ -8378,6 +8487,7 @@ impl Render for Workspace {
         // The welcome covers the whole window; the rest float over the work.
         let welcome = self.welcome.as_ref().map(|(w, _)| w.clone());
         let tab_menu = self.render_tab_menu(cx);
+        let text_menu = self.render_text_menu(cx);
         let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
@@ -9081,6 +9191,7 @@ impl Render for Workspace {
             )
             .when(!self.focus_mode, |root| root.child(status))
             .children(tab_menu)
+            .children(text_menu)
             .when_some(overlay, |root, layer| {
                 root.child(
                     div()
@@ -9329,6 +9440,54 @@ mod tests {
             assert!(e.buffer.is_dirty(), "not marked saved");
         });
         std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A right-click in the text: its menu, with what can be done there; an item does it and
+    /// closes it, as a key does.
+    #[gpui::test]
+    fn the_text_s_menu_does_what_it_says(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("text-menu");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one two\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let file = dir.join("a.txt");
+        workspace.update_in(cx, |w, window, cx| w.open_file(file, window, cx));
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        let labels = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |w, cx| {
+                w.text_menu.as_ref().map(|m| w.text_menu_items(&m.editor, cx).iter().map(|i| i.label).collect::<Vec<_>>())
+            })
+        };
+        let open = |cx: &mut gpui::VisualTestContext| {
+            editor.update_in(cx, |e, window, cx| {
+                window.focus(&e.focus_handle(cx));
+                e.selection = crate::editor::Selection { anchor: 0, head: 3 };
+                cx.emit(EditorEvent::TextMenu(Default::default()));
+            });
+            cx.run_until_parked();
+        };
+        open(cx);
+        // No language server for it, AI off: the clipboard and formatting.
+        assert_eq!(labels(cx), Some(vec!["Cut", "Copy", "Paste", "Format Document"]));
+        // Copy: done, on what's selected, and the menu goes.
+        workspace.update_in(cx, |w, window, cx| w.run_text_menu_item(1, window, cx));
+        cx.run_until_parked();
+        assert_eq!(labels(cx), None);
+        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("one"));
+        // A key closes it.
+        open(cx);
+        cx.simulate_keystrokes("right");
+        assert_eq!(labels(cx), None, "a key closes it");
         std::fs::remove_dir_all(&dir).ok();
     }
 
