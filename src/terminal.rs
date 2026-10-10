@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-actions!(terminal, [Copy, Paste, Clear, Find, FindNext, FindPrevious, CloseFind]);
+actions!(terminal, [Copy, Paste, Clear, Find, FindNext, FindPrevious, CloseFind, PreviousCommand, NextCommand]);
 
 /// The terminal's text is a point smaller than the editor's, and follows it (⌘+ / ⌘-).
 const FONT_SIZE_BELOW_EDITOR: f32 = 1.;
@@ -45,12 +45,16 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-f", Find, ctx),
             KeyBinding::new("cmd-g", FindNext, ctx),
             KeyBinding::new("cmd-shift-g", FindPrevious, ctx),
+            KeyBinding::new("cmd-up", PreviousCommand, ctx),
+            KeyBinding::new("cmd-down", NextCommand, ctx),
         ]);
     } else {
         keys.extend([
             KeyBinding::new("ctrl-shift-c", Copy, ctx),
             KeyBinding::new("ctrl-shift-v", Paste, ctx),
             KeyBinding::new("ctrl-shift-f", Find, ctx),
+            KeyBinding::new("ctrl-up", PreviousCommand, ctx),
+            KeyBinding::new("ctrl-down", NextCommand, ctx),
         ]);
         // Outside macOS, Null's shortcuts use Ctrl, which shells need too (Ctrl+W
         // deletes a word, Ctrl+B moves back...). Inside the terminal, give them back.
@@ -196,6 +200,36 @@ fn clear_above_cursor<T: EventListener>(term: &mut Term<T>) {
     term.selection = None;
 }
 
+/// What came before the command on a command's line: its prompt (`ada@mac app %`).
+fn prompt_of(line: &str) -> Option<&str> {
+    let typed = typed_command(line);
+    let at = (typed.as_ptr() as usize).saturating_sub(line.as_ptr() as usize).min(line.len());
+    Some(line.get(..at)?.trim_end()).filter(|p| !p.is_empty())
+}
+
+/// Where to scroll to (lines up from the bottom) to show the command before (`up`) or
+/// after the row at the top, at the top: a row beginning with one of `prompts`. Past the
+/// last one, the bottom; past the first, nowhere.
+fn command_offset(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    prompts: &[String],
+    up: bool,
+) -> Option<i32> {
+    let history = grid.history_size() as i32;
+    let top = -(grid.display_offset() as i32);
+    let is_command = |line: i32| {
+        let text = row_text(grid, Line(line));
+        prompts.iter().any(|p| text.starts_with(p.as_str()))
+    };
+    if up {
+        let line = (-history..top).rev().find(|&l| is_command(l))?;
+        Some(-line)
+    } else {
+        // Below the screen's top row only history can be scrolled to; the rest is the bottom.
+        Some((top + 1..0).find(|&l| is_command(l)).map_or(0, |l| -l))
+    }
+}
+
 /// A command too quick to be seen running is taken as done this long after Return.
 const QUICK_RUN: std::time::Duration = std::time::Duration::from_millis(600);
 
@@ -285,6 +319,8 @@ pub struct TerminalView {
     pub name: Option<String>,
     /// Where the command running (or just typed) began.
     run: Option<RunStart>,
+    /// The prompts commands were typed after (`ada@mac app %`), to find them again by.
+    prompts: Vec<String>,
     /// The program running in the shell now (`cargo`), while one is.
     pub running: Option<String>,
     selecting: bool,
@@ -464,6 +500,7 @@ impl TerminalView {
             root: cwd,
             link: None,
             find: None,
+            prompts: Vec::new(),
             _events: events,
             _watching: watching,
         }
@@ -474,7 +511,7 @@ impl TerminalView {
     pub fn run_command(&mut self, command: &str, cx: &mut Context<Self>) {
         if self.settled {
             if self.running.is_none() {
-                self.run = Some(self.run_start(Some(command)));
+                self.start_run(Some(command));
             }
             return self.write(format!("{command}\r").into_bytes());
         }
@@ -605,7 +642,7 @@ impl TerminalView {
             let text = text.replace('\x1b', "").replace("\r\n", "\n").replace('\n', "\r");
             let text = text.trim_end_matches('\r');
             if self.running.is_none() {
-                self.run = Some(self.run_start(text.split('\r').next()));
+                self.start_run(text.split('\r').next());
             }
             return self.write(format!("\x1b[200~{text}\x1b[201~\r").into_bytes());
         }
@@ -646,7 +683,7 @@ impl TerminalView {
         if let Some(bytes) = key_to_bytes(&event.keystroke, app_cursor) {
             // Return at the shell's prompt: a command begins here.
             if bytes == b"\r" && self.running.is_none() {
-                self.run = Some(self.run_start(None));
+                self.start_run(None);
             }
             // Typing jumps back to the prompt if the view was scrolled up.
             self.term.lock().scroll_display(Scroll::Bottom);
@@ -738,7 +775,42 @@ impl TerminalView {
         if shown.is_absolute() && shown.is_dir() { shown } else { self.root.clone() }
     }
 
-    /// A command beginning now, at the cursor's line.
+    /// A command beginning at the cursor's line, and its prompt kept to find it again by.
+    fn start_run(&mut self, typing: Option<&str>) {
+        let run = self.run_start(typing);
+        if let Some(prompt) = prompt_of(&run.line).filter(|p| !self.prompts.iter().any(|q| q == p)) {
+            // (A few: the folder in it changes.)
+            if self.prompts.len() == 32 {
+                self.prompts.remove(0);
+            }
+            self.prompts.push(prompt.to_string());
+        }
+        self.run = Some(run);
+    }
+
+    /// ⌘↑ / ⌘↓: the output scrolls to the command typed before (or after) the one at the
+    /// top, its line at the top; past the last, to the bottom.
+    fn previous_command(&mut self, _: &PreviousCommand, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_to_command(true, cx);
+    }
+
+    fn next_command(&mut self, _: &NextCommand, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_to_command(false, cx);
+    }
+
+    fn scroll_to_command(&mut self, up: bool, cx: &mut Context<Self>) {
+        let mut term = self.term.lock();
+        // (A full-screen program's screen has no commands in it.)
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let offset = term.grid().display_offset() as i32;
+        let Some(wanted) = command_offset(term.grid(), &self.prompts, up) else { return };
+        term.scroll_display(Scroll::Delta(wanted - offset));
+        drop(term);
+        cx.notify();
+    }
+
     /// A command beginning at the cursor's line (its first row, when a long one wraps).
     /// `typing`: the command Null is about to type there itself, not on the line yet.
     fn run_start(&self, typing: Option<&str>) -> RunStart {
@@ -1181,6 +1253,8 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::clear))
+            .on_action(cx.listener(Self::previous_command))
+            .on_action(cx.listener(Self::next_command))
             .on_action(cx.listener(Self::open_find))
             .on_action(cx.listener(Self::close_find))
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.step_match(true, cx)))
@@ -1707,6 +1781,48 @@ fn shell_words(paths: &[std::path::PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⌘↑ / ⌘↓: from command to command typed, by the prompt they were typed after.
+    #[test]
+    fn jumping_from_command_to_command() {
+        assert_eq!(prompt_of("ada@mac app % cargo build"), Some("ada@mac app %"));
+        assert_eq!(prompt_of("no prompt here"), None);
+        let config = Config { scrolling_history: 100, ..Default::default() };
+        let mut term = Term::new(config, &GridSize { columns: 30, lines: 4 }, alacritty_terminal::event::VoidListener);
+        let mut parser = alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        // Three commands, each printing 5 lines, then the prompt again: 19 rows, 4 shown.
+        let mut text = String::new();
+        for name in ["one", "two", "three"] {
+            text.push_str(&format!("ada@mac app % echo {name}\r\n"));
+            for i in 0..5 {
+                text.push_str(&format!("{name} {i}\r\n"));
+            }
+        }
+        text.push_str("ada@mac app % ");
+        parser.advance(&mut term, text.as_bytes());
+        let prompts = vec!["ada@mac app %".to_string()];
+        let top_row = |term: &Term<_>| row_text(term.grid(), Line(-(term.grid().display_offset() as i32))).trim_end().to_string();
+        let go = |term: &mut Term<_>, up| {
+            let offset = term.grid().display_offset() as i32;
+            let wanted = command_offset(term.grid(), &prompts, up);
+            if let Some(wanted) = wanted {
+                term.scroll_display(Scroll::Delta(wanted - offset));
+            }
+            wanted.is_some()
+        };
+        assert!(go(&mut term, true));
+        assert_eq!(top_row(&term), "ada@mac app % echo three");
+        assert!(go(&mut term, true));
+        assert_eq!(top_row(&term), "ada@mac app % echo two");
+        assert!(go(&mut term, true));
+        assert_eq!(top_row(&term), "ada@mac app % echo one");
+        assert!(!go(&mut term, true), "none before the first");
+        assert!(go(&mut term, false));
+        assert_eq!(top_row(&term), "ada@mac app % echo two");
+        // Past the last: back to the bottom.
+        assert!(go(&mut term, false) && go(&mut term, false));
+        assert_eq!(term.grid().display_offset(), 0);
+    }
 
     /// ⌘K: the line being typed on goes to the top; what was above it, scrollback
     /// included, goes.
