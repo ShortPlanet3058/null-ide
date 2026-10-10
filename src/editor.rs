@@ -1591,12 +1591,19 @@ impl Editor {
             return;
         }
         let last = search.matches.len() - 1;
-        search.current = Some(if forward {
-            search.matches.iter().position(|m| m.start >= selection.end && *m != selection).unwrap_or(0)
+        let next = if forward {
+            search.matches.iter().position(|m| m.start >= selection.end && *m != selection)
         } else {
-            search.matches.iter().rposition(|m| m.end <= selection.start && *m != selection).unwrap_or(last)
-        });
+            search.matches.iter().rposition(|m| m.end <= selection.start && *m != selection)
+        };
+        // Past the last (or the first): round to the other end, and a word says so.
+        let wrapped = next.is_none() && last > 0;
+        search.current = Some(next.unwrap_or(if forward { 0 } else { last }));
         self.select_current_match(cx);
+        if wrapped {
+            let note = if forward { "Back at the top" } else { "Back at the bottom" };
+            self.show_notice(self.selection.head, note.into(), cx);
+        }
     }
 
     pub fn select_next_match(&mut self, cx: &mut Context<Self>) {
