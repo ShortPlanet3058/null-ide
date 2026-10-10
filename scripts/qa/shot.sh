@@ -6,6 +6,7 @@
 #
 # `shot NAME` steps take more pictures on the way, as NAME.png beside OUT.png.
 # NULL_QA_SETTINGS='"keymap": "vim", "word_wrap": true' adds settings to its own.
+# NULL_QA_FAKE_AI=1 gives it an AI: a stand-in on this Mac (fake_ai.py) with set answers.
 #
 # It keeps to itself: a home of its own (settings, sessions, history, its shell's
 # history), only the environment it needs (no API keys, logs or shell setup of yours;
@@ -48,10 +49,20 @@ else
     project="$home/project/project"
     mkdir -p "$project"
 fi
+# A stand-in AI, answering as Ollama does, on a free port of this Mac only.
+settings="${NULL_QA_SETTINGS:-}"
+fake_pid=""
+if [ "${NULL_QA_FAKE_AI:-}" = 1 ]; then
+    port="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+    python3 -I "$here/fake_ai.py" "$port" > /dev/null 2>&1 &
+    fake_pid=$!
+    ai='"ai": { "enabled": true, "provider": "ollama", "completions": true, "ollama": { "base_url": "http://127.0.0.1:'"$port"'/v1", "model": "fake", "completion_model": "fake" } }'
+    settings="${settings:+$settings, }$ai"
+fi
 # (Welcomed already, unless the settings given say otherwise.)
-case "${NULL_QA_SETTINGS:-}" in
-    *'"welcomed"'*) printf '{ %s }\n' "$NULL_QA_SETTINGS" ;;
-    *) printf '{ "welcomed": true%s }\n' "${NULL_QA_SETTINGS:+, $NULL_QA_SETTINGS}" ;;
+case "$settings" in
+    *'"welcomed"'*) printf '{ %s }\n' "$settings" ;;
+    *) printf '{ "welcomed": true%s }\n' "${settings:+, $settings}" ;;
 esac > "$home/.config/null/settings.json"
 log="$home/qa.log"
 pid=""
@@ -64,6 +75,7 @@ finish() {
         wait "$pid" 2>/dev/null || true
         sleep 0.5
     fi
+    [ -n "$fake_pid" ] && kill "$fake_pid" 2>/dev/null
     rm -rf "$home" 2>/dev/null || { sleep 1; rm -rf "$home"; }
 }
 trap finish EXIT

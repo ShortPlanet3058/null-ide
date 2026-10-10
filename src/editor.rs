@@ -742,6 +742,9 @@ pub struct Editor {
     /// ⌘I: the field while it's open, a change until it's kept or undone, an answer.
     prompt: Option<assist::Prompting>,
     ai_change: Option<assist::Change>,
+    /// The AI's prompt went away while it had the keys (its change written): they come back
+    /// here when next drawn, unless something else took them meanwhile.
+    refocus: bool,
     /// An AI task's changes to this file, being reviewed.
     review: Option<review::Review>,
     note: Option<assist::Note>,
@@ -947,6 +950,7 @@ impl Editor {
             git_diff_task: None,
             prompt: None,
             ai_change: None,
+            refocus: false,
             review: None,
             note: None,
             ghost: None,
@@ -4164,6 +4168,9 @@ impl EntityInputHandler for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.refocus) && window.focused(cx).is_none() {
+            window.focus(&self.focus_handle);
+        }
         if let Some(preview) = &self.preview {
             return self.render_preview(preview, cx);
         }
