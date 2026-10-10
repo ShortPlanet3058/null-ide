@@ -35,7 +35,11 @@ home="$(mktemp -d)"
 project="${3:-$home/project}"
 mkdir -p "$home/.config/null" "$home/tmp" "$project"
 project="$(cd "$project" && pwd)"
-printf '{ "welcomed": true%s }\n' "${NULL_QA_SETTINGS:+, $NULL_QA_SETTINGS}" > "$home/.config/null/settings.json"
+# (Welcomed already, unless the settings given say otherwise.)
+case "${NULL_QA_SETTINGS:-}" in
+    *'"welcomed"'*) printf '{ %s }\n' "$NULL_QA_SETTINGS" ;;
+    *) printf '{ "welcomed": true%s }\n' "${NULL_QA_SETTINGS:+, $NULL_QA_SETTINGS}" ;;
+esac > "$home/.config/null/settings.json"
 log="$home/qa.log"
 pid=""
 finish() {

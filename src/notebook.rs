@@ -157,6 +157,28 @@ pub fn to_markdown(json: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A notebook opens as it reads; one that doesn't read as a notebook, as its text.
+    #[gpui::test]
+    fn a_notebook_opens_as_it_reads(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = crate::tools::test_dir("notebook-open");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cell = r##"{"cell_type":"markdown","metadata":{},"source":["# Hi"]}"##;
+        std::fs::write(dir.join("a.ipynb"), format!(r#"{{"cells":[{cell}],"metadata":{{}},"nbformat":4,"nbformat_minor":5}}"#)).unwrap();
+        std::fs::write(dir.join("broken.ipynb"), "{ not json").unwrap();
+        for (name, reading) in [("a.ipynb", true), ("broken.ipynb", false)] {
+            let path = dir.join(name);
+            let (e, cx) = cx.add_window_view(|_, cx| crate::editor::Editor::open(path, None, cx));
+            assert_eq!(e.read_with(cx, |e, _| e.reading), reading, "{name}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_notebook_reads_as_markdown() {
         let json = r##"{

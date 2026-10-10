@@ -979,6 +979,9 @@ impl Editor {
         editor.on_disk = Some(fingerprint(&text));
         editor.disk_stamp = disk_stamp(&editor.path.clone().unwrap_or_default());
         editor.encoding = encoding;
+        // A notebook opens as it reads, its cells (its JSON isn't written by hand: ⌘⇧V
+        // shows it); one that doesn't read as a notebook, as the text it is.
+        editor.reading = editor.is_notebook() && crate::notebook::to_markdown(&text).is_some();
         editor.reload_git_base(cx);
         if let Some(lsp) = lsp {
             editor.attach_lsp(lsp, cx);
