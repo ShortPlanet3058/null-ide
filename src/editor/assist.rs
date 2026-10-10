@@ -298,6 +298,15 @@ impl Editor {
         cx.notify();
     }
 
+    /// Text hidden in the file (see `invisible::without_hidden`) isn't sent: said, once.
+    fn say_hidden_left_out(&mut self, sent: &str, cx: &mut Context<Self>) {
+        let hidden = super::invisible::without_hidden(sent).1;
+        if hidden > 0 {
+            let message = format!("Hidden text in this file ({hidden} characters) is left out of what the AI reads.");
+            self.show_notice(self.selection.head, message, cx);
+        }
+    }
+
     fn file_context(&self, lines: &Range<usize>) -> String {
         let path = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into());
         format!(
@@ -327,6 +336,7 @@ impl Editor {
             user,
             ..Default::default()
         };
+        self.say_hidden_left_out(&request.user, cx);
         let mut events = ai::stream(cx.global::<Settings>().ai.clone(), request);
         let task = cx.spawn(async move |this, cx| {
             let mut text = String::new();
@@ -476,6 +486,7 @@ impl Editor {
             user,
             ..Default::default()
         };
+        self.say_hidden_left_out(&request.user, cx);
         let mut events = ai::stream(cx.global::<Settings>().ai.clone(), request);
         let task = cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {

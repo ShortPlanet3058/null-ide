@@ -460,6 +460,12 @@ pub fn strip_code_fence(text: &str) -> String {
 /// Asks the configured provider and calls `on_text` as the answer arrives.
 /// Blocking: run it off the UI thread. Errors are written for people, not logs.
 pub fn ask(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
+    // Text hidden in characters that show nothing isn't the person's to give the model.
+    let prompt = &Prompt {
+        system: crate::editor::invisible::without_hidden(&prompt.system).0,
+        user: crate::editor::invisible::without_hidden(&prompt.user).0,
+        ..prompt.clone()
+    };
     let started = std::time::Instant::now();
     let mut first = None;
     let result = ask_inner(settings, prompt, &mut |text| {
@@ -1059,6 +1065,12 @@ pub fn stream_fim(settings: AiSettings, fim: Fim) -> futures::channel::mpsc::Unb
             let started = std::time::Instant::now();
             let text_tx = tx.clone();
             let mut first = None;
+            // (Hidden text left out, as from any request.)
+            let fim = Fim {
+                prefix: crate::editor::invisible::without_hidden(&fim.prefix).0,
+                suffix: crate::editor::invisible::without_hidden(&fim.suffix).0,
+                ..fim
+            };
             let result = fill(&settings, &fim, &mut |text| {
                 first.get_or_insert_with(|| started.elapsed());
                 text_tx.unbounded_send(AiEvent::Text(text.to_string())).ok();
