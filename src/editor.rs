@@ -89,7 +89,7 @@ pub use rewrap::Rewrap;
 pub use structure::{
     CamelCase, ExpandSelection, GoToMatchingBracket, JoinLines, KebabCase, LowerCase, NewlineAbove, NewlineBelow,
     NextChange, PascalCase, PreviousChange, RemoveDuplicateLines, ReverseLines, ShrinkSelection, SnakeCase, SortLines,
-    TitleCase, UpperCase,
+    TitleCase, TrimTrailingWhitespace, UpperCase,
 };
 
 use crate::buffer::Buffer;
@@ -2994,9 +2994,13 @@ impl Editor {
         cx.notify();
     }
 
-    /// Indents with this from now on (the lines already there stay as they are).
+    /// Indents with this from now on, and the lines already there are made to (2 spaces
+    /// to 4, spaces to tabs).
     pub fn set_indent(&mut self, indent: IndentStyle, cx: &mut Context<Self>) {
-        self.style.indent = indent;
+        let from = std::mem::replace(&mut self.style.indent, indent);
+        if from != indent {
+            self.reindent_file(from, indent, cx);
+        }
         cx.notify();
     }
 
@@ -4401,6 +4405,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::reverse_lines))
             .on_action(cx.listener(Self::remove_duplicate_lines))
             .on_action(cx.listener(Self::sort_lines))
+            .on_action(cx.listener(Self::trim_trailing_whitespace))
             .on_action(cx.listener(Self::remove_invisible_characters))
             .on_action(cx.listener(Self::upper_case))
             .on_action(cx.listener(Self::lower_case))

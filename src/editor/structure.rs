@@ -26,7 +26,8 @@ actions!(
         KebabCase,
         TitleCase,
         NextChange,
-        PreviousChange
+        PreviousChange,
+        TrimTrailingWhitespace
     ]
 );
 
@@ -314,6 +315,62 @@ impl Editor {
         self.touch(cx);
     }
 
+    /// All the file's lines, but the empty one after its last line break (that break is the
+    /// last line's own).
+    fn all_lines(&self) -> Range<usize> {
+        let count = self.buffer.len_lines();
+        if count > 1 && self.buffer.line_len(count - 1) == 0 { 0..count - 1 } else { 0..count }
+    }
+
+    /// Spaces and tabs at the ends of the file's lines, gone (in one undo); the caret stays
+    /// on its line.
+    pub(super) fn trim_trailing_whitespace(
+        &mut self,
+        _: &TrimTrailingWhitespace,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let lines = self.all_lines();
+        let texts = self.line_texts(&lines);
+        let trimmed: Vec<String> = texts.iter().map(|t| t.trim_end_matches([' ', '\t']).to_string()).collect();
+        if trimmed == texts {
+            return;
+        }
+        let lengths: Vec<usize> = trimmed.iter().map(|t| t.chars().count()).collect();
+        self.rewrite_lines(lines, trimmed, move |(l, c)| (l, c.min(lengths.get(l).copied().unwrap_or(c))), cx);
+    }
+
+    /// The file's indentation, `from` levels made `to` ones (2 spaces to 4, spaces to
+    /// tabs), in one undo; what's left over (a space or two lining something up) stays.
+    pub(crate) fn reindent_file(
+        &mut self,
+        from: crate::file_style::Indent,
+        to: crate::file_style::Indent,
+        cx: &mut Context<Self>,
+    ) {
+        let lines = self.all_lines();
+        let texts = self.line_texts(&lines);
+        let mut moved: Vec<(usize, usize)> = Vec::with_capacity(texts.len());
+        let new: Vec<String> = texts
+            .iter()
+            .map(|text| {
+                let (line, old, new) = reindented(text, from, to);
+                moved.push((old, new));
+                line
+            })
+            .collect();
+        if new == texts {
+            return;
+        }
+        // The caret keeps its place in the text after the indentation (or in it, as far in).
+        let place = move |(l, c): (usize, usize)| match moved.get(l) {
+            Some(&(old, new)) if c >= old => (l, c - old + new),
+            Some(&(_, new)) => (l, c.min(new)),
+            None => (l, c),
+        };
+        self.rewrite_lines(lines, new, place, cx);
+    }
+
     /// The selected lines, in order (letters before case, then as written).
     pub(super) fn sort_lines(&mut self, _: &SortLines, _: &mut Window, cx: &mut Context<Self>) {
         self.reorder_lines(
@@ -443,6 +500,23 @@ fn join(lines: &[String]) -> (String, usize) {
     (joined, caret)
 }
 
+/// `line` with its indentation, counted in `from` levels, written in `to` ones; and how
+/// many characters the indentation was, and is.
+fn reindented(line: &str, from: crate::file_style::Indent, to: crate::file_style::Indent) -> (String, usize, usize) {
+    let rest = line.trim_start_matches([' ', '\t']);
+    let lead = &line[..line.len() - rest.len()];
+    // A line of only spaces is left as it is.
+    if rest.is_empty() || lead.is_empty() {
+        return (line.to_string(), lead.len(), lead.len());
+    }
+    let mut columns = 0;
+    for c in lead.chars() {
+        columns = if c == '\t' { (columns / from.width() + 1) * from.width() } else { columns + 1 };
+    }
+    let new_lead = to.unit().repeat(columns / from.width()) + &" ".repeat(columns % from.width());
+    (format!("{new_lead}{rest}"), lead.len(), new_lead.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,6 +592,35 @@ mod tests {
 
     fn selected(e: &Editor) -> String {
         e.buffer.slice(e.selection.range())
+    }
+
+    /// Trim Trailing Whitespace, the indentation made another, and ⌘/ on an empty line: each
+    /// one undo, the caret kept in its text.
+    #[gpui::test]
+    fn tidying_lines(cx: &mut TestAppContext) {
+        use crate::file_style::Indent;
+        let (e, cx) = editor(cx, "fn a() {  \n  if x {\t\n      y(1,\n        2);\n  }\n   \n}\n");
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(e.buffer.offset(1, 4));
+            e.trim_trailing_whitespace(&TrimTrailingWhitespace, window, cx);
+            assert_eq!(e.buffer.to_string(), "fn a() {\n  if x {\n      y(1,\n        2);\n  }\n\n}\n");
+            assert_eq!(e.buffer.point(e.selection.head), (1, 4));
+            // 2 spaces a level, to 4: the extra spaces lining `2` up stay extra.
+            e.style.indent = Indent::Spaces(2);
+            e.set_indent(Indent::Spaces(4), cx);
+            assert_eq!(e.buffer.to_string(), "fn a() {\n    if x {\n            y(1,\n                2);\n    }\n\n}\n");
+            assert_eq!(e.buffer.point(e.selection.head), (1, 6), "still after `if`");
+            e.set_indent(Indent::Tabs, cx);
+            assert_eq!(e.buffer.to_string(), "fn a() {\n\tif x {\n\t\t\ty(1,\n\t\t\t\t2);\n\t}\n\n}\n");
+            // One undo each.
+            e.step_history(true, cx);
+            assert_eq!(e.buffer.to_string(), "fn a() {\n    if x {\n            y(1,\n                2);\n    }\n\n}\n");
+            // ⌘/ on the empty line: a comment begins there.
+            e.selection = Selection::caret(e.buffer.offset(5, 0));
+            e.toggle_comment(cx);
+            assert_eq!(e.buffer.line_text(5), "// ");
+            assert_eq!(e.buffer.point(e.selection.head), (5, 3));
+        });
     }
 
     #[gpui::test]
