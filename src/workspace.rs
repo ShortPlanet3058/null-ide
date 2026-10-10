@@ -707,6 +707,8 @@ pub struct Workspace {
     pub quitting: bool,
     /// Unsaved work was just kept for next time: the backup stays.
     keeping_unsaved: bool,
+    /// Quitting (or closing the window) though a command runs in a terminal: said yes to.
+    stopping_commands: bool,
     /// Writing unsaved work to its backup, once typing pauses.
     backup_task: Option<Task<()>>,
     /// Saves waiting for a pause in typing, by editor.
@@ -900,6 +902,7 @@ impl Workspace {
             backup_task: None,
             quitting: false,
             keeping_unsaved: false,
+            stopping_commands: false,
             view_before_preview: None,
             ai_task: None,
             git_status: Vec::new(),
@@ -3398,6 +3401,32 @@ impl Workspace {
     /// Asks before discarding unsaved changes. Returns true when `action` can go ahead
     /// right away; otherwise it runs after the person answers.
     fn confirm_unsaved(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // A command still running in a terminal (a build, a server) stops with the window:
+        // asked about first.
+        if matches!(action, CloseAction::Quit | CloseAction::CloseWindow)
+            && !std::mem::take(&mut self.stopping_commands)
+            && let Some(message) = self.commands_running(cx)
+        {
+            let leave = if matches!(action, CloseAction::Quit) { "Quit" } else { "Close" };
+            let answer =
+                window.prompt(PromptLevel::Warning, &message, Some("It stops if you go on."), &[leave, "Cancel"], cx);
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(choice) = answer.await else { return };
+                this.update_in(cx, |this, window, cx| {
+                    if choice != 0 {
+                        if matches!(action, CloseAction::Quit) {
+                            cx.defer(crate::quit_cancelled);
+                        }
+                        return;
+                    }
+                    this.stopping_commands = true;
+                    this.confirm_unsaved(action, window, cx);
+                })
+                .ok();
+            })
+            .detach();
+            return false;
+        }
         let scope: Vec<Entity<Editor>> = match &action {
             CloseAction::CloseTabs(editors) => editors.clone(),
             _ => self.tabs.iter().map(|tab| tab.editor.clone()).collect(),
@@ -3856,6 +3885,12 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// What's running in the terminals, as said before quitting: "cargo is still running".
+    fn commands_running(&self, cx: &App) -> Option<String> {
+        let running: Vec<String> = self.terminals.iter().filter_map(|(t, _)| t.read(cx).running.clone()).collect();
+        still_running(&running)
     }
 
     /// Quits, after asking about unsaved changes (finishing the close quits).
@@ -8270,6 +8305,15 @@ fn moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
     Some(if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) })
 }
 
+/// What's said before quitting with these commands running in terminals.
+fn still_running(running: &[String]) -> Option<String> {
+    match running {
+        [] => None,
+        [one] => Some(format!("{one} is still running in the terminal")),
+        many => Some(format!("{} commands are still running in the terminals", many.len())),
+    }
+}
+
 #[derive(Clone)]
 enum CloseAction {
     Quit,
@@ -9574,6 +9618,16 @@ mod tests {
     }
 
     /// A terminal's menu: Copy only with something selected.
+    #[test]
+    fn quitting_says_what_still_runs() {
+        assert_eq!(still_running(&[]), None);
+        assert_eq!(still_running(&["cargo".into()]).as_deref(), Some("cargo is still running in the terminal"));
+        assert_eq!(
+            still_running(&["cargo".into(), "npm".into()]).as_deref(),
+            Some("2 commands are still running in the terminals")
+        );
+    }
+
     #[test]
     fn a_terminal_s_menu() {
         let labels = |selected| terminal_menu_items(selected).iter().map(|i| i.label).collect::<Vec<_>>();
