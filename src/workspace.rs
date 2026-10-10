@@ -165,6 +165,7 @@ actions!(
         CloseSavedTabs,
         ToggleMaximizeTerminal,
         AboutNull,
+        RecentNotices,
         SaveWithoutFormatting,
         UseNvidia,
         UseOllama,
@@ -730,6 +731,8 @@ pub struct Workspace {
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
+    /// The notices shown lately, newest last (Recent Notices lists them).
+    past_notices: Vec<(String, std::time::SystemTime)>,
     notice_task: Option<Task<()>>,
     /// A notice for when Null comes back to the front (a command finished meanwhile).
     notice_on_return: Option<String>,
@@ -950,6 +953,7 @@ impl Workspace {
             ignore_rules,
             key_prompt: None,
             notice: None,
+            past_notices: Vec::new(),
             notice_on_return: None,
             notice_task: None,
             focus_before_palette: None,
@@ -3908,6 +3912,29 @@ impl Workspace {
         still_running(&running)
     }
 
+    /// The notices shown lately, newest first, with when: one picked is copied.
+    fn recent_notices(&mut self, _: &RecentNotices, window: &mut Window, cx: &mut Context<Self>) {
+        if self.past_notices.is_empty() {
+            return self.show_notice("Nothing to say yet".into(), cx);
+        }
+        let seconds = |t: std::time::SystemTime| {
+            t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+        };
+        let now = seconds(std::time::SystemTime::now());
+        let locations = self
+            .past_notices
+            .iter()
+            .rev()
+            .map(|(said, at)| crate::palette::Location {
+                path: PathBuf::new(),
+                position: Default::default(),
+                text: format!("{said}\t{}", crate::git::ago(seconds(*at), now)),
+                kind: crate::palette::LocationKind::Notice,
+            })
+            .collect();
+        self.open_locations("Recent notices · ↵ copies one".into(), locations, window, cx);
+    }
+
     /// Null's name and version, where it comes from.
     fn about(&mut self, _: &AboutNull, window: &mut Window, cx: &mut Context<Self>) {
         let detail = format!("{}\n{}", env!("CARGO_PKG_DESCRIPTION"), env!("CARGO_PKG_REPOSITORY"));
@@ -4184,6 +4211,7 @@ impl Workspace {
             (View, "Split Terminal".into(), Box::new(SplitTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
             (App, "About Null".into(), Box::new(AboutNull)),
+            (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
         if self.active.is_some() {
@@ -5828,6 +5856,10 @@ impl Workspace {
     }
 
     fn show_notice(&mut self, message: String, cx: &mut Context<Self>) {
+        if self.past_notices.len() == 30 {
+            self.past_notices.remove(0);
+        }
+        self.past_notices.push((message.clone(), std::time::SystemTime::now()));
         self.notice = Some((message, Instant::now()));
         self.notice_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(4)).await;
@@ -9358,6 +9390,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::go_to_tab))
             .on_action(cx.listener(Self::toggle_maximize_terminal))
             .on_action(cx.listener(Self::about))
+            .on_action(cx.listener(Self::recent_notices))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
@@ -11773,6 +11806,15 @@ mod tests {
             let palette = palette.read(cx);
             assert_eq!(palette.kind(), PaletteKind::Locations);
             assert_eq!(palette.query(), "hel");
+        });
+        // Notices shown lately, newest first.
+        workspace.update_in(cx, |w, window, cx| {
+            w.close_palette(window, cx);
+            w.show_notice("first".into(), cx);
+            w.show_notice("second".into(), cx);
+            w.recent_notices(&RecentNotices, window, cx);
+            let (palette, _) = w.palette.as_ref().expect("a list open");
+            assert_eq!(palette.read(cx).location_texts(), ["second\tjust now", "first\tjust now"]);
         });
         std::fs::remove_dir_all(&dir).ok();
     }

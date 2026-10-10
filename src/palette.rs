@@ -106,6 +106,8 @@ pub enum LocationKind {
     FileChange(crate::ai_task::ChangeKind, usize, usize),
     /// A commit in a file's history: its subject, then (after a tab) who and when.
     Commit,
+    /// A notice shown lately: what it said, then (after a tab) when.
+    Notice,
 }
 
 /// A place in the code, with the text to show for it.
@@ -879,6 +881,12 @@ impl Palette {
         &self.query
     }
 
+    /// The places listed, as their text reads.
+    #[cfg(test)]
+    pub fn location_texts(&self) -> Vec<String> {
+        self.locations.iter().map(|l| l.text.clone()).collect()
+    }
+
     /// ⌘I while committing: the files that go in, for AI to write the message from.
     fn write_commit_message(&mut self, _: &WriteCommitMessage, _: &mut Window, cx: &mut Context<Self>) {
         if self.kind != PaletteKind::Commit || !cx.global::<Settings>().ai.enabled {
@@ -952,6 +960,12 @@ impl Palette {
                 }
             }
             Item::Line(line) => cx.emit(PaletteEvent::GoToLine(line)),
+            // A notice: what it said, copied.
+            Item::Location(i) if self.locations[i].kind == LocationKind::Notice => {
+                let said = self.locations[i].text.split('\t').next().unwrap_or("").to_string();
+                crate::system_clipboard::write(cx, gpui::ClipboardItem::new_string(said));
+                cx.emit(PaletteEvent::Dismissed)
+            }
             Item::Location(i) => {
                 let location = &self.locations[i];
                 cx.emit(PaletteEvent::OpenLocation(location.path.clone(), location.position))
@@ -1168,7 +1182,8 @@ impl Palette {
                     LocationKind::Reference
                     | LocationKind::Symbol(_)
                     | LocationKind::FileChange(..)
-                    | LocationKind::Commit => accent,
+                    | LocationKind::Commit
+                    | LocationKind::Notice => accent,
                 };
                 if let LocationKind::FileChange(kind, added, removed) = location.kind {
                     use crate::ai_task::ChangeKind;
@@ -1199,7 +1214,7 @@ impl Palette {
                         div().child(text).into_any_element(),
                         Some(div().text_color(dim).child(place).into_any_element()),
                     )
-                } else if location.kind == LocationKind::Commit {
+                } else if matches!(location.kind, LocationKind::Commit | LocationKind::Notice) {
                     // The subject, then who and when, faint.
                     let (subject, detail) = location.text.split_once('\t').unwrap_or((&location.text, ""));
                     let marked: Vec<_> =
