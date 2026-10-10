@@ -163,6 +163,10 @@ actions!(
         CloseAllTabs,
         CloseOtherTabs,
         CloseSavedTabs,
+        ToggleMaximizeTerminal,
+        AboutNull,
+        RecentNotices,
+        JoinSides,
         SaveWithoutFormatting,
         UseNvidia,
         UseOllama,
@@ -174,6 +178,11 @@ actions!(
         SetApiKey,
     ]
 );
+
+/// ⌘1…⌘8: the tab at that place on the side in use; ⌘9: its last one.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct GoToTab(pub usize);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Workspace");
@@ -232,6 +241,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
         KeyBinding::new("secondary--", DecreaseFontSize, ctx),
         KeyBinding::new("secondary-0", ResetFontSize, ctx),
+        KeyBinding::new("secondary-1", GoToTab(1), ctx),
+        KeyBinding::new("secondary-2", GoToTab(2), ctx),
+        KeyBinding::new("secondary-3", GoToTab(3), ctx),
+        KeyBinding::new("secondary-4", GoToTab(4), ctx),
+        KeyBinding::new("secondary-5", GoToTab(5), ctx),
+        KeyBinding::new("secondary-6", GoToTab(6), ctx),
+        KeyBinding::new("secondary-7", GoToTab(7), ctx),
+        KeyBinding::new("secondary-8", GoToTab(8), ctx),
+        KeyBinding::new("secondary-9", GoToTab(9), ctx),
         KeyBinding::new("secondary-shift-backspace", GoToLastEdit, ctx),
     ];
     if cfg!(target_os = "macos") {
@@ -534,6 +552,9 @@ impl Render for TabGhost {
 #[derive(Clone)]
 struct DraggedDivider;
 
+/// The terminal's top edge, dragged to make it taller or shorter.
+struct DraggedTerminalEdge;
+
 /// A terminal being named: which one, the field, and the watch on the field losing focus.
 struct TerminalRename {
     terminal: gpui::EntityId,
@@ -597,6 +618,10 @@ pub struct Workspace {
     switching: Option<usize>,
     /// How much of the width the left side takes when split (of the height, stacked).
     split_ratio: f32,
+    /// The terminal's height, as dragged (`TERMINAL_HEIGHT` until then); and whether it
+    /// takes all the room it can, over the code.
+    terminal_height: f32,
+    terminal_maximized: bool,
     /// The two sides one above the other, rather than side by side.
     stacked: bool,
     sidebar: Transition,
@@ -693,6 +718,8 @@ pub struct Workspace {
     pub quitting: bool,
     /// Unsaved work was just kept for next time: the backup stays.
     keeping_unsaved: bool,
+    /// Quitting (or closing the window) though a command runs in a terminal: said yes to.
+    stopping_commands: bool,
     /// Writing unsaved work to its backup, once typing pauses.
     backup_task: Option<Task<()>>,
     /// Saves waiting for a pause in typing, by editor.
@@ -705,6 +732,8 @@ pub struct Workspace {
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
+    /// The notices shown lately, newest last (Recent Notices lists them).
+    past_notices: Vec<(String, std::time::SystemTime)>,
     notice_task: Option<Task<()>>,
     /// A notice for when Null comes back to the front (a command finished meanwhile).
     notice_on_return: Option<String>,
@@ -851,6 +880,8 @@ impl Workspace {
             tabs: Vec::new(),
             shown: [None, None],
             split_ratio: 0.5,
+            terminal_height: TERMINAL_HEIGHT,
+            terminal_maximized: false,
             used: Vec::new(),
             switching: None,
             stacked: false,
@@ -886,6 +917,7 @@ impl Workspace {
             backup_task: None,
             quitting: false,
             keeping_unsaved: false,
+            stopping_commands: false,
             view_before_preview: None,
             ai_task: None,
             git_status: Vec::new(),
@@ -922,6 +954,7 @@ impl Workspace {
             ignore_rules,
             key_prompt: None,
             notice: None,
+            past_notices: Vec::new(),
             notice_on_return: None,
             notice_task: None,
             focus_before_palette: None,
@@ -1030,6 +1063,7 @@ impl Workspace {
             active: active.and_then(|p| tabs.iter().position(|t| t.path == p)),
             shown_right: right.and_then(|p| tabs.iter().position(|t| t.path == p)),
             split_ratio: self.is_split().then_some(self.split_ratio),
+            terminal_height: (self.terminal_height != TERMINAL_HEIGHT).then_some(self.terminal_height),
             stacked: self.is_split() && self.stacked,
             tabs,
             expanded: self.tree.read(cx).expanded_folders(),
@@ -1093,6 +1127,9 @@ impl Workspace {
         self.keep_pinned_first();
         if let Some(ratio) = session.split_ratio {
             self.split_ratio = ratio.clamp(0.2, 0.8);
+        }
+        if let Some(height) = session.terminal_height {
+            self.terminal_height = height.max(80.);
         }
         self.stacked = session.stacked;
         // What the right side showed, then the tab that had the keyboard.
@@ -2761,6 +2798,16 @@ impl Workspace {
     }
 
     /// Tabs on `side`, by index.
+    /// ⌘1…⌘9 (see `GoToTab`).
+    fn go_to_tab(&mut self, &GoToTab(n): &GoToTab, window: &mut Window, cx: &mut Context<Self>) {
+        let side = self.active.map_or(0, |a| self.tabs[a].side);
+        let tabs = self.side_tabs(side);
+        let at = if n >= 9 { tabs.last() } else { tabs.get(n.saturating_sub(1)) };
+        if let Some(&ix) = at {
+            self.show_tab(ix, true, window, cx);
+        }
+    }
+
     fn side_tabs(&self, side: usize) -> Vec<usize> {
         (0..self.tabs.len()).filter(|&i| self.tabs[i].side == side).collect()
     }
@@ -3300,6 +3347,53 @@ impl Workspace {
         self.show_tab(ix, true, window, cx);
     }
 
+    /// Join Sides: the second side's tabs after the first's, one side again (a file open on
+    /// both keeps one tab, its copy sharing the same text closing).
+    fn join_sides(&mut self, _: &JoinSides, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_split() {
+            return;
+        }
+        let active = self.active.map(|i| self.tabs[i].editor.clone());
+        let doubles: Vec<Entity<Editor>> = self
+            .tabs
+            .iter()
+            .filter(|t| t.side == 1)
+            .filter(|t| {
+                self.twins_of(&t.editor, cx)
+                    .iter()
+                    .any(|twin| self.tabs.iter().any(|o| o.side == 0 && &o.editor == twin))
+            })
+            .map(|t| t.editor.clone())
+            .collect();
+        // (Copies, not closed files: ⇧⌘T has nothing to bring back.)
+        let closed_before = self.recently_closed.len();
+        for double in &doubles {
+            if let Some(ix) = self.tabs.iter().position(|t| &t.editor == double) {
+                self.remove_tab(ix, window, cx);
+            }
+        }
+        self.recently_closed.truncate(closed_before);
+        // (One passing tab at most: the one already on this side stays so.)
+        let passing_here = self.tabs.iter().any(|t| t.side == 0 && t.passing);
+        for tab in &mut self.tabs {
+            tab.passing &= tab.side == 0 || !passing_here;
+            tab.side = 0;
+        }
+        self.shown = [None, None];
+        self.keep_pinned_first();
+        // The tab worked in stays the one shown (its twin, if it was the copy that closed).
+        let target = active
+            .clone()
+            .filter(|a| !doubles.contains(a))
+            .or_else(|| active.as_ref().and_then(|a| self.twins_of(a, cx).into_iter().next()));
+        let ix = target.and_then(|t| self.tabs.iter().position(|tab| tab.editor == t)).unwrap_or(0);
+        if ix < self.tabs.len() {
+            self.show_tab(ix, true, window, cx);
+        }
+        self.schedule_session_save(cx);
+        cx.notify();
+    }
+
     /// A tab dropped on `side`: before tab `before`, or at the end of that side.
     fn drop_tab(
         &mut self,
@@ -3374,6 +3468,32 @@ impl Workspace {
     /// Asks before discarding unsaved changes. Returns true when `action` can go ahead
     /// right away; otherwise it runs after the person answers.
     fn confirm_unsaved(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // A command still running in a terminal (a build, a server) stops with the window:
+        // asked about first.
+        if matches!(action, CloseAction::Quit | CloseAction::CloseWindow)
+            && !std::mem::take(&mut self.stopping_commands)
+            && let Some(message) = self.commands_running(cx)
+        {
+            let leave = if matches!(action, CloseAction::Quit) { "Quit" } else { "Close" };
+            let answer =
+                window.prompt(PromptLevel::Warning, &message, Some("It stops if you go on."), &[leave, "Cancel"], cx);
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(choice) = answer.await else { return };
+                this.update_in(cx, |this, window, cx| {
+                    if choice != 0 {
+                        if matches!(action, CloseAction::Quit) {
+                            cx.defer(crate::quit_cancelled);
+                        }
+                        return;
+                    }
+                    this.stopping_commands = true;
+                    this.confirm_unsaved(action, window, cx);
+                })
+                .ok();
+            })
+            .detach();
+            return false;
+        }
         let scope: Vec<Entity<Editor>> = match &action {
             CloseAction::CloseTabs(editors) => editors.clone(),
             _ => self.tabs.iter().map(|tab| tab.editor.clone()).collect(),
@@ -3834,6 +3954,52 @@ impl Workspace {
         .detach();
     }
 
+    /// What's running in the terminals, as said before quitting: "cargo is still running".
+    pub fn commands_running(&self, cx: &App) -> Option<String> {
+        let running: Vec<String> = self.terminals.iter().filter_map(|(t, _)| t.read(cx).running.clone()).collect();
+        still_running(&running)
+    }
+
+    /// The notices shown lately, newest first, with when: one picked is copied.
+    fn recent_notices(&mut self, _: &RecentNotices, window: &mut Window, cx: &mut Context<Self>) {
+        if self.past_notices.is_empty() {
+            self.show_notice("Nothing to say yet".into(), cx);
+            self.past_notices.clear();
+            return;
+        }
+        let seconds =
+            |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let now = seconds(std::time::SystemTime::now());
+        let locations = self
+            .past_notices
+            .iter()
+            .rev()
+            .map(|(said, at)| crate::palette::Location {
+                path: PathBuf::new(),
+                position: Default::default(),
+                text: format!("{said}\t{}", crate::git::ago(seconds(*at), now)),
+                kind: crate::palette::LocationKind::Notice,
+            })
+            .collect();
+        self.open_locations("Recent notices · ↵ copies one".into(), locations, window, cx);
+    }
+
+    /// Null's name and version, where it comes from.
+    fn about(&mut self, _: &AboutNull, window: &mut Window, cx: &mut Context<Self>) {
+        let detail = format!("{}\n{}", env!("CARGO_PKG_DESCRIPTION"), env!("CARGO_PKG_REPOSITORY"));
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &format!("Null {}", env!("CARGO_PKG_VERSION")),
+            Some(&detail),
+            &["OK"],
+            cx,
+        );
+        cx.spawn(async move |_, _| {
+            answer.await.ok();
+        })
+        .detach();
+    }
+
     /// Quits, after asking about unsaved changes (finishing the close quits).
     pub fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm_unsaved(CloseAction::Quit, window, cx);
@@ -4084,12 +4250,22 @@ impl Workspace {
             (Go, "Previous Conflict".into(), Box::new(crate::editor::PreviousConflict)),
             (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
             (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
+            (
+                View,
+                toggle(self.terminal_maximized, "Restore Terminal Size", "Maximize Terminal"),
+                Box::new(ToggleMaximizeTerminal),
+            ),
             (View, "New Terminal".into(), Box::new(NewTerminal)),
             (View, "Next Terminal".into(), Box::new(NextTerminal)),
             (View, "Split Terminal".into(), Box::new(SplitTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
+            (App, "About Null".into(), Box::new(AboutNull)),
+            (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
+        if self.is_split() {
+            commands.push((View, "Join Sides".into(), Box::new(JoinSides)));
+        }
         if self.active.is_some() {
             commands.extend([
                 (File, "Save".into(), Box::new(Save) as Box<dyn Action>),
@@ -4977,7 +5153,7 @@ impl Workspace {
         &mut self,
         query: &crate::search::SearchQuery,
         replacement: &str,
-        targets: &[(PathBuf, Option<usize>)],
+        targets: &[(PathBuf, Option<Vec<usize>>)],
         cx: &mut Context<Self>,
     ) {
         let (mut replaced, mut files, mut failed) = (0, 0, Vec::new());
@@ -4989,7 +5165,7 @@ impl Workspace {
                     let count = editor.update(cx, |editor, cx| {
                         let text = editor.buffer.to_string();
                         let rope = editor.buffer.rope().clone();
-                        let edits: Vec<_> = crate::project_search::replacements(&text, query, replacement, *line)
+                        let edits: Vec<_> = crate::project_search::replacements(&text, query, replacement, line.as_deref())
                             .into_iter()
                             .map(|(r, new)| (rope.byte_to_char(r.start)..rope.byte_to_char(r.end), new))
                             .collect();
@@ -5008,7 +5184,7 @@ impl Workspace {
                         failed.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                         continue;
                     };
-                    let edits = crate::project_search::replacements(&text, query, replacement, *line);
+                    let edits = crate::project_search::replacements(&text, query, replacement, line.as_deref());
                     if edits.is_empty() {
                         continue;
                     }
@@ -5732,6 +5908,10 @@ impl Workspace {
     }
 
     fn show_notice(&mut self, message: String, cx: &mut Context<Self>) {
+        if self.past_notices.len() == 30 {
+            self.past_notices.remove(0);
+        }
+        self.past_notices.push((message.clone(), std::time::SystemTime::now()));
         self.notice = Some((message, Instant::now()));
         self.notice_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(4)).await;
@@ -6674,10 +6854,23 @@ impl Workspace {
         }
     }
 
+    /// The terminal as tall as it can be (over the code), or back to its height; shown first
+    /// if it was hidden.
+    fn toggle_maximize_terminal(&mut self, _: &ToggleMaximizeTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal_open.on {
+            self.toggle_terminal(&ToggleTerminal, window, cx);
+            self.terminal_maximized = true;
+        } else {
+            self.terminal_maximized = !self.terminal_maximized;
+        }
+        cx.notify();
+    }
+
     fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_open.on {
             let had_focus = self.terminal().is_some_and(|t| t.focus_handle(cx).is_focused(window));
             self.terminal_open.set(false, TERMINAL_SLIDE, TERMINAL_SLIDE);
+            self.terminal_maximized = false;
             if had_focus {
                 self.focus_main(window, cx);
             }
@@ -6785,7 +6978,7 @@ impl Workspace {
         path.trim_end_matches('/').rsplit('/').next().unwrap_or("").trim()
     }
 
-    fn render_terminal_panel(&self, height: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_terminal_panel(&self, height: f32, full: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
         let terminal = self.terminal()?;
         if height < 0.5 {
             return None;
@@ -6927,7 +7120,26 @@ impl Workspace {
                 .border_t_1()
                 .border_color(theme.hairline)
                 .bg(theme.background)
-                .child(div().h(px(TERMINAL_HEIGHT)).flex().flex_col().child(header).child(match self.shown_pair() {
+                .relative()
+                // Its top edge: drag it to make it taller or shorter; a double-click makes it
+                // as tall as it can be, and back.
+                .child(
+                    div()
+                        .id("terminal-edge")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(4.))
+                        .cursor_row_resize()
+                        .on_drag(DraggedTerminalEdge, |_, _, _, cx| cx.new(|_| gpui::EmptyView))
+                        .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                            if event.click_count() == 2 {
+                                this.toggle_maximize_terminal(&ToggleMaximizeTerminal, window, cx);
+                            }
+                        })),
+                )
+                .child(div().h(px(full)).flex().flex_col().child(header).child(match self.shown_pair() {
                     // Two side by side, a click in one making it the current.
                     Some((left, right)) => {
                         let pane = |terminal: Entity<TerminalView>| {
@@ -7529,6 +7741,7 @@ impl Workspace {
                 let resting = shown && !active;
                 let dirty = editor.buffer.is_dirty();
                 let missing = editor.missing;
+                let read_only = editor.read_only;
                 let group = format!("tab-{ix}");
                 let pinned = tab.pinned;
                 let passing = tab.passing && cx.global::<Settings>().preview_tabs;
@@ -7629,6 +7842,17 @@ impl Workspace {
                                     .when(passing, |d| d.italic())
                                     .child(name),
                             )
+                            // Can't be written (its permissions): a lock, faintly.
+                            .when(read_only, |d| {
+                                d.child(
+                                    svg()
+                                        .path("icons/lock.svg")
+                                        .size(px(11.))
+                                        .flex_none()
+                                        .mt(px(3.))
+                                        .text_color(theme.faint),
+                                )
+                            })
                             .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
                     )
                     .child(close)
@@ -8246,6 +8470,15 @@ fn moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
     Some(if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) })
 }
 
+/// What's said before quitting with these commands running in terminals.
+fn still_running(running: &[String]) -> Option<String> {
+    match running {
+        [] => None,
+        [one] => Some(format!("{one} is still running in the terminal")),
+        many => Some(format!("{} commands are still running in the terminals", many.len())),
+    }
+}
+
 #[derive(Clone)]
 enum CloseAction {
     Quit,
@@ -8403,7 +8636,10 @@ impl Render for Workspace {
         let terminal_panel = match debug_panel {
             Some(panel) => Some(panel),
             None => {
-                (!self.focus_mode).then(|| self.render_terminal_panel(TERMINAL_HEIGHT * terminal_shown, cx)).flatten()
+                // As dragged, or maximized: all the room but a little of the code's.
+                let room = f32::from(window.viewport_size().height) - 170.;
+                let full = if self.terminal_maximized { room } else { self.terminal_height.min(room) }.max(80.);
+                (!self.focus_mode).then(|| self.render_terminal_panel(full * terminal_shown, full, cx)).flatten()
             }
         };
         // One editor, or two side by side, each side making its tab current when clicked into.
@@ -9204,6 +9440,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::go_to_tab))
+            .on_action(cx.listener(Self::toggle_maximize_terminal))
+            .on_action(cx.listener(Self::about))
+            .on_action(cx.listener(Self::recent_notices))
+            .on_action(cx.listener(Self::join_sides))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
@@ -9290,6 +9531,17 @@ impl Render for Workspace {
                         .min_w_0()
                         .flex()
                         .flex_col()
+                        .on_drag_move::<DraggedTerminalEdge>(cx.listener(
+                            |this, event: &DragMoveEvent<DraggedTerminalEdge>, _, cx| {
+                                let height = f32::from(event.bounds.bottom() - event.event.position.y);
+                                // (As the drawing has it: some of the code always shows.)
+                                let most = f32::from(event.bounds.size.height) - 100.;
+                                this.terminal_height = height.clamp(80., most.max(80.));
+                                this.terminal_maximized = false;
+                                this.schedule_session_save(cx);
+                                cx.notify();
+                            },
+                        ))
                         .child(div().flex_1().min_h_0().child(body))
                         .children(terminal_panel),
                 ),
@@ -9549,6 +9801,16 @@ mod tests {
     }
 
     /// A terminal's menu: Copy only with something selected.
+    #[test]
+    fn quitting_says_what_still_runs() {
+        assert_eq!(still_running(&[]), None);
+        assert_eq!(still_running(&["cargo".into()]).as_deref(), Some("cargo is still running in the terminal"));
+        assert_eq!(
+            still_running(&["cargo".into(), "npm".into()]).as_deref(),
+            Some("2 commands are still running in the terminals")
+        );
+    }
+
     #[test]
     fn a_terminal_s_menu() {
         let labels = |selected| terminal_menu_items(selected).iter().map(|i| i.label).collect::<Vec<_>>();
@@ -11524,6 +11786,63 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// ⌘2 shows the second tab, ⌘9 the last.
+    #[gpui::test]
+    fn number_keys_go_to_tabs(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("tab-numbers");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                w.open_file(dir.join(name), window, cx);
+            }
+        });
+        let shown = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.active_editor().map(|e| e.read(cx).file_name()).unwrap_or_default())
+        };
+        cx.simulate_keystrokes("cmd-2");
+        assert_eq!(shown(cx), "b.txt");
+        cx.simulate_keystrokes("cmd-9");
+        assert_eq!(shown(cx), "c.txt");
+        cx.simulate_keystrokes("cmd-1");
+        assert_eq!(shown(cx), "a.txt");
+        // Two sides joined: one again, a file open on both keeping one tab.
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_on_other_side(window, cx);
+            assert!(w.is_split());
+            w.join_sides(&JoinSides, window, cx);
+            assert!(!w.is_split());
+            assert_eq!(w.tabs.len(), 3, "the copy closed");
+            assert_eq!(w.active_editor().map(|e| e.read(cx).file_name()).as_deref(), Some("a.txt"));
+        });
+        // A file that can't be written says so (its tab shows a lock).
+        let locked = dir.join("locked.txt");
+        std::fs::write(&locked, "x").unwrap();
+        let mut permissions = std::fs::metadata(&locked).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&locked, permissions.clone()).unwrap();
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(locked.clone(), window, cx);
+            assert!(w.active_editor().unwrap().read(cx).read_only);
+            assert!(!w.tabs[0].editor.read(cx).read_only);
+        });
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&locked, permissions).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// `@` typed in ⌘P: the open file's symbols, what follows it kept as the search.
     #[gpui::test]
     fn at_in_the_files_lists_the_file_s_symbols(cx: &mut gpui::TestAppContext) {
@@ -11551,6 +11870,15 @@ mod tests {
             let palette = palette.read(cx);
             assert_eq!(palette.kind(), PaletteKind::Locations);
             assert_eq!(palette.query(), "hel");
+        });
+        // Notices shown lately, newest first.
+        workspace.update_in(cx, |w, window, cx| {
+            w.close_palette(window, cx);
+            w.show_notice("first".into(), cx);
+            w.show_notice("second".into(), cx);
+            w.recent_notices(&RecentNotices, window, cx);
+            let (palette, _) = w.palette.as_ref().expect("a list open");
+            assert_eq!(palette.read(cx).location_texts(), ["second\tjust now", "first\tjust now"]);
         });
         std::fs::remove_dir_all(&dir).ok();
     }

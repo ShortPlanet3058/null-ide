@@ -15,6 +15,8 @@ pub struct Session {
     pub shown_right: Option<usize>,
     /// How much of the width the left side took, when split (of the height, stacked).
     pub split_ratio: Option<f32>,
+    /// The terminal's height, when dragged to another.
+    pub terminal_height: Option<f32>,
     /// Whether the two sides were one above the other.
     pub stacked: bool,
     /// Folders expanded in the file tree.
@@ -309,6 +311,24 @@ fn remember_in(file: &Path, root: &Path) {
     }
 }
 
+/// Takes `root` off the recent projects (it stays on disk).
+pub fn forget_project(root: &Path) {
+    if let Some(file) = recent_projects_file() {
+        forget_in(&file, root);
+    }
+}
+
+fn forget_in(file: &Path, root: &Path) {
+    let mut recent = read_recent(file);
+    let before = recent.len();
+    recent.retain(|p| p != root);
+    if recent.len() != before
+        && let Ok(text) = serde_json::to_string_pretty(&recent)
+    {
+        std::fs::write(file, text).ok();
+    }
+}
+
 /// Projects opened lately, most recent first, that are still there.
 pub fn recent_projects() -> Vec<PathBuf> {
     let Some(file) = recent_projects_file() else { return Vec::new() };
@@ -377,6 +397,9 @@ mod tests {
             remember_in(&file, Path::new(p));
         }
         assert_eq!(read_recent(&file), [PathBuf::from("/c"), PathBuf::from("/a"), PathBuf::from("/b")]);
+        // One taken off the list: the others stay, in order.
+        forget_in(&file, Path::new("/a"));
+        assert_eq!(read_recent(&file), [PathBuf::from("/c"), PathBuf::from("/b")]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

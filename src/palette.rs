@@ -32,7 +32,8 @@ actions!(
         AdjustLeft,
         AdjustRight,
         ToggleCommitFile,
-        WriteCommitMessage
+        WriteCommitMessage,
+        ForgetProject
     ]
 );
 
@@ -53,6 +54,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-i", WriteCommitMessage, Some("Palette && committing")),
         KeyBinding::new("left", AdjustLeft, adjusting),
         KeyBinding::new("right", AdjustRight, adjusting),
+        // In the recent projects, ⌘⌫ takes the one picked off the list.
+        KeyBinding::new("secondary-backspace", ForgetProject, Some("(Palette && projects) > TextInput")),
     ]);
 }
 
@@ -103,6 +106,8 @@ pub enum LocationKind {
     FileChange(crate::ai_task::ChangeKind, usize, usize),
     /// A commit in a file's history: its subject, then (after a tab) who and when.
     Commit,
+    /// A notice shown lately: what it said, then (after a tab) when.
+    Notice,
 }
 
 /// A place in the code, with the text to show for it.
@@ -834,6 +839,21 @@ impl Palette {
         self.adjust(1, cx);
     }
 
+    /// ⌘⌫ in the recent projects: with something typed, as in any field; with nothing
+    /// typed, the project picked leaves the list (the folder itself stays where it is).
+    fn forget_project(&mut self, _: &ForgetProject, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.query.is_empty() {
+            return cx.propagate();
+        }
+        let Some(Item::Project(i)) = self.selected_item() else { return };
+        let project = self.projects.remove(i);
+        crate::session::forget_project(&project);
+        let selected = self.selected;
+        self.update_rows(cx);
+        self.selected = selected.min(self.rows.len().saturating_sub(1));
+        cx.notify();
+    }
+
     /// ⌘↵: a recent project in a window of its own; anything else as ↵ does.
     fn confirm_aside(&mut self, _: &ConfirmAside, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(Item::Project(i)) = self.selected_item() {
@@ -859,6 +879,12 @@ impl Palette {
     #[cfg(test)]
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    /// The places listed, as their text reads.
+    #[cfg(test)]
+    pub fn location_texts(&self) -> Vec<String> {
+        self.locations.iter().map(|l| l.text.clone()).collect()
     }
 
     /// ⌘I while committing: the files that go in, for AI to write the message from.
@@ -934,6 +960,12 @@ impl Palette {
                 }
             }
             Item::Line(line) => cx.emit(PaletteEvent::GoToLine(line)),
+            // A notice: what it said, copied.
+            Item::Location(i) if self.locations[i].kind == LocationKind::Notice => {
+                let said = self.locations[i].text.split('\t').next().unwrap_or("").to_string();
+                crate::system_clipboard::write(cx, gpui::ClipboardItem::new_string(said));
+                cx.emit(PaletteEvent::Dismissed)
+            }
             Item::Location(i) => {
                 let location = &self.locations[i];
                 cx.emit(PaletteEvent::OpenLocation(location.path.clone(), location.position))
@@ -1150,7 +1182,8 @@ impl Palette {
                     LocationKind::Reference
                     | LocationKind::Symbol(_)
                     | LocationKind::FileChange(..)
-                    | LocationKind::Commit => accent,
+                    | LocationKind::Commit
+                    | LocationKind::Notice => accent,
                 };
                 if let LocationKind::FileChange(kind, added, removed) = location.kind {
                     use crate::ai_task::ChangeKind;
@@ -1181,7 +1214,7 @@ impl Palette {
                         div().child(text).into_any_element(),
                         Some(div().text_color(dim).child(place).into_any_element()),
                     )
-                } else if location.kind == LocationKind::Commit {
+                } else if matches!(location.kind, LocationKind::Commit | LocationKind::Notice) {
                     // The subject, then who and when, faint.
                     let (subject, detail) = location.text.split_once('\t').unwrap_or((&location.text, ""));
                     let marked: Vec<_> =
@@ -1331,8 +1364,8 @@ impl Palette {
             PaletteKind::Commit if self.left_out.is_empty() => "↵ commit",
             PaletteKind::Commit => "↵ commit these",
             PaletteKind::Run => "↵ run",
-            PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window",
-            PaletteKind::Projects => "↵ open · Ctrl+↵ new window",
+            PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window · ⌘⌫ off the list",
+            PaletteKind::Projects => "↵ open · Ctrl+↵ new window · Ctrl+⌫ off the list",
             PaletteKind::Branch => match self.selected_item() {
                 Some(Item::NewBranch) => "↵ create",
                 _ => "↵ switch",
@@ -1524,6 +1557,9 @@ impl Render for Palette {
         if self.kind == PaletteKind::Commit {
             context.add("committing");
         }
+        if self.kind == PaletteKind::Projects {
+            context.add("projects");
+        }
         let theme = cx.global::<Theme>();
         div()
             .key_context(context)
@@ -1535,6 +1571,7 @@ impl Render for Palette {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::toggle_commit_file))
             .on_action(cx.listener(Self::confirm_aside))
+            .on_action(cx.listener(Self::forget_project))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::adjust_left))
             .on_action(cx.listener(Self::adjust_right))
