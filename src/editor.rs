@@ -555,6 +555,8 @@ pub struct Editor {
     pub disk_changed: bool,
     /// Set while saving by itself (see `save_by_itself`).
     saving_by_itself: bool,
+    /// Set while saving as it is (see `save_as_is`).
+    saving_as_is: bool,
     /// What the file last held on disk, as far as Null knows, to recognise it moved.
     pub on_disk: Option<Fingerprint>,
     /// The file's size and time when `on_disk` was taken: the same still, it wasn't
@@ -840,6 +842,7 @@ impl Editor {
             missing: false,
             disk_changed: false,
             saving_by_itself: false,
+            saving_as_is: false,
             on_disk: None,
             disk_stamp: None,
             encoding: Default::default(),
@@ -3010,6 +3013,15 @@ impl Editor {
         saved
     }
 
+    /// "Save Without Formatting": written exactly as it is, not formatted and not tidied
+    /// (spaces at line ends, the final line break), as a one-off.
+    pub fn save_as_is(&mut self, cx: &mut Context<Self>) -> bool {
+        self.saving_as_is = true;
+        let saved = self.save_to_disk(cx);
+        self.saving_as_is = false;
+        saved
+    }
+
     pub fn save_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
         // Nothing to write: what's shown is the file itself.
         if self.preview.is_some() {
@@ -3042,8 +3054,10 @@ impl Editor {
                 return false;
             }
         }
-        let by_itself = self.saving_by_itself;
-        self.tidy_for_save(by_itself, cx);
+        if !self.saving_as_is {
+            let by_itself = self.saving_by_itself;
+            self.tidy_for_save(by_itself, cx);
+        }
         let Some(path) = &self.path else { return false };
         // Deleted on disk with its folder: saving puts both back.
         if self.missing
