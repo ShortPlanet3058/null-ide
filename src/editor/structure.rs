@@ -654,6 +654,19 @@ mod tests {
         e.buffer.slice(e.selection.range())
     }
 
+    /// Fold with lines selected: those lines, behind the first; a run of comments folds too.
+    #[gpui::test]
+    fn selected_lines_and_comment_runs_fold(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "// a\n// b\n// c\nfn f() {\n    1;\n    2;\n    3;\n}\n");
+        e.update_in(cx, |e, window, cx| {
+            assert!(e.foldable().contains(&(0..3)), "the comments");
+            e.selection = Selection { anchor: e.buffer.offset(4, 0), head: e.buffer.offset(6, 2) };
+            e.fold(&crate::editor::fold::Fold, window, cx);
+            assert!(e.is_folded(4));
+            assert_eq!(e.buffer.point(e.selection.head).0, 4, "the caret out of what's hidden");
+        });
+    }
+
     /// Select to Matching Bracket: the pair around the caret, then the one around that.
     /// Duplicate Selection: the copy just after, selected; with nothing selected, the line.
     #[gpui::test]

@@ -1,12 +1,56 @@
 //! Folding: a block's inner lines hidden behind its first line, which ends in "⋯". The
 //! closing line stays, so the shape of the code still shows. Regions come from the
-//! syntax tree; a fold opens again as soon as the caret goes inside it.
+//! syntax tree, and runs of comment or import lines; lines selected fold too. A fold
+//! opens again as soon as the caret goes inside it.
 
 use super::Editor;
 use gpui::{App, Context, KeyBinding, Window, actions};
 use std::ops::Range;
 
 actions!(fold, [Fold, Unfold, FoldAll, UnfoldAll, FoldLevel1, FoldLevel2, FoldLevel3]);
+
+/// What starts a line that imports something, in the languages that do it line by line.
+const IMPORTS: [&str; 7] = ["use ", "pub use ", "import ", "from ", "#include ", "#import ", "using "];
+/// A run of comment or import lines this long or longer can fold.
+const RUN: usize = 3;
+
+/// Runs of lines all comments (starting with `comment`) or all imports, as regions that
+/// fold to their first line: from it to the line after the run.
+fn runs<'a>(lines: impl Iterator<Item = &'a str>, comment: Option<&str>) -> Vec<Range<usize>> {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Kind {
+        Comment,
+        Import,
+    }
+    let mut out = Vec::new();
+    let mut run: Option<(usize, usize, Kind)> = None;
+    let close = |run: Option<(usize, usize, Kind)>, out: &mut Vec<Range<usize>>| {
+        if let Some((first, last, _)) = run
+            && last + 1 - first >= RUN
+        {
+            out.push(first..last + 1);
+        }
+    };
+    for (i, line) in lines.enumerate() {
+        let text = line.trim_start();
+        let kind = if comment.is_some_and(|c| text.starts_with(c)) {
+            Some(Kind::Comment)
+        } else if IMPORTS.iter().any(|k| text.starts_with(k)) {
+            Some(Kind::Import)
+        } else {
+            None
+        };
+        run = match (run, kind) {
+            (Some((first, _, was)), Some(kind)) if was == kind => Some((first, i, kind)),
+            (before, kind) => {
+                close(before, &mut out);
+                kind.map(|kind| (i, i, kind))
+            }
+        };
+    }
+    close(run, &mut out);
+    out
+}
 
 /// How deep each of `regions` (sorted by start) is: 0 for one inside no other.
 fn depths(regions: &[Range<usize>]) -> Vec<usize> {
@@ -69,7 +113,7 @@ impl Editor {
             // A language without a grammar (Swift, Ruby…): its blocks by indentation.
             let basic =
                 self.basic_syntax().is_some() && self.buffer.rope().len_bytes() <= crate::basic_syntax::MAX_BYTES;
-            let ranges = match &mut self.highlighter {
+            let mut ranges = match &mut self.highlighter {
                 Some(highlighter) => {
                     highlighter.sync(&self.buffer);
                     highlighter.fold_ranges()
@@ -80,6 +124,23 @@ impl Editor {
                 }
                 None => Vec::new(),
             };
+            // In code: runs of comment lines, and of imports, fold too (not one the syntax
+            // folds already). Only each line's start is looked at.
+            if (self.highlighter.is_some() || basic) && !self.is_prose() {
+                let comment = self.comment_marks().and_then(|(line, _)| line);
+                let starts: Vec<String> = self
+                    .buffer
+                    .rope()
+                    .lines()
+                    .map(|l| l.chars().skip_while(|c| *c == ' ' || *c == '\t').take(12).collect())
+                    .collect();
+                for run in runs(starts.iter().map(String::as_str), comment) {
+                    if run.end < self.buffer.len_lines() && !ranges.iter().any(|r| r.start == run.start) {
+                        ranges.push(run);
+                    }
+                }
+                ranges.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
+            }
             self.folds.foldable = Some((revision, ranges));
         }
         &self.folds.foldable.as_ref().unwrap().1
@@ -113,6 +174,12 @@ impl Editor {
     }
 
     pub(super) fn fold(&mut self, _: &Fold, _: &mut Window, cx: &mut Context<Self>) {
+        // Lines selected: those fold, behind the first.
+        let range = self.selection.range();
+        let (first, last) = (self.buffer.point(range.start).0, self.buffer.point(range.end).0);
+        if last > first {
+            return self.set_folded(first..last + 1, true, cx);
+        }
         let line = self.buffer.point(self.selection.head).0;
         let region = match self.region_at(line) {
             Some(region) if !self.folds.folded.contains(&region) => Some(region),
@@ -284,6 +351,14 @@ fn hidden_lines(folded: &[Range<usize>]) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runs_of_comments_and_imports_fold() {
+        let lines = ["use a;", "use b;", "use c;", "", "// one", "// two", "fn f() {}", "// a", "// b", "// c", "x"];
+        assert_eq!(runs(lines.into_iter(), Some("//")), vec![0..3, 7..10]);
+        // A run of two, or of two kinds: no.
+        assert!(runs(["// a", "use b;", "// c"].into_iter(), Some("//")).is_empty());
+    }
 
     #[test]
     fn nested_folds_hide_the_outer_lines_once() {
