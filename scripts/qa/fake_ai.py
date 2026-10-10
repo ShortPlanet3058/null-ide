@@ -62,12 +62,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            # A few characters at a time, as a model writes.
+            # A few characters at a time, as a model writes ("slowly" in the request: slowly,
+            # to look at it writing).
+            pause = 0.5 if "slowly" in user else 0.02
             for i in range(0, len(text), 6):
                 chunk = {"choices": [{"delta": {"content": text[i : i + 6]}}]}
-                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-                self.wfile.flush()
-                time.sleep(0.02)
+                try:
+                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                    self.wfile.flush()
+                except OSError:
+                    return  # Stopped listening (cancelled).
+                time.sleep(pause)
             self.wfile.write(b"data: [DONE]\n\n")
             return
         if self.path.endswith("/api/generate"):
