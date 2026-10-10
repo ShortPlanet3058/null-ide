@@ -559,9 +559,9 @@ impl TerminalView {
                 cx.emit(TerminalEvent::TitleChanged);
             }
             TermEvent::PtyWrite(text) => self.write(text.into_bytes()),
-            TermEvent::ClipboardStore(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            TermEvent::ClipboardStore(_, text) => crate::system_clipboard::write(cx, ClipboardItem::new_string(text)),
             TermEvent::ClipboardLoad(_, format) => {
-                let text = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+                let text = crate::system_clipboard::read(cx).and_then(|item| item.text()).unwrap_or_default();
                 self.write(format(&text).into_bytes());
             }
             TermEvent::TextAreaSizeRequest(format) => {
@@ -644,12 +644,12 @@ impl TerminalView {
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.term.lock().selection_to_string().filter(|t| !t.is_empty()) {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            crate::system_clipboard::write(cx, ClipboardItem::new_string(text));
         }
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        let Some(text) = crate::system_clipboard::read(cx).and_then(|item| item.text()) else { return };
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         // No escape characters: pasted text could otherwise end bracketed paste early and run commands.
         let text = text.replace('\x1b', "").replace("\r\n", "\r").replace('\n', "\r");

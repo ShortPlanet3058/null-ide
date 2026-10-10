@@ -8,7 +8,10 @@
 //! `terminal` for the terminal), `run <command>` (in the
 //! terminal), `wait <ms>`, `rows` (the caret line's rows as drawn, with what's after its
 //! text, to stderr), `shot <name>` (a picture now, `<name>.png` beside the last one),
-//! `ready`. A line starting with `#` is a note.
+//! `ready` (the last: steps after it aren't done). A line starting with `#` is a note.
+//!
+//! A run copies to and pastes from a clipboard of its own, never reads or changes the
+//! keychain, and installs nothing (see `system_clipboard::kept_apart`).
 
 use crate::workspace::Workspace;
 use gpui::{App, AppContext as _, Keystroke, Modifiers};
@@ -23,6 +26,8 @@ pub fn run(cx: &mut App) {
     cx.spawn(async move |cx| {
         // The window first: opened, drawn, its files read.
         cx.background_executor().timer(Duration::from_millis(800)).await;
+        let ack = std::env::var_os("NULL_QA_ACK").map(std::path::PathBuf::from);
+        let mut shots = 0;
         for line in steps.lines().map(str::trim_start).filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
             // (What `type` types, exactly as written after the space: spaces count.)
             let (step, arg) = line.split_once(' ').map_or((line.trim_end(), ""), |(s, a)| match s {
@@ -31,9 +36,18 @@ pub fn run(cx: &mut App) {
             });
             eprintln!("null qa: {line}");
             if step == "shot" {
-                // The script takes it while this waits.
+                // Drawn, then the script takes it while this waits for it to say it has
+                // (a file in NULL_QA_ACK named for the shot's number), at most 15 s.
+                cx.background_executor().timer(Duration::from_millis(300)).await;
+                shots += 1;
                 println!("NULL_QA_SHOT {arg}");
-                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                let taken = ack.as_ref().map(|dir| dir.join(format!("{shots}.done")));
+                for _ in 0..300 {
+                    if taken.as_ref().is_none_or(|done| done.exists()) {
+                        break;
+                    }
+                    cx.background_executor().timer(Duration::from_millis(50)).await;
+                }
                 continue;
             }
             if step == "wait" {
@@ -47,11 +61,6 @@ pub fn run(cx: &mut App) {
             };
             let done = match step {
                 // Keys go to the window, not to the workspace (it's free to take them).
-                // (Not ⌘C, ⌘X, ⌘V: the Mac's clipboard is the person's, not this run's.)
-                "keys" if arg.split_whitespace().any(|k| matches!(k, "cmd-c" | "cmd-x" | "cmd-v")) => {
-                    eprintln!("null qa: no copying or pasting: the clipboard is the person's");
-                    Ok(())
-                }
                 "keys" | "type" => cx.update_window(handle.into(), |_, window, cx| {
                     let keys: Vec<Keystroke> = if step == "keys" {
                         arg.split_whitespace().filter_map(|k| Keystroke::parse(k).ok()).collect()
@@ -101,7 +110,7 @@ pub fn run(cx: &mut App) {
                 }),
                 "ready" => {
                     println!("NULL_QA_READY");
-                    Ok(())
+                    break;
                 }
                 other => {
                     eprintln!("null qa: no step called {other}");

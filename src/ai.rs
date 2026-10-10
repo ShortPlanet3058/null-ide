@@ -371,6 +371,10 @@ pub fn api_key(id: ProviderId) -> Option<String> {
     if let Some(key) = env_key(id) {
         return Some(key);
     }
+    // (A QA run never reads the person's keychain.)
+    if crate::system_clipboard::kept_apart() {
+        return None;
+    }
     let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
     keys.get_or_insert_with(HashMap::new)
         .entry(id.key())
@@ -394,6 +398,10 @@ pub fn known_key(id: ProviderId) -> Option<bool> {
 }
 
 pub fn store_api_key(id: ProviderId, key: &str) -> Result<(), String> {
+    // (Nor changes it: a key typed in one is the person's to keep or not.)
+    if crate::system_clipboard::kept_apart() {
+        return Err("Keys aren't kept in a QA run.".into());
+    }
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, id.key()).map_err(|e| e.to_string())?;
     let key = key.trim();
     if key.is_empty() { entry.delete_credential().or(Ok(())) } else { entry.set_password(key) }

@@ -256,20 +256,20 @@ impl TextInput {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        if let Some(text) = crate::system_clipboard::read(cx).and_then(|item| item.text()) {
             self.replace(self.selected.clone(), &text.replace(['\n', '\r'], " "), cx);
         }
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected.clone()].to_string()));
+            crate::system_clipboard::write(cx, ClipboardItem::new_string(self.content[self.selected.clone()].to_string()));
         }
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected.clone()].to_string()));
+            crate::system_clipboard::write(cx, ClipboardItem::new_string(self.content[self.selected.clone()].to_string()));
             self.replace(self.selected.clone(), "", cx);
         }
     }

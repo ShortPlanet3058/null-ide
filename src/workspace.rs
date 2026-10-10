@@ -311,7 +311,8 @@ struct TabMenu {
 /// The program `cargo build` makes for a project: its first `[[bin]]`, or the package
 /// named in Cargo.toml, in target/debug.
 /// The program `cargo build --message-format=json` says it built: the one named as
-/// `expected` is (its file name), else the first; None when it built none.
+/// `expected` is (its file name), else the only one; None when it built none, or several
+/// and none of them is the one expected (which, isn't for Null to guess).
 fn built_program(messages: &str, expected: Option<&Path>) -> Option<PathBuf> {
     let programs: Vec<PathBuf> = messages
         .lines()
@@ -321,7 +322,8 @@ fn built_program(messages: &str, expected: Option<&Path>) -> Option<PathBuf> {
         .filter_map(|m| m["executable"].as_str().map(PathBuf::from))
         .collect();
     let wanted = expected.and_then(Path::file_name);
-    programs.iter().find(|p| p.file_name() == wanted).or(programs.first()).cloned()
+    let only = (programs.len() == 1).then(|| &programs[0]);
+    programs.iter().find(|p| p.file_name() == wanted).or(only).cloned()
 }
 
 fn cargo_program(root: &Path) -> Option<PathBuf> {
@@ -1891,7 +1893,7 @@ impl Workspace {
         };
         let ext = e.path().and_then(|p| p.extension()).and_then(|x| x.to_str()).unwrap_or("").to_string();
         let block = code_block(&name, &ext, first + 1, last + 1, &lines);
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(block));
+        crate::system_clipboard::write(cx, gpui::ClipboardItem::new_string(block));
         let what =
             if first == last { format!("line {}", first + 1) } else { format!("lines {}–{}", first + 1, last + 1) };
         self.show_notice(format!("Copied {what} as a code block."), cx);
@@ -1911,7 +1913,7 @@ impl Workspace {
             let html = editor.update(cx, |e, cx| e.colored_html(range, cx));
             let item = gpui::ClipboardItem::new_string(source.clone());
             if !crate::markdown_html::copy_rich(&source, &html) {
-                cx.write_to_clipboard(item.clone());
+                crate::system_clipboard::write(cx, item.clone());
             }
             crate::clipboard_history::remember(&item, cx);
             let what = if whole { "The file" } else { "The selection" };
@@ -1926,7 +1928,7 @@ impl Workspace {
         let source = if whole { e.buffer.to_string() } else { e.buffer.slice(range) };
         let item = gpui::ClipboardItem::new_string(source.clone());
         if !crate::markdown_html::copy_rich(&source, &crate::markdown_html::fragment(&source)) {
-            cx.write_to_clipboard(item.clone());
+            crate::system_clipboard::write(cx, item.clone());
         }
         crate::clipboard_history::remember(&item, cx);
         let what = if whole { "The document" } else { "The selection" };
@@ -2017,7 +2019,7 @@ impl Workspace {
                         return;
                     }
                     Ok(link) => {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(link));
+                        crate::system_clipboard::write(cx, gpui::ClipboardItem::new_string(link));
                         if first == last {
                             format!("Copied a link to line {first}.")
                         } else {
@@ -2048,7 +2050,7 @@ impl Workspace {
     /// The file against the clipboard: each difference kept, or changed to the clipboard's.
     fn compare_with_clipboard(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor().cloned() else { return };
-        let Some(clipboard) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let Some(clipboard) = crate::system_clipboard::read(cx).and_then(|item| item.text()) else {
             return self.show_notice("The clipboard has no text.".into(), cx);
         };
         self.compare_editor(&editor, clipboard, "Against the clipboard", "Same as the clipboard.", cx);
@@ -2587,7 +2589,8 @@ impl Workspace {
     /// A Markdown preview beside its source follows it: the block at the source's top
     /// is at the preview's.
     fn sync_preview(&mut self, source: &Entity<Editor>, cx: &mut Context<Self>) {
-        if source.read(cx).reading {
+        // (A Markdown file's lines are its preview's; a notebook's JSON lines aren't.)
+        if source.read(cx).reading || !source.read(cx).is_markdown() {
             return;
         }
         let line = source.read(cx).top_line();
@@ -4315,7 +4318,7 @@ impl Workspace {
                 this.close_palette(window, cx);
                 // A copy picked: on the clipboard again, and pasted where the caret is.
                 if let Some(item) = clipboard.and_then(|list| list.get(position.line as usize).cloned()) {
-                    cx.write_to_clipboard(item);
+                    crate::system_clipboard::write(cx, item);
                     if let Some(editor) = this.active_editor().cloned() {
                         window.focus(&editor.focus_handle(cx));
                         window.dispatch_action(Box::new(crate::editor::Paste), cx);
@@ -7642,7 +7645,7 @@ impl Workspace {
         let Some(path) = path else { return };
         let root = self.tree.read(cx).root().to_path_buf();
         let shown = if relative { path.strip_prefix(&root).unwrap_or(path) } else { path };
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(shown.display().to_string()));
+        crate::system_clipboard::write(cx, gpui::ClipboardItem::new_string(shown.display().to_string()));
     }
 
     /// Rename File… and Move File to Trash… from ⌘K: the open file chosen in the files,
@@ -9112,7 +9115,8 @@ mod tests {
         .join("\n");
         let expected = PathBuf::from("/p/target/debug/app");
         assert_eq!(built_program(&messages, Some(&expected)), Some(PathBuf::from("/elsewhere/debug/app")));
-        assert_eq!(built_program(&messages, None), Some(PathBuf::from("/elsewhere/debug/helper")), "the first");
+        assert_eq!(built_program(&messages, None), None, "several, none expected: not guessed");
+        assert_eq!(built_program(&artifact("bin", Some("/t/debug/one")), None), Some(PathBuf::from("/t/debug/one")));
         assert_eq!(built_program(&artifact("lib", None), None), None, "no program");
     }
 

@@ -517,7 +517,7 @@ impl Editor {
             let clipboard = suggestion
                 .insert
                 .contains("CLIPBOARD")
-                .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+                .then(|| crate::system_clipboard::read(cx).and_then(|item| item.text()))
                 .flatten()
                 .map(|text| text.replace("\r\n", "\n").replace('\n', &format!("{ending}{indent}")));
             let path = self.path.clone().unwrap_or_default();

@@ -760,8 +760,10 @@ impl Palette {
             if (typed.contains(char::is_whitespace) || names_category)
                 && let Some((score, highlights)) = fuzzy::score(&format!("{prefix}{}", c.label), query)
             {
+                // (Below what its own name finds: "file" lists Go to File before the rest of
+                // the File commands.)
                 let highlights = highlights.into_iter().filter_map(|b| b.checked_sub(prefix.len())).collect();
-                found.push((score + boost, Item::Command(i), highlights));
+                found.push((score + boost - 20, Item::Command(i), highlights));
                 continue;
             }
             // Or what it's also called ("split" for moving a tab to the other side).

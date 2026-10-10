@@ -2,6 +2,7 @@
 #![allow(clippy::single_range_in_vec_init)]
 
 mod ai;
+mod system_clipboard;
 #[cfg(debug_assertions)]
 mod qa;
 mod ai_agent;

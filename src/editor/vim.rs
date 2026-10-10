@@ -1750,7 +1750,7 @@ impl Editor {
             cx.default_global::<Shared>().registers.insert('0', register.clone());
         }
         #[cfg(not(test))]
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(register.text.clone()));
+        crate::system_clipboard::write(cx, gpui::ClipboardItem::new_string(register.text.clone()));
         #[cfg(test)]
         let _ = cx;
         cx.default_global::<Shared>().unnamed = Some(register);
@@ -1766,7 +1766,7 @@ impl Editor {
             _ => {}
         }
         #[cfg(not(test))]
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+        if let Some(text) = crate::system_clipboard::read(cx).and_then(|item| item.text())
             && cx.try_global::<Shared>().and_then(|s| s.unnamed.as_ref()).is_none_or(|r| r.text != text)
         {
             let linewise = text.ends_with('\n');

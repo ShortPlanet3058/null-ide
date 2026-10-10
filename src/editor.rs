@@ -981,7 +981,7 @@ impl Editor {
         editor.encoding = encoding;
         // A notebook opens as it reads, its cells (its JSON isn't written by hand: ⌘⇧V
         // shows it); one that doesn't read as a notebook, as the text it is.
-        editor.reading = editor.is_notebook() && crate::notebook::to_markdown(&text).is_some();
+        editor.reading = editor.is_notebook() && crate::notebook::is_notebook(&text);
         editor.reload_git_base(cx);
         if let Some(lsp) = lsp {
             editor.attach_lsp(lsp, cx);
@@ -1675,6 +1675,7 @@ impl Editor {
 
     /// Selects a match found by project search and highlights the query's other matches.
     pub fn reveal_match(&mut self, line: usize, columns: Range<usize>, query: SearchQuery, cx: &mut Context<Self>) {
+        self.show_text_for_place();
         let start = self.buffer.offset(line, columns.start);
         let end = self.buffer.offset(line, columns.end);
         self.single_cursor();
@@ -2426,7 +2427,7 @@ impl Editor {
     }
 
     fn paste_clipboard(&mut self, adjust: bool, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else { return };
+        let Some(item) = crate::system_clipboard::read(cx) else { return };
         // An image (a screenshot) pasted in Markdown: saved next to the file, linked here.
         if self.is_markdown() && item.text().is_none() {
             let image = item.entries().iter().find_map(|entry| match entry {
@@ -4532,6 +4533,14 @@ impl Editor {
     }
 
     /// The preview: the document drawn as it reads, in a column, scrolling.
+    /// Sent to a place in the text (a search's match, a definition): a notebook shows its
+    /// text, where the place is, not its cells from the top.
+    fn show_text_for_place(&mut self) {
+        if self.reading && self.is_notebook() {
+            self.reading = false;
+        }
+    }
+
     /// A Jupyter notebook (`.ipynb`): its JSON read as cells in the preview.
     pub fn is_notebook(&self) -> bool {
         self.path.as_ref().and_then(|p| p.extension()).is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
