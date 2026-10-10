@@ -213,7 +213,7 @@ impl Editor {
         if !self.selection.is_empty() && self.extra.is_empty() {
             return self.format_selection_now(cx);
         }
-        self.format_then(false, cx);
+        self.format_then(false, false, cx);
     }
 
     /// Markdown: the next footnote's mark at the caret (`[^3]`), its note started at the end of
@@ -446,12 +446,13 @@ impl Editor {
         }));
     }
 
-    /// Formats the file with its language server, then saves it if `save`. A server
-    /// that takes too long (or can't format) doesn't hold the save back.
-    fn format_then(&mut self, save: bool, cx: &mut Context<Self>) {
+    /// Formats the file with its language server, then saves it if `save` (and asks for
+    /// its tab to close once saved if `close`). A server that takes too long (or can't
+    /// format) doesn't hold the save back.
+    fn format_then(&mut self, save: bool, close: bool, cx: &mut Context<Self>) {
         let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else {
             if save {
-                self.save_to_disk(cx);
+                self.save_then(close, cx);
             }
             return;
         };
@@ -479,20 +480,37 @@ impl Editor {
                     this.apply_lsp_edits(&edits, cx);
                 }
                 if save {
-                    this.save_to_disk(cx);
+                    this.save_then(close, cx);
                 }
             })
             .ok();
         }));
     }
 
+    /// Saves, then asks for the tab to close if `close` and it was saved.
+    fn save_then(&mut self, close: bool, cx: &mut Context<Self>) {
+        if self.save_to_disk(cx) && close {
+            cx.emit(EditorEvent::SavedToClose);
+        }
+    }
+
     /// Saving from the keyboard: formats first when that's switched on.
     pub fn save_from_keyboard(&mut self, cx: &mut Context<Self>) {
+        self.save_formatted(false, cx);
+    }
+
+    /// Vim's `:wq`: saved as from the keyboard (formatted first when that's on), then the
+    /// tab closes; not if the save didn't happen (no file yet, changed on disk, failed).
+    pub fn save_and_close(&mut self, cx: &mut Context<Self>) {
+        self.save_formatted(true, cx);
+    }
+
+    fn save_formatted(&mut self, close: bool, cx: &mut Context<Self>) {
         if cx.global::<Settings>().format_on_save_for(self.language_name()) && self.lsp.is_some() && self.path.is_some()
         {
-            self.format_then(true, cx);
+            self.format_then(true, close, cx);
         } else {
-            self.save_to_disk(cx);
+            self.save_then(close, cx);
         }
     }
 }
