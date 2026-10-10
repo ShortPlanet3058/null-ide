@@ -301,7 +301,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
         KeyBinding::new("secondary-alt-up", AddCursorAbove, ctx),
         KeyBinding::new("secondary-alt-down", AddCursorBelow, ctx),
-        KeyBinding::new("alt-shift-i", AddCursorsToLineEnds, ctx),
+        // (⌥⇧I types ï on a Mac: ⌃⇧L there, beside ⌘⇧L.)
+        KeyBinding::new(if cfg!(target_os = "macos") { "ctrl-shift-l" } else { "alt-shift-i" }, AddCursorsToLineEnds, ctx),
         KeyBinding::new("secondary-u", UndoCursor, ctx),
     ];
     if cfg!(target_os = "macos") {
@@ -440,7 +441,7 @@ pub enum EditorEvent {
     BookmarksChanged,
     /// A right-click in the text, at this place in the window: the workspace shows what can
     /// be done there.
-    TextMenu(Point<Pixels>),
+    TextMenu(Point<Pixels>, usize),
     /// Several places to choose from (implementations): the workspace lists them.
     ShowLocations {
         title: String,
@@ -555,7 +556,8 @@ pub struct Editor {
     pub disk_changed: bool,
     /// Set while saving by itself (see `save_by_itself`).
     saving_by_itself: bool,
-    /// Set while saving as it is (see `save_as_is`).
+    /// The next write is as it is (see `save_as_is`): kept until the file is written, through
+    /// asking where to save it or about a change on disk.
     saving_as_is: bool,
     /// What the file last held on disk, as far as Null knows, to recognise it moved.
     pub on_disk: Option<Fingerprint>,
@@ -3007,6 +3009,7 @@ impl Editor {
     /// Saves without being asked to (auto save): as `save_to_disk`, but the lines being
     /// typed on keep their trailing spaces.
     pub fn save_by_itself(&mut self, cx: &mut Context<Self>) -> bool {
+        self.saving_as_is = false;
         self.saving_by_itself = true;
         let saved = self.save_to_disk(cx);
         self.saving_by_itself = false;
@@ -3017,9 +3020,7 @@ impl Editor {
     /// (spaces at line ends, the final line break), as a one-off.
     pub fn save_as_is(&mut self, cx: &mut Context<Self>) -> bool {
         self.saving_as_is = true;
-        let saved = self.save_to_disk(cx);
-        self.saving_as_is = false;
-        saved
+        self.save_to_disk(cx)
     }
 
     pub fn save_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3054,7 +3055,7 @@ impl Editor {
                 return false;
             }
         }
-        if !self.saving_as_is {
+        if !std::mem::take(&mut self.saving_as_is) {
             let by_itself = self.saving_by_itself;
             self.tidy_for_save(by_itself, cx);
         }
@@ -3292,14 +3293,24 @@ impl Editor {
             return;
         }
         let at = self.offset_at(event.position);
-        let range = self.selection.range();
-        if range.is_empty() || !(range.start..=range.end).contains(&at) {
-            self.single_cursor();
-            self.selection = Selection::caret(at);
-            self.goal_column = None;
-            self.touch(cx);
+        // In a selection (any of them, with several cursors): kept, for Cut and Copy.
+        let in_selection = self.all_selections().iter().any(|s| {
+            let range = s.range();
+            !range.is_empty() && (range.start..=range.end).contains(&at)
+        });
+        if !in_selection {
+            self.caret_to(at, cx);
         }
-        cx.emit(EditorEvent::TextMenu(event.position));
+        cx.emit(EditorEvent::TextMenu(event.position, at));
+    }
+
+    /// One caret, at `offset`, as a click puts it: the text doesn't scroll to it.
+    pub fn caret_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.single_cursor();
+        self.selection = Selection::caret(offset.min(self.buffer.len_chars()));
+        self.goal_column = None;
+        self.touch(cx);
+        self.reveal_only = true;
     }
 
     fn offset_at(&self, position: Point<Pixels>) -> usize {
@@ -5122,7 +5133,7 @@ mod tests {
         let text = "|a|bb|\n|-|-|\n|ccc|d|\n";
         let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("t.md")), cx));
         e.update_in(cx, |e, window, _| window.focus(&e.focus_handle));
-        cx.simulate_keystrokes("alt-shift-f");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "alt-cmd-l" } else { "alt-shift-f" });
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "| a   | bb  |\n| --- | --- |\n| ccc | d   |\n"));
         cx.simulate_keystrokes("cmd-z");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), text));

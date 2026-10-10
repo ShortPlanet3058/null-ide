@@ -218,7 +218,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-m", ShowProblems, ctx),
         KeyBinding::new("secondary-shift-o", GoToSymbol, ctx),
         KeyBinding::new("secondary-t", GoToSymbolInProject, ctx),
-        KeyBinding::new("alt-z", ToggleWordWrap, ctx),
+        // (On a Mac ⌥ with a letter types a character, ⌥Z an Â in French: ⌃⌥Z there.)
+        KeyBinding::new(if cfg!(target_os = "macos") { "ctrl-alt-z" } else { "alt-z" }, ToggleWordWrap, ctx),
         KeyBinding::new("secondary-n", NewUntitled, ctx),
         KeyBinding::new("secondary-shift-s", SaveAs, ctx),
         // Also here, not only in the editor: saving must work wherever the keyboard is
@@ -318,12 +319,14 @@ struct TextMenu {
     keys: FocusHandle,
     position: Point<Pixels>,
     items: Vec<TextMenuItem>,
+    /// In a file's text: the file, and where in it the click was.
+    clicked: Option<(Entity<Editor>, usize)>,
 }
 
 /// What a terminal's menu offers: copying what's selected, pasting, clearing; another
 /// terminal beside it or a new one.
 fn terminal_menu_items(selected: bool) -> Vec<TextMenuItem> {
-    let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group };
+    let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group, at_click: false };
     let mut items = Vec::new();
     if selected {
         items.push(item("Copy", Box::new(crate::terminal::Copy), false));
@@ -341,6 +344,9 @@ struct TextMenuItem {
     label: &'static str,
     action: Box<dyn Action>,
     group: bool,
+    /// Done on the word clicked, even when that was inside a selection (Go to
+    /// Definition...): the caret goes there first.
+    at_click: bool,
 }
 
 /// The program `cargo build` makes for a project: its first `[[bin]]`, or the package
@@ -932,11 +938,22 @@ impl Workspace {
         .detach();
         workspace._subscriptions.push(debugger_events);
         workspace._subscriptions.push(debugger_changes);
-        // A key while a tab's or the text's menu is open: it closes, as menus do.
-        let menus_close = cx.observe_keystrokes(|this, _, _, cx| {
-            if this.text_menu.take().is_some() | this.tab_menu.take().is_some() {
-                cx.notify();
+        // A key while a tab's or the text's menu is open: it closes, as menus do, and does
+        // nothing else (Esc doesn't also take back a change being reviewed, a letter doesn't
+        // type over the selection). Caught before the text or the terminal gets it.
+        let this = cx.weak_entity();
+        let own_window = window.window_handle();
+        let menus_close = cx.intercept_keystrokes(move |_, window, cx| {
+            if window.window_handle() != own_window {
+                return;
             }
+            let Some(this) = this.upgrade() else { return };
+            this.update(cx, |this, cx| {
+                if this.text_menu.take().is_some() | this.tab_menu.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            });
         });
         workspace._subscriptions.push(menus_close);
         workspace._subscriptions.push(cx.observe_window_bounds(window, |this, window, cx| {
@@ -2897,9 +2914,14 @@ impl Workspace {
                 }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
                 EditorEvent::VimCommandLine => this.open_palette(PaletteKind::Ex, window, cx),
-                EditorEvent::TextMenu(position) => {
+                EditorEvent::TextMenu(position, at) => {
                     let items = this.text_menu_items(editor, cx);
-                    this.text_menu = Some(TextMenu { keys: editor.focus_handle(cx), position: *position, items });
+                    this.text_menu = Some(TextMenu {
+                        keys: editor.focus_handle(cx),
+                        position: *position,
+                        items,
+                        clicked: Some((editor.clone(), *at)),
+                    });
                     cx.notify();
                 }
                 EditorEvent::SavedToClose => {
@@ -3181,6 +3203,9 @@ impl Workspace {
         }
         self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
+        // A menu open on it (or on any text): gone with it.
+        self.text_menu = None;
+        self.tab_menu = None;
         if let Some(path) = tab.editor.read(cx).path().map(Path::to_path_buf)
             && cx.has_global::<crate::project_search::UnsavedFiles>()
         {
@@ -3610,9 +3635,10 @@ impl Workspace {
         self.confirm_unsaved(CloseAction::CloseTabs(editors), window, cx);
     }
 
-    /// The tabs with nothing unsaved (and not pinned): closing them asks nothing.
+    /// The tabs with nothing unsaved (and not pinned): closing them asks nothing. One whose
+    /// file was deleted on disk holds the only copy of its text: it stays.
     fn close_saved_tabs(&mut self, _: &CloseSavedTabs, window: &mut Window, cx: &mut Context<Self>) {
-        let saved = self.unpinned().filter(|e| !e.read(cx).buffer.is_dirty()).collect();
+        let saved = self.unpinned().filter(|e| !e.read(cx).buffer.is_dirty() && !e.read(cx).missing).collect();
         self.confirm_unsaved(CloseAction::CloseTabs(saved), window, cx);
     }
 
@@ -5609,7 +5635,7 @@ impl Workspace {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
     }
 
-    /// ⌥Z: wrapping on or off for the kind of file at hand, prose or code.
+    /// ⌃⌥Z (⌥Z off a Mac): wrapping on or off for the kind of file at hand, prose or code.
     fn toggle_word_wrap(&mut self, _: &ToggleWordWrap, _: &mut Window, cx: &mut Context<Self>) {
         if self.active_editor().is_some_and(|e| e.read(cx).is_prose()) {
             return settings::update(cx, |s| s.wrap_prose = !s.wrap_prose);
@@ -6493,7 +6519,8 @@ impl Workspace {
             TerminalEvent::TitleChanged => cx.notify(),
             TerminalEvent::Menu(position) => {
                 let items = terminal_menu_items(terminal.read(cx).has_selection());
-                this.text_menu = Some(TextMenu { keys: terminal.focus_handle(cx), position: *position, items });
+                this.text_menu =
+                    Some(TextMenu { keys: terminal.focus_handle(cx), position: *position, items, clicked: None });
                 cx.notify();
             }
             // The shell exited (e.g. `exit`): its tab goes; with none left, so does the panel.
@@ -6536,6 +6563,7 @@ impl Workspace {
 
     fn remove_terminal(&mut self, id: gpui::EntityId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.terminals.iter().position(|(t, _)| t.entity_id() == id) else { return };
+        self.text_menu = None;
         // Being named: the name goes with it.
         if self.terminal_rename.as_ref().is_some_and(|r| r.terminal == id) {
             self.terminal_rename = None;
@@ -7628,7 +7656,7 @@ impl Workspace {
             items.push(CloseToTheRight);
         }
         // (Only when some are saved and some aren't: otherwise it's "Close All".)
-        let dirty = |t: &Tab| t.editor.read(cx).buffer.is_dirty();
+        let dirty = |t: &Tab| t.editor.read(cx).buffer.is_dirty() || t.editor.read(cx).missing;
         if self.tabs.iter().any(|t| !t.pinned && !dirty(t)) && self.tabs.iter().any(dirty) {
             items.push(CloseSaved);
         }
@@ -7768,13 +7796,14 @@ impl Workspace {
     /// the name there; with AI, asking it to change the code; formatting.
     fn text_menu_items(&self, editor: &Entity<Editor>, cx: &App) -> Vec<TextMenuItem> {
         use crate::editor::{Copy, Cut, FindReferences, FormatDocument, GoToDefinition, InlineAssist, Paste, RenameSymbol};
-        let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group };
+        let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group, at_click: false };
+        let at_click = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group, at_click: true };
         let editor = editor.read(cx);
         let mut items = vec![item("Cut", Box::new(Cut), false), item("Copy", Box::new(Copy), false), item("Paste", Box::new(Paste), false)];
         if editor.has_language_server(cx) {
-            items.push(item("Go to Definition", Box::new(GoToDefinition), true));
-            items.push(item("Find References", Box::new(FindReferences), false));
-            items.push(item("Rename…", Box::new(RenameSymbol), false));
+            items.push(at_click("Go to Definition", Box::new(GoToDefinition), true));
+            items.push(at_click("Find References", Box::new(FindReferences), false));
+            items.push(at_click("Rename…", Box::new(RenameSymbol), false));
         }
         if cx.global::<Settings>().ai.active() != ProviderId::Off {
             items.push(item("Change with AI…", Box::new(InlineAssist), true));
@@ -7787,6 +7816,11 @@ impl Workspace {
     fn run_text_menu_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = self.text_menu.take() else { return };
         let Some(item) = menu.items.into_iter().nth(ix) else { return };
+        if item.at_click
+            && let Some((editor, at)) = menu.clicked
+        {
+            editor.update(cx, |editor, cx| editor.caret_to(at, cx));
+        }
         window.focus(&menu.keys);
         window.dispatch_action(item.action, cx);
         cx.notify();
@@ -9531,7 +9565,7 @@ mod tests {
             editor.update_in(cx, |e, window, cx| {
                 window.focus(&e.focus_handle(cx));
                 e.selection = crate::editor::Selection { anchor: 0, head: 3 };
-                cx.emit(EditorEvent::TextMenu(Default::default()));
+                cx.emit(EditorEvent::TextMenu(Default::default(), 0));
             });
             cx.run_until_parked();
         };
@@ -9543,10 +9577,33 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(labels(cx), None);
         assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("one"));
-        // A key closes it.
+        // A key closes it, and does nothing else: the selection stays, nothing is typed.
         open(cx);
         cx.simulate_keystrokes("right");
         assert_eq!(labels(cx), None, "a key closes it");
+        open(cx);
+        cx.simulate_keystrokes("x");
+        assert_eq!(labels(cx), None);
+        editor.read_with(cx, |e, _| {
+            assert_eq!(e.selection, crate::editor::Selection { anchor: 0, head: 3 }, "still selected");
+            assert_eq!(e.buffer.to_string(), "one two\n", "nothing typed");
+        });
+        // Then keys work again.
+        cx.simulate_keystrokes("right");
+        editor.read_with(cx, |e, _| assert!(e.selection.range().is_empty()));
+        // Go to Definition and the like: done on the word clicked, even inside a selection.
+        let keys = editor.read_with(cx, |e, cx| e.focus_handle(cx));
+        workspace.update_in(cx, |w, window, cx| {
+            let item = TextMenuItem { label: "Here", action: Box::new(gpui::NoAction), group: false, at_click: true };
+            w.text_menu = Some(TextMenu {
+                keys,
+                position: Default::default(),
+                items: vec![item],
+                clicked: Some((editor.clone(), 5)),
+            });
+            w.run_text_menu_item(0, window, cx);
+        });
+        editor.read_with(cx, |e, _| assert_eq!(e.selection, crate::editor::Selection { anchor: 5, head: 5 }));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10017,7 +10074,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Markdown wraps while code doesn't; ⌥Z in each switches its own kind.
+    /// Markdown wraps while code doesn't; ⌃⌥Z in each switches its own kind.
     #[gpui::test]
     fn prose_wraps_on_its_own_setting(cx: &mut gpui::TestAppContext) {
         let dir = crate::tools::test_dir("prose-wrap");
@@ -10042,16 +10099,16 @@ mod tests {
         };
         assert!(wraps(cx, "notes.md"), "Markdown wraps by default");
         assert!(!wraps(cx, "main.rs"), "code doesn't");
-        // ⌥Z in the Markdown file: prose stops wrapping, code is left as it was.
+        // ⌃⌥Z in the Markdown file: prose stops wrapping, code is left as it was.
         wraps(cx, "notes.md");
-        cx.simulate_keystrokes("alt-z");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "ctrl-alt-z" } else { "alt-z" });
         cx.run_until_parked();
         let (prose, code) = cx.update(|_, cx| (cx.global::<Settings>().wrap_prose, cx.global::<Settings>().word_wrap));
         assert_eq!((prose, code), (false, false));
         assert!(!wraps(cx, "notes.md"));
         // ⌥Z in the code: code wraps, prose stays off.
         wraps(cx, "main.rs");
-        cx.simulate_keystrokes("alt-z");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "ctrl-alt-z" } else { "alt-z" });
         cx.run_until_parked();
         let (prose, code) = cx.update(|_, cx| (cx.global::<Settings>().wrap_prose, cx.global::<Settings>().word_wrap));
         assert_eq!((prose, code), (false, true));
@@ -11477,12 +11534,15 @@ mod tests {
             let c = w.tabs.iter().find(|t| t.editor.read(cx).file_name() == "c.txt").unwrap().editor.clone();
             c.update(cx, |e, cx| e.replace_text_in_range(None, "y", window, cx));
             assert!(w.tab_menu_items(&a, cx).contains(&TabMenuItem::CloseSaved));
+            // Deleted on disk: its text is only here now, so it isn't "saved".
+            let d = w.tabs.iter().find(|t| t.editor.read(cx).file_name() == "d.txt").unwrap().editor.clone();
+            d.update(cx, |e, _| e.missing = true);
             w.close_saved_tabs(&CloseSavedTabs, window, cx);
         });
         cx.run_until_parked();
         assert!(!cx.has_pending_prompt(), "nothing asked");
         workspace.update_in(cx, |w, window, cx| {
-            assert_eq!(names(w, cx), ["a.txt", "c.txt"], "the pinned one and the unsaved one");
+            assert_eq!(names(w, cx), ["a.txt", "c.txt", "d.txt"], "the pinned one, the unsaved one, the deleted one");
             // As it is: the spaces .editorconfig would take away stay.
             w.show_tab(1, true, window, cx);
             w.save_without_formatting(&SaveWithoutFormatting, window, cx);
@@ -11492,6 +11552,14 @@ mod tests {
             w.active_editor().unwrap().update(cx, |e, cx| e.replace_text_in_range(None, "z", window, cx));
             w.save_active(&Save, window, cx);
             assert_eq!(std::fs::read_to_string(dir.join("c.txt")).unwrap(), "yzx\n");
+            // Changed on disk meanwhile: asked about first, then written as it is still.
+            w.active_editor().unwrap().update(cx, |e, cx| {
+                e.replace_text_in_range(None, "  ", window, cx);
+                e.disk_changed = true;
+                assert!(!e.save_as_is(cx), "asked about first");
+                assert!(e.overwrite_disk(cx), "Save Mine");
+            });
+            assert_eq!(std::fs::read_to_string(dir.join("c.txt")).unwrap(), "yz  x\n");
         });
         std::fs::remove_dir_all(&dir).ok();
     }

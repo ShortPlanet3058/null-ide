@@ -21,15 +21,20 @@ pub struct KeyProblems(pub Vec<String>);
 impl Global for KeyProblems {}
 
 /// Whether `keystrokes` start with a key that types a character: a letter, a digit, a sign
-/// or a space, with no modifier or only ⇧.
+/// or a space, with no modifier or only ⇧; on a Mac with ⌥ too (⌥Z types Â in French, ⌥⇧I
+/// an ï).
 pub(crate) fn types_something(keystrokes: &str) -> bool {
     let Some(first) = keystrokes.split_whitespace().next().and_then(|k| Keystroke::parse(k).ok()) else {
         return false;
     };
     let m = first.modifiers;
-    let plain = !(m.platform || m.control || m.alt || m.function);
+    let plain = !(m.platform || m.control || m.function || (m.alt && !cfg!(target_os = "macos")));
     plain && (first.key.chars().count() == 1 || first.key == "space")
 }
+
+/// What to add to a key that types, to make it a shortcut.
+pub(crate) const ADD_TO_TYPING: &str =
+    if cfg!(target_os = "macos") { "add ⌘ or ⌃" } else { "add ⌘, ⌃ or ⌥" };
 
 /// A name as written, for comparing: letters and digits, in lower case.
 fn plain(name: &str) -> String {
@@ -89,7 +94,7 @@ pub fn bindings(
             },
         };
         if types_something(keystrokes) {
-            problems.push(format!("\"{keystrokes}\" types a character: add cmd, ctrl or alt"));
+            problems.push(format!("\"{keystrokes}\" types a character: {ADD_TO_TYPING}"));
             continue;
         }
         match KeyBinding::load(keystrokes, action, None, false, None, &gpui::DummyKeyboardMapper) {
@@ -133,8 +138,32 @@ mod tests {
     fn keys_that_type_are_refused() {
         assert!(types_something("x") && types_something("shift-x") && types_something("space"));
         assert!(types_something("5") && types_something("shift-/"));
-        assert!(!types_something("cmd-x") && !types_something("ctrl-x") && !types_something("alt-x"));
+        assert!(!types_something("cmd-x") && !types_something("ctrl-x") && !types_something("alt-cmd-x"));
+        // ⌥ with a letter types on a Mac.
+        assert_eq!(types_something("alt-x"), cfg!(target_os = "macos"));
+        assert_eq!(types_something("alt-shift-i"), cfg!(target_os = "macos"));
+        assert!(!types_something("alt-up") && !types_something("ctrl-alt-z"));
         assert!(!types_something("f5") && !types_something("escape") && !types_something("up"));
+    }
+
+    /// None of Null's own shortcuts, in any keymap, takes a key that types: ⌥Z, ⌥⇧I and the
+    /// like stay characters on a Mac.
+    #[gpui::test]
+    fn no_shortcut_takes_a_typed_character(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            for keymap in crate::keymap::Keymap::ALL {
+                crate::keymap::register(keymap, cx);
+                let bindings = cx.key_bindings();
+                for binding in bindings.borrow().bindings() {
+                    let Some(first) = binding.keystrokes().first() else { continue };
+                    if first.modifiers().alt {
+                        let keys = first.inner().unparse();
+                        assert!(!types_something(&keys), "{keys} ({}) in {}", binding.action().name(), keymap.label());
+                    }
+                }
+            }
+        });
     }
 
     #[test]

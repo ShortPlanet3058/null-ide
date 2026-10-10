@@ -648,7 +648,11 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Wrap Markdown and text",
-                Some("Paragraphs fit the window, whatever code does. ⌥Z in one of these files switches this"),
+                Some(if cfg!(target_os = "macos") {
+                    "Paragraphs fit the window, whatever code does. ⌃⌥Z in one of these files switches this"
+                } else {
+                    "Paragraphs fit the window, whatever code does. Alt+Z in one of these files switches this"
+                }),
                 Self::toggle("wrap-prose", s.wrap_prose, &theme, cx, |s| s.wrap_prose = !s.wrap_prose),
                 &theme,
             ),
@@ -1238,9 +1242,13 @@ impl SettingsPanel {
         // Alone (or with ⇧), a key types, or moves, or confirms (↵, ⇥, the arrows): as a
         // shortcut it would stop doing that everywhere. F1–F20 are free.
         let f_key = pressed.key.strip_prefix('f').is_some_and(|n| n.parse::<u8>().is_ok_and(|n| (1..=20).contains(&n)));
+        // (On a Mac ⌥ with a letter types too: ⌥Z an Â.)
+        if crate::user_keys::types_something(&typed) {
+            self.key_note = Some((ix, format!("That key types: {}", crate::user_keys::ADD_TO_TYPING)));
+            return;
+        }
         if !(m.platform || m.control || m.alt || f_key) {
-            let why = if crate::user_keys::types_something(&typed) { "That key types" } else { "That key has a use" };
-            self.key_note = Some((ix, format!("{why}: add ⌘, ⌃ or ⌥")));
+            self.key_note = Some((ix, "That key has a use: add ⌘, ⌃ or ⌥".into()));
             return;
         }
         let shown = gpui::KeyBinding::new(&typed, gpui::NoAction, None);
