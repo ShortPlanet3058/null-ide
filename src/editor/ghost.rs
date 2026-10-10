@@ -469,10 +469,13 @@ impl Editor {
                  comes next, reply with nothing."
             ),
             user: format!(
-                "{chat_outline}{chat_context}File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {before:?}",
+                "{chat_outline}{chat_context}File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {:?}",
                 self.language_name(),
                 prefix,
                 suffix,
+                // (Hidden text left out before it's quoted: quoted, it would be escapes the
+                // request's own leaving out can't tell from text.)
+                super::invisible::without_hidden(&before).0,
             ),
             // A fill-only code model can't chat; the usual model does it then.
             model: ai_settings.completion_model(provider).filter(|_| !ai::fim_available(&ai_settings)),

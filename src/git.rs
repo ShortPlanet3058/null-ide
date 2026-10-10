@@ -584,10 +584,29 @@ pub struct Hunk {
 /// The changes from `before` to `after`, line by line (each line with its line break).
 /// The lines are compared as they are: as `TextDiff::from_lines` finds them, many times
 /// quicker on a long file (it's run as the text changes: a review, the gutter's marks).
+/// A whole long file rewritten line by line takes long to compare well: after a moment,
+/// it's compared roughly (bigger changes), not frozen on.
 pub fn line_ops(before: &str, after: &str) -> Vec<similar::DiffOp> {
-    let old: Vec<&str> = before.split_inclusive('\n').collect();
-    let new: Vec<&str> = after.split_inclusive('\n').collect();
-    similar::capture_diff_slices(similar::Algorithm::Myers, &old, &new)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    similar::capture_diff_slices_deadline(similar::Algorithm::Myers, &lines(before), &lines(after), Some(deadline))
+}
+
+/// `text`'s lines, each with its line break: a line ends at \n, \r\n or a lone \r, as the
+/// editor's lines do (and `TextDiff::from_lines`'s).
+pub fn lines(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' || (b == b'\r' && bytes.get(i + 1) != Some(&b'\n')) {
+            lines.push(&text[start..=i]);
+            start = i + 1;
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
 }
 
 /// How the current text differs from `base`, line by line.
@@ -623,6 +642,8 @@ mod tests {
             ("", "x\n"),
             ("one\ntwo\n", "one\ntwo"),
             ("x\ny\nx\ny\n", "y\nx\ny\nx\n"),
+            ("a\rb\rc", "a\rB\rc\r\nd"),
+            ("one\r\ntwo\r\n", "one\r\n2\r\n"),
         ];
         for (before, after) in cases {
             let usual = similar::TextDiff::from_lines(before, after).ops().to_vec();

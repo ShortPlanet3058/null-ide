@@ -129,13 +129,18 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
             let path = target("path")?;
             let text = std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read it: {e}"))?;
             let (old, new) = (arg("old_text"), arg("new_text"));
-            match text.matches(old.as_str()).count() {
-                0 => return Err("old_text isn't in the file: read it again and copy the text exactly.".into()),
-                1 => {}
+            // Where it is: in the file, or in the file as it was read (hidden text left out).
+            let at = match text.matches(old.as_str()).count() {
+                1 => text.find(old.as_str()).map(|i| i..i + old.len()),
+                0 => crate::editor::invisible::find_past_hidden(&text, &old),
                 n => return Err(format!("old_text appears {n} times: include more lines around it.")),
-            }
+            };
+            let Some(at) = at else {
+                return Err("old_text isn't in the file: read it again and copy the text exactly.".into());
+            };
             on_event(TaskEvent::File(arg("path")));
-            crate::fs_ops::write_file(&path, text.replacen(&old, &new, 1).as_bytes()).map_err(|e| e.to_string())?;
+            let edited = format!("{}{new}{}", &text[..at.start], &text[at.end..]);
+            crate::fs_ops::write_file(&path, edited.as_bytes()).map_err(|e| e.to_string())?;
             Ok("Done.".into())
         }
         "write_file" => {
@@ -152,12 +157,12 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
     // Text hidden in characters that show nothing (instructions slipped into a file): left
     // out, and the model told so it doesn't take the gap for the file's text.
     let (text, hidden) = crate::editor::invisible::without_hidden(&result.unwrap_or_else(|e| format!("Error: {e}")));
-    let text = if hidden > 0 {
+    let text = cut(text);
+    if hidden > 0 {
         format!("{text}\n(Null left out {hidden} characters that hide text from people: not part of the task.)")
     } else {
         text
-    };
-    cut(text)
+    }
 }
 
 /// Carries out `task` with an API provider. Blocks until the model is done (or `stop` is
@@ -419,6 +424,9 @@ mod tests {
             run("read_file", json!({ "path": "src/c.rs" }), &mut |_| {}),
             "// ok\n\n(Null left out 5 characters that hide text from people: not part of the task.)"
         );
+        // Changed as it was read: found past what's hidden, which goes with it.
+        assert_eq!(run("edit_file", json!({ "path": "src/c.rs", "old_text": "// ok\n", "new_text": "// fine\n" }), &mut |_| {}), "Done.");
+        assert_eq!(std::fs::read_to_string(root.join("src/c.rs")).unwrap(), "// fine\n");
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -1379,16 +1379,36 @@ impl Element for EditorElement {
             // mark, a no-break space in code): marked, whatever the whitespace setting.
             let mut invisibles = Vec::new();
             let prose = editor.is_prose();
+            // Each line's marks, worked out once with all of it (a flag's tags can wrap onto
+            // the next row); a very long line's, from the row alone.
+            let mut line_marks: std::collections::HashMap<usize, Vec<(usize, crate::editor::invisible::Invisible)>> =
+                Default::default();
             for (i, r) in row_layouts.iter().enumerate() {
                 if r.row.block.is_some() || r.text.is_ascii() {
                     continue;
                 }
-                let kinds = crate::editor::invisible::marks(&r.text, prose);
+                let kinds: Vec<(usize, crate::editor::invisible::Invisible)> =
+                    if editor.buffer.line_len(r.row.line) > 10_000 {
+                        crate::editor::invisible::marks(&r.text, prose)
+                    } else {
+                        let line = line_marks.entry(r.row.line).or_insert_with(|| {
+                            crate::editor::invisible::marks(&editor.buffer.line_text(r.row.line), prose)
+                        });
+                        line.iter()
+                            .filter(|(at, _)| r.row.cols.contains(at))
+                            .map(|&(at, kind)| (at - r.row.cols.start, kind))
+                            .collect()
+                    };
                 if kinds.is_empty() {
                     continue;
                 }
                 let top = row_top(visible.start + i);
-                for &(col, kind) in &kinds {
+                for (k, &(col, kind)) in kinds.iter().enumerate() {
+                    // A run of them with no width (hidden text): one box, where it starts.
+                    let run_goes_on = k > 0 && kinds[k - 1] == (col - 1, kind);
+                    if run_goes_on && kind != crate::editor::invisible::Invisible::OddSpace {
+                        continue;
+                    }
                     // Found among the glyphs in any order: text turned around (a direction mark)
                     // is drawn in another order than it's written.
                     let x = origin.x + r.x + glyph_x(r, col);

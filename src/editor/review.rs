@@ -39,7 +39,7 @@ pub(super) struct Review {
 
 /// The changes between two texts, by lines.
 pub fn hunks(before: &str, after: &str) -> Vec<Hunk> {
-    let old: Vec<&str> = before.split_inclusive('\n').collect();
+    let old = crate::git::lines(before);
     crate::git::line_ops(before, after)
         .iter()
         .filter_map(|op| {
@@ -133,7 +133,7 @@ fn line_bytes(text: &str, lines: &Range<usize>) -> Range<usize> {
     let mut start = text.len();
     let mut end = text.len();
     let mut offset = 0;
-    for (i, line) in text.split_inclusive('\n').enumerate() {
+    for (i, line) in crate::git::lines(text).into_iter().enumerate() {
         if i == lines.start {
             start = offset;
         }
