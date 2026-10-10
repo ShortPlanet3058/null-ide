@@ -186,40 +186,62 @@ struct RunStart {
     folder: PathBuf,
     at: std::time::Instant,
     seen: bool,
+    /// ⌘K cleared what was above: the command's line among it (`line` says what it was).
+    cleared: bool,
 }
 
-/// Clears a terminal as ⌘K does: the cursor's line to the top, nothing above it, no
-/// scrollback, shown from the bottom.
+/// Clears a terminal as ⌘K does: the line being typed on to the top (all of it, when it
+/// wraps), nothing above it, no scrollback, shown from the bottom. The whole screen moves,
+/// whatever scrolling region a program set, and a saved cursor moves with it.
 fn clear_above_cursor<T: EventListener>(term: &mut Term<T>) {
-    use alacritty_terminal::vte::ansi::{ClearMode, Handler};
-    let line = term.grid().cursor.point.line.0.max(0);
-    term.scroll_up(line as usize);
-    term.goto_line(0);
+    use alacritty_terminal::vte::ansi::{ClearMode, Color, Handler};
+    let grid = term.grid();
+    let wraps = |line: i32| grid[Line(line)][Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE);
+    let mut first = grid.cursor.point.line.0.max(0);
+    while first > 0 && wraps(first - 1) {
+        first -= 1;
+    }
+    let screen = grid.screen_lines() as i32;
+    let grid = term.grid_mut();
+    if first > 0 {
+        grid.scroll_up::<Color>(&(Line(0)..Line(screen)), first as usize);
+        grid.cursor.point.line = Line((grid.cursor.point.line.0 - first).max(0));
+        grid.saved_cursor.point.line = Line((grid.saved_cursor.point.line.0 - first).max(0));
+    }
     term.clear_screen(ClearMode::Saved);
     term.scroll_display(Scroll::Bottom);
     term.selection = None;
 }
 
-/// What came before the command on a command's line: its prompt (`ada@mac app %`).
-fn prompt_of(line: &str) -> Option<&str> {
-    let typed = typed_command(line);
-    let at = (typed.as_ptr() as usize).saturating_sub(line.as_ptr() as usize).min(line.len());
-    Some(line.get(..at)?.trim_end()).filter(|p| !p.is_empty())
+/// Whether a command's line is worth finding again by: not a prompt alone (a bare Return),
+/// which would find every prompt, or a `#` heading for a root shell's `#`.
+fn findable(line: &str) -> bool {
+    let line = line.trim();
+    line.chars().count() >= 4 && !PROMPT_SIGNS.iter().any(|sign| line.ends_with(sign.trim()))
 }
 
 /// Where to scroll to (lines up from the bottom) to show the command before (`up`) or
-/// after the row at the top, at the top: a row beginning with one of `prompts`. Past the
-/// last one, the bottom; past the first, nowhere.
+/// after the row at the top, at the top: a row reading as one of `commands` did when typed
+/// (its start, when the terminal is narrower now). Past the last one, the bottom; past the
+/// first, nowhere.
 fn command_offset(
     grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
-    prompts: &[String],
+    commands: &[String],
     up: bool,
 ) -> Option<i32> {
     let history = grid.history_size() as i32;
     let top = -(grid.display_offset() as i32);
+    // (Most rows are output: only one beginning as a command did is looked at closely.)
+    let starts: std::collections::HashSet<&str> =
+        commands.iter().filter_map(|c| c.split_whitespace().next()).collect();
     let is_command = |line: i32| {
         let text = row_text(grid, Line(line));
-        prompts.iter().any(|p| text.starts_with(p.as_str()))
+        let text = text.trim_end();
+        if !text.split_whitespace().next().is_some_and(|word| starts.contains(word)) {
+            return false;
+        }
+        let wraps = grid[Line(line)][Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE);
+        commands.iter().any(|c| text.starts_with(c.as_str()) || (wraps && c.starts_with(text)))
     };
     if up {
         let line = (-history..top).rev().find(|&l| is_command(l))?;
@@ -319,8 +341,10 @@ pub struct TerminalView {
     pub name: Option<String>,
     /// Where the command running (or just typed) began.
     run: Option<RunStart>,
-    /// The prompts commands were typed after (`ada@mac app %`), to find them again by.
-    prompts: Vec<String>,
+    /// The lines commands were typed on (`ada@mac app % cargo test`), to find them again by.
+    commands: Vec<String>,
+    /// The foreground program's process group, while one runs (an inner shell, say).
+    running_group: Option<i32>,
     shell_pid: Option<i32>,
     /// The shell's folder, as last seen.
     folder: Option<PathBuf>,
@@ -428,7 +452,8 @@ impl TerminalView {
                 loop {
                     cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
                     let now = watch.program();
-                    let folder = pid.and_then(crate::terminal_watch::folder_of);
+                    let group = now.as_ref().map(|(group, _)| *group);
+                    let folder = pid.and_then(crate::terminal_watch::folder_of).filter(|f| f.is_dir());
                     let name = now.as_ref().map(|(_, name)| name.clone());
                     let finished = crate::terminal_watch::step(
                         &mut running,
@@ -462,6 +487,7 @@ impl TerminalView {
                                 _ => {}
                             }
                             this.running = name;
+                            this.running_group = group;
                             cx.emit(TerminalEvent::TitleChanged);
                         } else if this.running.is_none()
                             && this
@@ -512,12 +538,14 @@ impl TerminalView {
             settle_task: None,
             last_redraw: std::time::Instant::now(),
             redraw_task: None,
-            root: cwd,
+            root: cwd.clone(),
             link: None,
             find: None,
-            prompts: Vec::new(),
+            commands: Vec::new(),
+            running_group: None,
             shell_pid: pid,
-            folder: None,
+            // (Where it started, until the system says.)
+            folder: Some(cwd),
             _events: events,
             _watching: watching,
         }
@@ -732,15 +760,23 @@ impl TerminalView {
     /// command still running keeps running). A full-screen program (vim, htop) is asked to
     /// draw itself again instead.
     fn clear(&mut self, _: &Clear, _: &mut Window, cx: &mut Context<Self>) {
-        let full_screen = self.term.lock().mode().contains(TermMode::ALT_SCREEN);
+        let full_screen = {
+            let mut term = self.term.lock();
+            let full_screen = term.mode().contains(TermMode::ALT_SCREEN);
+            if !full_screen {
+                clear_above_cursor(&mut term);
+            }
+            full_screen
+        };
         if full_screen {
             self.write(b"\x0c".to_vec());
         } else {
-            clear_above_cursor(&mut self.term.lock());
             // What a running command printed before is gone: its output starts here.
             if let Some(run) = &mut self.run {
                 run.mark = 0;
+                run.cleared = true;
             }
+            self.link = None;
             if self.find.is_some() {
                 self.search(false, cx);
             }
@@ -793,7 +829,9 @@ impl TerminalView {
     /// The shell's folder now: as the system has it, or as its title shows it
     /// ("me@mac:~/code/app"), or the one it started in.
     fn shell_folder(&self) -> PathBuf {
-        if let Some(folder) = self.shell_pid.and_then(crate::terminal_watch::folder_of) {
+        // (The program in front first: a shell started in it, `poetry shell`, has its own.)
+        let folder = self.running_group.and_then(crate::terminal_watch::folder_of);
+        if let Some(folder) = folder.or_else(|| self.shell_pid.and_then(crate::terminal_watch::folder_of)).filter(|f| f.is_dir()) {
             return folder;
         }
         let shown = self.title.rsplit(':').next().map(str::trim).unwrap_or("");
@@ -804,15 +842,14 @@ impl TerminalView {
         if shown.is_absolute() && shown.is_dir() { shown } else { self.root.clone() }
     }
 
-    /// A command beginning at the cursor's line, and its prompt kept to find it again by.
+    /// A command beginning at the cursor's line, and that line kept to find it again by.
     fn start_run(&mut self, typing: Option<&str>) {
         let run = self.run_start(typing);
-        if let Some(prompt) = prompt_of(&run.line).filter(|p| !self.prompts.iter().any(|q| q == p)) {
-            // (A few: the folder in it changes.)
-            if self.prompts.len() == 32 {
-                self.prompts.remove(0);
+        if findable(&run.line) && !self.commands.contains(&run.line) {
+            if self.commands.len() == 1000 {
+                self.commands.remove(0);
             }
-            self.prompts.push(prompt.to_string());
+            self.commands.push(run.line.clone());
         }
         self.run = Some(run);
     }
@@ -829,12 +866,14 @@ impl TerminalView {
 
     fn scroll_to_command(&mut self, up: bool, cx: &mut Context<Self>) {
         let mut term = self.term.lock();
-        // (A full-screen program's screen has no commands in it.)
-        if term.mode().contains(TermMode::ALT_SCREEN) {
+        // A full-screen program's screen has no commands in it: the key is the program's
+        // (vim, tmux), as Ctrl+↑ is a running one's off a Mac (⌘ reaches no program).
+        if term.mode().contains(TermMode::ALT_SCREEN) || (!cfg!(target_os = "macos") && self.running.is_some()) {
+            cx.propagate();
             return;
         }
         let offset = term.grid().display_offset() as i32;
-        let Some(wanted) = command_offset(term.grid(), &self.prompts, up) else { return };
+        let Some(wanted) = command_offset(term.grid(), &self.commands, up) else { return };
         term.scroll_display(Scroll::Delta(wanted - offset));
         drop(term);
         cx.notify();
@@ -863,7 +902,7 @@ impl TerminalView {
             let text: String = text.chars().take(grid.columns()).collect();
             ((grid.history_size() as i32 + first).max(0) as usize, text.trim_end().to_string())
         };
-        RunStart { mark, line, folder: self.shell_folder(), at: std::time::Instant::now(), seen: false }
+        RunStart { mark, line, folder: self.shell_folder(), at: std::time::Instant::now(), seen: false, cleared: false }
     }
 
     /// Whether the shell shows its prompt again after `run`: what's before the cursor
@@ -885,7 +924,9 @@ impl TerminalView {
     /// Tells what a finished command printed (unless nothing was typed: a bare Return).
     fn report_run(&self, program: Option<String>, run: RunStart, cx: &mut Context<Self>) {
         let output = self.output_since(&run);
-        let command = typed_command(output.lines().next().unwrap_or("")).to_string();
+        // (Cleared since: the first line is some output, the command was on `line`.)
+        let line = if run.cleared { run.line.as_str() } else { output.lines().next().unwrap_or("") };
+        let command = typed_command(line).to_string();
         let name = program.unwrap_or_else(|| program_of(&command).to_string());
         if name.is_empty() {
             return;
@@ -1274,9 +1315,15 @@ impl Render for TerminalView {
             // (`src/main.rs`), and the keys come here to go on typing.
             .on_drop(cx.listener(|this, dragged: &crate::file_tree::DraggedEntry, window, _| {
                 // (As they really are: /tmp and /private/tmp are one.)
-                let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
+                // (Its folder as it really is, /tmp and /private/tmp being one; a link itself
+                // as it is, not what it points to.)
+                let real = |p: PathBuf| match (p.parent().and_then(|d| d.canonicalize().ok()), p.file_name()) {
+                    (Some(folder), Some(name)) => folder.join(name),
+                    _ => p,
+                };
                 let paths: Vec<PathBuf> = dragged.paths().into_iter().map(real).collect();
-                let paths = within(&paths, &real(this.shell_folder()));
+                let folder = this.shell_folder();
+                let paths = within(&paths, &folder.canonicalize().unwrap_or(folder));
                 this.write(shell_words(&paths).into_bytes());
                 window.focus(&this.focus_handle);
             }))
@@ -1807,13 +1854,13 @@ fn run_lines(text: &str) -> Vec<String> {
 }
 
 /// `paths` as the shell in `folder` reaches them: relative inside it (`./-x` for one that
-/// would read as an option), whole outside it.
+/// would read as an option, `./~x` for one read as someone's home), whole outside it.
 fn within(paths: &[PathBuf], folder: &std::path::Path) -> Vec<PathBuf> {
     paths
         .iter()
         .map(|path| match path.strip_prefix(folder) {
             Ok(rest) if rest.as_os_str().is_empty() => PathBuf::from("."),
-            Ok(rest) if rest.to_string_lossy().starts_with('-') => PathBuf::from(".").join(rest),
+            Ok(rest) if rest.to_string_lossy().starts_with(['-', '~']) => PathBuf::from(".").join(rest),
             Ok(rest) => rest.to_path_buf(),
             Err(_) => path.clone(),
         })
@@ -1844,15 +1891,21 @@ mod tests {
             PathBuf::from("/code/app/-odd name.txt"),
             PathBuf::from("/code/app"),
             PathBuf::from("/elsewhere/notes.md"),
+            PathBuf::from("/code/app/~backup.txt"),
         ];
-        assert_eq!(shell_words(&within(&paths, &folder)), "src/main.rs './-odd name.txt' . /elsewhere/notes.md ");
+        assert_eq!(
+            shell_words(&within(&paths, &folder)),
+            "src/main.rs './-odd name.txt' . /elsewhere/notes.md ./~backup.txt "
+        );
     }
 
     /// ⌘↑ / ⌘↓: from command to command typed, by the prompt they were typed after.
     #[test]
     fn jumping_from_command_to_command() {
-        assert_eq!(prompt_of("ada@mac app % cargo build"), Some("ada@mac app %"));
-        assert_eq!(prompt_of("no prompt here"), None);
+        assert!(findable("ada@mac app % cargo build"));
+        // A prompt alone (a bare Return), or a root shell's: they'd find every prompt, or
+        // a Markdown heading.
+        assert!(!findable("ada@mac app %") && !findable("# ") && !findable("$"));
         let config = Config { scrolling_history: 100, ..Default::default() };
         let mut term = Term::new(config, &GridSize { columns: 30, lines: 4 }, alacritty_terminal::event::VoidListener);
         let mut parser = alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
@@ -1866,7 +1919,7 @@ mod tests {
         }
         text.push_str("ada@mac app % ");
         parser.advance(&mut term, text.as_bytes());
-        let prompts = vec!["ada@mac app %".to_string()];
+        let prompts: Vec<String> = ["one", "two", "three"].iter().map(|n| format!("ada@mac app % echo {n}")).collect();
         let top_row = |term: &Term<_>| row_text(term.grid(), Line(-(term.grid().display_offset() as i32))).trim_end().to_string();
         let go = |term: &mut Term<_>, up| {
             let offset = term.grid().display_offset() as i32;
@@ -1906,9 +1959,18 @@ mod tests {
         assert_eq!(row_text(grid, Line(0)).trim_end(), "$ ls -la", "the line typed on, at the top");
         assert_eq!(grid.cursor.point, GridPoint::new(Line(0), Column(8)), "the caret where it was on it");
         assert!((1..5).all(|l| row_text(grid, Line(l)).trim().is_empty()), "nothing below");
+        // A command wrapped onto two rows: both stay, the first at the top; a cursor saved
+        // further down moves up with them.
+        parser.advance(&mut term, b"\r\nout\r\nout\r\n\x1b7$ a command long enough to wrap".as_slice());
+        clear_above_cursor(&mut term);
+        let grid = term.grid();
+        assert_eq!(row_text(grid, Line(0)).trim_end(), "$ a command long eno");
+        assert_eq!(row_text(grid, Line(1)).trim_end(), "ugh to wrap");
+        assert_eq!(grid.cursor.point.line, Line(1));
+        assert_eq!(grid.saved_cursor.point.line, Line(0));
         // What comes next follows it.
         parser.advance(&mut term, b"\r\nnext".as_slice());
-        assert_eq!(row_text(term.grid(), Line(1)).trim_end(), "next");
+        assert_eq!(row_text(term.grid(), Line(2)).trim_end(), "next");
     }
 
     /// A line of words is one piece of text to draw, not one per word; what looks different
