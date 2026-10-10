@@ -358,23 +358,20 @@ impl LspStore {
         }));
 
         let root_uri = uri_for(&self.root);
-        // Python's: a package with its own environment is a folder of its own, so its
-        // imports are read from its environment (see the answer to workspace/configuration).
+        // Python's is told the project's Python (see the answer to workspace/configuration).
+        // (Not each package's as a folder of its own: pyright opens a file in every folder
+        // holding it, so a package's files would be checked twice, with two Pythons.)
         let python = crate::lsp::is_python_server(config.name);
-        let packages = if python { crate::python_env::packages(&self.root) } else { Vec::new() };
-        let folder = |dir: &Path| {
-            Some(WorkspaceFolder {
-                uri: uri_for(dir)?,
-                name: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-            })
-        };
-        let folders: Vec<WorkspaceFolder> =
-            std::iter::once(self.root.as_path()).chain(packages.iter().map(|(dir, _)| dir.as_path())).filter_map(folder).collect();
         #[allow(deprecated)] // root_uri is deprecated in favour of workspace folders, but some servers still read it
         let params = InitializeParams {
             process_id: Some(std::process::id()),
             root_uri: root_uri.clone(),
-            workspace_folders: root_uri.map(|_| folders),
+            workspace_folders: root_uri.map(|uri| {
+                vec![WorkspaceFolder {
+                    uri,
+                    name: self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                }]
+            }),
             capabilities: ClientCapabilities {
                 text_document: Some(TextDocumentClientCapabilities {
                     hover: Some(HoverClientCapabilities {
@@ -468,9 +465,8 @@ impl LspStore {
                 })),
                 workspace: Some(lsp_types::WorkspaceClientCapabilities {
                     apply_edit: Some(true),
-                    // Python's are told which Python each folder has (others keep their defaults).
+                    // Python's are told which Python the project has (others keep their defaults).
                     configuration: python.then_some(true),
-                    workspace_folders: python.then_some(true),
                     semantic_tokens: Some(lsp_types::SemanticTokensWorkspaceClientCapabilities {
                         refresh_support: Some(true),
                     }),
@@ -598,14 +594,18 @@ impl LspStore {
     }
 
     /// A server's setting asked for (workspace/configuration): for Python's, the Python of
-    /// the folder asked about (its package's environment, else the project's); nothing else
-    /// is set, so servers keep their own defaults.
+    /// the folder asked about (the nearest environment: the project's, as only it is a
+    /// folder); nothing else is set, so servers keep their own defaults.
     fn configuration(&self, server: &str, item: &Value) -> Value {
         let python = crate::lsp::is_python_server(server) && item["section"].as_str() == Some("python");
         let scope = item["scopeUri"].as_str().and_then(|uri| uri.parse().ok()).and_then(|uri| path_for(&uri));
         let env = python.then(|| crate::python_env::find_for(&self.root, scope.as_deref().unwrap_or(&self.root))).flatten();
         match env {
-            Some(env) => serde_json::json!({ "pythonPath": crate::python_env::interpreter(&env) }),
+            // (A path that isn't text, on Linux: not given.)
+            Some(env) => match crate::python_env::interpreter(&env).to_str() {
+                Some(python) => serde_json::json!({ "pythonPath": python }),
+                None => Value::Null,
+            },
             None => Value::Null,
         }
     }
