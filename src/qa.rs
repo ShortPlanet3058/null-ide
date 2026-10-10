@@ -23,8 +23,12 @@ pub fn run(cx: &mut App) {
     cx.spawn(async move |cx| {
         // The window first: opened, drawn, its files read.
         cx.background_executor().timer(Duration::from_millis(800)).await;
-        for line in steps.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-            let (step, arg) = line.split_once(' ').map_or((line, ""), |(s, a)| (s, a.trim()));
+        for line in steps.lines().map(str::trim_start).filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
+            // (What `type` types, exactly as written after the space: spaces count.)
+            let (step, arg) = line.split_once(' ').map_or((line.trim_end(), ""), |(s, a)| match s {
+                "type" => (s, a),
+                _ => (s, a.trim()),
+            });
             eprintln!("null qa: {line}");
             if step == "shot" {
                 // The script takes it while this waits.
