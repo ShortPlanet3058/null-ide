@@ -967,6 +967,74 @@ mod tests {
         });
     }
 
+    /// Where the keys are while ⌘I writes a change and after (the 30th and 31st reviews'
+    /// rules): on the "Writing…" bar while it writes, where Esc stops it and typing reaches
+    /// nothing; in the code once written, even when something else had them meanwhile and
+    /// gave them back to the bar (a list closing); Esc from the code stops it too.
+    #[gpui::test]
+    fn the_keys_while_a_change_is_written_and_after(cx: &mut TestAppContext) {
+        let text = "def f(x):\n    return x / 0\n";
+        let (e, cx) = editor(cx, text);
+        cx.update(|_, cx| crate::keymap::register(crate::keymap::Keymap::Null, cx));
+        // Writing, as ↵ in the field leaves it: the bar has the keys.
+        let writing = |e: &Entity<Editor>, cx: &mut VisualTestContext| {
+            e.update_in(cx, |e, window, cx| {
+                e.selection = Selection::caret(2);
+                e.open_inline_assist(false, window, cx);
+                if let Some(prompt) = &mut e.prompt {
+                    prompt.writing = true;
+                }
+                window.focus(&e.writing_focus);
+                e.rebuild_blocks();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            // (The bar is drawn where the last frame laid the text out: a second frame.)
+            e.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        };
+        let keys_on = |e: &Entity<Editor>, cx: &mut VisualTestContext| {
+            e.update_in(cx, |e, window, _| (e.writing_focus.is_focused(window), e.focus_handle.is_focused(window)))
+        };
+        writing(&e, cx);
+        assert_eq!(keys_on(&e, cx), (true, false), "while it writes: the bar's");
+        // Typed then: nothing reaches the code. Esc: it stops.
+        cx.simulate_keystrokes("x y z enter");
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), text);
+        cx.simulate_keystrokes("escape");
+        assert!(e.read_with(cx, |e, _| e.prompt.is_none()), "Esc on the bar stops it");
+
+        // Written: the keys go to the code, to keep or undo it.
+        writing(&e, cx);
+        e.update(cx, |e, cx| e.apply_change("def f(x):\n    return x / 2\n".into(), "halve".into(), cx));
+        cx.run_until_parked();
+        assert_eq!(keys_on(&e, cx), (false, true), "written: the code's");
+        cx.simulate_keystrokes("tab");
+        assert!(e.read_with(cx, |e, _| e.ai_change.is_none()), "⇥ keeps it");
+
+        // A list had the keys when it was written, and gives them back to the bar on closing.
+        writing(&e, cx);
+        let elsewhere = cx.update(|_, cx| cx.focus_handle());
+        cx.update(|window, _| window.focus(&elsewhere));
+        e.update(cx, |e, cx| e.apply_change("def f(x):\n    return x / 4\n".into(), "quarter".into(), cx));
+        cx.run_until_parked();
+        assert!(cx.update(|window, _| elsewhere.is_focused(window)), "not taken from the list");
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&e.writing_focus);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(keys_on(&e, cx), (false, true), "given back to the bar, gone: the code's");
+        cx.simulate_keystrokes("escape");
+        assert!(e.read_with(cx, |e, _| e.ai_change.is_none()), "Esc undoes it");
+
+        // The keys in the code while it writes (a click there): Esc still stops it.
+        writing(&e, cx);
+        e.update_in(cx, |e, window, _| window.focus(&e.focus_handle));
+        cx.simulate_keystrokes("escape");
+        assert!(e.read_with(cx, |e, _| e.prompt.is_none()), "Esc in the code stops it");
+    }
+
     #[gpui::test]
     fn a_ghost_completion_is_taken_with_tab_or_dropped_by_moving(cx: &mut TestAppContext) {
         let (e, cx) = editor(cx, "x = 1\ny = \n");
