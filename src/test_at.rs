@@ -47,7 +47,15 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
             let module = ancestor_with(dir, "go.mod")?;
             Some(format!("go test {}-v ./...", in_dir(root, &module, |d| format!("-C {} ", quote(d)))))
         }
-        "Python" => Some(format!("{} -m pytest", crate::python_env::python(root))),
+        // A package with its own environment (a monorepo's): its tests, with its Python.
+        "Python" => {
+            let python = crate::python_env::python_for(root, path);
+            let package = crate::python_env::find_for(root, path).and_then(|env| env.parent().map(Path::to_path_buf));
+            Some(match package.filter(|p| p != root && p.starts_with(root)) {
+                Some(package) => format!("{python} -m pytest {}", quote(&relative(root, &package))),
+                None => format!("{python} -m pytest"),
+            })
+        }
         "JavaScript" | "TypeScript" | "TSX" => {
             let project = ancestor_with(dir, "package.json")?;
             // Each test's own line, as runs of many files don't print by themselves.
@@ -71,11 +79,20 @@ fn in_package(root: &Path, project: &Path, command: String) -> String {
 /// What runs every test found, each kind once: one command, the parts after each other
 /// (one failing doesn't keep the others from running).
 pub fn run_everything(files: &[FileTests]) -> Option<String> {
-    let mut commands: Vec<&str> = Vec::new();
+    let mut commands: Vec<String> = Vec::new();
     for every in files.iter().filter_map(|f| f.every.as_deref()) {
-        if !commands.contains(&every) {
-            commands.push(every);
+        if !commands.iter().any(|c| c == every) {
+            commands.push(every.to_string());
         }
+    }
+    // Packages with their own environment run their tests with it: not again with the
+    // project's (which would find them too).
+    let packages: Vec<String> = commands
+        .iter()
+        .filter_map(|c| c.split_once(" -m pytest ").map(|(_, package)| format!(" --ignore={package}")))
+        .collect();
+    for command in commands.iter_mut().filter(|c| c.ends_with(" -m pytest")) {
+        command.push_str(&packages.concat());
     }
     (!commands.is_empty()).then(|| commands.join("; "))
 }
@@ -388,11 +405,11 @@ pub fn find(language: &str, root: &Path, path: &Path, text: &str, tree: &Tree, b
             match byte {
                 Some(byte) => {
                     let (id, name) = python_test(text, tree, byte)?;
-                    let python = crate::python_env::python(root);
+                    let python = crate::python_env::python_for(root, path);
                     let command = format!("{python} -m pytest {}", quote(&format!("{relative}::{id}")));
                     Some(TestRun { command, name })
                 }
-                None => Some(all(format!("{} -m pytest {}", crate::python_env::python(root), quote(&relative)))),
+                None => Some(all(format!("{} -m pytest {}", crate::python_env::python_for(root, path), quote(&relative)))),
             }
         }
         "JavaScript" | "TypeScript" | "TSX" => {
@@ -753,6 +770,25 @@ mod tests {
         let names: Vec<String> =
             tests_in_file(&root, &root.join("a.test.js"), js).unwrap().tests.into_iter().map(|t| t.name).collect();
         assert_eq!(names, ["it's \"x\"", "plain"]);
+    }
+
+    /// A monorepo package with its own environment: its tests run with its Python, and
+    /// not again with the project's.
+    #[test]
+    fn a_package_s_tests_run_with_its_environment() {
+        let test = "def test_one():\n    pass\n";
+        let root = project(
+            "nested-env",
+            &[("tests/test_a.py", test), ("api/.venv/bin/python", ""), ("api/tests/test_b.py", test)],
+        );
+        let files = discover(&root);
+        let b = files.iter().find(|f| f.path.ends_with("api/tests/test_b.py")).unwrap();
+        assert_eq!(b.tests[0].command, "api/.venv/bin/python -m pytest api/tests/test_b.py::test_one");
+        assert_eq!(b.every.as_deref(), Some("api/.venv/bin/python -m pytest api"));
+        assert_eq!(
+            run_everything(&files).as_deref(),
+            Some("api/.venv/bin/python -m pytest api; python3 -m pytest --ignore=api")
+        );
     }
 
     #[test]
