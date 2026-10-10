@@ -1,6 +1,6 @@
 //! The other uses of the symbol at the caret, tinted softly: from the language server
 //! when one runs (so `count` the variable and `count` in a comment differ), else the
-//! same whole word nearby.
+//! same whole word nearby. With some text selected (on one line), the same text nearby.
 
 use super::Editor;
 use gpui::{Context, Task};
@@ -11,6 +11,8 @@ use std::time::Duration;
 const SETTLE: Duration = Duration::from_millis(150);
 /// Lines around the caret searched when there's no language server.
 const NEARBY_LINES: usize = 400;
+/// A selection longer than this isn't looked for elsewhere.
+const SELECTION_MAX: usize = 200;
 
 #[derive(Default)]
 pub(super) struct SymbolMarks {
@@ -24,16 +26,21 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Where `word` appears in `text` as a whole word (byte offsets).
-fn whole_word_matches(text: &str, word: &str) -> Vec<usize> {
+/// Where `word` appears in `text` (byte offsets): as a whole word, or anywhere.
+fn matches(text: &str, word: &str, whole: bool) -> Vec<usize> {
     text.match_indices(word)
         .filter(|(i, _)| {
             let before = text[..*i].chars().next_back();
             let after = text[i + word.len()..].chars().next();
-            !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
+            !whole || (!before.is_some_and(is_word_char) && !after.is_some_and(is_word_char))
         })
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Whether a selection is looked for elsewhere: on one line, not long, not only spaces.
+fn worth_marking(selected: &str) -> bool {
+    !selected.contains(['\n', '\r']) && !selected.trim().is_empty() && selected.chars().count() <= SELECTION_MAX
 }
 
 impl Editor {
@@ -58,7 +65,37 @@ impl Editor {
         self.symbol_marks.ranges.clear();
         self.symbol_marks.task = None;
         let wanted = cx.global::<crate::settings::Settings>().symbol_marks;
-        if !wanted || !self.selection.is_empty() || !self.extra.is_empty() {
+        if !wanted {
+            return;
+        }
+        // Some text selected: the same text around, once the selection settles (not at
+        // each step of a drag).
+        if !self.selection.is_empty() {
+            let range = self.selection.range();
+            let selected = self.buffer.slice(range.clone());
+            if !worth_marking(&selected) {
+                return;
+            }
+            self.symbol_marks.task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SETTLE).await;
+                this.update(cx, |this, cx| {
+                    if this.buffer.revision() != revision || this.selection.range() != range {
+                        return;
+                    }
+                    let found = this.nearby_uses(&selected, range.start, false);
+                    // Only the selection itself: nothing to point out.
+                    if found.len() < 2 {
+                        return;
+                    }
+                    this.symbol_marks.ranges = found.into_iter().filter(|r| *r != range).collect();
+                    this.symbol_marks.revision = revision;
+                    cx.notify();
+                })
+                .ok();
+            }));
+            return;
+        }
+        if !self.extra.is_empty() {
             return;
         }
         let word = self.word_at(caret);
@@ -87,7 +124,7 @@ impl Editor {
                     ranges
                 }
                 None => {
-                    let Ok(ranges) = this.update(cx, |this, _| this.nearby_uses(&text, word.start)) else { return };
+                    let Ok(ranges) = this.update(cx, |this, _| this.nearby_uses(&text, word.start, true)) else { return };
                     ranges
                 }
             };
@@ -104,8 +141,8 @@ impl Editor {
         }));
     }
 
-    /// The same whole word on the lines around `at`.
-    fn nearby_uses(&self, word: &str, at: usize) -> Vec<Range<usize>> {
+    /// The same word (whole, or anywhere) on the lines around `at`.
+    fn nearby_uses(&self, word: &str, at: usize, whole: bool) -> Vec<Range<usize>> {
         let line = self.buffer.point(at).0;
         let first = line.saturating_sub(NEARBY_LINES);
         let last = (line + NEARBY_LINES).min(self.buffer.len_lines());
@@ -125,9 +162,9 @@ impl Editor {
         // whole only if the word goes no further.
         let cut_before = start > 0 && is_word_char(rope.char(start - 1));
         let cut_after = end < rope.len_chars() && is_word_char(rope.char(end));
-        whole_word_matches(&text, word)
+        matches(&text, word, whole)
             .into_iter()
-            .filter(|&byte| !(cut_before && byte == 0) && !(cut_after && byte + word.len() == text.len()))
+            .filter(|&byte| !whole || (!(cut_before && byte == 0) && !(cut_after && byte + word.len() == text.len())))
             .map(|byte| {
                 let from = rope.byte_to_char(start_byte + byte);
                 from..from + len
@@ -173,11 +210,27 @@ mod tests {
         });
         settle(cx);
         e.update(cx, |e, _| assert!(e.symbol_marks().is_empty()));
+        // Text selected: the same text elsewhere, inside words too, not the selection itself.
+        e.update(cx, |e, cx| {
+            e.selection = super::super::Selection { anchor: 10, head: 14 };
+            e.refresh_symbol_marks(cx);
+        });
+        settle(cx);
+        e.update(cx, |e, _| assert_eq!(e.symbol_marks(), [0..4, 19..23, 32..36]));
+        // Over two lines, or only spaces: nothing looked for.
+        e.update(cx, |e, cx| {
+            e.selection = super::super::Selection { anchor: 2, head: 12 };
+            e.refresh_symbol_marks(cx);
+        });
+        settle(cx);
+        e.update(cx, |e, _| assert!(e.symbol_marks().is_empty()));
     }
 
     #[test]
     fn finds_whole_words_only() {
-        assert_eq!(whole_word_matches("count + counter + count_2 + count", "count"), vec![0, 28]);
-        assert_eq!(whole_word_matches("é count", "count"), vec![3]);
+        assert_eq!(matches("count + counter + count_2 + count", "count", true), vec![0, 28]);
+        assert_eq!(matches("é count", "count", true), vec![3]);
+        assert_eq!(matches("count + counter", "count", false), vec![0, 8]);
+        assert!(worth_marking("count") && !worth_marking("a\nb") && !worth_marking("   "));
     }
 }
