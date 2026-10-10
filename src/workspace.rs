@@ -6730,7 +6730,7 @@ impl Workspace {
 
     /// What a terminal's tab says: the name given to it, else its folder's.
     fn terminal_tab_label(terminal: &TerminalView, ix: usize) -> String {
-        Self::named_terminal_label(terminal.name.as_deref(), &terminal.title, ix)
+        Self::named_terminal_label(terminal.name.as_deref(), &terminal.shown_title(), ix)
     }
 
     /// Labels told apart: a second "qa" is "qa 2" (two terminals in one folder).
@@ -6771,7 +6771,7 @@ impl Workspace {
             return None;
         }
         let theme = cx.global::<Theme>();
-        let title = Self::terminal_name(&terminal.read(cx).title).to_string();
+        let title = Self::terminal_name(&terminal.read(cx).shown_title()).to_string();
         let icon_button = |id: &'static str, icon: &'static str| {
             div()
                 .id(id)
@@ -11386,6 +11386,8 @@ mod tests {
         assert_eq!(Workspace::terminal_label("ada@mac:~/code/null", 0), "null");
         assert_eq!(Workspace::terminal_label("ada@mac:/tmp/", 1), "tmp");
         assert_eq!(Workspace::terminal_label("", 2), "Terminal 3");
+        // No title from the shell: the folder it's in, as the system has it.
+        assert_eq!(Workspace::terminal_label("/Users/ada/code/app", 0), "app");
         // A name given to it wins over its folder.
         assert_eq!(Workspace::named_terminal_label(Some("server"), "ada@mac:~/code/null", 0), "server");
         assert_eq!(Workspace::named_terminal_label(None, "ada@mac:~/code/null", 0), "null");

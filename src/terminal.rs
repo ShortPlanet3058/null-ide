@@ -322,6 +322,8 @@ pub struct TerminalView {
     /// The prompts commands were typed after (`ada@mac app %`), to find them again by.
     prompts: Vec<String>,
     shell_pid: Option<i32>,
+    /// The shell's folder, as last seen.
+    folder: Option<PathBuf>,
     /// The program running in the shell now (`cargo`), while one is.
     pub running: Option<String>,
     selecting: bool,
@@ -426,6 +428,7 @@ impl TerminalView {
                 loop {
                     cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
                     let now = watch.program();
+                    let folder = pid.and_then(crate::terminal_watch::folder_of);
                     let name = now.as_ref().map(|(_, name)| name.clone());
                     let finished = crate::terminal_watch::step(
                         &mut running,
@@ -434,6 +437,11 @@ impl TerminalView {
                         crate::terminal_watch::group_alive,
                     );
                     let Ok(()) = this.update(cx, |this, cx| {
+                        // Gone to another folder (`cd`): its tab says so.
+                        if folder.is_some() && this.folder != folder {
+                            this.folder = folder;
+                            cx.emit(TerminalEvent::TitleChanged);
+                        }
                         if this.running != name {
                             // Started: where its output begins (from Return, if it was seen).
                             // Ended: what it printed.
@@ -509,6 +517,7 @@ impl TerminalView {
             find: None,
             prompts: Vec::new(),
             shell_pid: pid,
+            folder: None,
             _events: events,
             _watching: watching,
         }
@@ -770,6 +779,15 @@ impl TerminalView {
         self.find = None;
         window.focus(&self.focus_handle);
         cx.notify();
+    }
+
+    /// What its tab and panel are named after: the title the shell sets, else the folder
+    /// it's in.
+    pub fn shown_title(&self) -> Cow<'_, str> {
+        match &self.folder {
+            Some(folder) if self.title.trim().is_empty() => Cow::Owned(folder.display().to_string()),
+            _ => Cow::Borrowed(&self.title),
+        }
     }
 
     /// The shell's folder now: as the system has it, or as its title shows it
