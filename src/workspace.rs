@@ -164,6 +164,7 @@ actions!(
         CloseOtherTabs,
         CloseSavedTabs,
         ToggleMaximizeTerminal,
+        AboutNull,
         SaveWithoutFormatting,
         UseNvidia,
         UseOllama,
@@ -3907,6 +3908,22 @@ impl Workspace {
         still_running(&running)
     }
 
+    /// Null's name and version, where it comes from.
+    fn about(&mut self, _: &AboutNull, window: &mut Window, cx: &mut Context<Self>) {
+        let detail = format!("{}\n{}", env!("CARGO_PKG_DESCRIPTION"), env!("CARGO_PKG_REPOSITORY"));
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &format!("Null {}", env!("CARGO_PKG_VERSION")),
+            Some(&detail),
+            &["OK"],
+            cx,
+        );
+        cx.spawn(async move |_, _| {
+            answer.await.ok();
+        })
+        .detach();
+    }
+
     /// Quits, after asking about unsaved changes (finishing the close quits).
     pub fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm_unsaved(CloseAction::Quit, window, cx);
@@ -4166,6 +4183,7 @@ impl Workspace {
             (View, "Next Terminal".into(), Box::new(NextTerminal)),
             (View, "Split Terminal".into(), Box::new(SplitTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
+            (App, "About Null".into(), Box::new(AboutNull)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
         if self.active.is_some() {
@@ -9327,6 +9345,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::go_to_tab))
             .on_action(cx.listener(Self::toggle_maximize_terminal))
+            .on_action(cx.listener(Self::about))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))

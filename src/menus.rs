@@ -53,6 +53,7 @@ pub fn set(cx: &mut App) {
         Menu {
             name: "Null".into(),
             items: vec![
+                MenuItem::action("About Null", crate::workspace::AboutNull),
                 MenuItem::action("Welcome to Null…", crate::workspace::ShowWelcome),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
