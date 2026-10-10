@@ -32,7 +32,8 @@ actions!(
         AdjustLeft,
         AdjustRight,
         ToggleCommitFile,
-        WriteCommitMessage
+        WriteCommitMessage,
+        ForgetProject
     ]
 );
 
@@ -53,6 +54,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-i", WriteCommitMessage, Some("Palette && committing")),
         KeyBinding::new("left", AdjustLeft, adjusting),
         KeyBinding::new("right", AdjustRight, adjusting),
+        // In the recent projects, ⌘⌫ takes the one picked off the list.
+        KeyBinding::new("secondary-backspace", ForgetProject, Some("(Palette && projects) > TextInput")),
     ]);
 }
 
@@ -834,6 +837,21 @@ impl Palette {
         self.adjust(1, cx);
     }
 
+    /// ⌘⌫ in the recent projects: what's typed goes, as in any field; with nothing typed,
+    /// the project picked leaves the list (the folder itself stays where it is).
+    fn forget_project(&mut self, _: &ForgetProject, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.query.is_empty() {
+            return self.input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        let Some(Item::Project(i)) = self.selected_item() else { return };
+        let project = self.projects.remove(i);
+        crate::session::forget_project(&project);
+        let selected = self.selected;
+        self.update_rows(cx);
+        self.selected = selected.min(self.rows.len().saturating_sub(1));
+        cx.notify();
+    }
+
     /// ⌘↵: a recent project in a window of its own; anything else as ↵ does.
     fn confirm_aside(&mut self, _: &ConfirmAside, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(Item::Project(i)) = self.selected_item() {
@@ -1331,8 +1349,8 @@ impl Palette {
             PaletteKind::Commit if self.left_out.is_empty() => "↵ commit",
             PaletteKind::Commit => "↵ commit these",
             PaletteKind::Run => "↵ run",
-            PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window",
-            PaletteKind::Projects => "↵ open · Ctrl+↵ new window",
+            PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window · ⌘⌫ off the list",
+            PaletteKind::Projects => "↵ open · Ctrl+↵ new window · Ctrl+⌫ off the list",
             PaletteKind::Branch => match self.selected_item() {
                 Some(Item::NewBranch) => "↵ create",
                 _ => "↵ switch",
@@ -1524,6 +1542,9 @@ impl Render for Palette {
         if self.kind == PaletteKind::Commit {
             context.add("committing");
         }
+        if self.kind == PaletteKind::Projects {
+            context.add("projects");
+        }
         let theme = cx.global::<Theme>();
         div()
             .key_context(context)
@@ -1535,6 +1556,7 @@ impl Render for Palette {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::toggle_commit_file))
             .on_action(cx.listener(Self::confirm_aside))
+            .on_action(cx.listener(Self::forget_project))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::adjust_left))
             .on_action(cx.listener(Self::adjust_right))
