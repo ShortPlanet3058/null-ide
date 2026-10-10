@@ -7146,6 +7146,18 @@ impl Workspace {
         }
     }
 
+    /// The editor in front (for `qa`'s steps).
+    #[cfg(debug_assertions)]
+    pub(crate) fn qa_editor(&self) -> Option<Entity<Editor>> {
+        self.active_editor().cloned()
+    }
+
+    /// Runs `command` in the terminal (for `qa`'s steps).
+    #[cfg(debug_assertions)]
+    pub(crate) fn qa_run(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_in_terminal(command, None, window, cx);
+    }
+
     /// A Vim command typed after `:` (see `PaletteKind::Ex`).
     fn run_ex(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let command = text.trim().trim_start_matches(':').trim();
