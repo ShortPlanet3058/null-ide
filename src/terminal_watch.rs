@@ -43,6 +43,35 @@ impl Foreground {
     }
 }
 
+/// The folder process `pid` is working in (a shell's, after its `cd`s).
+#[cfg(target_os = "macos")]
+pub fn folder_of(pid: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
+    // SAFETY: the buffer is as long as said, and plain data.
+    let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDVNODEPATHINFO, 0, info.as_mut_ptr().cast(), size) };
+    if got != size {
+        return None;
+    }
+    // SAFETY: filled in whole, as `got` says.
+    let info = unsafe { info.assume_init() };
+    // (The path, NUL-ended, in 32 rows of 32.)
+    let bytes: Vec<u8> = info.pvi_cdir.vip_path.iter().flatten().map(|&c| c as u8).take_while(|&b| b != 0).collect();
+    let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes));
+    path.is_absolute().then_some(path)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn folder_of(pid: i32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(not(unix))]
+pub fn folder_of(_: i32) -> Option<std::path::PathBuf> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn name_of(pid: i32) -> Option<String> {
     let mut buffer = [0u8; 256];
@@ -149,6 +178,15 @@ pub fn bounce_dock() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process's folder, as the system has it: this test's own.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_s_folder() {
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let folder = folder_of(std::process::id() as i32).expect("a folder");
+        assert_eq!(folder.canonicalize().unwrap(), here);
+    }
 
     #[test]
     fn a_long_command_says_when_it_s_done() {
