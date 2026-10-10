@@ -761,8 +761,14 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Other uses of a name",
-                Some("With the caret on a name, its other uses in the file get a soft tint"),
+                Some("With the caret on a name, its other uses in the file get a soft tint; so does text selected"),
                 Self::toggle("symbol-marks", s.symbol_marks, &theme, cx, |s| s.symbol_marks = !s.symbol_marks),
+                &theme,
+            ),
+            Self::row(
+                "Close brackets and quotes",
+                Some("Typing ( [ { or a quote types its partner too, and surrounds what's selected"),
+                Self::toggle("auto-close", s.auto_close, &theme, cx, |s| s.auto_close = !s.auto_close),
                 &theme,
             ),
             Self::row(

@@ -447,8 +447,11 @@ pub struct Settings {
     pub line_guide: bool,
     /// Keep the first lines of the blocks scrolled into pinned at the top.
     pub sticky_scroll: bool,
-    /// Tint the other uses of the name at the caret.
+    /// Tint the other uses of the name at the caret (and of the text selected).
     pub symbol_marks: bool,
+    /// Typing a bracket or quote types its partner too, steps over one already there, and
+    /// wraps what's selected.
+    pub auto_close: bool,
     /// Type hints from the language server inside the code (`x: i32`), faintly.
     pub inlay_hints: bool,
     /// What the language server says over the caret's function ("3 references", "▶ Run").
@@ -505,6 +508,7 @@ impl Default for Settings {
             line_guide: true,
             sticky_scroll: true,
             symbol_marks: true,
+            auto_close: true,
             ai: Default::default(),
         }
     }

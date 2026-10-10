@@ -274,7 +274,9 @@ impl Editor {
     pub(super) fn type_pair_char(&mut self, c: char, cx: &mut Context<Self>) -> bool {
         // In Markdown, * _ ~ over a selection mark it up: *once* for italic, **twice** for bold.
         let marks = self.is_markdown() && !self.selection.is_empty() && matches!(c, '*' | '_' | '~');
-        let pair = PAIRS.iter().copied().find(|(o, cl)| *o == c || *cl == c).or(marks.then_some((c, c)));
+        // (Brackets and quotes switched off: typed as they are.)
+        let auto = cx.global::<crate::settings::Settings>().auto_close;
+        let pair = PAIRS.iter().copied().filter(|_| auto).find(|(o, cl)| *o == c || *cl == c).or(marks.then_some((c, c)));
         let Some((open, close)) = pair else { return false };
         let caret = self.selection.head;
         let next = self.buffer.char_at(caret);
@@ -1144,6 +1146,10 @@ mod editor_tests {
         select(cx, &e, 0, 5);
         e.update(cx, |e, cx| assert!(e.type_pair_char('"', cx)));
         assert_eq!(text(cx, &e), "\"value\"");
+        // Switched off: typed as they are (after `editor`, which sets the defaults).
+        let e = editor(cx, "", "x.rs");
+        cx.update(|cx| cx.set_global(crate::settings::Settings { auto_close: false, ..Default::default() }));
+        e.update(cx, |e, cx| assert!(!e.type_pair_char('(', cx)));
     }
 
     #[gpui::test]

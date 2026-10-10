@@ -119,6 +119,7 @@ actions!(
         ToggleLineGuide,
         ToggleStickyScroll,
         ToggleSymbolMarks,
+        ToggleAutoClose,
         PreviousProblem,
         AutoSaveAfterPause,
         AutoSaveWhenLeaving,
@@ -4068,6 +4069,11 @@ impl Workspace {
                 View,
                 toggle(settings.symbol_marks, "Stop Marking Other Uses of a Name", "Mark Other Uses of a Name"),
                 Box::new(ToggleSymbolMarks),
+            ),
+            (
+                Edit,
+                toggle(settings.auto_close, "Stop Closing Brackets and Quotes", "Close Brackets and Quotes"),
+                Box::new(ToggleAutoClose),
             ),
             (Go, "Next Problem".into(), Box::new(NextProblem)),
             (Go, "Previous Problem".into(), Box::new(PreviousProblem)),
@@ -9166,6 +9172,7 @@ impl Render for Workspace {
                     settings::update(cx, |s| s.symbol_marks = !s.symbol_marks)
                 }),
             )
+            .on_action(cx.listener(|_, _: &ToggleAutoClose, _, cx| settings::update(cx, |s| s.auto_close = !s.auto_close)))
             .on_action(cx.listener(|_, _: &ToggleStickyScroll, _, cx| {
                 settings::update(cx, |s| s.sticky_scroll = !s.sticky_scroll)
             }))
