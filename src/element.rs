@@ -1702,14 +1702,24 @@ impl Element for EditorElement {
                     }
                 }
             };
-            // Vim out of Insert mode: a block over the character, faint enough to read it.
-            let caret = Some(if editor.block_caret(cx) {
+            // Vim out of Insert mode, or chosen: a block over the character, faint enough to
+            // read it. Or a line under it.
+            let caret_shape = cx.global::<Settings>().caret;
+            let caret = Some(if editor.block_caret(cx) || caret_shape == crate::settings::CaretShape::Block {
                 (
                     Bounds::new(
                         point(origin.x + visual.x, origin.y + visual.y + (line_height - caret_height) / 2.),
                         size(char_width, caret_height),
                     ),
                     opacity * 0.45,
+                )
+            } else if caret_shape == crate::settings::CaretShape::Underline {
+                (
+                    Bounds::new(
+                        point(origin.x + visual.x, origin.y + visual.y + (line_height + caret_height) / 2. - px(2.)),
+                        size(char_width, px(2.)),
+                    ),
+                    opacity,
                 )
             } else {
                 (

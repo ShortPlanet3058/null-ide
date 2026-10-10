@@ -698,6 +698,26 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Caret",
+                Some("A thin bar between characters, a block over one, or a line under it"),
+                {
+                    use crate::settings::CaretShape;
+                    Self::choices(
+                        "caret-shape",
+                        vec![
+                            (CaretShape::Bar, "Bar".into()),
+                            (CaretShape::Block, "Block".into()),
+                            (CaretShape::Underline, "Underline".into()),
+                        ],
+                        s.caret,
+                        &theme,
+                        cx,
+                        |_, shape, cx| settings::update(cx, |s| s.caret = shape),
+                    )
+                },
+                &theme,
+            ),
+            Self::row(
                 "Typewriter scrolling",
                 Some("Keeps the line you're writing in the middle of the window"),
                 Self::toggle("typewriter", s.typewriter, &theme, cx, |s| s.typewriter = !s.typewriter),

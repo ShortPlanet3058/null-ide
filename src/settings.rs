@@ -446,6 +446,8 @@ pub struct Settings {
     pub indent_guides: bool,
     /// The caret blinks for a while once typing stops; off, it stays lit.
     pub caret_blink: bool,
+    /// The caret's shape: a thin bar, a block over the character, or a line under it.
+    pub caret: CaretShape,
     /// The line being written stays in the middle of the window (typewriter scrolling).
     pub typewriter: bool,
     /// In Markdown and text, the paragraph being written stands out, the others fade.
@@ -515,6 +517,7 @@ impl Default for Settings {
             code_lens: true,
             indent_guides: true,
             caret_blink: true,
+            caret: CaretShape::Bar,
             typewriter: false,
             dim_paragraphs: false,
             smart_punctuation: false,
@@ -550,6 +553,16 @@ pub enum ShowWhitespace {
     Selection,
     Trailing,
     All,
+}
+
+/// The caret's shape in the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaretShape {
+    #[default]
+    Bar,
+    Block,
+    Underline,
 }
 
 /// How much room there is between lines of code.
@@ -1491,6 +1504,9 @@ mod tests {
     fn the_caret_blinks_unless_told_not_to() {
         assert!(Settings::default().caret_blink);
         assert!(!Settings::parse(r#"{ "caret_blink": false }"#).unwrap().caret_blink);
+        // A bar unless another shape is asked for.
+        assert_eq!(Settings::default().caret, CaretShape::Bar);
+        assert_eq!(Settings::parse(r#"{ "caret": "underline" }"#).unwrap().caret, CaretShape::Underline);
     }
 
     #[test]
