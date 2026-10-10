@@ -308,10 +308,27 @@ struct TabMenu {
     position: Point<Pixels>,
 }
 
-/// A right-click in a file's text: what can be done there, where it was clicked.
+/// A right-click in a file's text or a terminal: what can be done there, where it was
+/// clicked, and where the keys go to do it.
 struct TextMenu {
-    editor: Entity<Editor>,
+    keys: FocusHandle,
     position: Point<Pixels>,
+    items: Vec<TextMenuItem>,
+}
+
+/// What a terminal's menu offers: copying what's selected, pasting, clearing; another
+/// terminal beside it or a new one.
+fn terminal_menu_items(selected: bool) -> Vec<TextMenuItem> {
+    let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group };
+    let mut items = Vec::new();
+    if selected {
+        items.push(item("Copy", Box::new(crate::terminal::Copy), false));
+    }
+    items.push(item("Paste", Box::new(crate::terminal::Paste), false));
+    items.push(item("Clear", Box::new(crate::terminal::Clear), false));
+    items.push(item("Split Terminal", Box::new(SplitTerminal), true));
+    items.push(item("New Terminal", Box::new(NewTerminal), false));
+    items
 }
 
 /// An item of the text's menu: what it's called, what it does, and whether a line sets it
@@ -2877,7 +2894,8 @@ impl Workspace {
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
                 EditorEvent::VimCommandLine => this.open_palette(PaletteKind::Ex, window, cx),
                 EditorEvent::TextMenu(position) => {
-                    this.text_menu = Some(TextMenu { editor: editor.clone(), position: *position });
+                    let items = this.text_menu_items(editor, cx);
+                    this.text_menu = Some(TextMenu { keys: editor.focus_handle(cx), position: *position, items });
                     cx.notify();
                 }
                 EditorEvent::SavedToClose => {
@@ -6455,6 +6473,11 @@ impl Workspace {
         });
         let subscription = cx.subscribe_in(&terminal, window, |this, terminal, event, window, cx| match event {
             TerminalEvent::TitleChanged => cx.notify(),
+            TerminalEvent::Menu(position) => {
+                let items = terminal_menu_items(terminal.read(cx).has_selection());
+                this.text_menu = Some(TextMenu { keys: terminal.focus_handle(cx), position: *position, items });
+                cx.notify();
+            }
             // The shell exited (e.g. `exit`): its tab goes; with none left, so does the panel.
             TerminalEvent::Exited => this.remove_terminal(terminal.entity_id(), window, cx),
             TerminalEvent::Finished(name, took) => {
@@ -7739,8 +7762,8 @@ impl Workspace {
     /// An item picked: the keys back in the text, and what it does done there.
     fn run_text_menu_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = self.text_menu.take() else { return };
-        let Some(item) = self.text_menu_items(&menu.editor, cx).into_iter().nth(ix) else { return };
-        window.focus(&menu.editor.focus_handle(cx));
+        let Some(item) = menu.items.into_iter().nth(ix) else { return };
+        window.focus(&menu.keys);
         window.dispatch_action(item.action, cx);
         cx.notify();
     }
@@ -7748,14 +7771,15 @@ impl Workspace {
     fn render_text_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.text_menu.as_ref()?;
         let theme = cx.global::<Theme>();
-        let items = self.text_menu_items(&menu.editor, cx).into_iter().enumerate().map(|(i, item)| {
+        let items = menu.items.iter().enumerate().map(|(i, item)| {
             let keys = crate::palette::shortcut(item.action.as_ref(), cx);
+            let label = item.label;
             div()
                 .when(item.group && i > 0, |d| d.mt(px(4.)).pt(px(4.)).border_t_1().border_color(theme.hairline))
                 .child(
                     div()
                         .id(("text-menu", i))
-                        .debug_selector(move || format!("text-menu {}", item.label))
+                        .debug_selector(move || format!("text-menu {label}"))
                         .h(px(26.))
                         .px(px(10.))
                         .flex()
@@ -7766,7 +7790,7 @@ impl Workspace {
                         .cursor_pointer()
                         .text_color(theme.foreground)
                         .hover(|s| s.bg(theme.accent_soft))
-                        .child(item.label)
+                        .child(label)
                         .children(keys.map(|k| div().text_color(theme.faint).child(k)))
                         .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -9443,6 +9467,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A terminal's menu: Copy only with something selected.
+    #[test]
+    fn a_terminal_s_menu() {
+        let labels = |selected| terminal_menu_items(selected).iter().map(|i| i.label).collect::<Vec<_>>();
+        assert_eq!(labels(false), ["Paste", "Clear", "Split Terminal", "New Terminal"]);
+        assert_eq!(labels(true)[0], "Copy");
+    }
+
     /// A right-click in the text: its menu, with what can be done there; an item does it and
     /// closes it, as a key does.
     #[gpui::test]
@@ -9465,7 +9497,8 @@ mod tests {
         let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
         let labels = |cx: &mut gpui::VisualTestContext| {
             workspace.read_with(cx, |w, cx| {
-                w.text_menu.as_ref().map(|m| w.text_menu_items(&m.editor, cx).iter().map(|i| i.label).collect::<Vec<_>>())
+                let _ = cx;
+                w.text_menu.as_ref().map(|m| m.items.iter().map(|i| i.label).collect::<Vec<_>>())
             })
         };
         let open = |cx: &mut gpui::VisualTestContext| {

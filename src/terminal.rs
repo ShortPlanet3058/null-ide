@@ -155,6 +155,9 @@ pub enum TerminalEvent {
     Finished(String, std::time::Duration),
     /// A command finished: what it was, and what it printed.
     Ran(Ran),
+    /// A right-click (not taken by a program that reads the mouse), at this place in the
+    /// window: the workspace shows what can be done.
+    Menu(Point<Pixels>),
 }
 
 /// A command that finished in the shell.
@@ -961,6 +964,11 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Whether some of its text is selected (to copy).
+    pub fn has_selection(&self) -> bool {
+        self.term.lock().selection.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
     fn on_any_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(held) = self.mouse_held.take() else { return };
         if let Some(button) = button_code(held) {
@@ -1156,6 +1164,11 @@ impl Render for TerminalView {
             .capture_any_mouse_down(cx.listener(Self::on_any_mouse_down))
             .capture_any_mouse_up(cx.listener(Self::on_any_mouse_up))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            // (A program that reads the mouse took it above, in capture.)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, event: &MouseDownEvent, _, cx| cx.emit(TerminalEvent::Menu(event.position))),
+            )
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
