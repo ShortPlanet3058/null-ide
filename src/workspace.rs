@@ -510,6 +510,8 @@ pub struct Workspace {
     python_env: Option<PathBuf>,
     /// The open file's (its package's own, in a monorepo), and which file that was for.
     python_env_here: Option<(PathBuf, Option<PathBuf>)>,
+    /// The packages with an environment of their own (each a folder of Python's server).
+    python_packages: Vec<(PathBuf, PathBuf)>,
     /// The tests found (None: not looked for yet), and the search for them.
     tests: Option<std::rc::Rc<Vec<crate::test_at::FileTests>>>,
     tests_task: Option<Task<()>>,
@@ -778,6 +780,7 @@ impl Workspace {
             sidebar_tests: false,
             python_env: None,
             python_env_here: None,
+            python_packages: Vec::new(),
             tests: None,
             tests_task: None,
             test_status: std::collections::HashMap::new(),
@@ -911,6 +914,7 @@ impl Workspace {
             }
         }));
         workspace.python_env = crate::python_env::find(workspace.tree.read(cx).root());
+        workspace.python_packages = crate::python_env::packages(workspace.tree.read(cx).root());
         // settings.json couldn't be read at launch: said, not left to pass for the defaults.
         if let Some(why) = Settings::unreadable() {
             workspace.show_notice(
@@ -3041,6 +3045,7 @@ impl Workspace {
             self.find_tests(cx);
         }
         self.python_env = crate::python_env::find(&path);
+        self.python_packages = crate::python_env::packages(&path);
         self.python_env_here = None;
         let mut session = crate::session::Session::load(&path);
         session.window = self.window_state;
@@ -5005,10 +5010,13 @@ impl Workspace {
     /// An environment may have been made or removed: looked for again.
     fn python_env_changed(&mut self, cx: &mut Context<Self>) {
         self.python_env_here = None;
-        let now = crate::python_env::find(self.tree.read(cx).root());
-        // Another environment: Python's language server reads its packages from it.
-        if now != self.python_env {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let (now, packages) = (crate::python_env::find(&root), crate::python_env::packages(&root));
+        // Another environment (the project's, a package's): Python's language server reads
+        // imports from it.
+        if now != self.python_env || packages != self.python_packages {
             self.python_env = now;
+            self.python_packages = packages;
             self.lsp.update(cx, |lsp, cx| lsp.restart_python(cx));
         }
     }
