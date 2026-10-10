@@ -234,6 +234,10 @@ fn openai_loop(
         let reply: Value = serde_json::from_str(&text).map_err(|e| format!("An answer Null couldn't read: {e}"))?;
         let message = reply["choices"][0]["message"].clone();
         let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
+        // Stopped while it answered: what it asked to do isn't done.
+        if stop.load(Ordering::Relaxed) && !calls.is_empty() {
+            return Err("Stopped.".into());
+        }
         if calls.is_empty() {
             return Ok(message["content"].as_str().unwrap_or_default().trim().to_string());
         }
@@ -292,6 +296,9 @@ fn claude_loop(
         let reply: Value = serde_json::from_str(&text).map_err(|e| format!("An answer Null couldn't read: {e}"))?;
         let content = reply["content"].as_array().cloned().unwrap_or_default();
         let calls: Vec<&Value> = content.iter().filter(|b| b["type"] == "tool_use").collect();
+        if stop.load(Ordering::Relaxed) && !calls.is_empty() {
+            return Err("Stopped.".into());
+        }
         if calls.is_empty() {
             let said: Vec<&str> = content.iter().filter_map(|b| b["text"].as_str()).collect();
             return Ok(said.join("\n").trim().to_string());
@@ -316,6 +323,14 @@ mod tests {
     /// A stand-in for an OpenAI-style server: answers each request with the next reply,
     /// and hands back the requests' bodies.
     fn fake_server(replies: Vec<Value>) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+        fake_server_with(replies, || {})
+    }
+
+    /// The same, doing `on_request` once each request has come and before it's answered.
+    fn fake_server_with(
+        replies: Vec<Value>,
+        on_request: impl Fn() + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<Vec<Value>>) {
         use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -338,6 +353,7 @@ mod tests {
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
                 bodies.push(serde_json::from_slice(&body).unwrap());
+                on_request();
                 let text = reply.to_string();
                 let mut stream = reader.into_inner();
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).unwrap();
@@ -345,6 +361,29 @@ mod tests {
             bodies
         });
         (base, handle)
+    }
+
+    /// Stopped while the model answered: the edit it answered with isn't made.
+    #[test]
+    fn a_task_stopped_while_answering_does_nothing_more() {
+        let root = crate::tools::test_dir("agent-stop");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.rs"), "fn total() {}\n").unwrap();
+        let edit = json!({ "path": "a.rs", "old_text": "total", "new_text": "sum" }).to_string();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let pressed = stop.clone();
+        let (base, server) = fake_server_with(
+            vec![json!({ "choices": [{ "message": { "role": "assistant", "content": null, "tool_calls": [
+                { "id": "call_1", "type": "function", "function": { "name": "edit_file", "arguments": edit } }
+            ] } }] })],
+            move || pressed.store(true, Ordering::Relaxed),
+        );
+        let result = openai_loop(ProviderId::Ollama, &base, "test", None, "Task: rename", &root, &stop, &mut |_| {});
+        assert_eq!(result, Err("Stopped.".to_string()));
+        assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "fn total() {}\n", "not edited");
+        server.join().unwrap();
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

@@ -1825,7 +1825,8 @@ impl Workspace {
         let settings = cx.global::<Settings>().ai.clone();
         let root = self.tree.read(cx).root().to_path_buf();
         // Nothing in the field meanwhile: ↵ there must never commit a placeholder.
-        self.show_notice("Writing the commit message…".into(), cx);
+        const WRITING: &str = "Writing the commit message…";
+        self.show_notice(WRITING.into(), cx);
         cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             let diff = cx
@@ -1874,6 +1875,14 @@ impl Workspace {
                 };
                 let shown = message.trim().to_string();
                 if palette.update(cx, |p, cx| p.set_query(&shown, cx)).is_err() || done {
+                    // Written (or no longer wanted): not still said to be on its way.
+                    this.update(cx, |this, cx| {
+                        if this.notice.as_ref().is_some_and(|(n, _)| n == WRITING) {
+                            this.notice = None;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
                     return;
                 }
             }
