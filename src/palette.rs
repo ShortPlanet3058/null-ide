@@ -751,11 +751,19 @@ impl Palette {
                 found.push((score + boost + 5, Item::Command(i), highlights));
                 continue;
             }
-            // The category counts too, so "lines dup" finds "Duplicate Line".
+            // The category counts too, so "lines dup" finds "Duplicate Line" (with a space
+            // between: one word's letters strewn across both would find most anything).
             let prefix = format!("{} ", c.category.label());
-            if let Some((score, highlights)) = fuzzy::score(&format!("{prefix}{}", c.label), query) {
+            if query.trim().contains(char::is_whitespace)
+                && let Some((score, highlights)) = fuzzy::score(&format!("{prefix}{}", c.label), query)
+            {
                 let highlights = highlights.into_iter().filter_map(|b| b.checked_sub(prefix.len())).collect();
                 found.push((score + boost, Item::Command(i), highlights));
+                continue;
+            }
+            // Or what it's also called ("split" for moving a tab to the other side).
+            if let Some((score, _)) = also_called(c.action.name()).and_then(|words| fuzzy::score(words, query)) {
+                found.push((score + boost, Item::Command(i), Vec::new()));
             }
         }
         found.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
@@ -1554,6 +1562,18 @@ fn split_place(query: &str) -> (&str, Option<(u32, u32)>) {
     }
 }
 
+/// Other words a command is looked for by, that its name doesn't have.
+fn also_called(action: &str) -> Option<&'static str> {
+    Some(match action {
+        "workspace::MoveTabRight" => "split right",
+        "workspace::MoveTabLeft" => "split left",
+        "workspace::MoveTabDown" => "split down",
+        "workspace::MoveTabUp" => "split up",
+        "workspace::OpenOnOtherSide" => "split",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1580,6 +1600,12 @@ mod tests {
                 category: Category::View,
                 label: "Wrap Lines".into(),
                 action: Box::new(crate::menus::ToggleWordWrap),
+                keys: None,
+            },
+            Command {
+                category: Category::View,
+                label: "Move Tab to the Right Side".into(),
+                action: Box::new(crate::workspace::MoveTabRight),
                 keys: None,
             },
         ];
@@ -1636,6 +1662,13 @@ mod tests {
         assert_eq!(items(cx, &p), ["quick: Wrap lines"]);
         type_query(cx, &p, "spacing");
         assert_eq!(items(cx, &p), ["quick: Line spacing"]);
+        // The category with a space: "lines dup". One word strewn across both: nothing
+        // ("split": the s of Lines, then Duplicate's p l i t).
+        type_query(cx, &p, "lines dup");
+        assert_eq!(items(cx, &p), ["Duplicate Line"]);
+        // What a command is also called: splitting is moving a tab to a side.
+        type_query(cx, &p, "split");
+        assert_eq!(items(cx, &p), ["Move Tab to the Right Side"]);
     }
 
     #[gpui::test]

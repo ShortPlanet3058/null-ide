@@ -5,6 +5,8 @@
 #
 #   scripts/qa/shot.sh STEPS OUT.png [PROJECT] [WAIT_SECONDS]
 #
+# `shot NAME` steps take more pictures on the way, as NAME.png beside OUT.png.
+#
 # NULL_QA_SETTINGS='"keymap": "vim", "word_wrap": true' adds settings to its own.
 #
 # Needs `cargo build` first (target/debug/null). The window comes to the front for the
@@ -39,11 +41,25 @@ HOME="$home" XDG_CONFIG_HOME= XDG_DATA_HOME= NULL_DATA_DIR="$home/data" NULL_QA=
     "$bin" "$project" > "$log" 2>&1 &
 pid=$!
 
+# `shot <name>` steps: a picture each, beside OUT.png, as they come.
+taken=0
+take_shots() {
+    local names
+    names="$( (grep '^NULL_QA_SHOT ' "$log" || true) | sed 's/^NULL_QA_SHOT //' | tail -n +$((taken + 1)))"
+    [ -z "$names" ] && return 0
+    while IFS= read -r name; do
+        screencapture -x -o -l "$("$winid" "$pid")" "$(dirname "$out")/$name.png"
+        echo "$(dirname "$out")/$name.png"
+        taken=$((taken + 1))
+    done <<< "$names"
+}
 for _ in $(seq $((wait_for * 10))); do
+    take_shots
     grep -q NULL_QA_READY "$log" && break
     kill -0 "$pid" 2>/dev/null || { cat "$log" >&2; echo "null quit before it was ready" >&2; exit 1; }
     sleep 0.1
 done
+take_shots
 grep -q NULL_QA_READY "$log" || { cat "$log" >&2; echo "not ready after ${wait_for}s" >&2; exit 1; }
 sleep 0.3
 id="$("$winid" "$pid")"

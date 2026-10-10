@@ -5,7 +5,8 @@
 //! Steps: `open <path>`, `goto <line>:<column>` (from 1), `keys <keystroke> ...`
 //! (`cmd-p`, `escape`), `type <text>`, `action terminal`, `run <command>` (in the
 //! terminal), `wait <ms>`, `rows` (the caret line's rows as drawn, with what's after its
-//! text, to stderr), `ready`. A line starting with `#` is a note.
+//! text, to stderr), `shot <name>` (a picture now, `<name>.png` beside the last one),
+//! `ready`. A line starting with `#` is a note.
 
 use crate::workspace::Workspace;
 use gpui::{App, AppContext as _, Keystroke, Modifiers};
@@ -24,6 +25,12 @@ pub fn run(cx: &mut App) {
         for line in steps.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let (step, arg) = line.split_once(' ').map_or((line, ""), |(s, a)| (s, a.trim()));
             eprintln!("null qa: {line}");
+            if step == "shot" {
+                // The script takes it while this waits.
+                println!("NULL_QA_SHOT {arg}");
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                continue;
+            }
             if step == "wait" {
                 let ms = arg.parse().unwrap_or(500);
                 cx.background_executor().timer(Duration::from_millis(ms)).await;
