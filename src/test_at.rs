@@ -50,8 +50,8 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
         // A package with its own environment (a monorepo's): its tests, with its Python.
         "Python" => {
             let python = crate::python_env::python_for(root, path);
-            let package = crate::python_env::find_for(root, path).and_then(|env| env.parent().map(Path::to_path_buf));
-            Some(match package.filter(|p| p != root && p.starts_with(root)) {
+            let package = crate::python_env::owner_for(root, path).map(|(dir, _)| dir);
+            Some(match package.filter(|p| p != root) {
                 Some(package) => format!("{python} -m pytest {}", quote(&relative(root, &package))),
                 None => format!("{python} -m pytest"),
             })
@@ -86,13 +86,19 @@ pub fn run_everything(files: &[FileTests]) -> Option<String> {
         }
     }
     // Packages with their own environment run their tests with it: not again with the
-    // project's (which would find them too).
-    let packages: Vec<String> = commands
-        .iter()
-        .filter_map(|c| c.split_once(" -m pytest ").map(|(_, package)| format!(" --ignore={package}")))
-        .collect();
-    for command in commands.iter_mut().filter(|c| c.ends_with(" -m pytest")) {
-        command.push_str(&packages.concat());
+    // project's, or a package's they're inside (which would find them too).
+    let packages: Vec<String> =
+        commands.iter().filter_map(|c| c.split_once(" -m pytest ").map(|(_, package)| package.to_string())).collect();
+    let bare = |package: &str| package.trim_matches('\'').to_string();
+    for command in commands.iter_mut() {
+        let within = match command.split_once(" -m pytest ") {
+            Some((_, package)) => Some(format!("{}/", bare(package))),
+            None if command.ends_with(" -m pytest") => None,
+            None => continue,
+        };
+        let inner = packages.iter().filter(|p| within.as_ref().is_none_or(|w| bare(p).starts_with(w.as_str())));
+        let ignores: String = inner.map(|p| format!(" --ignore={p}")).collect();
+        command.push_str(&ignores);
     }
     (!commands.is_empty()).then(|| commands.join("; "))
 }
@@ -119,7 +125,7 @@ pub fn may_hold_tests(path: &Path) -> bool {
 /// Every test under `root` (as .gitignore leaves it), file by file. Slow on a big project:
 /// off the main thread.
 pub fn discover(root: &Path) -> Vec<FileTests> {
-    let mut files: Vec<FileTests> = ignore::WalkBuilder::new(root)
+    let files = ignore::WalkBuilder::new(root)
         // .gitignore read outside a git repository too; packages and builds never looked in.
         .require_git(false)
         .filter_entry(|e| !matches!(e.file_name().to_str(), Some("node_modules" | "target" | ".venv" | "venv")))
@@ -127,12 +133,16 @@ pub fn discover(root: &Path) -> Vec<FileTests> {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()) && may_hold_tests(e.path()))
         .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_BYTES))
-        .take(MAX_FILES)
-        .filter_map(|e| {
-            let text = crate::encoding::read(e.path()).ok()?.0;
-            tests_in_file(root, e.path(), &text)
-        })
-        .collect();
+        .take(MAX_FILES);
+    // (Each folder's Python environment looked for once, not once a test.)
+    let mut files: Vec<FileTests> = crate::python_env::remembering(|| {
+        files
+            .filter_map(|e| {
+                let text = crate::encoding::read(e.path()).ok()?.0;
+                tests_in_file(root, e.path(), &text)
+            })
+            .collect()
+    });
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files
 }
@@ -779,7 +789,13 @@ mod tests {
         let test = "def test_one():\n    pass\n";
         let root = project(
             "nested-env",
-            &[("tests/test_a.py", test), ("api/.venv/bin/python", ""), ("api/tests/test_b.py", test)],
+            &[
+                ("tests/test_a.py", test),
+                ("api/.venv/bin/python", ""),
+                ("api/tests/test_b.py", test),
+                ("api/plugins/.venv/bin/python", ""),
+                ("api/plugins/test_c.py", test),
+            ],
         );
         let files = discover(&root);
         let b = files.iter().find(|f| f.path.ends_with("api/tests/test_b.py")).unwrap();
@@ -787,7 +803,10 @@ mod tests {
         assert_eq!(b.every.as_deref(), Some("api/.venv/bin/python -m pytest api"));
         assert_eq!(
             run_everything(&files).as_deref(),
-            Some("api/.venv/bin/python -m pytest api; python3 -m pytest --ignore=api")
+            Some(
+                "api/plugins/.venv/bin/python -m pytest api/plugins; api/.venv/bin/python -m pytest api --ignore=api/plugins; \
+                 python3 -m pytest --ignore=api/plugins --ignore=api"
+            )
         );
     }
 

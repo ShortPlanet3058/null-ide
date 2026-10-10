@@ -86,8 +86,9 @@ pub struct Vim {
     head: usize,
     /// The column `j` and `k` keep to, as shown (`usize::MAX` after `$`: the line's end).
     goal: Option<usize>,
-    /// The column on its row `gj` and `gk` keep to (wrapped text).
-    row_goal: Option<usize>,
+    /// The column on its row `gj` and `gk` keep to (wrapped text), and where the caret
+    /// was left and the text's revision then: moved or edited since, it's forgotten.
+    row_goal: Option<(usize, u64, usize)>,
     /// The last f F t T, and its character, for ; and ,.
     last_find: Option<(char, char)>,
     /// The keys of the command being typed, and the text's revision before it.
@@ -566,6 +567,16 @@ impl Editor {
             .fold(0, |col, c| col + crate::wrap::char_columns(c, col))
     }
 
+    /// The column the caret at `column` of `line` is shown at, as Vim has it: on a tab, its
+    /// last column (where Vim draws the caret).
+    fn vim_caret_column(&self, line: usize, column: usize) -> usize {
+        let start = self.display_column(line, column);
+        match self.buffer.line_text(line).chars().nth(column) {
+            Some(c @ '\t') => start + crate::wrap::char_columns(c, start) - 1,
+            _ => start,
+        }
+    }
+
     /// The character of `line` at shown column `column`, and how many spaces short of it
     /// the line ends (a short line).
     fn column_char(&self, line: usize, column: usize) -> (usize, usize) {
@@ -678,14 +689,13 @@ impl Editor {
             // caret goes straight down; to the line's end after $.
             let goal = match this.vim.goal {
                 Some(goal) => goal,
-                None => *this.vim.goal.insert(this.display_column(line, column)),
+                None => *this.vim.goal.insert(this.vim_caret_column(line, column)),
             };
             let len = this.buffer.line_len(to_line);
             let col = if goal == usize::MAX { len } else { this.column_char(to_line, goal).0 };
             let col = col.min(len.saturating_sub(1));
             Motion { to: this.line_start(to_line) + col, linewise: true, inclusive: false }
         };
-        self.vim.row_goal = None;
         let keeps_goal = matches!(key, Key::Char('j' | 'k') | Key::Ctrl('d' | 'u' | 'f' | 'b'));
         if !keeps_goal {
             self.vim.goal = None;
@@ -857,13 +867,13 @@ impl Editor {
         // (a click after it), back on its last character.
         if self.vim.mode == Mode::Normal && self.selection.is_empty() && self.selection.head != self.vim.placed {
             self.vim.goal = None;
-            self.vim.row_goal = None;
             let at = self.vim_clamp(self.selection.head.min(self.buffer.len_chars()));
             self.selection = Selection::caret(at);
             self.vim.placed = at;
         }
         // Selected with the mouse (or ⌘A): Visual, from there (an operator waiting is dropped).
         if self.vim.mode == Mode::Normal && !self.selection.is_empty() {
+            self.vim.goal = None;
             self.vim.operator = None;
             self.vim.count = None;
             self.vim.block_to_end = false;
@@ -1100,8 +1110,9 @@ impl Editor {
         let count = self.vim.count.take().or(operator.and_then(|(_, n)| n));
         let operator = operator.map(|(op, _)| op);
         let n = count.unwrap_or(1).max(1);
-        let row_goal = self.vim.row_goal.take();
-        if matches!((pending, &key), ('g', Key::Char('g')) | ('\'' | '`' | 'f' | 'F' | 't' | 'T', _)) {
+        let row_goal = self.vim.row_goal.filter(|(at, revision, _)| *at == self.vim_at() && *revision == self.buffer.revision());
+        let row_goal = row_goal.map(|(_, _, goal)| goal);
+        if matches!((pending, &key), ('g', Key::Char('g')) | ('\'' | '`' | 'f' | 'F' | 't' | 'T' | 'i' | 'a', _)) {
             self.vim.goal = None;
         }
         match (pending, key) {
@@ -1156,7 +1167,7 @@ impl Editor {
                 let (to, goal) = self.vim_screen_rows(rows, row_goal);
                 self.vim.goal = None;
                 self.vim_go(Motion { to, linewise: false, inclusive: false }, operator, window, cx);
-                self.vim.row_goal = Some(goal);
+                self.vim.row_goal = Some((self.vim_at(), self.buffer.revision(), goal));
             }
             // The start, first text and end of the row as shown.
             ('g', Key::Char(end @ ('0' | '^' | '$'))) => {
@@ -1196,6 +1207,12 @@ impl Editor {
         self.wrap.update(&self.buffer, self.wrap.width(), &self.block_specs());
         let (line, column) = self.buffer.point(self.vim_at());
         let (row, shown) = self.wrap.to_display(line, column, &self.buffer);
+        // On a tab: its last column, as j and k have it.
+        let indent = self.wrap.row(row, &self.buffer).indent;
+        let shown = match self.buffer.char_at(self.vim_at()) {
+            Some(c @ '\t') => shown + crate::wrap::char_columns(c, shown.saturating_sub(indent)) - 1,
+            _ => shown,
+        };
         let goal = goal.unwrap_or(shown);
         let (last_row, last_line) = (self.wrap.rows().saturating_sub(1) as isize, self.vim_last_line());
         let mut at = row as isize;
@@ -1209,7 +1226,31 @@ impl Editor {
             }
             at = next;
         }
-        (self.wrap.to_offset(at as usize, goal, &self.buffer), goal)
+        (self.vim_row_char(at as usize, goal), goal)
+    }
+
+    /// The character shown at column `goal` of `row` (a tab, anywhere in its room; the
+    /// row's last when it's shorter).
+    fn vim_row_char(&self, row: usize, goal: usize) -> usize {
+        let shown = self.wrap.row(row, &self.buffer);
+        if shown.block.is_some() {
+            return self.wrap.to_offset(row, goal, &self.buffer);
+        }
+        let start = self.line_start(shown.line);
+        let rope = self.buffer.rope();
+        let (goal, mut column) = (goal.saturating_sub(shown.indent), 0);
+        for i in shown.cols.clone() {
+            let c = rope.char(start + i);
+            if c == '\n' || c == '\r' {
+                break;
+            }
+            column += crate::wrap::char_columns(c, column);
+            if column > goal {
+                return start + i;
+            }
+        }
+        // (The line's end: the caret goes back onto its last character.)
+        start + if shown.last { shown.cols.end } else { shown.cols.end.saturating_sub(1).max(shown.cols.start) }
     }
 
     /// The start (`0`), first text (`^`) or last character (`$`) of the row Vim is on as
@@ -2579,6 +2620,16 @@ mod tests {
         assert_eq!(shown(&e, cx), format!("\txy\n{under_y}\n\tz\n"));
         cx.simulate_keystrokes("d g k");
         assert_eq!(shown(&e, cx), format!("\tx|{}\n\tz\n", &below[tab + 1..]));
+        // Pressed again, gj keeps its column through a short row.
+        let (e, cx) = vim("abcde|fgh\nab\nabcdefgh\n", &mut cx.cx);
+        cx.simulate_keystrokes("g j g j");
+        assert_eq!(shown(&e, cx), "abcdefgh\nab\nabcde|fgh\n");
+        // On a tab, its last column is kept (where Vim shows the caret); onto a tab, on it.
+        let (e, cx) = vim("|\tz\nabcdefgh\nab\tcd\n", &mut cx.cx);
+        cx.simulate_keystrokes("j");
+        assert_eq!(shown(&e, cx), format!("\tz\n{}|{}\nab\tcd\n", &"abcdefgh"[..tab - 1], &"abcdefgh"[tab - 1..]));
+        cx.simulate_keystrokes("g j");
+        assert_eq!(shown(&e, cx), "\tz\nabcdefgh\nab|\tcd\n", "on the tab where the column is");
 
         // Wrapped: a row at a time, its column kept; the empty line after the last isn't one.
         let (e, cx) = vim(&format!("wo|rd {}\nend\n", "word ".repeat(9)), &mut cx.cx);

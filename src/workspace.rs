@@ -1178,14 +1178,8 @@ impl Workspace {
         // (Only when they're the ones in use: another window's in front, they wait for this one.)
         // An environment made or removed (`python -m venv .venv`): known from now.
         // (Or Poetry's, kept outside: known again when the project's Poetry files change.)
-        if visible.iter().any(|p| crate::python_env::may_change(p)) {
-            self.python_env_here = None;
-            let now = crate::python_env::find(&root);
-            // Another environment: Python's language server reads its packages from it.
-            if now != self.python_env {
-                self.python_env = now;
-                self.lsp.update(cx, |lsp, cx| lsp.restart_python(cx));
-            }
+        if visible.iter().any(|p| crate::python_env::may_change(&root, p)) {
+            self.python_env_changed(cx);
         }
         let settings_changed = visible.contains(&crate::settings::project_file(&root))
             || visible.contains(&crate::settings::vscode_file(&root));
@@ -5008,6 +5002,17 @@ impl Workspace {
         cx.notify();
     }
 
+    /// An environment may have been made or removed: looked for again.
+    fn python_env_changed(&mut self, cx: &mut Context<Self>) {
+        self.python_env_here = None;
+        let now = crate::python_env::find(self.tree.read(cx).root());
+        // Another environment: Python's language server reads its packages from it.
+        if now != self.python_env {
+            self.python_env = now;
+            self.lsp.update(cx, |lsp, cx| lsp.restart_python(cx));
+        }
+    }
+
     /// How the tests did, from what a run printed (one run from the list, or typed).
     fn read_test_results(&mut self, ran: &crate::terminal::Ran) {
         let results = crate::test_at::results(&ran.output);
@@ -6392,6 +6397,11 @@ impl Workspace {
             TerminalEvent::Ran(ran) => {
                 this.read_test_results(ran);
                 this.read_reported(ran, cx);
+                // `poetry install`, `poetry env use`: Poetry's environments are kept outside
+                // the project, where no change is seen.
+                if ran.command.split_whitespace().any(|word| word == "poetry") {
+                    this.python_env_changed(cx);
+                }
             }
             TerminalEvent::OpenFile(path, line, column) => {
                 this.open_file(path.clone(), window, cx);
@@ -7158,6 +7168,10 @@ impl Workspace {
                 self.close_tab(&CloseTab, window, cx);
             }
             // Formatted first when that's on: the tab closes once it's saved (`SavedToClose`).
+            // :x writes only what changed (a file as it was saved isn't formatted again).
+            "x" | "xit" if !editor.read(cx).buffer.is_dirty() => {
+                self.confirm_unsaved(CloseAction::CloseTabs(vec![editor]), window, cx);
+            }
             "wq" | "x" | "xit" => editor.update(cx, |e, cx| e.save_and_close(cx)),
             "qa" | "qa!" | "qall" => self.close_all_tabs(&CloseAllTabs, window, cx),
             "wqa" | "xa" | "wqall" | "xall" => {
@@ -9224,7 +9238,7 @@ mod tests {
         let dir = crate::tools::test_dir("vim-wq");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        for name in ["a.txt", "b.txt"] {
+        for name in ["a.txt", "b.txt", "c.txt"] {
             std::fs::write(dir.join(name), "saved\n").unwrap();
         }
         cx.update(|cx| {
@@ -9235,12 +9249,15 @@ mod tests {
         });
         let root = dir.clone();
         let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
-        for (name, command, kept) in [("a.txt", "wq", "changed\n"), ("b.txt", "q!", "saved\n")] {
+        for (name, command, kept) in [("a.txt", "wq", "changed\n"), ("b.txt", "q!", "saved\n"), ("c.txt", "x", "saved\n")] {
             let file = dir.join(name);
             workspace.update_in(cx, |w, window, cx| w.open_file(file, window, cx));
             cx.run_until_parked();
             let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
-            editor.update(cx, |e, cx| e.restore_unsaved("changed\n", cx));
+            // (:x on a file as it was saved: closed, nothing written.)
+            if command != "x" {
+                editor.update(cx, |e, cx| e.restore_unsaved("changed\n", cx));
+            }
             workspace.update_in(cx, |w, window, cx| w.run_ex(command, window, cx));
             cx.run_until_parked();
             assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), kept, ":{command}");

@@ -16,20 +16,54 @@ fn python_in(env: &Path) -> PathBuf {
 /// The environment of the project at `root`: a folder of its with a Python in it, else
 /// the one Poetry made for it in its own folder.
 pub fn find(root: &Path) -> Option<PathBuf> {
-    FOLDERS.iter().map(|f| root.join(f)).find(|env| python_in(env).exists()).or_else(|| poetry(root))
+    if let Some(found) = MEMO.with(|memo| memo.borrow().as_ref().and_then(|m| m.get(root).cloned())) {
+        return found;
+    }
+    let found = FOLDERS.iter().map(|f| root.join(f)).find(|env| python_in(env).exists()).or_else(|| poetry(root));
+    MEMO.with(|memo| {
+        if let Some(memo) = memo.borrow_mut().as_mut() {
+            memo.insert(root.to_path_buf(), found.clone());
+        }
+    });
+    found
+}
+
+thread_local! {
+    /// Environments already looked for, while `remembering` (a whole project's tests found
+    /// at once: each folder looked in once, not once a test).
+    static MEMO: std::cell::RefCell<Option<std::collections::HashMap<PathBuf, Option<PathBuf>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `work` with each folder's environment looked for once.
+pub fn remembering<T>(work: impl FnOnce() -> T) -> T {
+    MEMO.with(|memo| *memo.borrow_mut() = Some(Default::default()));
+    let result = work();
+    MEMO.with(|memo| *memo.borrow_mut() = None);
+    result
 }
 
 /// The environment for `path` in the project at `root`: the nearest folder's, from
 /// `path`'s up to the project's (each package of a monorepo with its own), else the
 /// project's.
 pub fn find_for(root: &Path, path: &Path) -> Option<PathBuf> {
-    path.ancestors().take_while(|dir| dir.starts_with(root) && *dir != root).find_map(find).or_else(|| find(root))
+    owner_for(root, path).map(|(_, env)| env)
 }
 
-/// Whether a change at `path` can make or remove an environment (its folder, Poetry's files).
-pub fn may_change(path: &Path) -> bool {
-    path.components().any(|c| FOLDERS.iter().any(|f| c.as_os_str() == *f))
-        || path.file_name().is_some_and(|n| n == "pyproject.toml" || n == "poetry.lock")
+/// The same, with the folder it's for (the package's, or the project's).
+pub fn owner_for(root: &Path, path: &Path) -> Option<(PathBuf, PathBuf)> {
+    path.ancestors()
+        .take_while(|dir| dir.starts_with(root) && *dir != root)
+        .chain(std::iter::once(root))
+        .find_map(|dir| find(dir).map(|env| (dir.to_path_buf(), env)))
+}
+
+/// Whether a change at `path` (in the project at `root`) can make or remove an
+/// environment: its folder, Poetry's files.
+pub fn may_change(root: &Path, path: &Path) -> bool {
+    let Ok(inside) = path.strip_prefix(root) else { return false };
+    inside.components().any(|c| FOLDERS.iter().any(|f| c.as_os_str() == *f))
+        || path.file_name().is_some_and(|n| ["pyproject.toml", "poetry.lock", "poetry.toml"].iter().any(|f| n == *f))
 }
 
 /// How the status bar names it: where it is in the project (".venv"), or "Poetry".
@@ -42,71 +76,126 @@ pub fn label(env: &Path, root: &Path) -> String {
 
 /// The environment Poetry keeps for a project outside it (its default): in its
 /// `virtualenvs` folder, named after the project and its folder
-/// (`name-<hash of the folder>-py3.12`); the newest Python when there are several.
+/// (`name-<hash of the folder>-py3.12`).
 fn poetry(root: &Path) -> Option<PathBuf> {
-    poetry_in(root, &poetry_folder()?)
+    let pyproject = std::fs::read_to_string(root.join("pyproject.toml")).ok()?;
+    let local = std::fs::read_to_string(root.join("poetry.toml")).unwrap_or_default();
+    let name = poetry_name(&pyproject, root.join("poetry.lock").exists())?;
+    poetry_in(root, &name, &poetry_folder(&local)?)
 }
 
-/// The same, with Poetry's environments in `folder`.
-fn poetry_in(root: &Path, folder: &Path) -> Option<PathBuf> {
-    let name = poetry_name(&std::fs::read_to_string(root.join("pyproject.toml")).ok()?)?;
-    let prefix = format!("{}-", poetry_env_name(&name, &root.canonicalize().ok()?));
+/// The same, with Poetry's environments in `folder`: the one `poetry env use` chose
+/// (`envs.toml` says), else the newest Python.
+fn poetry_in(root: &Path, name: &str, folder: &Path) -> Option<PathBuf> {
+    let base = poetry_env_name(name, &root.canonicalize().ok()?);
+    let prefix = format!("{base}-py");
     let mut found: Vec<(Vec<u32>, PathBuf)> = std::fs::read_dir(folder)
         .ok()?
         .flatten()
         .filter_map(|entry| {
             let file = entry.file_name().to_string_lossy().into_owned();
-            let version = file.strip_prefix(&prefix)?.strip_prefix("py")?;
+            let version = file.strip_prefix(&prefix)?;
             let version = version.split('.').map(|n| n.parse().ok()).collect::<Option<Vec<u32>>>()?;
             Some((version, entry.path()))
         })
         .filter(|(_, env)| python_in(env).exists())
         .collect();
+    let chosen = std::fs::read_to_string(folder.join("envs.toml")).ok().and_then(|t| toml_value(&t, &base, "minor"));
+    if let Some(env) = chosen.and_then(|minor| found.iter().find(|(_, env)| env.ends_with(format!("{prefix}{minor}")))) {
+        return Some(env.1.clone());
+    }
     found.sort();
     found.pop().map(|(_, env)| env)
 }
 
-/// The project's name, if Poetry manages it: `[tool.poetry]`'s, or `[project]`'s when
-/// `[tool.poetry]` is there too (Poetry 2 reads it from there).
-fn poetry_name(pyproject: &str) -> Option<String> {
-    let mut section = "";
-    let (mut poetry, mut own, mut project) = (false, None, None);
-    for line in pyproject.lines().map(str::trim) {
-        if let Some(header) = line.strip_prefix('[').and_then(|l| l.split(']').next()) {
-            section = header.trim();
-            poetry |= section == "tool.poetry" || section.starts_with("tool.poetry.");
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else { continue };
-        if key.trim() != "name" {
-            continue;
-        }
-        let value = value.split('#').next().unwrap_or("").trim().trim_matches(|c| c == '"' || c == '\'');
-        match section {
-            "tool.poetry" => own = Some(value.to_string()),
-            "project" => project = Some(value.to_string()),
-            _ => {}
+/// The project's name as Poetry names its environment, if Poetry manages it (it has
+/// `[tool.poetry]`, Poetry's lock file, or Poetry builds it): `[project]`'s, else
+/// `[tool.poetry]`'s, else Poetry's own for a project that isn't a package.
+fn poetry_name(pyproject: &str, locked: bool) -> Option<String> {
+    let has_poetry = pyproject.lines().map(str::trim).any(|l| l == "[tool.poetry]" || l.starts_with("[tool.poetry."));
+    let built = toml_value(pyproject, "build-system", "build-backend").is_some_and(|b| b.starts_with("poetry"));
+    if !(has_poetry || locked || built) {
+        return None;
+    }
+    let name = toml_value(pyproject, "project", "name")
+        .or_else(|| toml_value(pyproject, "tool.poetry", "name"))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "non-package-mode".into());
+    // As Python packaging writes names: "My_App.core" is "my-app-core".
+    let mut canonical = String::new();
+    for c in name.chars() {
+        if matches!(c, '-' | '_' | '.') {
+            if !canonical.ends_with('-') {
+                canonical.push('-');
+            }
+        } else {
+            canonical.extend(c.to_lowercase());
         }
     }
-    if poetry { own.or(project).filter(|n| !n.is_empty()) } else { None }
+    Some(canonical)
 }
 
-/// Where Poetry keeps environments: as it's set to (`POETRY_VIRTUALENVS_PATH`, else
-/// under `POETRY_CACHE_DIR`), else its cache folder.
-fn poetry_folder() -> Option<PathBuf> {
-    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    if let Some(path) = var("POETRY_VIRTUALENVS_PATH") {
-        return Some(path);
+/// A plain value from TOML text: `key = "value"` under `[section]`, or `section.key =
+/// "value"` before any. (Enough for the few settings read here, not a TOML reader.)
+fn toml_value(text: &str, section: &str, key: &str) -> Option<String> {
+    let mut current = String::new();
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            current = line.trim_start_matches('[').split(']').next().unwrap_or("").trim().trim_matches('"').to_string();
+            continue;
+        }
+        let Some((k, value)) = line.split_once('=') else { continue };
+        let k = k.trim().trim_matches('"');
+        let full = if current.is_empty() { k.to_string() } else { format!("{current}.{k}") };
+        if full == format!("{section}.{key}") || (section.is_empty() && full == key) {
+            let value = value.trim();
+            let value = match value.chars().next() {
+                Some(q @ ('"' | '\'')) => value[1..].split(q).next().unwrap_or(""),
+                _ => value.split('#').next().unwrap_or("").trim(),
+            };
+            return Some(value.to_string());
+        }
     }
-    let cache = var("POETRY_CACHE_DIR").or_else(|| {
-        let home = var("HOME")?;
+    None
+}
+
+/// Where Poetry keeps environments: as it's set to (`POETRY_VIRTUALENVS_PATH`; the
+/// project's `poetry.toml`, `local`; Poetry's own `config.toml`), else its cache folder.
+fn poetry_folder(local: &str) -> Option<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let home = var("HOME");
+    let config_dir = var("POETRY_CONFIG_DIR").or_else(|| {
+        let home = home.clone()?;
+        Some(if cfg!(target_os = "macos") {
+            home.join("Library/Application Support/pypoetry")
+        } else {
+            var("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")).join("pypoetry")
+        })
+    });
+    let config = config_dir.and_then(|d| std::fs::read_to_string(d.join("config.toml")).ok()).unwrap_or_default();
+    let setting = |key: &str| {
+        let (section, key) = key.rsplit_once('.').unwrap_or(("", key));
+        toml_value(local, section, key).or_else(|| toml_value(&config, section, key))
+    };
+    let expand = |path: String| match (path.strip_prefix("~/"), &home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(path),
+    };
+    let cache = var("POETRY_CACHE_DIR").or_else(|| setting("cache-dir").map(expand)).or_else(|| {
+        let home = home.clone()?;
         Some(if cfg!(target_os = "macos") {
             home.join("Library/Caches/pypoetry")
         } else {
             var("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache")).join("pypoetry")
         })
     })?;
-    Some(cache.join("virtualenvs"))
+    if let Some(path) = var("POETRY_VIRTUALENVS_PATH") {
+        return Some(path);
+    }
+    match setting("virtualenvs.path") {
+        Some(path) => Some(expand(path.replace("{cache-dir}", &cache.to_string_lossy()))),
+        None => Some(cache.join("virtualenvs")),
+    }
 }
 
 /// Poetry's name for a project's environments, less the Python version: its name made
@@ -232,8 +321,12 @@ mod tests {
         assert_eq!(find_for(&dir, &dir.join("web/x.py")), Some(dir.join(".venv")));
         assert_eq!(find_for(&dir, &dir), Some(dir.join(".venv")));
         assert_eq!(find_for(&dir, Path::new("/elsewhere/x.py")), Some(dir.join(".venv")), "outside: the project's");
-        assert!(may_change(&dir.join("api/.venv/bin")) && may_change(&dir.join("api/pyproject.toml")));
-        assert!(!may_change(&dir.join("api/app.py")) && !may_change(&dir.join("environment.py")));
+        assert!(may_change(&dir, &dir.join("api/.venv/bin")) && may_change(&dir, &dir.join("api/pyproject.toml")));
+        assert!(!may_change(&dir, &dir.join("api/app.py")) && !may_change(&dir, &dir.join("environment.py")));
+        assert!(!may_change(&dir.join("api"), &dir.join("api/app.py")), "a folder above the project isn't one");
+        assert_eq!(owner_for(&dir, &dir.join("api/tests/test_a.py")), Some((dir.join("api"), dir.join("api/.venv"))));
+        let memo = remembering(|| find_for(&dir, &dir.join("web/x.py")));
+        assert_eq!(memo, Some(dir.join(".venv")), "remembered: the same");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -242,10 +335,19 @@ mod tests {
         // As Poetry names it (worked out with the same code as Poetry, in Python).
         assert_eq!(poetry_env_name("My App", Path::new("/Users/me/my-app")), "my_app-IAp8Z3rM");
         let pyproject = "[project]\nname = \"alpha\"\n\n[tool.poetry]\npackage-mode = false\n";
-        assert_eq!(poetry_name(pyproject).as_deref(), Some("alpha"), "Poetry 2: [project]'s name");
-        let old = "[tool.poetry]\nname = 'beta'  # the name\n[tool.poetry.dependencies]\nname = \"x\"\n";
-        assert_eq!(poetry_name(old).as_deref(), Some("beta"));
-        assert_eq!(poetry_name("[project]\nname = \"uv-made\"\n"), None, "not Poetry's");
+        assert_eq!(poetry_name(pyproject, false).as_deref(), Some("alpha"), "Poetry 2: [project]'s name");
+        let old = "[tool.poetry]\nname = 'beta'  # the name\n[[tool.poetry.source]]\nname = \"x\"\n";
+        assert_eq!(poetry_name(old, false).as_deref(), Some("beta"));
+        let both = "[project]\nname = \"new\"\n[tool.poetry]\nname = \"old\"\n";
+        assert_eq!(poetry_name(both, false).as_deref(), Some("new"), "[project]'s wins, as in Poetry");
+        assert_eq!(poetry_name("[project]\nname = \"uv-made\"\n", false), None, "not Poetry's");
+        assert_eq!(poetry_name("[project]\nname = \"My_App.core\"\n", true).as_deref(), Some("my-app-core"), "locked: Poetry's");
+        let built = "[project]\nname = \"x\"\n[build-system]\nbuild-backend = \"poetry.core.masonry.api\"\n";
+        assert_eq!(poetry_name(built, false).as_deref(), Some("x"), "built by Poetry");
+        assert_eq!(poetry_name("[tool.poetry]\npackage-mode = false\n", false).as_deref(), Some("non-package-mode"));
+        assert_eq!(toml_value("virtualenvs.path = \"/v\" # set\n", "virtualenvs", "path").as_deref(), Some("/v"));
+        assert_eq!(toml_value("cache-dir = '/c'\n[virtualenvs]\npath = \"{cache-dir}/v\"\n", "", "cache-dir").as_deref(), Some("/c"));
+        assert_eq!(toml_value("[virtualenvs]\npath = \"{cache-dir}/v\"\n", "virtualenvs", "path").as_deref(), Some("{cache-dir}/v"));
         // Found among Poetry's: this project's (not another's of the same name), the newest Python.
         let dir = crate::tools::test_dir("poetry-env");
         let _ = std::fs::remove_dir_all(&dir);
@@ -258,7 +360,10 @@ mod tests {
             std::fs::write(envs.join(&env).join("bin/python"), "").unwrap();
         }
         std::fs::create_dir_all(envs.join(format!("{ours}-py3.14"))).unwrap(); // No Python in it.
-        assert_eq!(poetry_in(&project, &envs), Some(envs.join(format!("{ours}-py3.12"))));
+        assert_eq!(poetry_in(&project, "alpha", &envs), Some(envs.join(format!("{ours}-py3.12"))));
+        // The one `poetry env use 3.9` chose.
+        std::fs::write(envs.join("envs.toml"), format!("[{ours}]\nminor = \"3.9\"\npatch = \"3.9.18\"\n")).unwrap();
+        assert_eq!(poetry_in(&project, "alpha", &envs), Some(envs.join(format!("{ours}-py3.9"))));
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(label(Path::new("/p/.venv"), Path::new("/p")), ".venv");
         assert_eq!(label(Path::new("/p/api/.venv"), Path::new("/p")), "api/.venv");

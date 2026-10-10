@@ -750,6 +750,9 @@ pub struct Editor {
     ghost_cache: Vec<(String, Vec<String>)>,
     renaming: Option<refactor::Renaming>,
     format_task: Option<Task<()>>,
+    /// What the whole file's formatting under way does once done: save, then close the tab
+    /// (`:wq`). A second one started meanwhile takes these on, not drops them.
+    format_after: (bool, bool),
     /// A search to run again once typing pauses, in a big file (see `search_after_edit`).
     search_task: Option<Task<()>>,
     /// Pasted code being formatted (Format on paste): apart, so it can't cancel a save's.
@@ -951,6 +954,7 @@ impl Editor {
             ghost_cache: Vec::new(),
             renaming: None,
             format_task: None,
+            format_after: (false, false),
             search_task: None,
             paste_format_task: None,
             blocks: Vec::new(),
