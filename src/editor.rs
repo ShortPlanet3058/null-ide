@@ -240,6 +240,7 @@ pub fn bind_ai_keys(cx: &mut App) {
     assist::bind_keys(cx);
     review::bind_keys(cx);
     ghost::bind_keys(cx);
+    assist::bind_writing_keys(cx);
 }
 
 pub fn bind_keys(cx: &mut App) {
@@ -745,10 +746,6 @@ pub struct Editor {
     /// The keys while the AI writes a change: on its "Writing…" bar (Esc stops it; nothing
     /// typed reaches the code it's rewriting).
     writing_focus: FocusHandle,
-    /// Where the keys go once it's done, if they're still on that bar (or nowhere): the code
-    /// (its change written: ⇥ and Esc keep or undo it), or the field (it didn't come: ask
-    /// again).
-    keys_after_writing: Option<assist::KeysAfter>,
     /// An AI task's changes to this file, being reviewed.
     review: Option<review::Review>,
     note: Option<assist::Note>,
@@ -955,7 +952,6 @@ impl Editor {
             git_diff_task: None,
             prompt: None,
             ai_change: None,
-            keys_after_writing: None,
             review: None,
             note: None,
             ghost: None,
@@ -4308,6 +4304,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::cancel_completion))
             .on_action(cx.listener(Self::inline_assist))
             .on_action(cx.listener(Self::keep_change_action))
+            // (Esc while the AI writes, the keys in the code: see `bind_writing_keys`.)
+            .on_action(cx.listener(Self::cancel_prompt))
             .on_action(cx.listener(Self::undo_change_action))
             .on_action(cx.listener(Self::close_note_action))
             .on_action(cx.listener(Self::accept_ghost_action))
