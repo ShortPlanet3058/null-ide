@@ -742,9 +742,13 @@ pub struct Editor {
     /// ⌘I: the field while it's open, a change until it's kept or undone, an answer.
     prompt: Option<assist::Prompting>,
     ai_change: Option<assist::Change>,
-    /// The AI's answer didn't come (failed, nothing to change): its field, back again, takes
-    /// the keys when next drawn, to ask again.
-    focus_prompt: bool,
+    /// The keys while the AI writes a change: on its "Writing…" bar (Esc stops it; nothing
+    /// typed reaches the code it's rewriting).
+    writing_focus: FocusHandle,
+    /// Where the keys go once it's done, if they're still on that bar (or nowhere): the code
+    /// (its change written: ⇥ and Esc keep or undo it), or the field (it didn't come: ask
+    /// again).
+    keys_after_writing: Option<assist::KeysAfter>,
     /// An AI task's changes to this file, being reviewed.
     review: Option<review::Review>,
     note: Option<assist::Note>,
@@ -821,6 +825,7 @@ impl Editor {
         );
         let mut editor = Self {
             focus_handle: cx.focus_handle(),
+            writing_focus: cx.focus_handle(),
             buffer,
             path,
             highlighter,
@@ -950,7 +955,7 @@ impl Editor {
             git_diff_task: None,
             prompt: None,
             ai_change: None,
-            focus_prompt: false,
+            keys_after_writing: None,
             review: None,
             note: None,
             ghost: None,
@@ -4168,7 +4173,7 @@ impl EntityInputHandler for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.focus_prompt_if_asked(window, cx);
+        self.keys_back_after_writing(window, cx);
         if let Some(preview) = &self.preview {
             return self.render_preview(preview, cx);
         }
@@ -4303,8 +4308,6 @@ impl Render for Editor {
             .on_action(cx.listener(Self::cancel_completion))
             .on_action(cx.listener(Self::inline_assist))
             .on_action(cx.listener(Self::keep_change_action))
-            // (Esc while the AI writes: the field that stops it is gone, the editor has the keys.)
-            .on_action(cx.listener(Self::cancel_prompt))
             .on_action(cx.listener(Self::undo_change_action))
             .on_action(cx.listener(Self::close_note_action))
             .on_action(cx.listener(Self::accept_ghost_action))

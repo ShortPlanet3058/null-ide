@@ -243,6 +243,10 @@ fn openai_loop(
         }
         messages.push(message);
         for call in calls {
+            // (Stopped while one of them ran: not the next.)
+            if stop.load(Ordering::Relaxed) {
+                return Err("Stopped.".into());
+            }
             let name = call["function"]["name"].as_str().unwrap_or_default();
             // Arguments come as a JSON string (some servers send the object itself).
             let input = match &call["function"]["arguments"] {
@@ -303,13 +307,15 @@ fn claude_loop(
             let said: Vec<&str> = content.iter().filter_map(|b| b["text"].as_str()).collect();
             return Ok(said.join("\n").trim().to_string());
         }
-        let results: Vec<Value> = calls
-            .iter()
-            .map(|call| {
-                let result = run_tool(root, call["name"].as_str().unwrap_or_default(), &call["input"], on_event);
-                json!({ "type": "tool_result", "tool_use_id": call["id"], "content": result })
-            })
-            .collect();
+        let mut results: Vec<Value> = Vec::new();
+        for call in &calls {
+            // (Stopped while one of them ran: not the next.)
+            if stop.load(Ordering::Relaxed) {
+                return Err("Stopped.".into());
+            }
+            let result = run_tool(root, call["name"].as_str().unwrap_or_default(), &call["input"], on_event);
+            results.push(json!({ "type": "tool_result", "tool_use_id": call["id"], "content": result }));
+        }
         messages.push(json!({ "role": "assistant", "content": content }));
         messages.push(json!({ "role": "user", "content": results }));
     }
