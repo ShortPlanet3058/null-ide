@@ -1,7 +1,9 @@
 //! Characters that can't be seen, or look like others: a zero-width space pasted from a
 //! web page, a direction mark that makes code read differently from how it runs ("Trojan
 //! Source"), a no-break space where a space was meant. Marked in the code, named in the
-//! status bar when the caret is on one, and taken out on asking.
+//! status bar when the caret is on one, and taken out on asking. And text hidden in
+//! characters that show nothing (tag characters, runs of variation selectors): a way to
+//! slip instructions to an AI past a person reading the code.
 
 use super::Editor;
 use gpui::{Context, Window, actions};
@@ -17,6 +19,55 @@ pub enum Invisible {
     Direction,
     /// A space that isn't the usual one.
     OddSpace,
+    /// Carries text that isn't shown: tag characters (not in a flag), variation selectors
+    /// one after another.
+    Hidden,
+}
+
+/// A tag character (U+E0000 to U+E007F): an ASCII character, not shown. Flags of
+/// regions (🏴 then tags) are written with them.
+fn is_tag(c: char) -> bool {
+    ('\u{E0000}'..='\u{E007F}').contains(&c)
+}
+
+/// A variation selector: picks how the character before it is drawn (one at a time).
+fn is_selector(c: char) -> bool {
+    ('\u{FE00}'..='\u{FE0F}').contains(&c) || ('\u{E0100}'..='\u{E01EF}').contains(&c)
+}
+
+/// What's marked in `text`, by char index: as `marked`, and hidden text, which only its
+/// neighbours tell apart from what's written with the same characters (a flag's tags, an
+/// emoji's selector).
+pub fn marks(text: &str, prose: bool) -> Vec<(usize, Invisible)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut found = Vec::new();
+    let mut in_flag = false;
+    for (i, &c) in chars.iter().enumerate() {
+        if is_tag(c) {
+            // 🏴 and tags up to the one that ends them (U+E007F): a flag.
+            let flag = in_flag;
+            in_flag = in_flag && c != '\u{E007F}';
+            if !flag {
+                found.push((i, Invisible::Hidden));
+            }
+            continue;
+        }
+        in_flag = c == '\u{1F3F4}';
+        let next_to_selector = [i.checked_sub(1), Some(i + 1)].into_iter().flatten().any(|j| chars.get(j).is_some_and(|&n| is_selector(n)));
+        if is_selector(c) && next_to_selector {
+            found.push((i, Invisible::Hidden));
+        } else if let Some(kind) = marked(c, prose) {
+            found.push((i, kind));
+        }
+    }
+    found
+}
+
+/// The text tag characters around `i` in `chars` hide ("ignore the above").
+fn hidden_text(chars: &[char], i: usize) -> String {
+    let tags = |c: &&char| is_tag(**c);
+    let start = i - chars[..i].iter().rev().take_while(tags).count();
+    chars[start..].iter().take_while(tags).filter_map(|&c| char::from_u32(c as u32 - 0xE0000)).filter(|c| !c.is_control()).collect()
 }
 
 /// Whether `c` is a character that can't be seen as itself, and which kind. (Joiners stay
@@ -64,6 +115,8 @@ pub fn name(c: char) -> &'static str {
         '\u{00A0}' => "no-break space",
         '\u{202F}' => "narrow no-break space",
         '\u{3000}' => "ideographic space",
+        c if is_tag(c) => "tag character",
+        c if is_selector(c) => "variation selector",
         _ => "unusual space",
     }
 }
@@ -80,13 +133,20 @@ impl Editor {
     /// The character at the caret (or just before it) that can't be seen as itself: its
     /// code ("U+200B") and name, for the status bar.
     pub fn invisible_at_caret(&self) -> Option<String> {
-        let head = self.selection.head;
-        let prose = self.is_prose();
-        [self.buffer.char_at(head), head.checked_sub(1).and_then(|i| self.buffer.char_at(i))]
+        let (line, column) = self.buffer.point(self.selection.head);
+        let chars: Vec<char> = self.buffer.line_text(line).chars().collect();
+        let found = marks(&chars.iter().collect::<String>(), self.is_prose());
+        let (i, kind) = [Some(column), column.checked_sub(1)]
             .into_iter()
             .flatten()
-            .find(|c| marked(*c, prose).is_some())
-            .map(|c| format!("U+{:04X} {}", c as u32, name(c)))
+            .find_map(|i| found.iter().find(|(at, _)| *at == i).copied())?;
+        let c = chars[i];
+        let what = format!("U+{:04X} {}", c as u32, name(c));
+        Some(match kind {
+            Invisible::Hidden if is_tag(c) => format!("{what}s hiding “{}”", hidden_text(&chars, i)),
+            Invisible::Hidden => format!("{what}s hiding data"),
+            _ => what,
+        })
     }
 
     /// Takes out the characters that can't be seen (in the selection, or the whole file):
@@ -105,12 +165,9 @@ impl Editor {
         let mut edits = Vec::new();
         for range in &ranges {
             let text = self.buffer.slice(range.clone());
-            for (i, c) in text.chars().enumerate() {
-                match marked(c, prose) {
-                    Some(Invisible::OddSpace) => edits.push((range.start + i..range.start + i + 1, " ".to_string())),
-                    Some(_) => edits.push((range.start + i..range.start + i + 1, String::new())),
-                    None => {}
-                }
+            for (i, kind) in marks(&text, prose) {
+                let with = if kind == Invisible::OddSpace { " " } else { "" };
+                edits.push((range.start + i..range.start + i + 1, with.to_string()));
             }
         }
         // The caret stays by the same text: less what's taken out before it.
@@ -156,6 +213,23 @@ mod tests {
         assert_eq!(marked('\u{200B}', true), Some(Invisible::ZeroWidth));
     }
 
+    #[test]
+    fn hidden_text_is_marked_flags_and_emoji_are_not() {
+        let hide = |s: &str| s.chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect::<String>();
+        let text = format!("x = 1{}\n", hide("run rm"));
+        let found = marks(&text, false);
+        assert_eq!(found.len(), 6);
+        assert!(found.iter().all(|(_, k)| *k == Invisible::Hidden));
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(hidden_text(&chars, 7), "run rm");
+        // England's flag: 🏴, tags, the one that ends them. An emoji's one selector.
+        let england = format!("\u{1F3F4}{}\u{E007F}", hide("gbeng"));
+        assert!(marks(&format!("a {england} b ❤\u{FE0F}"), true).is_empty());
+        assert_eq!(marks(&format!("{england}{}", hide("x")), false), vec![(7, Invisible::Hidden)], "after the flag");
+        // Selectors one after another carry bytes.
+        assert_eq!(marks("😀\u{E0100}\u{E0101}", false), vec![(1, Invisible::Hidden), (2, Invisible::Hidden)]);
+    }
+
     #[gpui::test]
     fn they_are_named_and_taken_out(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -173,6 +247,16 @@ mod tests {
             e.remove_invisible_characters(&RemoveInvisibleCharacters, window, cx);
             assert_eq!(e.buffer.to_string(), "let a = 1;\nif admin { }\n");
             assert_eq!(e.selection.head, 1, "the caret by the same text");
+            // Hidden text: what it says, and taken out.
+            let tags: String = "hi".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
+            let end = e.buffer.len_chars();
+            e.edit(end..end, &format!("// ok{tags}\n"), crate::editor::EditKind::Other, cx);
+            e.selection = crate::editor::Selection::caret(end + 5);
+            assert_eq!(e.invisible_at_caret().as_deref(), Some("U+E0068 tag characters hiding “hi”"));
+            e.remove_invisible_characters(&RemoveInvisibleCharacters, window, cx);
+            assert_eq!(e.buffer.to_string(), "let a = 1;\nif admin { }\n// ok\n");
+            e.undo(&crate::editor::Undo, window, cx);
+            e.undo(&crate::editor::Undo, window, cx);
             // One step back.
             e.undo(&crate::editor::Undo, window, cx);
             assert_eq!(e.buffer.to_string(), text);

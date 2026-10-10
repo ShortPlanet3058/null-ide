@@ -256,6 +256,46 @@ mod tests {
         }
     }
 
+    /// A problem on the caret's line doesn't hide its lens: the problem, then the lens,
+    /// still to be clicked.
+    #[gpui::test]
+    fn a_problem_and_a_lens_share_the_line(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        use gpui::AppContext as _;
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let path = std::path::PathBuf::from("/tmp/lens-and-problem.rs");
+        let lsp = cx.new(|_| crate::lsp_store::LspStore::new("/tmp".into()));
+        let problem = lsp_types::Diagnostic {
+            range: lsp_types::Range::new(lsp_types::Position::new(0, 3), lsp_types::Position::new(0, 7)),
+            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+            message: "unused function".into(),
+            ..Default::default()
+        };
+        lsp.update(cx, |lsp, _| lsp.set_diagnostics(path.clone(), vec![problem]));
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("fn adds() {}\n"), Some(path.clone()), cx));
+        e.update(cx, |e, cx| {
+            e.lsp = Some(lsp.clone());
+            cx.notify();
+            let mut run = lens("▶ Run Test", "rust-analyzer.runSingle", Some(vec![serde_json::json!({
+                "args": { "cargoArgs": ["test", "--", "adds", "--exact"] }
+            })]));
+            run.range = lsp_types::Range::new(lsp_types::Position::new(0, 3), lsp_types::Position::new(0, 7));
+            e.lenses = Lenses { raw: vec![(0, run)], revision: e.buffer.revision(), ..Lenses::default() };
+        });
+        cx.run_until_parked();
+        e.read_with(cx, |e, _| {
+            let layout = e.layout.as_ref().expect("drawn");
+            let shown = layout.rows.iter().find(|r| r.row.line == 0).map(|r| r.shaped.text.to_string()).unwrap();
+            let (problem, lens) = (shown.find("unused function"), shown.find("▶ Run Test"));
+            assert!(problem.is_some() && lens.is_some() && problem < lens, "{shown}");
+            assert_eq!(e.lenses.hits.len(), 1, "the lens can be clicked");
+        });
+    }
+
     /// The caret's line shows its lenses; a click on one does what it says.
     #[gpui::test]
     fn a_lens_is_clicked(cx: &mut gpui::TestAppContext) {

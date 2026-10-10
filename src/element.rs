@@ -568,19 +568,17 @@ impl Element for EditorElement {
                 None => TextRun { background_color: Some(theme.hairline), ..run(len, &font, theme.faint) },
             };
             // A row with its hints in (swatches among them, by index), then `suffix` (a
-            // fold's ⋯, who changed the line).
+            // fold's ⋯, who changed the line), in its runs.
             let shape_hinted = |text: &str,
                                 runs: &[TextRun],
                                 hints: &[(usize, String)],
                                 swatches: &[Option<Hsla>],
-                                suffix: Option<TextRun>,
+                                suffix: Vec<TextRun>,
                                 suffix_text: &str| {
                 let (mut shown, mut runs, placed) =
                     insert_hints(text, runs, hints, |i, len| hint_style(len, swatches.get(i).copied().flatten()));
-                if let Some(run) = suffix {
-                    shown.push_str(suffix_text);
-                    runs.push(run);
-                }
+                shown.push_str(suffix_text);
+                runs.extend(suffix);
                 let (shown, runs, tabs) = expand_tabs(&shown, &runs);
                 (shape(shown, &runs), gaps_of(&placed, &tabs))
             };
@@ -954,24 +952,31 @@ impl Element for EditorElement {
                         .as_ref()
                         .filter(|_| row.last && conflicts.iter().any(|c| c.start == row.line))
                         .cloned();
+                    let lens_here = lens_note.clone().filter(|_| row.last && row.line == caret_line);
                     let (suffix, suffix_text) = if row.last && editor.is_folded(row.line) {
-                        (Some(run(FOLDED.len(), &font, theme.muted)), FOLDED.to_string())
+                        (vec![run(FOLDED.len(), &font, theme.muted)], FOLDED.to_string())
                     } else if let Some(note) = values {
-                        (Some(run(note.len(), &font, theme.muted)), note)
+                        (vec![run(note.len(), &font, theme.muted)], note)
                     } else if let Some(note) = tip {
-                        (Some(run(note.len(), &font, theme.faint)), note)
+                        (vec![run(note.len(), &font, theme.faint)], note)
                     } else if let Some((note, color)) =
                         line_notes.get(&row.line).filter(|_| row.last && !editor.is_folded(row.line))
                     {
-                        (Some(run(note.len(), &font, *color)), note.clone())
-                    } else if let Some(note) =
-                        lens_note.clone().filter(|_| row.last && row.line == caret_line)
-                    {
-                        (Some(run(note.len(), &font, theme.muted)), note)
+                        // The problem, then what the server offers on the line (after it, to
+                        // be clicked: see `lens_hits`).
+                        let mut runs = vec![run(note.len(), &font, *color)];
+                        let mut text = note.clone();
+                        if let Some(lens) = lens_here {
+                            runs.push(run(lens.len(), &font, theme.muted));
+                            text.push_str(&lens);
+                        }
+                        (runs, text)
+                    } else if let Some(note) = lens_here {
+                        (vec![run(note.len(), &font, theme.muted)], note)
                     } else if let Some(note) = blame {
-                        (Some(run(note.len(), &font, theme.faint)), note)
+                        (vec![run(note.len(), &font, theme.faint)], note)
                     } else {
-                        (None, String::new())
+                        (Vec::new(), String::new())
                     };
                     let (shaped, gaps) = shape_hinted(&text, &runs, &hints, &swatches, suffix, &suffix_text);
                     RowLayout { x: char_width * row.indent as f32, row, text, shaped, gaps }
@@ -1378,12 +1383,7 @@ impl Element for EditorElement {
                 if r.row.block.is_some() || r.text.is_ascii() {
                     continue;
                 }
-                let kinds: Vec<(usize, crate::editor::invisible::Invisible)> = r
-                    .text
-                    .chars()
-                    .enumerate()
-                    .filter_map(|(col, c)| Some((col, crate::editor::invisible::marked(c, prose)?)))
-                    .collect();
+                let kinds = crate::editor::invisible::marks(&r.text, prose);
                 if kinds.is_empty() {
                     continue;
                 }
@@ -1822,7 +1822,9 @@ impl Element for EditorElement {
             }
             for (mark, kind) in &prepaint.invisibles {
                 let color = match kind {
-                    crate::editor::invisible::Invisible::Direction => theme.error,
+                    crate::editor::invisible::Invisible::Direction | crate::editor::invisible::Invisible::Hidden => {
+                        theme.error
+                    }
                     _ => theme.warning.opacity(0.8),
                 };
                 window.paint_quad(gpui::outline(*mark, color, gpui::BorderStyle::Dashed).corner_radii(px(2.)));
