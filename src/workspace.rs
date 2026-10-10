@@ -3139,7 +3139,7 @@ impl Workspace {
         }
         // Focus follows to the next tab only if it was in the tab being closed (deleting a
         // file from the tree keeps the keyboard in the tree).
-        let had_focus = tab.editor.focus_handle(cx).contains_focused(window, cx);
+        let had_focus = tab.editor.read(cx).has_keys(window, cx);
         if let Some(path) = tab.editor.read(cx).path() {
             self.recently_closed.push(path.to_path_buf());
         }
