@@ -266,6 +266,8 @@ fn default_browser() -> Option<std::path::PathBuf> {
 enum MenuItem {
     Open,
     OpenInBrowser,
+    /// In the app the system opens its kind with (Preview, Numbers...).
+    OpenWithApp,
     NewFile,
     NewFolder,
     Rename,
@@ -289,6 +291,7 @@ impl MenuItem {
         match self {
             MenuItem::Open => "Open",
             MenuItem::OpenInBrowser => "Open in Browser",
+            MenuItem::OpenWithApp => "Open with Default App",
             MenuItem::NewFile => "New File…",
             MenuItem::NewFolder => "New Folder…",
             MenuItem::Rename => "Rename…",
@@ -1289,6 +1292,9 @@ impl FileTree {
                 if opens_in_browser(&e.path) {
                     items.push(OpenInBrowser);
                 }
+                if !e.is_dir {
+                    items.push(OpenWithApp);
+                }
                 items.extend([
                     NewFile,
                     NewFolder,
@@ -1338,6 +1344,11 @@ impl FileTree {
             MenuItem::OpenInBrowser => {
                 if let Some(entry) = target {
                     open_in_browser(&entry.path, cx);
+                }
+            }
+            MenuItem::OpenWithApp => {
+                if let Some(entry) = target {
+                    cx.open_with_system(&entry.path);
                 }
             }
             MenuItem::NewFile => {
