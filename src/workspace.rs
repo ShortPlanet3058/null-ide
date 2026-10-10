@@ -1340,7 +1340,13 @@ impl Workspace {
                     changed
                         .into_iter()
                         .map(|(path, status)| {
-                            let (after, encoding) = crate::encoding::read(&path).unwrap_or_default();
+                            // (A file that isn't text: no lines to count.)
+                            let Ok((after, encoding)) = crate::encoding::read(&path).or_else(|e| {
+                                if path.exists() { Err(e) } else { Ok(Default::default()) }
+                            }) else {
+                                let not = crate::palette::NOT_TEXT;
+                                return (path, status, not, not);
+                            };
                             let before = git::committed_text(&path, encoding).unwrap_or_default();
                             let (added, removed) = crate::ai_task::line_counts(&before, &after);
                             (path, status, added, removed)

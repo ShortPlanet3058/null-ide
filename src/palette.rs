@@ -88,6 +88,9 @@ pub enum PaletteKind {
     Ex,
 }
 
+/// The lines added and removed a file change shows when it isn't text (no lines).
+pub const NOT_TEXT: usize = usize::MAX;
+
 /// What a place in the list is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocationKind {
@@ -1158,6 +1161,9 @@ impl Palette {
                         ChangeKind::Deleted if self.kind == PaletteKind::Commit => {
                             (theme.git_deleted, "deleted".to_string())
                         }
+                        // (A file that isn't text has no lines to count.)
+                        ChangeKind::Added if added == NOT_TEXT => (theme.git_added, "new · not text".to_string()),
+                        ChangeKind::Changed if added == NOT_TEXT => (theme.git_modified, "not text".to_string()),
                         ChangeKind::Added => (theme.git_added, format!("new · +{added}")),
                         ChangeKind::Changed => (theme.git_modified, format!("+{added} −{removed}")),
                         ChangeKind::Deleted => (theme.git_deleted, "deleted · ↵ restores it".to_string()),
