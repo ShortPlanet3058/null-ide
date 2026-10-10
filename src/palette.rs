@@ -751,10 +751,13 @@ impl Palette {
                 found.push((score + boost + 5, Item::Command(i), highlights));
                 continue;
             }
-            // The category counts too, so "lines dup" finds "Duplicate Line" (with a space
-            // between: one word's letters strewn across both would find most anything).
+            // The category counts too, so "lines dup" finds "Duplicate Line", and "lines"
+            // lists them all (with a space between, or the category's name alone: one word's
+            // letters strewn across both would find most anything).
             let prefix = format!("{} ", c.category.label());
-            if query.trim().contains(char::is_whitespace)
+            let typed = query.trim().to_lowercase();
+            let names_category = typed.len() >= 3 && c.category.label().to_lowercase().starts_with(&typed);
+            if (typed.contains(char::is_whitespace) || names_category)
                 && let Some((score, highlights)) = fuzzy::score(&format!("{prefix}{}", c.label), query)
             {
                 let highlights = highlights.into_iter().filter_map(|b| b.checked_sub(prefix.len())).collect();
@@ -1666,6 +1669,8 @@ mod tests {
         // ("split": the s of Lines, then Duplicate's p l i t).
         type_query(cx, &p, "lines dup");
         assert_eq!(items(cx, &p), ["Duplicate Line"]);
+        type_query(cx, &p, "lines");
+        assert!(items(cx, &p).contains(&"Duplicate Line".to_string()), "a category's name: what's in it");
         // What a command is also called: splitting is moving a tab to a side.
         type_query(cx, &p, "split");
         assert_eq!(items(cx, &p), ["Move Tab to the Right Side"]);
