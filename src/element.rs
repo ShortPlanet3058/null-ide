@@ -328,6 +328,41 @@ fn whitespace_xs(r: &RowLayout, marks: &[(usize, bool)]) -> Vec<(Pixels, Pixels,
     marks.iter().zip(xs.chunks(2)).map(|(&(_, tab), x)| (x[0], x[1], tab)).collect()
 }
 
+/// A removed line's runs: its indentation as it is, the rest struck through, the words
+/// that changed (`changed`, in chars) in `strong`, the others in `faint`.
+fn struck_runs(
+    text: &str,
+    indent: usize,
+    changed: &[Range<usize>],
+    struck: impl Fn(usize, Hsla) -> TextRun,
+    indentation: TextRun,
+    faint: Hsla,
+    strong: Hsla,
+) -> Vec<TextRun> {
+    let mut runs = if indent > 0 { vec![indentation] } else { Vec::new() };
+    let in_changed = |char_ix: usize| changed.iter().any(|r| r.contains(&char_ix));
+    let mut current: Option<(bool, usize)> = None;
+    for (char_ix, (byte, c)) in text.char_indices().enumerate() {
+        if byte < indent {
+            continue;
+        }
+        let strong_here = in_changed(char_ix);
+        match &mut current {
+            Some((was, len)) if *was == strong_here => *len += c.len_utf8(),
+            _ => {
+                if let Some((was, len)) = current.take() {
+                    runs.push(struck(len, if was { strong } else { faint }));
+                }
+                current = Some((strong_here, c.len_utf8()));
+            }
+        }
+    }
+    if let Some((was, len)) = current {
+        runs.push(struck(len, if was { strong } else { faint }));
+    }
+    runs
+}
+
 /// `note` in at most `room` characters: cut short with "…". None when even its start
 /// wouldn't fit (a few letters say nothing).
 fn shortened(note: &str, room: usize) -> Option<String> {
@@ -829,6 +864,9 @@ impl Element for EditorElement {
                 .then(|| crate::palette::shortcut(&crate::editor::QuickFix, cx))
                 .flatten()
                 .map(|keys| format!("{BLAME_GAP}{keys} to resolve"));
+            // In a changed line, the words that changed (drawn plainer in the old line, and
+            // tinted on both sides below).
+            let words = editor.word_changes(lines_shown.clone());
             let row_layouts: Vec<RowLayout> = rows
                 .into_iter()
                 .map(|row| {
@@ -850,12 +888,15 @@ impl Element for EditorElement {
                             }
                             _ => String::new(),
                         };
-                        // Struck through from the first character, not across the indentation.
+                        // Struck through from the first character, not across the indentation; the
+                        // words that changed in it plainer than the rest (they're what to read).
                         let indent = text.len() - text.trim_start().len();
-                        let mut struck = run(text.len() - indent, &font, theme.faint);
-                        struck.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: Some(theme.faint) });
-                        let runs: Vec<TextRun> =
-                            if indent > 0 { vec![run(indent, &font, theme.faint), struck] } else { vec![struck] };
+                        let changed = words.removed.get(&(block, i)).cloned().unwrap_or_default();
+                        let runs = struck_runs(&text, indent, &changed, |len, color| {
+                            let mut struck = run(len, &font, color);
+                            struck.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: Some(color) });
+                            struck
+                        }, run(indent, &font, theme.faint), theme.faint, theme.muted);
                         let (shaped, tabs) = shape_row(&text, &runs);
                         return RowLayout { x: px(0.), row, text, shaped, gaps: tabs };
                     }
@@ -1133,7 +1174,6 @@ impl Element for EditorElement {
                 None => Vec::new(),
             };
             // In a changed line, the words that changed: a little stronger, on each side.
-            let words = editor.word_changes(lines_shown.clone());
             for (r, row) in row_layouts.iter().zip(visible.clone()) {
                 let (ranges, color, cols) = match r.row.block {
                     Some(block) => {
@@ -1939,6 +1979,21 @@ impl Element for EditorElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An old line's words that changed are drawn plainer than the rest of it.
+    #[test]
+    fn an_old_line_s_changed_words_stand_out() {
+        let font = gpui::font("Menlo");
+        let (faint, strong) = (gpui::black(), gpui::white());
+        let plain = |len: usize, color: Hsla| run(len, &font, color);
+        // "    let a = 1;": indentation, then "let a = ", then "1" changed, then ";".
+        let runs = struck_runs("    let a = 1;", 4, &[(12..13)], plain, run(4, &font, faint), faint, strong);
+        let shape: Vec<(usize, bool)> = runs.iter().map(|r| (r.len, r.color == strong)).collect();
+        assert_eq!(shape, [(4, false), (8, false), (1, true), (1, false)]);
+        assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), "    let a = 1;".len(), "every byte in a run");
+        let none = struck_runs("x é", 0, &[], plain, run(0, &font, faint), faint, strong);
+        assert_eq!(none.iter().map(|r| r.len).collect::<Vec<_>>(), ["x é".len()]);
+    }
 
     /// A problem too long for what's left of a wrapped row: cut short, with "…".
     #[test]

@@ -32,6 +32,36 @@ def answer(system: str, user: str) -> str:
     return f"Done. {NOTE}"
 
 
+def agent_step(messages):
+    """Null's task agent asks with tools: list the files, read the first Rust or text one,
+    write it back with its numbers grown, then say so. One step per request, worked out
+    from what the earlier ones did."""
+    results = [m.get("content", "") for m in messages if m.get("role") == "tool"]
+    calls = [c for m in messages if m.get("role") == "assistant" for c in m.get("tool_calls") or []]
+
+    def call(name, arguments):
+        number = len(calls) + 1
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": f"call_{number}", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+            ],
+        }
+
+    if len(results) == 0:
+        return call("list_files", {})
+    if len(results) == 1:
+        listed = results[0].splitlines()
+        files = [f for f in listed if f.endswith((".rs", ".py"))] or [f for f in listed if f.endswith((".txt", ".md"))]
+        return call("read_file", {"path": files[0] if files else "README.md"})
+    path = json.loads(calls[1]["function"]["arguments"]).get("path", "")
+    if len(results) == 2:
+        grown = re.sub(r"\b(\d+)\b", lambda m: str(int(m.group(1)) * 10), results[1])
+        return call("write_file", {"path": path, "content": grown})
+    return {"role": "assistant", "content": f"Grew the numbers in {path}. {NOTE}"}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -54,6 +84,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         request = self.read_json()
+        if self.path.endswith("/chat/completions") and request.get("tools"):
+            body = json.dumps({"choices": [{"message": agent_step(request.get("messages") or [])}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.endswith("/chat/completions"):
             messages = request.get("messages") or []
             system = " ".join(m.get("content", "") for m in messages if m.get("role") == "system")
