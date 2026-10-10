@@ -321,6 +321,7 @@ pub struct TerminalView {
     run: Option<RunStart>,
     /// The prompts commands were typed after (`ada@mac app %`), to find them again by.
     prompts: Vec<String>,
+    shell_pid: Option<i32>,
     /// The program running in the shell now (`cargo`), while one is.
     pub running: Option<String>,
     selecting: bool,
@@ -364,6 +365,8 @@ pub struct Shell {
     size: GridSize,
     cwd: PathBuf,
     watch: Option<crate::terminal_watch::Foreground>,
+    /// The shell's process, to ask which folder it's in.
+    pid: Option<i32>,
 }
 
 impl Shell {
@@ -398,6 +401,10 @@ impl Shell {
         let watch = crate::terminal_watch::Foreground::new(pty.file(), pty.child().id());
         #[cfg(not(unix))]
         let watch = None;
+        #[cfg(unix)]
+        let pid = Some(pty.child().id() as i32);
+        #[cfg(not(unix))]
+        let pid = None;
         let (tx, events) = mpsc::unbounded();
         let listener = Listener(tx);
         let config = Config { scrolling_history: SCROLLBACK, ..Default::default() };
@@ -405,13 +412,13 @@ impl Shell {
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
         let sender = event_loop.channel();
         event_loop.spawn();
-        Ok(Self { term, sender, events, size, cwd, watch })
+        Ok(Self { term, sender, events, size, cwd, watch, pid })
     }
 }
 
 impl TerminalView {
     pub fn new(shell: Shell, cx: &mut Context<Self>) -> Self {
-        let Shell { term, sender, mut events, size, cwd, watch } = shell;
+        let Shell { term, sender, mut events, size, cwd, watch, pid } = shell;
         // Once a second, what the shell is running.
         let watching = watch.map(|watch| {
             cx.spawn(async move |this, cx| {
@@ -501,6 +508,7 @@ impl TerminalView {
             link: None,
             find: None,
             prompts: Vec::new(),
+            shell_pid: pid,
             _events: events,
             _watching: watching,
         }
@@ -764,9 +772,12 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// The shell's folder now, as its title shows it ("me@mac:~/code/app"), or the one
-    /// it started in.
+    /// The shell's folder now: as the system has it, or as its title shows it
+    /// ("me@mac:~/code/app"), or the one it started in.
     fn shell_folder(&self) -> PathBuf {
+        if let Some(folder) = self.shell_pid.and_then(crate::terminal_watch::folder_of) {
+            return folder;
+        }
         let shown = self.title.rsplit(':').next().map(str::trim).unwrap_or("");
         let shown = match (shown.strip_prefix("~/"), std::env::var_os("HOME")) {
             (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
@@ -1240,6 +1251,16 @@ impl Render for TerminalView {
             // Files dropped on the terminal are typed in, quoted for the shell, as Terminal does.
             .on_drop(cx.listener(|this, dropped: &gpui::ExternalPaths, _, _| {
                 this.write(shell_words(dropped.paths()).into_bytes())
+            }))
+            // Files dragged from the files: typed in too, as the shell's folder reaches them
+            // (`src/main.rs`), and the keys come here to go on typing.
+            .on_drop(cx.listener(|this, dragged: &crate::file_tree::DraggedEntry, window, _| {
+                // (As they really are: /tmp and /private/tmp are one.)
+                let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
+                let paths: Vec<PathBuf> = dragged.paths().into_iter().map(real).collect();
+                let paths = within(&paths, &real(this.shell_folder()));
+                this.write(shell_words(&paths).into_bytes());
+                window.focus(&this.focus_handle);
             }))
             .track_focus(&self.focus_handle)
             .size_full()
@@ -1767,6 +1788,20 @@ fn run_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// `paths` as the shell in `folder` reaches them: relative inside it (`./-x` for one that
+/// would read as an option), whole outside it.
+fn within(paths: &[PathBuf], folder: &std::path::Path) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .map(|path| match path.strip_prefix(folder) {
+            Ok(rest) if rest.as_os_str().is_empty() => PathBuf::from("."),
+            Ok(rest) if rest.to_string_lossy().starts_with('-') => PathBuf::from(".").join(rest),
+            Ok(rest) => rest.to_path_buf(),
+            Err(_) => path.clone(),
+        })
+        .collect()
+}
+
 fn shell_words(paths: &[std::path::PathBuf]) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%~".contains(c);
     paths
@@ -1781,6 +1816,19 @@ fn shell_words(paths: &[std::path::PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Files dragged in from the files are typed as the shell's folder reaches them.
+    #[test]
+    fn dragged_files_are_typed_from_the_shell_s_folder() {
+        let folder = PathBuf::from("/code/app");
+        let paths = [
+            PathBuf::from("/code/app/src/main.rs"),
+            PathBuf::from("/code/app/-odd name.txt"),
+            PathBuf::from("/code/app"),
+            PathBuf::from("/elsewhere/notes.md"),
+        ];
+        assert_eq!(shell_words(&within(&paths, &folder)), "src/main.rs './-odd name.txt' . /elsewhere/notes.md ");
+    }
 
     /// ⌘↑ / ⌘↓: from command to command typed, by the prompt they were typed after.
     #[test]
