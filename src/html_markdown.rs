@@ -7,6 +7,9 @@
 /// gave one (a browser, Notes, Pages, Google Docs). Never for what Null copied: it gives
 /// plain text only, which clears the rest.
 pub fn clipboard_html() -> Option<String> {
+    if crate::system_clipboard::kept_apart() {
+        return None;
+    }
     // Tests never read the real clipboard.
     #[cfg(all(target_os = "macos", not(test)))]
     {

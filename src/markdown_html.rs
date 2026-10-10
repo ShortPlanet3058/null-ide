@@ -35,6 +35,10 @@ pub const OWN_COPY: &str = "dev.null-ide.markdown";
 /// Puts `text` on the clipboard with `html` for apps that paste formatted text. Returns
 /// false where that isn't done (the text alone should go then).
 pub fn copy_rich(text: &str, html: &str) -> bool {
+    // (A QA run keeps to a clipboard of its own: the text alone, there.)
+    if crate::system_clipboard::kept_apart() {
+        return false;
+    }
     // Tests never touch the real clipboard.
     #[cfg(all(target_os = "macos", not(test)))]
     {

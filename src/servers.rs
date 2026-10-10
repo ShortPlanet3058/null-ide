@@ -217,6 +217,11 @@ pub fn can_install(server: &Server) -> Result<(), String> {
 
 /// Installs the server. Takes a while (it downloads): run it off the main thread.
 pub fn install(server: &Server) -> Result<(), String> {
+    // (A QA run uses what the person installed, and installs nothing: no downloads, no
+    // change to their toolchains.)
+    if crate::system_clipboard::kept_apart() {
+        return Err("Nothing is installed in a QA run.".into());
+    }
     can_install(server)?;
     let dir = crate::tools::data_dir().ok_or("There's no folder to install into.")?.join("servers");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;

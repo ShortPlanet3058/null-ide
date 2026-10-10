@@ -414,7 +414,7 @@ impl Editor {
             let indent = self.line_indent(lines[0]);
             let item = ClipboardItem::new_string_with_metadata(text, format!("{LINES}|{indent}"));
             crate::clipboard_history::remember(&item, cx);
-            cx.write_to_clipboard(item);
+            crate::system_clipboard::write(cx, item);
             return true;
         }
         let kind = if texts.len() > 1 {
@@ -424,7 +424,7 @@ impl Editor {
         };
         let item = ClipboardItem::new_string_with_metadata(texts.join("\n"), kind);
         crate::clipboard_history::remember(&item, cx);
-        cx.write_to_clipboard(item);
+        crate::system_clipboard::write(cx, item);
         true
     }
 

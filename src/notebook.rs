@@ -4,6 +4,17 @@
 
 use serde_json::Value;
 
+/// Whether `json` reads as a notebook (it has cells), without turning it into anything:
+/// asked on opening each one, where its outputs (pictures) can be many megabytes.
+pub fn is_notebook(json: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Notebook {
+        #[allow(dead_code)]
+        cells: Vec<serde::de::IgnoredAny>,
+    }
+    serde_json::from_str::<Notebook>(json).is_ok()
+}
+
 /// A cell's text: a string, or a list of lines.
 fn text_of(value: &Value) -> String {
     match value {
@@ -175,6 +186,9 @@ mod tests {
             let path = dir.join(name);
             let (e, cx) = cx.add_window_view(|_, cx| crate::editor::Editor::open(path, None, cx));
             assert_eq!(e.read_with(cx, |e, _| e.reading), reading, "{name}");
+            // Sent to a match in it: its text, there.
+            e.update(cx, |e, cx| e.reveal_match(0, 0..1, Default::default(), cx));
+            assert!(!e.read_with(cx, |e, _| e.reading), "{name}: at the match");
         }
         std::fs::remove_dir_all(&dir).ok();
     }

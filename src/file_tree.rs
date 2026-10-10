@@ -1102,13 +1102,13 @@ impl FileTree {
 
     fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
         let path = self.selected_entry().map(|e| e.path).unwrap_or_else(|| self.root.clone());
-        cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+        crate::system_clipboard::write(cx, ClipboardItem::new_string(path.display().to_string()));
     }
 
     fn copy_relative_path(&mut self, _: &CopyRelativePath, _: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.selected_entry() else { return };
         let relative = entry.path.strip_prefix(&self.root).unwrap_or(&entry.path).display().to_string();
-        cx.write_to_clipboard(ClipboardItem::new_string(relative));
+        crate::system_clipboard::write(cx, ClipboardItem::new_string(relative));
     }
 
     fn reveal(&mut self, _: &Reveal, _: &mut Window, cx: &mut Context<Self>) {
@@ -1235,7 +1235,7 @@ impl FileTree {
         match item {
             MenuItem::CopyPaths => {
                 let paths: Vec<String> = self.picked().iter().map(|e| e.path.display().to_string()).collect();
-                cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
+                crate::system_clipboard::write(cx, ClipboardItem::new_string(paths.join("\n")));
             }
             MenuItem::Compare => {
                 if let [a, b] = self.picked().as_slice() {
