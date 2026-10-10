@@ -508,6 +508,8 @@ pub struct Workspace {
     sidebar_tests: bool,
     /// The project's own Python environment (`.venv`), if it has one.
     python_env: Option<PathBuf>,
+    /// The open file's (its package's own, in a monorepo), and which file that was for.
+    python_env_here: Option<(PathBuf, Option<PathBuf>)>,
     /// The tests found (None: not looked for yet), and the search for them.
     tests: Option<std::rc::Rc<Vec<crate::test_at::FileTests>>>,
     tests_task: Option<Task<()>>,
@@ -775,6 +777,7 @@ impl Workspace {
             sidebar_outline: false,
             sidebar_tests: false,
             python_env: None,
+            python_env_here: None,
             tests: None,
             tests_task: None,
             test_status: std::collections::HashMap::new(),
@@ -1175,8 +1178,8 @@ impl Workspace {
         // (Only when they're the ones in use: another window's in front, they wait for this one.)
         // An environment made or removed (`python -m venv .venv`): known from now.
         // (Or Poetry's, kept outside: known again when the project's Poetry files change.)
-        let env_files = [".venv", "venv", "env", "pyproject.toml", "poetry.lock"];
-        if visible.iter().any(|p| env_files.iter().any(|f| p.starts_with(root.join(f)))) {
+        if visible.iter().any(|p| crate::python_env::may_change(p)) {
+            self.python_env_here = None;
             let now = crate::python_env::find(&root);
             // Another environment: Python's language server reads its packages from it.
             if now != self.python_env {
@@ -3044,6 +3047,7 @@ impl Workspace {
             self.find_tests(cx);
         }
         self.python_env = crate::python_env::find(&path);
+        self.python_env_here = None;
         let mut session = crate::session::Session::load(&path);
         session.window = self.window_state;
         self.restore_session(session, window, cx);
@@ -6343,7 +6347,7 @@ impl Workspace {
         // In a Python project with its own environment: made the shell's, as activating does.
         let root = self.tree.read(cx).root().to_path_buf();
         let activate = (dir.starts_with(&root))
-            .then(|| crate::python_env::find(&root))
+            .then(|| crate::python_env::find_for(&root, &dir))
             .flatten()
             .and_then(|env| {
                 let shell = std::env::var("SHELL")
@@ -8086,10 +8090,20 @@ impl Render for Workspace {
         };
         // Python with the project's own environment: which one ("Python (.venv)").
         let root_now = self.tree.read(cx).root().to_path_buf();
+        let editor = self.active_editor().map(|e| e.read(cx)).filter(|e| e.preview.is_none());
+        let python = editor.filter(|e| e.language_name() == "Python").and_then(|e| e.path().map(Path::to_path_buf));
+        let env = python.map(|path| {
+            // (Looked for once per file, not every frame.)
+            if self.python_env_here.as_ref().is_none_or(|(of, _)| *of != path) {
+                let env = crate::python_env::find_for(&root_now, &path);
+                self.python_env_here = Some((path, env));
+            }
+            self.python_env_here.as_ref().and_then(|(_, env)| env.clone())
+        });
         let language = self.active_editor().map(|e| e.read(cx)).filter(|e| e.preview.is_none()).map(|e| {
             let name = e.language_name();
-            match (name, &self.python_env) {
-                ("Python", Some(env)) => format!("{name} ({})", crate::python_env::label(env, &root_now)),
+            match (name, env.flatten()) {
+                ("Python", Some(env)) => format!("{name} ({})", crate::python_env::label(&env, &root_now)),
                 _ => name.to_string(),
             }
         });

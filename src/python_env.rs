@@ -19,6 +19,19 @@ pub fn find(root: &Path) -> Option<PathBuf> {
     FOLDERS.iter().map(|f| root.join(f)).find(|env| python_in(env).exists()).or_else(|| poetry(root))
 }
 
+/// The environment for `path` in the project at `root`: the nearest folder's, from
+/// `path`'s up to the project's (each package of a monorepo with its own), else the
+/// project's.
+pub fn find_for(root: &Path, path: &Path) -> Option<PathBuf> {
+    path.ancestors().take_while(|dir| dir.starts_with(root) && *dir != root).find_map(find).or_else(|| find(root))
+}
+
+/// Whether a change at `path` can make or remove an environment (its folder, Poetry's files).
+pub fn may_change(path: &Path) -> bool {
+    path.components().any(|c| FOLDERS.iter().any(|f| c.as_os_str() == *f))
+        || path.file_name().is_some_and(|n| n == "pyproject.toml" || n == "poetry.lock")
+}
+
 /// How the status bar names it: where it is in the project (".venv"), or "Poetry".
 pub fn label(env: &Path, root: &Path) -> String {
     match env.strip_prefix(root) {
@@ -115,8 +128,14 @@ fn poetry_env_name(name: &str, folder: &Path) -> String {
 
 /// What runs Python for the project's commands, as typed from its folder: its
 /// environment's (`.venv/bin/python`), else the system's `python3`.
+#[cfg(test)]
 pub fn python(root: &Path) -> String {
-    match find(root) {
+    python_for(root, root)
+}
+
+/// The same, for what's at `path` (its nearest environment: see `find_for`).
+pub fn python_for(root: &Path, path: &Path) -> String {
+    match find_for(root, path) {
         Some(env) => {
             let python = python_in(&env);
             let relative = python.strip_prefix(root).unwrap_or(&python).to_string_lossy().into_owned();
@@ -197,6 +216,27 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A monorepo: each package's files use its environment, the rest the project's.
+    #[test]
+    fn the_nearest_environment_is_used() {
+        let dir = crate::tools::test_dir("python-env-nested");
+        let _ = std::fs::remove_dir_all(&dir);
+        for env in [".venv", "api/.venv"] {
+            std::fs::create_dir_all(dir.join(env).join("bin")).unwrap();
+            std::fs::write(dir.join(env).join("bin/python"), "").unwrap();
+        }
+        std::fs::create_dir_all(dir.join("api/tests")).unwrap();
+        std::fs::create_dir_all(dir.join("web")).unwrap();
+        assert_eq!(find_for(&dir, &dir.join("api/tests/test_a.py")), Some(dir.join("api/.venv")));
+        assert_eq!(python_for(&dir, &dir.join("api/tests/test_a.py")), "api/.venv/bin/python");
+        assert_eq!(find_for(&dir, &dir.join("web/x.py")), Some(dir.join(".venv")));
+        assert_eq!(find_for(&dir, &dir), Some(dir.join(".venv")));
+        assert_eq!(find_for(&dir, Path::new("/elsewhere/x.py")), Some(dir.join(".venv")), "outside: the project's");
+        assert!(may_change(&dir.join("api/.venv/bin")) && may_change(&dir.join("api/pyproject.toml")));
+        assert!(!may_change(&dir.join("api/app.py")) && !may_change(&dir.join("environment.py")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn poetry_s_own_environment_is_found() {
         // As Poetry names it (worked out with the same code as Poetry, in Python).
@@ -221,6 +261,7 @@ mod tests {
         assert_eq!(poetry_in(&project, &envs), Some(envs.join(format!("{ours}-py3.12"))));
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(label(Path::new("/p/.venv"), Path::new("/p")), ".venv");
+        assert_eq!(label(Path::new("/p/api/.venv"), Path::new("/p")), "api/.venv");
         assert_eq!(label(Path::new("/cache/virtualenvs/a-x-py3.12"), Path::new("/p")), "Poetry");
     }
 }
