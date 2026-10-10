@@ -2,6 +2,8 @@
 #![allow(clippy::single_range_in_vec_init)]
 
 mod ai;
+#[cfg(debug_assertions)]
+mod qa;
 mod ai_agent;
 mod ai_task;
 mod assets;
@@ -205,7 +207,16 @@ fn main() {
         // Nothing else is open yet: the window opens now (a deferred open would wait for
         // an update that never comes, and Null would start with no window).
         open_project_window_now(root, file, cx);
-        cx.activate(true);
+        #[cfg(debug_assertions)]
+        qa::run(cx);
+        // (Looked at by `qa` while someone works in another app: not brought to the front
+        // unless asked.)
+        let behind = cfg!(debug_assertions)
+            && std::env::var_os("NULL_QA").is_some()
+            && std::env::var_os("NULL_QA_FRONT").is_none_or(|front| front == "0");
+        if !behind {
+            cx.activate(true);
+        }
     });
 }
 
