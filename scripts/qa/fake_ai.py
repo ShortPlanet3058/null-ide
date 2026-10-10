@@ -85,7 +85,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         request = self.read_json()
         if self.path.endswith("/chat/completions") and request.get("tools"):
-            body = json.dumps({"choices": [{"message": agent_step(request.get("messages") or [])}]}).encode()
+            messages = request.get("messages") or []
+            # ("slowly" in the task: each step takes a while, to look at it running.)
+            if any("slowly" in (m.get("content") or "") for m in messages if m.get("role") == "user"):
+                time.sleep(1.5)
+            body = json.dumps({"choices": [{"message": agent_step(messages)}]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
