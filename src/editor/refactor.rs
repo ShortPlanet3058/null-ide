@@ -415,6 +415,10 @@ impl Editor {
 
     fn format_selection_now(&mut self, cx: &mut Context<Self>) {
         let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else { return };
+        // The whole file being formatted to save: it covers this (and isn't dropped for it).
+        if self.format_after.0 {
+            return;
+        }
         let at = self.selection.head;
         if !lsp.read(cx).formats_ranges(&path) {
             let label = crate::lsp_store::LspStore::language_label(&path).unwrap_or("This language");
@@ -450,6 +454,8 @@ impl Editor {
     /// its tab to close once saved if `close`). A server that takes too long (or can't
     /// format) doesn't hold the save back.
     fn format_then(&mut self, save: bool, close: bool, cx: &mut Context<Self>) {
+        // One under way that was to save (and close): this one does that when done.
+        let (save, close) = (save || self.format_after.0, close || self.format_after.1);
         let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else {
             if save {
                 self.save_then(close, cx);
@@ -459,6 +465,7 @@ impl Editor {
         // A paste still being formatted: the whole file's formatting covers it (and its
         // answer, landing first, would make this one look out of date).
         self.paste_format_task = None;
+        self.format_after = (save, close);
         let revision = self.buffer.revision();
         let request = lsp.read(cx).format(
             &path,
@@ -472,15 +479,18 @@ impl Editor {
                 _ = futures::FutureExt::fuse(timeout) => None,
             };
             this.update(cx, |this, cx| {
-                // Typing since the request started wins over the server's view of the text.
-                if let Some(edits) = edits.filter(|_| this.buffer.revision() == revision) {
+                this.format_after = (false, false);
+                // Typing since the request started wins over the server's view of the text
+                // (and keeps the tab open: `:wq` isn't for text typed after it).
+                let typed = this.buffer.revision() != revision;
+                if let Some(edits) = edits.filter(|_| !typed) {
                     if !save && edits.is_empty() {
                         this.show_notice(this.selection.head, "Already formatted.".into(), cx);
                     }
                     this.apply_lsp_edits(&edits, cx);
                 }
                 if save {
-                    this.save_then(close, cx);
+                    this.save_then(close && !typed, cx);
                 }
             })
             .ok();
