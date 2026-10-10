@@ -337,6 +337,11 @@ pub fn char_columns(c: char, col: usize) -> usize {
 /// character past it, so a minified file's one long line stays quick to show and edit.
 pub const LONG_LINE: usize = 2_000;
 
+/// The columns `text` takes on screen (tabs at their full width).
+pub fn columns_of(text: &str) -> usize {
+    columns(text.chars())
+}
+
 fn columns(chars: impl Iterator<Item = char>) -> usize {
     chars.fold(0, |col, c| col + char_columns(c, col))
 }

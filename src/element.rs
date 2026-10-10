@@ -328,6 +328,21 @@ fn whitespace_xs(r: &RowLayout, marks: &[(usize, bool)]) -> Vec<(Pixels, Pixels,
     marks.iter().zip(xs.chunks(2)).map(|(&(_, tab), x)| (x[0], x[1], tab)).collect()
 }
 
+/// `note` in at most `room` characters: cut short with "…". None when even its start
+/// wouldn't fit (a few letters say nothing).
+fn shortened(note: &str, room: usize) -> Option<String> {
+    if note.chars().count() <= room {
+        return Some(note.to_string());
+    }
+    if room < BLAME_GAP.chars().count() + 8 {
+        return None;
+    }
+    let mut cut: String = note.chars().take(room - 1).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    Some(cut)
+}
+
 /// The note at the end of the caret's line when something's wrong there: the most serious
 /// problem starting on it (`chars` of the text), its first line, cut short.
 fn problem_note<'a>(
@@ -963,9 +978,21 @@ impl Element for EditorElement {
                         line_notes.get(&row.line).filter(|_| row.last && !editor.is_folded(row.line))
                     {
                         // The problem, then what the server offers on the line (after it, to
-                        // be clicked: see `lens_hits`).
-                        let mut runs = vec![run(note.len(), &font, *color)];
-                        let mut text = note.clone();
+                        // be clicked: see `lens_hits`). With lines wrapped nothing scrolls
+                        // sideways: a problem too long for what's left of the row is cut
+                        // short, or left to the squiggle and the status bar, so the lens
+                        // stays in view.
+                        let note = match &lens_here {
+                            Some(lens) if editor.wrap.is_on() => {
+                                let used = row.indent + crate::wrap::columns_of(&text);
+                                let room = (text_width / cw) as usize;
+                                let left = room.saturating_sub(used + lens.chars().count() + 1);
+                                shortened(note, left).unwrap_or_default()
+                            }
+                            _ => note.clone(),
+                        };
+                        let mut runs = if note.is_empty() { Vec::new() } else { vec![run(note.len(), &font, *color)] };
+                        let mut text = note;
                         if let Some(lens) = lens_here {
                             runs.push(run(lens.len(), &font, theme.muted));
                             text.push_str(&lens);
@@ -1909,6 +1936,17 @@ impl Element for EditorElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A problem too long for what's left of a wrapped row: cut short, with "…".
+    #[test]
+    fn a_note_is_cut_to_fit() {
+        let note = format!("{BLAME_GAP}unused variable: `unused`");
+        assert_eq!(shortened(&note, 100), Some(note.clone()), "room for it");
+        let cut = shortened(&note, 20).unwrap();
+        assert_eq!(cut.chars().count(), 20);
+        assert!(cut.ends_with('…') && cut.starts_with(BLAME_GAP), "{cut:?}");
+        assert_eq!(shortened(&note, 6), None, "too little room to say anything: left out");
+    }
 
     #[test]
     fn pins_the_blocks_the_view_is_inside() {

@@ -4,7 +4,8 @@
 //!
 //! Steps: `open <path>`, `goto <line>:<column>` (from 1), `keys <keystroke> ...`
 //! (`cmd-p`, `escape`), `type <text>`, `action terminal`, `run <command>` (in the
-//! terminal), `wait <ms>`, `ready`. A line starting with `#` is a note.
+//! terminal), `wait <ms>`, `rows` (the caret line's rows as drawn, with what's after its
+//! text, to stderr), `ready`. A line starting with `#` is a note.
 
 use crate::workspace::Workspace;
 use gpui::{App, AppContext as _, Keystroke, Modifiers};
@@ -52,6 +53,15 @@ pub fn run(cx: &mut App) {
                 }),
                 "action" if arg == "terminal" => cx.update_window(handle.into(), |_, window, cx| {
                     window.dispatch_action(Box::new(crate::workspace::ToggleTerminal), cx);
+                }),
+                "rows" => handle.update(cx, |workspace, _, cx| {
+                    if let Some(editor) = workspace.qa_editor() {
+                        let editor = editor.read(cx);
+                        let line = editor.buffer.point(editor.selection.head).0;
+                        for row in editor.layout.iter().flat_map(|l| &l.rows).filter(|r| r.row.line == line) {
+                            eprintln!("null qa: row {:?}", row.shaped.text.to_string());
+                        }
+                    }
                 }),
                 "open" | "goto" | "run" => handle.update(cx, |workspace, window, cx| match step {
                     "open" => workspace.open_file(PathBuf::from(arg), window, cx),
