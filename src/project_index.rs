@@ -200,6 +200,15 @@ pub fn ignore_rules(root: &Path) -> ignore::gitignore::Gitignore {
     builder.build().unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
 }
 
+/// The paths the `hide` setting keeps out (`*.pyc`, `build/`), as rules like `.gitignore`'s.
+pub fn hidden_rules(root: &Path, patterns: &[String]) -> ignore::gitignore::Gitignore {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    for pattern in patterns {
+        builder.add_line(None, pattern).ok();
+    }
+    builder.build().unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
+}
+
 /// Whether `path` (inside `root`) is left out by the rules, itself or through a folder above it.
 pub fn is_ignored(rules: &ignore::gitignore::Gitignore, root: &Path, path: &Path) -> bool {
     path.starts_with(root) && rules.matched_path_or_any_parents(path, false).is_ignore()

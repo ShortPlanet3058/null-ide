@@ -314,6 +314,9 @@ pub struct FileTree {
     /// When each folder was last opened or closed, to animate its arrow.
     toggled_at: HashMap<PathBuf, Instant>,
     children: HashMap<PathBuf, Vec<Entry>>,
+    /// What the `hide` setting keeps out of the files (`*.pyc`), as written and as rules.
+    hide: Vec<String>,
+    hidden: ignore::gitignore::Gitignore,
     rows: Vec<Row>,
     /// The open file, highlighted.
     active: Option<PathBuf>,
@@ -350,6 +353,8 @@ impl FileTree {
             toggled_at: HashMap::new(),
             root,
             children: HashMap::new(),
+            hide: Vec::new(),
+            hidden: ignore::gitignore::Gitignore::empty(),
             rows: Vec::new(),
             active: None,
             selected: None,
@@ -445,6 +450,18 @@ impl FileTree {
         }
     }
 
+    /// The `hide` setting: what it keeps out goes from the files at once (and comes back).
+    pub fn set_hidden(&mut self, hide: &[String], cx: &mut Context<Self>) {
+        if self.hide == hide {
+            return;
+        }
+        self.hide = hide.to_vec();
+        self.hidden = crate::project_index::hidden_rules(&self.root, hide);
+        self.children.clear();
+        self.rebuild();
+        cx.notify();
+    }
+
     /// Re-reads the folders affected by changes on disk (from the file watcher).
     pub fn refresh(&mut self, changed: &[PathBuf], cx: &mut Context<Self>) {
         let mut stale = false;
@@ -461,7 +478,7 @@ impl FileTree {
 
     /// The folder's entries, folders first. Everything inside an ignored folder is ignored
     /// (dimmed) too: `node_modules/x` as well as `node_modules`.
-    fn read_dir(dir: &Path, inside_ignored: bool) -> Vec<Entry> {
+    fn read_dir(dir: &Path, inside_ignored: bool, hidden: &ignore::gitignore::Gitignore) -> Vec<Entry> {
         let visible: HashSet<PathBuf> = ignore::WalkBuilder::new(dir)
             .max_depth(Some(1))
             .hidden(false)
@@ -474,16 +491,19 @@ impl FileTree {
         let mut entries: Vec<Entry> = read
             .filter_map(Result::ok)
             .filter(|e| !ALWAYS_HIDDEN.contains(&e.file_name().to_string_lossy().as_ref()))
-            .map(|e| {
+            .filter_map(|e| {
                 let path = e.path();
                 // The entry's own type, without another look at the disk (links: what they point to).
                 let is_dir = e.file_type().is_ok_and(|t| t.is_dir() || (t.is_symlink() && path.is_dir()));
-                Entry {
+                if hidden.matched(&path, is_dir).is_ignore() {
+                    return None;
+                }
+                Some(Entry {
                     name: e.file_name().to_string_lossy().into_owned().into(),
                     is_dir,
                     ignored: inside_ignored || !visible.contains(&path),
                     path,
-                }
+                })
             })
             .collect();
         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
@@ -514,8 +534,12 @@ impl FileTree {
     }
 
     fn push_children_of(&mut self, dir: &Path, depth: usize, inside_ignored: bool) {
-        let entries =
-            self.children.entry(dir.to_path_buf()).or_insert_with(|| Self::read_dir(dir, inside_ignored)).clone();
+        let hidden = &self.hidden;
+        let entries = self
+            .children
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| Self::read_dir(dir, inside_ignored, hidden))
+            .clone();
         for mut entry in entries {
             let expanded = entry.is_dir && self.expanded.contains(&entry.path);
             // Open, and holding only a folder: that folder joins this row, and so on down.
@@ -530,7 +554,7 @@ impl FileTree {
                 let inner = self
                     .children
                     .entry(entry.path.clone())
-                    .or_insert_with(|| Self::read_dir(&entry.path, entry.ignored))
+                    .or_insert_with(|| Self::read_dir(&entry.path, entry.ignored, &self.hidden))
                     .clone();
                 let [only] = inner.as_slice() else { break };
                 if !only.is_dir {
@@ -1946,12 +1970,25 @@ mod tests {
         std::fs::write(dir.join(".env"), "").unwrap();
         std::fs::write(dir.join("Cargo.toml"), "").unwrap();
 
-        let entries = FileTree::read_dir(&dir, false);
+        let entries = FileTree::read_dir(&dir, false, &ignore::gitignore::Gitignore::empty());
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_ref()).collect();
         assert_eq!(names, ["src", "target", ".env", ".gitignore", "Cargo.toml"]);
         let ignored = |name: &str| entries.iter().find(|e| e.name.as_ref() == name).unwrap().ignored;
         assert!(ignored("target") && ignored(".env"));
         assert!(!ignored("src") && !ignored("Cargo.toml"));
+        // What the `hide` setting names isn't listed at all.
+        let hidden = crate::project_index::hidden_rules(&dir, &["*.toml".into(), "src/".into()]);
+        let entries = FileTree::read_dir(&dir, false, &hidden);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_ref()).collect();
+        assert_eq!(names, ["target", ".env", ".gitignore"]);
+        // Nor in ⌘P: files inside a hidden folder neither.
+        std::fs::write(dir.join("src/main.rs"), "").unwrap();
+        std::fs::write(dir.join("README.md"), "").unwrap();
+        let files = |hide: &[String]| -> Vec<String> {
+            crate::palette::list_files(&dir, hide).into_iter().map(|f| f.relative.to_string()).collect()
+        };
+        assert!(files(&[]).contains(&"src/main.rs".to_string()));
+        assert_eq!(files(&["src/".into(), "*.toml".into()]), [".gitignore", "README.md"]);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

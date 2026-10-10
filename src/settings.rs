@@ -132,6 +132,17 @@ fn vscode_settings(root: &std::path::Path) -> JsonMap {
         out
     };
     let mut out = editing(&written);
+    // `"files.exclude": { "**/*.pyc": true }`: the ones set, hidden.
+    if let Some(Value::Object(exclude)) = written.get("files.exclude") {
+        let hidden: Vec<Value> = exclude
+            .iter()
+            .filter(|(_, on)| on.as_bool() == Some(true))
+            .map(|(glob, _)| Value::String(glob.clone()))
+            .collect();
+        if !hidden.is_empty() {
+            out.insert("hide".into(), Value::Array(hidden));
+        }
+    }
     if let Some(Value::Bool(on)) = written.get("editor.bracketPairColorization.enabled") {
         out.insert("bracket_colours".into(), Value::Bool(*on));
     }
@@ -449,6 +460,9 @@ pub struct Settings {
     pub sticky_scroll: bool,
     /// Tint the other uses of the name at the caret (and of the text selected).
     pub symbol_marks: bool,
+    /// Paths kept out of the files, ⌘P and project search, written as `.gitignore` writes
+    /// them (`*.pyc`, `build/`): beyond what `.gitignore` leaves out.
+    pub hide: Vec<String>,
     /// Typing a bracket or quote types its partner too, steps over one already there, and
     /// wraps what's selected.
     pub auto_close: bool,
@@ -509,6 +523,7 @@ impl Default for Settings {
             sticky_scroll: true,
             symbol_marks: true,
             auto_close: true,
+            hide: Vec::new(),
             ai: Default::default(),
         }
     }
@@ -1278,6 +1293,7 @@ mod tests {
                 "editor.insertSpaces": true,
                 "editor.formatOnSave": true,
                 "editor.wordWrap": "bounded",
+                "files.exclude": { "**/*.pyc": true, "dist": false },
                 "workbench.colorTheme": "Solarized",
                 "[python]": { "editor.tabSize": 4 },
                 "[typescript][typescriptreact]": { "editor.formatOnSave": false },
@@ -1290,6 +1306,7 @@ mod tests {
         let (now, _) = merged(&user, &read);
         assert_eq!((now.indent_size, now.indent_with_tabs, now.format_on_save, now.word_wrap), (2, false, true, true));
         assert_eq!(now.theme, user.theme, "only the editing settings");
+        assert_eq!(now.hide, ["**/*.pyc"], "the files it hides");
         assert_eq!(now.indent_for("Python"), crate::file_style::Indent::Spaces(4));
         assert!(!now.format_on_save_for("TypeScript") && !now.format_on_save_for("TSX"));
         assert!(now.format_on_save_for("Rust"));

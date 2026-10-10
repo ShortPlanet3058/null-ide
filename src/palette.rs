@@ -303,9 +303,9 @@ pub struct PaletteOptions {
     pub projects: Vec<PathBuf>,
 }
 
-struct FileEntry {
+pub(crate) struct FileEntry {
     path: PathBuf,
-    relative: String,
+    pub(crate) relative: String,
     /// Byte offset where the file name starts in `relative`.
     name_start: usize,
 }
@@ -419,8 +419,9 @@ impl Palette {
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_rows(cx));
         if kind == PaletteKind::Files {
             let root = options.root.clone();
+            let hide = cx.global::<crate::settings::Settings>().hide.clone();
             cx.spawn(async move |this, cx| {
-                let files = cx.background_executor().spawn(async move { list_files(&root) }).await;
+                let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
                 this.update(cx, |this, cx| {
                     this.files = files;
                     this.files_loaded = true;
@@ -1339,11 +1340,14 @@ impl Palette {
     }
 }
 
-/// Every file in the project, respecting `.gitignore`, sorted by path.
-fn list_files(root: &Path) -> Vec<FileEntry> {
+/// Every file in the project, respecting `.gitignore` and the `hide` setting, sorted by path.
+pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
+    let hidden = crate::project_index::hidden_rules(root, hide);
     let mut files: Vec<FileEntry> = ignore::WalkBuilder::new(root)
         .hidden(false)
-        .filter_entry(|e| e.file_name() != ".git")
+        .filter_entry(move |e| {
+            e.file_name() != ".git" && !hidden.matched(e.path(), e.file_type().is_some_and(|t| t.is_dir())).is_ignore()
+        })
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
