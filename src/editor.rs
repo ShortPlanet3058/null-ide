@@ -87,9 +87,9 @@ pub use invisible::RemoveInvisibleCharacters;
 pub use review::{KeepHunk, UndoHunk};
 pub use rewrap::Rewrap;
 pub use structure::{
-    CamelCase, ExpandSelection, GoToMatchingBracket, JoinLines, KebabCase, LowerCase, NewlineAbove, NewlineBelow,
+    CamelCase, DuplicateSelection, ExpandSelection, GoToMatchingBracket, JoinLines, KebabCase, LowerCase, NewlineAbove, NewlineBelow,
     NextChange, PascalCase, PreviousChange, RemoveDuplicateLines, ReverseLines, ShrinkSelection, SnakeCase, SortLines,
-    TitleCase, TrimTrailingWhitespace, UpperCase,
+    SelectToBracket, TitleCase, TrimTrailingWhitespace, UpperCase,
 };
 
 use crate::buffer::Buffer;
@@ -2149,7 +2149,7 @@ impl Editor {
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
         self.for_each_cursor(cx, |this, cx| {
-            if this.empty_pair_around_caret() {
+            if this.empty_pair_around_caret(cx) {
                 let head = this.selection.head;
                 return this.edit(head - 1..head + 1, "", EditKind::Deleting, cx);
             }
@@ -4405,6 +4405,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::reverse_lines))
             .on_action(cx.listener(Self::remove_duplicate_lines))
             .on_action(cx.listener(Self::sort_lines))
+            .on_action(cx.listener(Self::select_to_bracket))
+            .on_action(cx.listener(Self::duplicate_selection))
             .on_action(cx.listener(Self::trim_trailing_whitespace))
             .on_action(cx.listener(Self::remove_invisible_characters))
             .on_action(cx.listener(Self::upper_case))

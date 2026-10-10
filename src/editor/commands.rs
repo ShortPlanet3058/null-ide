@@ -2,7 +2,7 @@
 //! and the brackets and quotes that close themselves.
 
 use super::{EditKind, Editor, EditorEvent, Selection};
-use gpui::Context;
+use gpui::{App, Context};
 use std::ops::Range;
 
 /// Pairs that close themselves when the opening one is typed.
@@ -274,7 +274,9 @@ impl Editor {
     pub(super) fn type_pair_char(&mut self, c: char, cx: &mut Context<Self>) -> bool {
         // In Markdown, * _ ~ over a selection mark it up: *once* for italic, **twice** for bold.
         let marks = self.is_markdown() && !self.selection.is_empty() && matches!(c, '*' | '_' | '~');
-        let pair = PAIRS.iter().copied().find(|(o, cl)| *o == c || *cl == c).or(marks.then_some((c, c)));
+        // (Brackets and quotes switched off: typed as they are.)
+        let auto = cx.global::<crate::settings::Settings>().auto_close;
+        let pair = PAIRS.iter().copied().filter(|_| auto).find(|(o, cl)| *o == c || *cl == c).or(marks.then_some((c, c)));
         let Some((open, close)) = pair else { return false };
         let caret = self.selection.head;
         let next = self.buffer.char_at(caret);
@@ -704,14 +706,14 @@ impl Editor {
     }
 
     /// Backspace between an empty pair like `()` removes both.
-    pub(super) fn empty_pair_around_caret(&self) -> bool {
+    pub(super) fn empty_pair_around_caret(&self, cx: &App) -> bool {
         let caret = self.selection.head;
         let (Some(before), Some(after)) =
             (caret.checked_sub(1).and_then(|i| self.buffer.char_at(i)), self.buffer.char_at(caret))
         else {
             return false;
         };
-        self.selection.is_empty() && PAIRS.contains(&(before, after))
+        self.selection.is_empty() && PAIRS.contains(&(before, after)) && cx.global::<crate::settings::Settings>().auto_close
     }
 
     /// The bracket next to the caret and the one that matches it, as char offsets.
@@ -1144,6 +1146,13 @@ mod editor_tests {
         select(cx, &e, 0, 5);
         e.update(cx, |e, cx| assert!(e.type_pair_char('"', cx)));
         assert_eq!(text(cx, &e), "\"value\"");
+        // Switched off: typed as they are (after `editor`, which sets the defaults), and
+        // ⌫ between two typed takes only one.
+        let e = editor(cx, "()", "x.rs");
+        cx.update(|cx| cx.set_global(crate::settings::Settings { auto_close: false, ..Default::default() }));
+        e.update(cx, |e, cx| assert!(!e.type_pair_char('(', cx)));
+        select(cx, &e, 1, 1);
+        e.update(cx, |e, cx| assert!(!e.empty_pair_around_caret(cx)));
     }
 
     #[gpui::test]

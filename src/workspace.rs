@@ -119,6 +119,7 @@ actions!(
         ToggleLineGuide,
         ToggleStickyScroll,
         ToggleSymbolMarks,
+        ToggleAutoClose,
         PreviousProblem,
         AutoSaveAfterPause,
         AutoSaveWhenLeaving,
@@ -737,6 +738,7 @@ impl Workspace {
             let mut tree = FileTree::new(root, cx);
             // Renaming a file can update the code that names it: the workspace sees to it.
             tree.ask_before_renaming = true;
+            tree.set_hidden(&cx.global::<Settings>().hidden_paths(), cx);
             tree
         });
         let subscriptions = vec![
@@ -4069,6 +4071,11 @@ impl Workspace {
                 toggle(settings.symbol_marks, "Stop Marking Other Uses of a Name", "Mark Other Uses of a Name"),
                 Box::new(ToggleSymbolMarks),
             ),
+            (
+                Edit,
+                toggle(settings.auto_close, "Stop Closing Brackets and Quotes", "Close Brackets and Quotes"),
+                Box::new(ToggleAutoClose),
+            ),
             (Go, "Next Problem".into(), Box::new(NextProblem)),
             (Go, "Previous Problem".into(), Box::new(PreviousProblem)),
             (Go, "Next Change".into(), Box::new(crate::editor::NextChange)),
@@ -4106,6 +4113,7 @@ impl Workspace {
                 (Lines, "Move Line Up".into(), Box::new(crate::editor::MoveLineUp)),
                 (Lines, "Move Line Down".into(), Box::new(crate::editor::MoveLineDown)),
                 (Lines, "Duplicate Line".into(), Box::new(crate::editor::DuplicateLineDown)),
+                (Edit, "Duplicate Selection".into(), Box::new(crate::editor::DuplicateSelection)),
                 (Lines, "Delete Line".into(), Box::new(crate::editor::DeleteLine)),
                 (Lines, "Select Line".into(), Box::new(crate::editor::SelectLine)),
                 (Lines, "Insert Line Below".into(), Box::new(crate::editor::NewlineBelow)),
@@ -4129,6 +4137,7 @@ impl Workspace {
                 (Edit, "Expand Selection".into(), Box::new(crate::editor::ExpandSelection)),
                 (Edit, "Shrink Selection".into(), Box::new(crate::editor::ShrinkSelection)),
                 (Go, "Go to Matching Bracket".into(), Box::new(crate::editor::GoToMatchingBracket)),
+                (Edit, "Select to Matching Bracket".into(), Box::new(crate::editor::SelectToBracket)),
                 (Lines, "Indent with Tabs".into(), Box::new(crate::editor::IndentWithTabs)),
                 (Lines, "Indent with 2 Spaces".into(), Box::new(crate::editor::IndentWith2Spaces)),
                 (Lines, "Indent with 4 Spaces".into(), Box::new(crate::editor::IndentWith4Spaces)),
@@ -4463,6 +4472,15 @@ impl Workspace {
                     editor.update(cx, |editor, cx| editor.preview_lsp_range(range, cx));
                 }
             }
+            PaletteEvent::SymbolsHere(typed) => {
+                let typed = typed.clone();
+                this.go_to_symbol(&GoToSymbol, window, cx);
+                if let Some((palette, _)) = &this.palette
+                    && palette.read(cx).kind() == PaletteKind::Locations
+                {
+                    palette.update(cx, |palette, cx| palette.set_query(&typed, cx));
+                }
+            }
             PaletteEvent::GoToLine(line) => {
                 let line = *line;
                 this.close_palette(window, cx);
@@ -4566,6 +4584,7 @@ impl Workspace {
     /// Brings the window in line with settings after they change.
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
         let settings = cx.global::<Settings>().clone();
+        self.tree.update(cx, |tree, cx| tree.set_hidden(&settings.hidden_paths(), cx));
         self.sidebar.set(settings.sidebar_visible, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         if !settings.fade_bars_while_typing {
             self.chrome.set(true, FADE_IN, FADE_OUT);
@@ -9164,6 +9183,7 @@ impl Render for Workspace {
                     settings::update(cx, |s| s.symbol_marks = !s.symbol_marks)
                 }),
             )
+            .on_action(cx.listener(|_, _: &ToggleAutoClose, _, cx| settings::update(cx, |s| s.auto_close = !s.auto_close)))
             .on_action(cx.listener(|_, _: &ToggleStickyScroll, _, cx| {
                 settings::update(cx, |s| s.sticky_scroll = !s.sticky_scroll)
             }))
@@ -11500,6 +11520,37 @@ mod tests {
             // The same command again, clean: they go.
             w.read_reported(&ran("make", "nothing to be done\n"), cx);
             assert!(w.problem_places(cx).is_empty());
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `@` typed in ⌘P: the open file's symbols, what follows it kept as the search.
+    #[gpui::test]
+    fn at_in_the_files_lists_the_file_s_symbols(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("at-symbols");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn main() {}\nfn helper() {}\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.rs"), window, cx);
+            w.open_palette(PaletteKind::Files, window, cx);
+            let (palette, _) = w.palette.as_ref().unwrap();
+            palette.update(cx, |p, cx| p.set_query("@hel", cx));
+        });
+        cx.run_until_parked();
+        workspace.update(cx, |w, cx| {
+            let (palette, _) = w.palette.as_ref().expect("a list open");
+            let palette = palette.read(cx);
+            assert_eq!(palette.kind(), PaletteKind::Locations);
+            assert_eq!(palette.query(), "hel");
         });
         std::fs::remove_dir_all(&dir).ok();
     }

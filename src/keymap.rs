@@ -89,7 +89,7 @@ impl Keymap {
                 KeyBinding::new("secondary-r", crate::workspace::GoToSymbol, editor),
                 KeyBinding::new("secondary-r", crate::workspace::GoToSymbol, workspace),
                 KeyBinding::new("secondary-shift-r", crate::workspace::GoToSymbolInProject, workspace),
-                KeyBinding::new("secondary-shift-d", DuplicateLineDown, editor),
+                KeyBinding::new("secondary-shift-d", crate::editor::DuplicateSelection, editor),
                 KeyBinding::new("ctrl-shift-k", DeleteLine, editor),
                 KeyBinding::new("ctrl-secondary-up", MoveLineUp, editor),
                 KeyBinding::new("ctrl-secondary-down", MoveLineDown, editor),

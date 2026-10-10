@@ -303,9 +303,9 @@ pub struct PaletteOptions {
     pub projects: Vec<PathBuf>,
 }
 
-struct FileEntry {
+pub(crate) struct FileEntry {
     path: PathBuf,
-    relative: String,
+    pub(crate) relative: String,
     /// Byte offset where the file name starts in `relative`.
     name_start: usize,
 }
@@ -351,6 +351,8 @@ pub enum PaletteEvent {
     /// Change a setting and stay open, so its effect shows at once.
     Apply(Box<dyn Action>),
     GoToLine(usize),
+    /// `@` typed in the files: the open file's symbols, filtered by what follows it.
+    SymbolsHere(String),
     OpenLocation(PathBuf, lsp_types::Position),
     /// The keyboard is on a place in the open file: show it, without going there yet.
     Preview(PathBuf, lsp_types::Position),
@@ -419,8 +421,9 @@ impl Palette {
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_rows(cx));
         if kind == PaletteKind::Files {
             let root = options.root.clone();
+            let hide = cx.global::<crate::settings::Settings>().hidden_paths();
             cx.spawn(async move |this, cx| {
-                let files = cx.background_executor().spawn(async move { list_files(&root) }).await;
+                let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
                 this.update(cx, |this, cx| {
                     this.files = files;
                     this.files_loaded = true;
@@ -491,6 +494,11 @@ impl Palette {
         let query = self.query.clone();
         self.rows.clear();
         match self.kind {
+            // A hidden extra, as `:42` is: `@` lists the open file's symbols instead (with a
+            // file open; `@scope/pkg` is a path).
+            PaletteKind::Files if query.starts_with('@') && self.line_count.is_some() && !query.contains('/') => {
+                cx.emit(PaletteEvent::SymbolsHere(query[1..].to_string()));
+            }
             PaletteKind::Files => self.file_rows(split_place(&query).0),
             PaletteKind::Quick => self.quick_rows(&query),
             PaletteKind::Line | PaletteKind::Task | PaletteKind::Ex => {}
@@ -1339,11 +1347,14 @@ impl Palette {
     }
 }
 
-/// Every file in the project, respecting `.gitignore`, sorted by path.
-fn list_files(root: &Path) -> Vec<FileEntry> {
+/// Every file in the project, respecting `.gitignore` and the `hide` setting, sorted by path.
+pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
+    let hidden = crate::project_index::hidden_rules(root, hide);
     let mut files: Vec<FileEntry> = ignore::WalkBuilder::new(root)
         .hidden(false)
-        .filter_entry(|e| e.file_name() != ".git")
+        .filter_entry(move |e| {
+            e.file_name() != ".git" && !hidden.matched(e.path(), e.file_type().is_some_and(|t| t.is_dir())).is_ignore()
+        })
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))

@@ -698,6 +698,26 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Caret",
+                Some("A thin bar between characters, a block over one, or a line under it"),
+                {
+                    use crate::settings::CaretShape;
+                    Self::choices(
+                        "caret-shape",
+                        vec![
+                            (CaretShape::Bar, "Bar".into()),
+                            (CaretShape::Block, "Block".into()),
+                            (CaretShape::Underline, "Underline".into()),
+                        ],
+                        s.caret,
+                        &theme,
+                        cx,
+                        |_, shape, cx| settings::update(cx, |s| s.caret = shape),
+                    )
+                },
+                &theme,
+            ),
+            Self::row(
                 "Typewriter scrolling",
                 Some("Keeps the line you're writing in the middle of the window"),
                 Self::toggle("typewriter", s.typewriter, &theme, cx, |s| s.typewriter = !s.typewriter),
@@ -761,8 +781,14 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Other uses of a name",
-                Some("With the caret on a name, its other uses in the file get a soft tint"),
+                Some("With the caret on a name, its other uses in the file get a soft tint; so does text selected"),
                 Self::toggle("symbol-marks", s.symbol_marks, &theme, cx, |s| s.symbol_marks = !s.symbol_marks),
+                &theme,
+            ),
+            Self::row(
+                "Close brackets and quotes",
+                Some("Typing ( [ { or a quote types its partner too, and surrounds what's selected"),
+                Self::toggle("auto-close", s.auto_close, &theme, cx, |s| s.auto_close = !s.auto_close),
                 &theme,
             ),
             Self::row(

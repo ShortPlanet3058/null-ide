@@ -132,6 +132,17 @@ fn vscode_settings(root: &std::path::Path) -> JsonMap {
         out
     };
     let mut out = editing(&written);
+    // `"files.exclude": { "**/*.pyc": true }`: the ones set, hidden.
+    if let Some(Value::Object(exclude)) = written.get("files.exclude") {
+        let hidden: Vec<Value> = exclude
+            .iter()
+            .filter(|(_, on)| on.as_bool() == Some(true))
+            .map(|(glob, _)| Value::String(glob.clone()))
+            .collect();
+        if !hidden.is_empty() {
+            out.insert("files_exclude".into(), Value::Array(hidden));
+        }
+    }
     if let Some(Value::Bool(on)) = written.get("editor.bracketPairColorization.enabled") {
         out.insert("bracket_colours".into(), Value::Bool(*on));
     }
@@ -435,6 +446,8 @@ pub struct Settings {
     pub indent_guides: bool,
     /// The caret blinks for a while once typing stops; off, it stays lit.
     pub caret_blink: bool,
+    /// The caret's shape: a thin bar, a block over the character, or a line under it.
+    pub caret: CaretShape,
     /// The line being written stays in the middle of the window (typewriter scrolling).
     pub typewriter: bool,
     /// In Markdown and text, the paragraph being written stands out, the others fade.
@@ -447,8 +460,17 @@ pub struct Settings {
     pub line_guide: bool,
     /// Keep the first lines of the blocks scrolled into pinned at the top.
     pub sticky_scroll: bool,
-    /// Tint the other uses of the name at the caret.
+    /// Tint the other uses of the name at the caret (and of the text selected).
     pub symbol_marks: bool,
+    /// Paths kept out of the files, ⌘P and project search, written as `.gitignore` writes
+    /// them (`*.pyc`, `build/`): beyond what `.gitignore` leaves out.
+    pub hide: Vec<String>,
+    /// A project's `.vscode/settings.json` `files.exclude`: hidden too, with `hide` (not
+    /// in its place).
+    pub files_exclude: Vec<String>,
+    /// Typing a bracket or quote types its partner too, steps over one already there, and
+    /// wraps what's selected.
+    pub auto_close: bool,
     /// Type hints from the language server inside the code (`x: i32`), faintly.
     pub inlay_hints: bool,
     /// What the language server says over the caret's function ("3 references", "▶ Run").
@@ -498,6 +520,7 @@ impl Default for Settings {
             code_lens: true,
             indent_guides: true,
             caret_blink: true,
+            caret: CaretShape::Bar,
             typewriter: false,
             dim_paragraphs: false,
             smart_punctuation: false,
@@ -505,6 +528,9 @@ impl Default for Settings {
             line_guide: true,
             sticky_scroll: true,
             symbol_marks: true,
+            auto_close: true,
+            hide: Vec::new(),
+            files_exclude: Vec::new(),
             ai: Default::default(),
         }
     }
@@ -531,6 +557,16 @@ pub enum ShowWhitespace {
     Selection,
     Trailing,
     All,
+}
+
+/// The caret's shape in the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaretShape {
+    #[default]
+    Bar,
+    Block,
+    Underline,
 }
 
 /// How much room there is between lines of code.
@@ -588,6 +624,11 @@ impl AutoSave {
 }
 
 impl Settings {
+    /// What's kept out of the files, ⌘P and search: `hide`, and a project's `files.exclude`.
+    pub fn hidden_paths(&self) -> Vec<String> {
+        self.hide.iter().chain(&self.files_exclude).cloned().collect()
+    }
+
     /// The indentation new files get, and files that don't show their own.
     pub fn default_indent(&self) -> crate::file_style::Indent {
         if self.indent_with_tabs {
@@ -1274,6 +1315,7 @@ mod tests {
                 "editor.insertSpaces": true,
                 "editor.formatOnSave": true,
                 "editor.wordWrap": "bounded",
+                "files.exclude": { "**/*.pyc": true, "dist": false },
                 "workbench.colorTheme": "Solarized",
                 "[python]": { "editor.tabSize": 4 },
                 "[typescript][typescriptreact]": { "editor.formatOnSave": false },
@@ -1286,6 +1328,11 @@ mod tests {
         let (now, _) = merged(&user, &read);
         assert_eq!((now.indent_size, now.indent_with_tabs, now.format_on_save, now.word_wrap), (2, false, true, true));
         assert_eq!(now.theme, user.theme, "only the editing settings");
+        assert_eq!(now.files_exclude, ["**/*.pyc"], "the files it hides");
+        // With yours, not in their place.
+        let mine = Settings { hide: vec!["*.log".into()], ..Settings::default() };
+        let (with_mine, _) = merged(&mine, &vscode_settings(&dir));
+        assert_eq!(with_mine.hidden_paths(), ["*.log", "**/*.pyc"]);
         assert_eq!(now.indent_for("Python"), crate::file_style::Indent::Spaces(4));
         assert!(!now.format_on_save_for("TypeScript") && !now.format_on_save_for("TSX"));
         assert!(now.format_on_save_for("Rust"));
@@ -1470,6 +1517,9 @@ mod tests {
     fn the_caret_blinks_unless_told_not_to() {
         assert!(Settings::default().caret_blink);
         assert!(!Settings::parse(r#"{ "caret_blink": false }"#).unwrap().caret_blink);
+        // A bar unless another shape is asked for.
+        assert_eq!(Settings::default().caret, CaretShape::Bar);
+        assert_eq!(Settings::parse(r#"{ "caret": "underline" }"#).unwrap().caret, CaretShape::Underline);
     }
 
     #[test]

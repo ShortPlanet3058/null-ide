@@ -1579,11 +1579,22 @@ impl Element for EditorElement {
             let marked = editor.marked.clone().map(|r| underline(r, 0.85)).unwrap_or_default();
 
             let caret_height = line_height * 0.8;
+            // The other cursors as the caret is (a bar, a block, a line under the character).
+            let caret_shape = cx.global::<Settings>().caret;
             let caret_rect = |row: usize, x: Pixels| {
-                Bounds::new(
-                    point(origin.x + x - px(1.), row_top(row) + (line_height - caret_height) / 2.),
-                    size(px(2.), caret_height),
-                )
+                let top = row_top(row) + (line_height - caret_height) / 2.;
+                match caret_shape {
+                    crate::settings::CaretShape::Bar => {
+                        Bounds::new(point(origin.x + x - px(1.), top), size(px(2.), caret_height))
+                    }
+                    crate::settings::CaretShape::Block => {
+                        Bounds::new(point(origin.x + x, top), size(char_width, caret_height))
+                    }
+                    crate::settings::CaretShape::Underline => Bounds::new(
+                        point(origin.x + x, top + caret_height - px(2.)),
+                        size(char_width, px(2.)),
+                    ),
+                }
             };
             // Other cursors, and where dragged text would land.
             let extra_carets: Vec<Bounds<Pixels>> = editor
@@ -1702,14 +1713,23 @@ impl Element for EditorElement {
                     }
                 }
             };
-            // Vim out of Insert mode: a block over the character, faint enough to read it.
-            let caret = Some(if editor.block_caret(cx) {
+            // Vim out of Insert mode, or chosen: a block over the character, faint enough to
+            // read it. Or a line under it.
+            let caret = Some(if editor.block_caret(cx) || caret_shape == crate::settings::CaretShape::Block {
                 (
                     Bounds::new(
                         point(origin.x + visual.x, origin.y + visual.y + (line_height - caret_height) / 2.),
                         size(char_width, caret_height),
                     ),
                     opacity * 0.45,
+                )
+            } else if caret_shape == crate::settings::CaretShape::Underline {
+                (
+                    Bounds::new(
+                        point(origin.x + visual.x, origin.y + visual.y + (line_height + caret_height) / 2. - px(2.)),
+                        size(char_width, px(2.)),
+                    ),
+                    opacity,
                 )
             } else {
                 (

@@ -12,6 +12,8 @@ actions!(
         ExpandSelection,
         ShrinkSelection,
         GoToMatchingBracket,
+        SelectToBracket,
+        DuplicateSelection,
         NewlineBelow,
         NewlineAbove,
         JoinLines,
@@ -42,6 +44,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(expand, ExpandSelection, ctx),
         KeyBinding::new(shrink, ShrinkSelection, ctx),
         KeyBinding::new("secondary-shift-\\", GoToMatchingBracket, ctx),
+        KeyBinding::new("secondary-shift-d", DuplicateSelection, ctx),
         KeyBinding::new("secondary-enter", NewlineBelow, ctx),
         KeyBinding::new("secondary-shift-enter", NewlineAbove, ctx),
         KeyBinding::new("ctrl-j", JoinLines, ctx),
@@ -230,7 +233,7 @@ impl Editor {
                 // From either side of one bracket to the same side of the other.
                 if head == at + 1 { other + 1 } else { other }
             }
-            None => match self.enclosing_open_bracket() {
+            None => match self.enclosing_open_bracket(self.selection.head) {
                 Some(open) => open,
                 None => return,
             },
@@ -240,18 +243,95 @@ impl Editor {
         self.touch(cx);
     }
 
-    fn enclosing_open_bracket(&self) -> Option<usize> {
-        const LIMIT: usize = 20_000;
-        let mut chars = self.buffer.rope().chars_at(self.selection.head);
+    /// The brackets around the caret and what's between them, selected; again, the ones
+    /// around those. On a bracket: it and its partner.
+    pub(super) fn select_to_bracket(&mut self, _: &SelectToBracket, _: &mut Window, cx: &mut Context<Self>) {
+        self.single_cursor();
+        let range = self.selection.range();
+        let pair = match self.matching_brackets().filter(|_| range.is_empty()) {
+            Some((a, b)) => Some((a.min(b), a.max(b))),
+            None => self.enclosing_open_bracket(range.start).and_then(|open| {
+                let close = self.closing_bracket(open)?;
+                // (Inside the selection still: the next ones out.)
+                (close + 1 >= range.end).then_some((open, close))
+            }),
+        };
+        let Some((open, close)) = pair else { return };
+        self.selection = Selection { anchor: open, head: close + 1 };
+        self.goal_column = None;
+        self.touch(cx);
+    }
+
+    /// The bracket closing the one opening at `open` (of its kind: a `]` doesn't close a `(`).
+    fn closing_bracket(&self, open: usize) -> Option<usize> {
+        const LIMIT: usize = 200_000;
+        let opener = self.buffer.char_at(open)?;
+        let closer = match opener {
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            _ => return None,
+        };
         let mut depth = 0i32;
-        let mut i = self.selection.head;
+        for (k, c) in self.buffer.rope().chars_at(open).take(LIMIT).enumerate() {
+            if c == opener {
+                depth += 1;
+            } else if c == closer {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + k);
+                }
+            }
+        }
+        None
+    }
+
+    /// ⌘⇧D: each selection copied just after itself, the copy selected, as Sublime does;
+    /// with nothing selected, the line.
+    pub(super) fn duplicate_selection(&mut self, _: &DuplicateSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if self.all_selections().iter().all(|s| s.is_empty()) {
+            return self.on_each_cursors_lines(cx, |this, cx| this.duplicate_lines(true, cx));
+        }
+        self.for_each_cursor(cx, |this, cx| {
+            let range = this.selection.range();
+            if range.is_empty() {
+                return;
+            }
+            let text = this.buffer.slice(range.clone());
+            let len = text.chars().count();
+            this.edit(range.end..range.end, &text, EditKind::Other, cx);
+            this.selection = Selection { anchor: range.end, head: range.end + len };
+        });
+        self.touch(cx);
+    }
+
+    /// The bracket opening the block `from` is in: closers met on the way back are paired
+    /// with their own kind of opener.
+    fn enclosing_open_bracket(&self, from: usize) -> Option<usize> {
+        const LIMIT: usize = 20_000;
+        let mut chars = self.buffer.rope().chars_at(from);
+        let mut closed: Vec<char> = Vec::new();
+        let mut i = from;
         for _ in 0..LIMIT {
             let c = chars.prev()?;
             i -= 1;
             match c {
-                ')' | ']' | '}' => depth += 1,
-                '(' | '[' | '{' if depth == 0 => return Some(i),
-                '(' | '[' | '{' => depth -= 1,
+                ')' | ']' | '}' => closed.push(c),
+                '(' | '[' | '{' => {
+                    let closer = match c {
+                        '(' => ')',
+                        '[' => ']',
+                        _ => '}',
+                    };
+                    match closed.iter().rposition(|&x| x == closer) {
+                        Some(at) => {
+                            closed.truncate(at);
+                        }
+                        None if closed.is_empty() => return Some(i),
+                        // An opener of another kind than what's open: not the one around.
+                        None => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -594,6 +674,64 @@ mod tests {
         e.buffer.slice(e.selection.range())
     }
 
+    /// Fold with lines selected: those lines, behind the first; a run of comments folds too.
+    #[gpui::test]
+    fn selected_lines_and_comment_runs_fold(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "// a\n// b\n// c\nfn f() {\n    1;\n    2;\n    3;\n}\n");
+        e.update_in(cx, |e, window, cx| {
+            assert!(e.foldable().contains(&(0..3)), "the comments");
+            e.selection = Selection { anchor: e.buffer.offset(4, 0), head: e.buffer.offset(6, 2) };
+            e.fold(&crate::editor::fold::Fold, window, cx);
+            assert!(e.is_folded(4));
+            assert_eq!(e.buffer.point(e.selection.head).0, 4, "the caret out of what's hidden");
+            // Whole lines selected (⇧↓ to the next line's start): that next line stays.
+            e.unfold_all(&crate::editor::fold::UnfoldAll, window, cx);
+            e.selection = Selection { anchor: e.buffer.offset(4, 0), head: e.buffer.offset(6, 0) };
+            e.fold(&crate::editor::fold::Fold, window, cx);
+            assert!(e.folded_regions().contains(&(4, 6)), "{:?}", e.folded_regions());
+        });
+    }
+
+    /// Select to Matching Bracket: the pair around the caret, then the one around that.
+    /// Duplicate Selection: the copy just after, selected; with nothing selected, the line.
+    #[gpui::test]
+    fn brackets_selected_and_selections_duplicated(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, "f(a, [b, c]);\n");
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(7);
+            e.select_to_bracket(&SelectToBracket, window, cx);
+            assert_eq!(selected(e), "[b, c]");
+            e.select_to_bracket(&SelectToBracket, window, cx);
+            assert_eq!(selected(e), "(a, [b, c])");
+            e.select_to_bracket(&SelectToBracket, window, cx);
+            assert_eq!(selected(e), "(a, [b, c])", "none further out");
+            // Two selections, each copied after itself.
+            e.selection = Selection { anchor: 2, head: 3 };
+            e.extra = vec![crate::editor::Cursor { selection: Selection { anchor: 6, head: 7 }, goal: None }];
+            e.duplicate_selection(&DuplicateSelection, window, cx);
+            assert_eq!(e.buffer.to_string(), "f(aa, [bb, c]);\n");
+            e.extra.clear();
+            e.selection = Selection::caret(0);
+            e.duplicate_selection(&DuplicateSelection, window, cx);
+            assert_eq!(e.buffer.to_string(), "f(aa, [bb, c]);\nf(aa, [bb, c]);\n");
+        });
+        // Nothing selected, a cursor on each of two lines: each line, once.
+        let (e, cx) = editor(cx, "a\nb\n");
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(0);
+            e.extra = vec![crate::editor::Cursor { selection: Selection::caret(2), goal: None }];
+            e.duplicate_selection(&DuplicateSelection, window, cx);
+            assert_eq!(e.buffer.to_string(), "a\na\nb\nb\n");
+        });
+        // A bracket of another kind in between (in a string) isn't the one closing.
+        let (e, cx) = editor(cx, "f(a, \"]\");\n");
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(2);
+            e.select_to_bracket(&SelectToBracket, window, cx);
+            assert_eq!(selected(e), "(a, \"]\")");
+        });
+    }
+
     /// Trim Trailing Whitespace, the indentation made another, and ⌘/ on an empty line: each
     /// one undo, the caret kept in its text.
     #[gpui::test]
@@ -608,13 +746,19 @@ mod tests {
             // 2 spaces a level, to 4: the extra spaces lining `2` up stay extra.
             e.style.indent = Indent::Spaces(2);
             e.set_indent(Indent::Spaces(4), cx);
-            assert_eq!(e.buffer.to_string(), "fn a() {\n    if x {\n            y(1,\n                2);\n    }\n\n}\n");
+            assert_eq!(
+                e.buffer.to_string(),
+                "fn a() {\n    if x {\n            y(1,\n                2);\n    }\n\n}\n"
+            );
             assert_eq!(e.buffer.point(e.selection.head), (1, 6), "still after `if`");
             e.set_indent(Indent::Tabs, cx);
             assert_eq!(e.buffer.to_string(), "fn a() {\n\tif x {\n\t\t\ty(1,\n\t\t\t\t2);\n\t}\n\n}\n");
             // One undo each.
             e.step_history(true, cx);
-            assert_eq!(e.buffer.to_string(), "fn a() {\n    if x {\n            y(1,\n                2);\n    }\n\n}\n");
+            assert_eq!(
+                e.buffer.to_string(),
+                "fn a() {\n    if x {\n            y(1,\n                2);\n    }\n\n}\n"
+            );
             // ⌘/ on the empty line: a comment begins there.
             e.selection = Selection::caret(e.buffer.offset(5, 0));
             e.toggle_comment(cx);
