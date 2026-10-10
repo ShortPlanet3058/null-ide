@@ -34,7 +34,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-r", RenameSymbol, editor),
         KeyBinding::new("f2", RenameSymbol, editor),
         KeyBinding::new("shift-f12", FindReferences, editor),
-        KeyBinding::new("alt-shift-f", FormatDocument, editor),
+        // (⌥⇧F types · on a Mac: ⌥⌘L there, as in JetBrains' editors.)
+        KeyBinding::new(if cfg!(target_os = "macos") { "alt-cmd-l" } else { "alt-shift-f" }, FormatDocument, editor),
         KeyBinding::new("enter", ConfirmRename, Some("RenameField")),
         KeyBinding::new("escape", CancelRename, Some("RenameField")),
     ]);
@@ -516,6 +517,8 @@ impl Editor {
     }
 
     fn save_formatted(&mut self, close: bool, cx: &mut Context<Self>) {
+        // (A save as it is that never happened, asked about and cancelled: this one isn't.)
+        self.saving_as_is = false;
         if cx.global::<Settings>().format_on_save_for(self.language_name()) && self.lsp.is_some() && self.path.is_some()
         {
             self.format_then(true, close, cx);
@@ -571,7 +574,7 @@ mod tests {
         let text = "{\"a\":[1,2],\n\"b\":{}}\n";
         let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some("a.json".into()), cx));
         e.update_in(cx, |e, window, cx| window.focus(&gpui::Focusable::focus_handle(e, cx)));
-        cx.simulate_keystrokes("alt-shift-f");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "alt-cmd-l" } else { "alt-shift-f" });
         e.read_with(cx, |e, _| {
             assert_eq!(e.buffer.to_string(), "{\n    \"a\": [\n        1,\n        2\n    ],\n    \"b\": {}\n}\n");
         });
@@ -581,7 +584,7 @@ mod tests {
             let end = e.buffer.len_chars();
             e.edit(end..end, "]", EditKind::Other, cx);
         });
-        cx.simulate_keystrokes("alt-shift-f");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "alt-cmd-l" } else { "alt-shift-f" });
         e.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), format!("{text}]"), "broken: left alone"));
         // A selection: just it, lined up under its line.
         e.update(cx, |e, cx| {
@@ -590,7 +593,7 @@ mod tests {
             let start = e.buffer.to_string().find("{\"b").unwrap();
             e.selection = Selection { anchor: start, head: start + "{\"b\":[1,2]}".len() };
         });
-        cx.simulate_keystrokes("alt-shift-f");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "alt-cmd-l" } else { "alt-shift-f" });
         e.read_with(cx, |e, _| {
             assert_eq!(
                 e.buffer.to_string(),
