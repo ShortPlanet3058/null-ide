@@ -74,6 +74,8 @@ pub struct FileResult {
     path: PathBuf,
     relative: String,
     matches: Vec<LineMatch>,
+    /// Some of its matches were taken off the list: replacing goes line by line.
+    dismissed: bool,
 }
 
 enum Row {
@@ -200,8 +202,42 @@ impl ProjectSearch {
         if !self.show_replace || self.results.is_empty() {
             return;
         }
-        let targets = self.results.iter().map(|f| (f.path.clone(), None)).collect();
+        let targets = self.results.iter().flat_map(replace_targets).collect();
         cx.emit(ProjectSearchEvent::Replace { query: self.query.clone(), replacement: self.replacement(cx), targets });
+    }
+
+    /// The button on a file's row: its matches, in that file only.
+    fn replace_file(&mut self, file: usize, cx: &mut Context<Self>) {
+        let targets = replace_targets(&self.results[file]);
+        cx.emit(ProjectSearchEvent::Replace { query: self.query.clone(), replacement: self.replacement(cx), targets });
+    }
+
+    /// The ✕ on a result: off the list (not replaced by Replace All); on a file, all of it.
+    fn dismiss(&mut self, file: usize, line_match: Option<usize>, cx: &mut Context<Self>) {
+        match line_match {
+            Some(m) => {
+                let result = &mut self.results[file];
+                result.matches.remove(m);
+                result.dismissed = true;
+                if result.matches.is_empty() {
+                    self.results.remove(file);
+                }
+            }
+            None => {
+                self.results.remove(file);
+            }
+        }
+        let results = std::mem::take(&mut self.results);
+        let status = match self.status {
+            Status::Done { truncated, .. } => {
+                Status::Done { files: results.len(), matches: results.iter().map(|f| f.matches.len()).sum(), truncated }
+            }
+            Status::Idle => Status::Idle,
+            Status::Searching => Status::Searching,
+            Status::Invalid => Status::Invalid,
+        };
+        self.selected = self.selected.filter(|&s| s < self.rows.len().saturating_sub(1));
+        self.set_results(results, status, cx);
     }
 
     fn replace_line(&mut self, file: usize, line_match: usize, cx: &mut Context<Self>) {
@@ -394,6 +430,7 @@ impl ProjectSearch {
             .hover(|s| s.bg(theme.hairline));
         match self.rows[ix] {
             Row::File(f) => {
+                let group: SharedString = format!("file-{ix}").into();
                 let file = &self.results[f];
                 let name_start = file.relative.rfind(['/', '\\']).map_or(0, |i| i + 1);
                 let folder = file.relative[..name_start].trim_end_matches(['/', '\\']).to_string();
@@ -414,6 +451,21 @@ impl ProjectSearch {
                             .text_color(theme.muted)
                             .child(file.matches.len().to_string()),
                     )
+                    .group(group.clone())
+                    .when(self.show_replace, |row| {
+                        row.child(self.row_button(("replace-file", ix), "Replace", group.clone(), cx).on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.replace_file(f, cx)
+                            }),
+                        ))
+                    })
+                    .child(self.row_button(("dismiss-file", ix), "✕", group, cx).on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.dismiss(f, None, cx)
+                        },
+                    )))
                     .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, 0, false, cx)))
                     .into_any_element()
@@ -466,30 +518,47 @@ impl ProjectSearch {
                     )
                     .child(div().flex_1().min_w_0().overflow_hidden().code_font(cx).child(text))
                     .when(self.show_replace, |row| {
-                        row.child(
-                            div()
-                                .id(("replace-line", ix))
-                                .flex_none()
-                                .px(px(6.))
-                                .rounded(px(ui::R_KEY))
-                                .text_size(px(ui::T_XS))
-                                .text_color(theme.muted)
-                                .invisible()
-                                .group_hover(group, |s| s.visible())
-                                .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
-                                .child("Replace")
-                                .active(|s| s.opacity(0.7))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.replace_line(f, m, cx)
-                                })),
-                        )
+                        row.child(self.row_button(("replace-line", ix), "Replace", group.clone(), cx).on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.replace_line(f, m, cx)
+                            }),
+                        ))
                     })
+                    .child(self.row_button(("dismiss-match", ix), "✕", group, cx).on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.dismiss(f, Some(m), cx)
+                        },
+                    )))
                     .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open(f, m, false, cx)))
                     .into_any_element()
             }
         }
+    }
+
+    /// A small button on a result row, shown while the row is hovered.
+    fn row_button(
+        &self,
+        id: (&'static str, usize),
+        label: &'static str,
+        group: SharedString,
+        cx: &App,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = cx.global::<Theme>();
+        div()
+            .id(id)
+            .flex_none()
+            .px(px(6.))
+            .rounded(px(ui::R_KEY))
+            .text_size(px(ui::T_XS))
+            .text_color(theme.muted)
+            .invisible()
+            .group_hover(group, |s| s.visible())
+            .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
+            .child(label)
+            .active(|s| s.opacity(0.7))
     }
 
     fn toggle(
@@ -611,7 +680,7 @@ fn search_files(
         }
         if !matches.is_empty() {
             let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
-            batch.push(FileResult { path, relative, matches });
+            batch.push(FileResult { path, relative, matches, dismissed: false });
         }
         if total >= MAX_MATCHES {
             report(Found::Files(batch));
@@ -663,6 +732,17 @@ fn file_filter(root: &Path, written: &str) -> Option<ignore::overrides::Override
         }
     }
     any.then(|| only.build().ok()).flatten()
+}
+
+/// What replacing in `file`'s results changes: the whole file, or with some taken off the
+/// list, the lines still on it.
+fn replace_targets(file: &FileResult) -> Vec<(PathBuf, Option<usize>)> {
+    if !file.dismissed {
+        return vec![(file.path.clone(), None)];
+    }
+    let mut lines: Vec<usize> = file.matches.iter().map(|m| m.line).collect();
+    lines.dedup();
+    lines.into_iter().map(|line| (file.path.clone(), Some(line))).collect()
 }
 
 /// A match's replacement: `$1`-style groups filled in for a regex search, in the match's
@@ -1019,6 +1099,29 @@ mod tests {
         assert_eq!(marks, vec![(2..5, false), (5..8, true)]);
     }
 
+    /// A match taken off the list isn't replaced: its file goes line by line; a file taken
+    /// off goes whole.
+    #[gpui::test]
+    fn results_taken_off_the_list(cx: &mut gpui::TestAppContext) {
+        let search = cx.new(|cx| ProjectSearch::new(PathBuf::from("/p"), cx));
+        let m = |line| LineMatch { line, columns: 0..1, preview: "x".into(), highlights: vec![] };
+        let file = |name: &str, lines: Vec<usize>| FileResult {
+            path: PathBuf::from(name),
+            relative: name.into(),
+            matches: lines.into_iter().map(m).collect(),
+            dismissed: false,
+        };
+        search.update(cx, |s, cx| {
+            s.set_results(vec![file("a", vec![1, 2, 5]), file("b", vec![3])], Status::Idle, cx);
+            assert_eq!(replace_targets(&s.results[0]), [(PathBuf::from("a"), None)]);
+            s.dismiss(0, Some(1), cx);
+            assert_eq!(replace_targets(&s.results[0]), [(PathBuf::from("a"), Some(1)), (PathBuf::from("a"), Some(5))]);
+            s.dismiss(1, None, cx);
+            assert_eq!(s.results.len(), 1);
+            assert_eq!(s.rows.len(), 3, "a, a:1, a:5");
+        });
+    }
+
     #[gpui::test]
     fn arrows_step_through_matches_skipping_file_names(cx: &mut gpui::TestAppContext) {
         let search = cx.new(|cx| ProjectSearch::new(PathBuf::from("/p"), cx));
@@ -1027,6 +1130,7 @@ mod tests {
             path: PathBuf::from(name),
             relative: name.into(),
             matches: lines.into_iter().map(m).collect(),
+            dismissed: false,
         };
         search.update(cx, |s, cx| {
             s.set_results(vec![file("a", vec![1, 2]), file("b", vec![3])], Status::Idle, cx);
