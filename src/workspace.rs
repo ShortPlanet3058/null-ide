@@ -166,6 +166,7 @@ actions!(
         ToggleMaximizeTerminal,
         AboutNull,
         RecentNotices,
+        JoinSides,
         SaveWithoutFormatting,
         UseNvidia,
         UseOllama,
@@ -3346,6 +3347,47 @@ impl Workspace {
         self.show_tab(ix, true, window, cx);
     }
 
+    /// Join Sides: the second side's tabs after the first's, one side again (a file open on
+    /// both keeps one tab, its copy sharing the same text closing).
+    fn join_sides(&mut self, _: &JoinSides, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_split() {
+            return;
+        }
+        let active = self.active.map(|i| self.tabs[i].editor.clone());
+        let doubles: Vec<Entity<Editor>> = self
+            .tabs
+            .iter()
+            .filter(|t| t.side == 1)
+            .filter(|t| {
+                self.twins_of(&t.editor, cx)
+                    .iter()
+                    .any(|twin| self.tabs.iter().any(|o| o.side == 0 && &o.editor == twin))
+            })
+            .map(|t| t.editor.clone())
+            .collect();
+        for double in &doubles {
+            if let Some(ix) = self.tabs.iter().position(|t| &t.editor == double) {
+                self.remove_tab(ix, window, cx);
+            }
+        }
+        for tab in &mut self.tabs {
+            tab.side = 0;
+        }
+        self.shown = [None, None];
+        self.keep_pinned_first();
+        // The tab worked in stays the one shown (its twin, if it was the copy that closed).
+        let target = active
+            .clone()
+            .filter(|a| !doubles.contains(a))
+            .or_else(|| active.as_ref().and_then(|a| self.twins_of(a, cx).into_iter().next()));
+        let ix = target.and_then(|t| self.tabs.iter().position(|tab| tab.editor == t)).unwrap_or(0);
+        if ix < self.tabs.len() {
+            self.show_tab(ix, true, window, cx);
+        }
+        self.schedule_session_save(cx);
+        cx.notify();
+    }
+
     /// A tab dropped on `side`: before tab `before`, or at the end of that side.
     fn drop_tab(
         &mut self,
@@ -3917,9 +3959,8 @@ impl Workspace {
         if self.past_notices.is_empty() {
             return self.show_notice("Nothing to say yet".into(), cx);
         }
-        let seconds = |t: std::time::SystemTime| {
-            t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
-        };
+        let seconds =
+            |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let now = seconds(std::time::SystemTime::now());
         let locations = self
             .past_notices
@@ -4225,6 +4266,7 @@ impl Workspace {
                 (File, "Close All Tabs".into(), Box::new(CloseAllTabs)),
                 (File, "Close Other Tabs".into(), Box::new(CloseOtherTabs)),
                 (File, "Close Saved Tabs".into(), Box::new(CloseSavedTabs)),
+                (View, "Join Sides".into(), Box::new(JoinSides)),
                 (Edit, "Undo".into(), Box::new(Undo)),
                 (Edit, "Redo".into(), Box::new(Redo)),
                 (Edit, "Select All".into(), Box::new(SelectAll)),
@@ -9391,6 +9433,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_maximize_terminal))
             .on_action(cx.listener(Self::about))
             .on_action(cx.listener(Self::recent_notices))
+            .on_action(cx.listener(Self::join_sides))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
@@ -11762,6 +11805,15 @@ mod tests {
         assert_eq!(shown(cx), "c.txt");
         cx.simulate_keystrokes("cmd-1");
         assert_eq!(shown(cx), "a.txt");
+        // Two sides joined: one again, a file open on both keeping one tab.
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_on_other_side(window, cx);
+            assert!(w.is_split());
+            w.join_sides(&JoinSides, window, cx);
+            assert!(!w.is_split());
+            assert_eq!(w.tabs.len(), 3, "the copy closed");
+            assert_eq!(w.active_editor().map(|e| e.read(cx).file_name()).as_deref(), Some("a.txt"));
+        });
         // A file that can't be written says so (its tab shows a lock).
         let locked = dir.join("locked.txt");
         std::fs::write(&locked, "x").unwrap();
