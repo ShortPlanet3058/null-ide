@@ -1174,7 +1174,9 @@ impl Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         // (Only when they're the ones in use: another window's in front, they wait for this one.)
         // An environment made or removed (`python -m venv .venv`): known from now.
-        if visible.iter().any(|p| [".venv", "venv", "env"].iter().any(|f| p.starts_with(root.join(f)))) {
+        // (Or Poetry's, kept outside: known again when the project's Poetry files change.)
+        let env_files = [".venv", "venv", "env", "pyproject.toml", "poetry.lock"];
+        if visible.iter().any(|p| env_files.iter().any(|f| p.starts_with(root.join(f)))) {
             let now = crate::python_env::find(&root);
             // Another environment: Python's language server reads its packages from it.
             if now != self.python_env {
@@ -2821,6 +2823,9 @@ impl Workspace {
                 }
                 EditorEvent::NeedsPath => this.ask_where_to_save(editor.clone(), window, cx),
                 EditorEvent::VimCommandLine => this.open_palette(PaletteKind::Ex, window, cx),
+                EditorEvent::SavedToClose => {
+                    this.confirm_unsaved(CloseAction::CloseTabs(vec![editor.clone()]), window, cx);
+                }
                 EditorEvent::RunCommand(command) => this.run_in_terminal(command.clone(), None, window, cx),
                 EditorEvent::Reviewed => this.file_reviewed(editor, cx),
                 EditorEvent::FilesDropped { paths, at } => this.link_dropped(editor.clone(), paths, *at, cx),
@@ -7137,7 +7142,6 @@ impl Workspace {
         if let Ok(line) = command.parse::<usize>() {
             return editor.update(cx, |e, cx| e.vim_go_to_line(line, cx));
         }
-        let save = |editor: &Entity<Editor>, cx: &mut Context<Self>| editor.update(cx, |e, cx| e.save_to_disk(cx));
         match command {
             "w" | "write" => editor.update(cx, |e, cx| e.save_from_keyboard(cx)),
             "wa" | "wall" => self.save_all(&SaveAll, window, cx),
@@ -7149,11 +7153,8 @@ impl Workspace {
                 }
                 self.close_tab(&CloseTab, window, cx);
             }
-            "wq" | "x" | "xit" => {
-                if save(&editor, cx) {
-                    self.close_tab(&CloseTab, window, cx);
-                }
-            }
+            // Formatted first when that's on: the tab closes once it's saved (`SavedToClose`).
+            "wq" | "x" | "xit" => editor.update(cx, |e, cx| e.save_and_close(cx)),
             "qa" | "qa!" | "qall" => self.close_all_tabs(&CloseAllTabs, window, cx),
             "wqa" | "xa" | "wqall" | "xall" => {
                 self.save_all(&SaveAll, window, cx);
@@ -8088,9 +8089,7 @@ impl Render for Workspace {
         let language = self.active_editor().map(|e| e.read(cx)).filter(|e| e.preview.is_none()).map(|e| {
             let name = e.language_name();
             match (name, &self.python_env) {
-                ("Python", Some(env)) => {
-                    format!("{name} ({})", env.strip_prefix(&root_now).unwrap_or(env).to_string_lossy())
-                }
+                ("Python", Some(env)) => format!("{name} ({})", crate::python_env::label(env, &root_now)),
                 _ => name.to_string(),
             }
         });
@@ -9202,6 +9201,37 @@ mod tests {
             assert!(e.buffer.is_dirty(), "not marked saved");
         });
         std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Vim's :wq and :x save the file and close its tab; :q! closes it without saving.
+    #[gpui::test]
+    fn vim_write_and_quit_save_then_close(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("vim-wq");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(dir.join(name), "saved\n").unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        for (name, command, kept) in [("a.txt", "wq", "changed\n"), ("b.txt", "q!", "saved\n")] {
+            let file = dir.join(name);
+            workspace.update_in(cx, |w, window, cx| w.open_file(file, window, cx));
+            cx.run_until_parked();
+            let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+            editor.update(cx, |e, cx| e.restore_unsaved("changed\n", cx));
+            workspace.update_in(cx, |w, window, cx| w.run_ex(command, window, cx));
+            cx.run_until_parked();
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), kept, ":{command}");
+            assert!(workspace.read_with(cx, |w, _| w.tabs.is_empty()), ":{command} closes the tab");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -398,6 +398,8 @@ pub enum EditorEvent {
     /// The file will be written in another encoding: its other copies too.
     EncodingChanged(crate::encoding::Encoding),
     Saved,
+    /// Saved for `:wq`: the tab closes now.
+    SavedToClose,
     /// Save was asked for, but the buffer has no file yet.
     NeedsPath,
     /// A command to run in the terminal (a code lens's "▶ Run Test").
