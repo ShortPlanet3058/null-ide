@@ -26,6 +26,8 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", SubmitPrompt, Some("AiPrompt")),
         KeyBinding::new("escape", CancelPrompt, Some("AiPrompt")),
+        // While it writes the keys are the editor's (its field is gone): Esc stops it.
+        KeyBinding::new("escape", CancelPrompt, Some("Editor && ai_writing")),
         KeyBinding::new("tab", KeepChange, Some("Editor && ai_change")),
         KeyBinding::new("escape", UndoChange, Some("Editor && ai_change")),
         KeyBinding::new("escape", CloseNote, Some("Editor && ai_note")),
@@ -288,10 +290,13 @@ impl Editor {
         if prompt.ask_only || is_question(&typed) {
             return self.ask_question(instruction, window, cx);
         }
+        // The field goes while the change is written: the keys come here (Esc stops it, ⇥
+        // and Esc keep or undo what's written).
+        window.focus(&self.focus_handle);
         self.write_change(instruction, cx);
     }
 
-    fn cancel_prompt(&mut self, _: &CancelPrompt, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn cancel_prompt(&mut self, _: &CancelPrompt, window: &mut Window, cx: &mut Context<Self>) {
         self.prompt = None;
         self.rebuild_blocks();
         window.focus(&self.focus_handle);
@@ -365,6 +370,7 @@ impl Editor {
                             if let Some(prompt) = &mut this.prompt {
                                 prompt.writing = false;
                                 prompt.failed = Some(message);
+                                this.focus_prompt = true;
                             }
                             cx.notify();
                         })
@@ -395,6 +401,7 @@ impl Editor {
                 "Nothing to change there."
             };
             self.prompt = Some(Prompting { writing: false, failed: Some(failed.into()), task: None, ..prompt });
+            self.focus_prompt = true;
             return cx.notify();
         }
         let lines = prompt.lines.clone();
@@ -404,6 +411,7 @@ impl Editor {
         if self.buffer.slice(range.clone()) != prompt.original {
             let failed = "The code changed while the answer came. Ask again.";
             self.prompt = Some(Prompting { writing: false, failed: Some(failed.into()), task: None, ..prompt });
+            self.focus_prompt = true;
             return cx.notify();
         }
         self.record_undo(EditKind::Other);
@@ -449,8 +457,6 @@ impl Editor {
             lines: lines.start..lines.start + new_lines,
             instruction,
         });
-        // (The prompt had the keys, and is gone: ⇥ and Esc are for the change now.)
-        self.refocus = true;
         self.rebuild_blocks();
         self.touch(cx);
         cx.notify();
@@ -647,9 +653,21 @@ impl Editor {
         lines
     }
 
+    /// See `focus_prompt`.
+    pub(super) fn focus_prompt_if_asked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.focus_prompt)
+            && let Some(prompt) = self.prompt.as_ref().filter(|p| !p.writing)
+        {
+            window.focus(&prompt.input.focus_handle(cx));
+        }
+    }
+
     pub(super) fn ai_key_context(&self, context: &mut gpui::KeyContext) {
         if self.ai_change.is_some() {
             context.add("ai_change");
+        }
+        if self.prompt.as_ref().is_some_and(|p| p.writing) {
+            context.add("ai_writing");
         }
         if self.review.is_some() {
             context.add("review");

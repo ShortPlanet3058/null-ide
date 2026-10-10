@@ -742,9 +742,9 @@ pub struct Editor {
     /// ⌘I: the field while it's open, a change until it's kept or undone, an answer.
     prompt: Option<assist::Prompting>,
     ai_change: Option<assist::Change>,
-    /// The AI's prompt went away while it had the keys (its change written): they come back
-    /// here when next drawn, unless something else took them meanwhile.
-    refocus: bool,
+    /// The AI's answer didn't come (failed, nothing to change): its field, back again, takes
+    /// the keys when next drawn, to ask again.
+    focus_prompt: bool,
     /// An AI task's changes to this file, being reviewed.
     review: Option<review::Review>,
     note: Option<assist::Note>,
@@ -950,7 +950,7 @@ impl Editor {
             git_diff_task: None,
             prompt: None,
             ai_change: None,
-            refocus: false,
+            focus_prompt: false,
             review: None,
             note: None,
             ghost: None,
@@ -4168,9 +4168,7 @@ impl EntityInputHandler for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.refocus) && window.focused(cx).is_none() {
-            window.focus(&self.focus_handle);
-        }
+        self.focus_prompt_if_asked(window, cx);
         if let Some(preview) = &self.preview {
             return self.render_preview(preview, cx);
         }
@@ -4305,6 +4303,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::cancel_completion))
             .on_action(cx.listener(Self::inline_assist))
             .on_action(cx.listener(Self::keep_change_action))
+            // (Esc while the AI writes: the field that stops it is gone, the editor has the keys.)
+            .on_action(cx.listener(Self::cancel_prompt))
             .on_action(cx.listener(Self::undo_change_action))
             .on_action(cx.listener(Self::close_note_action))
             .on_action(cx.listener(Self::accept_ghost_action))

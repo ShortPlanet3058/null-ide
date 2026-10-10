@@ -1341,8 +1341,9 @@ impl Workspace {
                         .into_iter()
                         .map(|(path, status)| {
                             // (A file that isn't text: no lines to count.)
+                            // (Only what reads as no text: a folder, an unreadable file count as empty.)
                             let Ok((after, encoding)) = crate::encoding::read(&path).or_else(|e| {
-                                if path.exists() { Err(e) } else { Ok(Default::default()) }
+                                if e.kind() == std::io::ErrorKind::InvalidData { Err(e) } else { Ok(Default::default()) }
                             }) else {
                                 let not = crate::palette::NOT_TEXT;
                                 return (path, status, not, not);

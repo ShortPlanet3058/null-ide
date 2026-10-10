@@ -39,7 +39,23 @@ if [ -n "${3:-}" ] && [ ! -d "$3" ]; then
     echo "no folder $3" >&2
     exit 1
 fi
+finish() {
+    if [ -n "$pid" ]; then
+        # All it started (its group: language servers and what they run) and its shell,
+        # then it; gone before its home is.
+        pkill -TERM -P "$pid" 2>/dev/null || true
+        kill -TERM -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        sleep 0.5
+    fi
+    [ -z "$fake_pid" ] || kill "$fake_pid" 2>/dev/null || true
+    rm -rf "$home" 2>/dev/null || { sleep 1; rm -rf "$home"; }
+}
+
 home="$(mktemp -d)"
+pid=""
+fake_pid=""
+trap finish EXIT
 mkdir -p "$home/.config/null" "$home/tmp" "$home/ack" "$home/project"
 # A copy, named as the original (its name shows), so the steps change nothing of yours.
 if [ -n "${3:-}" ]; then
@@ -51,8 +67,10 @@ else
 fi
 # A stand-in AI, answering as Ollama does, on a free port of this Mac only.
 settings="${NULL_QA_SETTINGS:-}"
-fake_pid=""
 if [ "${NULL_QA_FAKE_AI:-}" = 1 ]; then
+    case "$settings" in
+        *'"ai"'*) echo "NULL_QA_FAKE_AI sets the AI: leave \"ai\" out of NULL_QA_SETTINGS" >&2; exit 1 ;;
+    esac
     port="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
     python3 -I "$here/fake_ai.py" "$port" > /dev/null 2>&1 &
     fake_pid=$!
@@ -65,20 +83,6 @@ case "$settings" in
     *) printf '{ "welcomed": true%s }\n' "${settings:+, $settings}" ;;
 esac > "$home/.config/null/settings.json"
 log="$home/qa.log"
-pid=""
-finish() {
-    if [ -n "$pid" ]; then
-        # All it started (its group: language servers and what they run) and its shell,
-        # then it; gone before its home is.
-        pkill -TERM -P "$pid" 2>/dev/null || true
-        kill -TERM -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-        sleep 0.5
-    fi
-    [ -n "$fake_pid" ] && kill "$fake_pid" 2>/dev/null
-    rm -rf "$home" 2>/dev/null || { sleep 1; rm -rf "$home"; }
-}
-trap finish EXIT
 
 # The window's number, or the log and why not.
 window_of() {
