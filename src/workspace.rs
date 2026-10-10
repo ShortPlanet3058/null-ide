@@ -4178,7 +4178,10 @@ impl Workspace {
         // The file's language, to put it in another (a script without an extension).
         if let Some(editor) = self.active_editor() {
             let now = editor.read(cx).language_name();
-            for name in crate::editor::language_names() {
+            // The one it's in first: what the language in the status bar opens on.
+            let mut names: Vec<&'static str> = crate::editor::language_names().into_iter().collect();
+            names.sort_by_key(|name| *name != now);
+            for name in names {
                 let label = format!("Language: {name}{}", current(name == now));
                 commands.push((View, label, Box::new(crate::editor::SetLanguage { name })));
             }
@@ -8432,6 +8435,9 @@ impl Render for Workspace {
             .child(div().w(px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
 
         let mut items = status_items.into_iter().map(|item| spaced(&item));
+        // (Text, with lines to go to: not a picture, not a preview.)
+        let can_go_to_line =
+            self.active_editor().map(|e| e.read(cx)).is_some_and(|e| e.preview.is_none() && !e.reading);
         let status =
             div()
                 .h(px(28.))
@@ -8755,7 +8761,22 @@ impl Render for Workspace {
                             }),
                     )
                 })
-                .children(items.map(|item| div().flex_none().whitespace_nowrap().child(item)))
+                // Where the caret is: a click goes to another line (as ⌃G).
+                .children(items.map(|item| {
+                    div()
+                        .id("status-position")
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .when(can_go_to_line, |d| {
+                            d.cursor_pointer()
+                                .hover(|s| s.text_color(theme.foreground))
+                                .tooltip(ui::tip("Go to line", Some(Box::new(GoToLine))))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.go_to_line(&GoToLine, window, cx)
+                                }))
+                        })
+                        .child(item)
+                }))
                 // The file's language: a click puts it in another.
                 .children(language.map(|name| {
                     div()

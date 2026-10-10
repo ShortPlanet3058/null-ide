@@ -8,7 +8,7 @@
 //! `terminal` for the terminal), `run <command>` (in the
 //! terminal), `wait <ms>`, `rows` (the caret line's rows as drawn, with what's after its
 //! text, to stderr), `shot <name>` (a picture now, `<name>.png` beside the last one),
-//! `click [cmd|alt|shift|ctrl…] X Y`, `hover [mods] X Y`, `drag X1 Y1 X2 Y2` (the mouse,
+//! `click [cmd|alt|shift|ctrl|double|triple…] X Y`, `hover [mods] X Y`, `drag X1 Y1 X2 Y2` (the mouse,
 //! in the window's points: half a Retina screenshot's pixels; the keys named are held for
 //! the click, not pressed: what waits for ⌥ itself, as the hover's info, doesn't see them),
 //! `ready` (the last: steps after it aren't done). A line starting with `#` is a note.
@@ -82,6 +82,7 @@ pub fn run(cx: &mut App) {
                 }),
                 "click" | "hover" | "drag" => {
                     let (modifiers, numbers) = mouse_args(arg);
+                    let clicks = if arg.contains("triple") { 3 } else if arg.contains("double") { 2 } else { 1 };
                     let (from, to) = match numbers[..] {
                         [x, y] => ((x, y), None),
                         [x1, y1, x2, y2] if step == "drag" => ((x1, y1), Some((x2, y2))),
@@ -90,19 +91,25 @@ pub fn run(cx: &mut App) {
                             continue;
                         }
                     };
-                    post_mouse(Mouse::Move, from, &modifiers);
+                    post_mouse(Mouse::Move, from, &modifiers, 1);
                     if step != "hover" {
-                        post_mouse(Mouse::Down, from, &modifiers);
+                        // A double or triple click: its first ones, then this one counting them.
+                        for count in 1..clicks {
+                            post_mouse(Mouse::Down, from, &modifiers, count);
+                            post_mouse(Mouse::Up, from, &modifiers, count);
+                        }
+                        post_mouse(Mouse::Down, from, &modifiers, clicks);
                         // A drag a frame at a time, as a hand makes it.
                         if let Some((x2, y2)) = to {
                             for i in 1..=8 {
                                 cx.background_executor().timer(Duration::from_millis(16)).await;
                                 let t = i as f32 / 8.;
-                                post_mouse(Mouse::Drag, (from.0 + (x2 - from.0) * t, from.1 + (y2 - from.1) * t), &modifiers);
+                                let at = (from.0 + (x2 - from.0) * t, from.1 + (y2 - from.1) * t);
+                                post_mouse(Mouse::Drag, at, &modifiers, 1);
                             }
                             cx.background_executor().timer(Duration::from_millis(16)).await;
                         }
-                        post_mouse(Mouse::Up, to.unwrap_or(from), &modifiers);
+                        post_mouse(Mouse::Up, to.unwrap_or(from), &modifiers, clicks);
                     }
                     Ok(())
                 }
@@ -185,7 +192,7 @@ enum Mouse {
 /// pointer, not another app), at (x, y) in the window's points from its top left. Seen by
 /// Null as a person's.
 #[cfg(target_os = "macos")]
-fn post_mouse(what: Mouse, (x, y): (f32, f32), modifiers: &Modifiers) {
+fn post_mouse(what: Mouse, (x, y): (f32, f32), modifiers: &Modifiers, clicks: isize) {
     use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
     use objc2_foundation::{MainThreadMarker, NSPoint};
     let Some(mtm) = MainThreadMarker::new() else { return };
@@ -224,7 +231,7 @@ fn post_mouse(what: Mouse, (x, y): (f32, f32), modifiers: &Modifiers) {
         window.windowNumber(),
         None,
         0,
-        1,
+        clicks,
         pressure,
     );
     if let Some(event) = event {
@@ -233,6 +240,6 @@ fn post_mouse(what: Mouse, (x, y): (f32, f32), modifiers: &Modifiers) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn post_mouse(_: Mouse, _: (f32, f32), _: &Modifiers) {
+fn post_mouse(_: Mouse, _: (f32, f32), _: &Modifiers, _: isize) {
     eprintln!("null qa: the mouse steps are for macOS");
 }
