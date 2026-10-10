@@ -4115,6 +4115,7 @@ impl Workspace {
                 (Edit, "Remove Invisible Characters".into(), Box::new(crate::editor::RemoveInvisibleCharacters)),
                 (Lines, "Reverse Lines".into(), Box::new(crate::editor::ReverseLines)),
                 (Lines, "Remove Duplicate Lines".into(), Box::new(crate::editor::RemoveDuplicateLines)),
+                (Lines, "Trim Trailing Whitespace".into(), Box::new(crate::editor::TrimTrailingWhitespace)),
                 (Lines, "Rewrap Comment or Paragraph".into(), Box::new(crate::editor::Rewrap)),
                 (Edit, "Upper Case".into(), Box::new(crate::editor::UpperCase)),
                 (Edit, "To snake_case".into(), Box::new(crate::editor::SnakeCase)),

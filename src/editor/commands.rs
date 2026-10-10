@@ -789,12 +789,18 @@ fn comment_continuation(
 /// column on line `i` (relative to the first line) so the selection stays put.
 fn toggle_line_comments(lines: &[String], marker: &str) -> (Vec<String>, impl Fn(usize, usize) -> usize + use<>) {
     let content: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+    // An empty line alone: a comment begins on it, after its indentation.
+    let alone = lines.len() == 1 && content.is_empty();
     let all_commented = !content.is_empty() && content.iter().all(|l| l.trim_start().starts_with(marker));
     let indent = content.iter().map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
     let mut shifts: Vec<isize> = Vec::new();
     let new_lines = lines
         .iter()
         .map(|line| {
+            if alone {
+                shifts.push(marker.len() as isize + 1);
+                return format!("{line}{marker} ");
+            }
             if line.trim().is_empty() {
                 shifts.push(0);
                 return line.clone();
