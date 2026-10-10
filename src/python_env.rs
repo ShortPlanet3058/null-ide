@@ -40,25 +40,34 @@ pub fn python(root: &Path) -> String {
 pub fn variables(root: &Path) -> Vec<(String, String)> {
     let Some(env) = find(root) else { return Vec::new() };
     let bin = python_in(&env).parent().map(Path::to_path_buf).unwrap_or_default();
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let joined = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    vec![("PATH".into(), joined), ("VIRTUAL_ENV".into(), env.to_string_lossy().into_owned())]
+    let mut vars = vec![("VIRTUAL_ENV".to_string(), env.to_string_lossy().into_owned())];
+    // (A folder whose name has a ":" can't go into PATH: left as it was, not emptied.)
+    let path = std::env::var_os("PATH").filter(|p| !p.is_empty());
+    let others = path.as_deref().map(|p| std::env::split_paths(p).collect::<Vec<_>>()).unwrap_or_default();
+    if let Ok(joined) = std::env::join_paths(std::iter::once(bin).chain(others)) {
+        vars.insert(0, ("PATH".into(), joined.to_string_lossy().into_owned()));
+    }
+    vars
 }
 
 /// What a terminal's shell types to make the environment its own: its `activate`, for
-/// that shell (fish and csh have their own), from where it is.
-pub fn activate_command(env: &Path, shell: &str) -> String {
+/// that shell, from where it is. None for a shell it doesn't know.
+pub fn activate_command(env: &Path, shell: &str) -> Option<String> {
     let name = Path::new(shell).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let script = match name.as_str() {
-        "fish" => "activate.fish",
-        "csh" | "tcsh" => "activate.csh",
-        _ => "activate",
+    let script = |file: &str| {
+        let path = env.join("bin").join(file).to_string_lossy().into_owned();
+        format!("'{}'", path.replace('\'', r"'\''"))
     };
-    let path = env.join("bin").join(script).to_string_lossy().into_owned();
-    // A space first: kept out of the shell's history (zsh, bash with ignorespace).
-    format!(" source '{}'", path.replace('\'', r"'\''"))
+    // A space first: kept out of the shell's history (fish; zsh and bash when set to).
+    Some(match name.as_str() {
+        "zsh" | "bash" | "ksh" | "mksh" => format!(" source {}", script("activate")),
+        "sh" | "dash" => format!(" . {}", script("activate")),
+        "fish" => format!(" source {}", script("activate.fish")),
+        "csh" | "tcsh" => format!(" source {}", script("activate.csh")),
+        "nu" => format!(" overlay use {}", script("activate.nu")),
+        "pwsh" => format!(" & {}", script("Activate.ps1")),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -83,9 +92,13 @@ mod tests {
         let vars = variables(&dir);
         assert!(vars[0].1.starts_with(&dir.join(".venv/bin").to_string_lossy().into_owned()));
         assert_eq!(vars[1], ("VIRTUAL_ENV".to_string(), dir.join(".venv").to_string_lossy().into_owned()));
-        assert_eq!(activate_command(Path::new("/p/.venv"), "/bin/zsh"), " source '/p/.venv/bin/activate'");
-        assert_eq!(activate_command(Path::new(".venv"), "/bin/zsh"), " source '.venv/bin/activate'");
-        assert_eq!(activate_command(Path::new("/p/.venv"), "/opt/homebrew/bin/fish"), " source '/p/.venv/bin/activate.fish'");
+        let activate = |env: &str, shell: &str| activate_command(Path::new(env), shell);
+        assert_eq!(activate("/p/.venv", "/bin/zsh").as_deref(), Some(" source '/p/.venv/bin/activate'"));
+        assert_eq!(activate(".venv", "/bin/zsh").as_deref(), Some(" source '.venv/bin/activate'"));
+        assert_eq!(activate("/p/.venv", "/opt/homebrew/bin/fish").as_deref(), Some(" source '/p/.venv/bin/activate.fish'"));
+        assert_eq!(activate(".venv", "/bin/sh").as_deref(), Some(" . '.venv/bin/activate'"));
+        assert_eq!(activate(".venv", "/usr/local/bin/nu").as_deref(), Some(" overlay use '.venv/bin/activate.nu'"));
+        assert_eq!(activate(".venv", "/usr/bin/xonsh"), None, "one it doesn't know: nothing typed");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
