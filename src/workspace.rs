@@ -791,6 +791,20 @@ impl Workspace {
                 }
                 FileTreeEvent::DiscardChanges(path, status) => this.discard_changes(path.clone(), *status, window, cx),
                 FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),
+                FileTreeEvent::Hide(path, folder) => {
+                    let root = this.tree.read(cx).root().to_path_buf();
+                    let Ok(inside) = path.strip_prefix(&root) else { return };
+                    // From the project's top, as .gitignore writes it: `/build/` (a folder).
+                    let pattern =
+                        format!("/{}{}", inside.to_string_lossy().replace('\\', "/"), if *folder { "/" } else { "" });
+                    match crate::settings::hide_in_project(&root, &pattern, cx) {
+                        Ok(()) => this.show_notice(
+                            format!("{pattern} hidden from the files, ⌘P and search (this project's settings)"),
+                            cx,
+                        ),
+                        Err(message) => this.show_notice(message, cx),
+                    }
+                }
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
             cx.observe(&lsp, |_, _, cx| cx.notify()),
@@ -11845,6 +11859,33 @@ mod tests {
             w.read_reported(&ran("make", "nothing to be done\n"), cx);
             assert!(w.problem_places(cx).is_empty());
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hide from Files: the folder goes from the files, written into the project's settings.
+    #[gpui::test]
+    fn hiding_from_the_files(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("hide-from-files");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/out.txt"), "x").unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let names = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |w, cx| w.tree.read(cx).shown_names());
+        assert!(names(cx).contains(&"build".to_string()));
+        cx.update(|_, cx| crate::settings::hide_in_project(&dir, "/build/", cx)).unwrap();
+        cx.run_until_parked();
+        // (The project's settings folder shows now, beside what's left.)
+        assert_eq!(names(cx), [".null", "a.txt"]);
+        let written = std::fs::read_to_string(crate::settings::project_file(&dir)).unwrap();
+        assert!(written.contains("files_exclude") && written.contains("/build/"), "{written}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

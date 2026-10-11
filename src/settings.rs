@@ -465,8 +465,9 @@ pub struct Settings {
     /// Paths kept out of the files, ⌘P and project search, written as `.gitignore` writes
     /// them (`*.pyc`, `build/`): beyond what `.gitignore` leaves out.
     pub hide: Vec<String>,
-    /// A project's `.vscode/settings.json` `files.exclude`: hidden too, with `hide` (not
-    /// in its place).
+    /// A project's own: its `.null/settings.json` `files_exclude` (Hide from Files writes
+    /// it), else its `.vscode/settings.json` `files.exclude`. Hidden with `hide`, not in
+    /// its place.
     pub files_exclude: Vec<String>,
     /// Typing a bracket or quote types its partner too, steps over one already there, and
     /// wraps what's selected.
@@ -999,6 +1000,27 @@ fn save_project(file: &std::path::Path, values: &JsonMap) {
     {
         eprintln!("null: couldn't save {}: {err}", file.display());
     }
+}
+
+/// Hide from Files: `pattern` (`/build/`, as `.gitignore` writes it) added to the project's
+/// own `files_exclude`, in its `.null/settings.json`, and in use at once. What it hid
+/// already (VS Code's `files.exclude` too) goes on being hidden.
+pub fn hide_in_project(root: &std::path::Path, pattern: &str, cx: &mut App) -> Result<(), String> {
+    use serde_json::Value;
+    let path = project_file(root);
+    let mut own = read_project(&path).map_err(|()| "This project's settings can't be read: put them right first")?;
+    let mut hidden: Vec<Value> = match own.get("files_exclude") {
+        Some(Value::Array(own)) => own.clone(),
+        _ => vscode_settings(root).get("files_exclude").and_then(Value::as_array).cloned().unwrap_or_default(),
+    };
+    let pattern = Value::String(pattern.to_string());
+    if !hidden.contains(&pattern) {
+        hidden.push(pattern);
+    }
+    own.insert("files_exclude".into(), Value::Array(hidden));
+    save_project(&path, &own);
+    use_project(root, cx);
+    Ok(())
 }
 
 /// The settings of the project at `root` (its window in front now): over yours, in place
