@@ -151,8 +151,14 @@ impl Editor {
     pub fn start_review(&mut self, before: String, cx: &mut Context<Self>) {
         // A notebook written in as its cells: compared with the other one's cells.
         let before = match self.notebook {
-            Some(_) => crate::notebook::to_cells_text(&before).unwrap_or(before),
-            None => before,
+            Some(_) if crate::notebook::is_notebook(&before) => match crate::notebook::to_cells_text(&before) {
+                Some(cells) => cells,
+                None => {
+                    let at = self.selection.head;
+                    return self.show_notice(at, "That version can't be shown as cells to compare.".into(), cx);
+                }
+            },
+            _ => before,
         };
         self.review = Some(Review { base: before, hunks: Vec::new(), revision: u64::MAX });
         self.refresh_review();

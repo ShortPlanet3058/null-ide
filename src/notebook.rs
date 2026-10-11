@@ -95,9 +95,14 @@ pub fn to_cells_text(json: &str) -> Option<String> {
     let cells: Vec<Cell> = notebook["cells"]
         .as_array()?
         .iter()
-        .map(|c| (c["cell_type"].as_str().unwrap_or("code").to_string(), text_of(&c["source"]).trim_end().to_string()))
+        .map(|c| {
+            (
+                c["cell_type"].as_str().unwrap_or("code").to_string(),
+                text_of(&c["source"]).trim_end_matches('\n').to_string(),
+            )
+        })
         .collect();
-    let back: Vec<Cell> = back.into_iter().map(|(k, t)| (k, t.trim_end().to_string())).collect();
+    let back: Vec<Cell> = back.into_iter().map(|(k, t)| (k, t.trim_end_matches('\n').to_string())).collect();
     (back == cells).then_some(out)
 }
 
@@ -123,8 +128,8 @@ fn cells_in(text: &str, comment: &str) -> Vec<Cell> {
     cells
         .into_iter()
         .map(|(kind, mut lines)| {
-            // The blank line between cells isn't the cell's.
-            while lines.last().is_some_and(|l| l.trim().is_empty()) {
+            // The empty line between cells isn't the cell's (spaces written at its end are).
+            while lines.last().is_some_and(|l| l.trim_end_matches('\r').is_empty()) {
                 lines.pop();
             }
             let lines: Vec<String> = if kind == "code" {
@@ -172,11 +177,15 @@ pub fn with_cells(json: &str, text: &str) -> Option<String> {
     let old: Vec<Value> = notebook.get("cells")?.as_array()?.clone();
     let new = cells_in(text, comment);
     let as_cell = |c: &Value| -> Cell {
-        (c["cell_type"].as_str().unwrap_or("code").to_string(), text_of(&c["source"]).trim_end().to_string())
+        (
+            c["cell_type"].as_str().unwrap_or("code").to_string(),
+            text_of(&c["source"]).trim_end_matches('\n').to_string(),
+        )
     };
     let old_cells: Vec<Cell> = old.iter().map(as_cell).collect();
-    let trimmed =
-        |cells: &[Cell]| -> Vec<Cell> { cells.iter().map(|(k, t)| (k.clone(), t.trim_end().to_string())).collect() };
+    let trimmed = |cells: &[Cell]| -> Vec<Cell> {
+        cells.iter().map(|(k, t)| (k.clone(), t.trim_end_matches('\n').to_string())).collect()
+    };
     if old_cells == trimmed(&new) {
         return Some(json.to_string());
     }
@@ -537,6 +546,23 @@ mod tests {
             t.start_review(NOTEBOOK.to_string(), cx);
             assert!(t.in_review(), "the change to take back");
         });
+        // Renamed (another kind of name): still a notebook on disk, written back as one;
+        // saved as a script (Save As .py): the cells, as they are.
+        e.update(cx, |e, cx| {
+            let renamed = dir.join("sales.ipynb.bak");
+            std::fs::rename(&path, &renamed).unwrap();
+            e.set_path(renamed.clone(), None, cx);
+            assert!(e.notebook.is_some(), "a rename keeps it a notebook");
+            std::fs::rename(&renamed, &path).unwrap();
+            e.set_path(path.clone(), None, cx);
+            let script = dir.join("sales.py");
+            e.saving_as(&script);
+            e.set_path(script.clone(), None, cx);
+            assert!(e.save_to_disk(cx));
+            assert!(std::fs::read_to_string(&script).unwrap().starts_with("# %% [markdown]"));
+            e.saving_as(&path);
+            e.set_path(path.clone(), None, cx);
+        });
         // Changed elsewhere (Jupyter): read again as its cells.
         let elsewhere = NOTEBOOK.replace("y = x * 2", "y = x * 3");
         std::fs::write(&path, &elsewhere).unwrap();
@@ -584,6 +610,11 @@ mod tests {
         let words = with_cells(NOTEBOOK, &text.replace("# By month.", "# By month and year.")).unwrap();
         assert_eq!(cells(&words)[0]["source"], serde_json::json!(["# Sales\n", "\n", "By month and year."]));
         assert!(with_cells("{ not json", &text).is_none());
+        // Spaces taken off a cell's end: saved too (not "nothing changed").
+        let spaced = NOTEBOOK.replace("\"y = x * 2\"", "\"y = x * 2  \"");
+        let text = to_cells_text(&spaced).unwrap();
+        let tidied = with_cells(&spaced, &text.replace("y = x * 2  ", "y = x * 2")).unwrap();
+        assert_eq!(cells(&tidied)[2]["source"], serde_json::json!(["y = x * 2"]));
         // A cell's own `# %%timeit` (a cell magic, commented) stays its text.
         let timed = NOTEBOOK.replace("\"y = x * 2\"", "\"# %%timeit\\n\", \"y = x * 2\"");
         let text = to_cells_text(&timed).unwrap();

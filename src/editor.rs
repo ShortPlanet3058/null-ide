@@ -1148,6 +1148,14 @@ impl Editor {
         cx.notify();
     }
 
+    /// Saved as another file (Save As): one that isn't a notebook takes the cells as they
+    /// are, as text (a rename keeps the notebook, which the file on disk still is).
+    pub fn saving_as(&mut self, path: &Path) {
+        if !is_notebook_path(path) {
+            self.notebook = None;
+        }
+    }
+
     /// What's shown of the file's text as read from disk: a notebook's cells as text to
     /// write in (its JSON kept, to write them back into); anything else as it is.
     fn shown_from_disk(&mut self, text: String) -> String {
@@ -1175,10 +1183,7 @@ impl Editor {
     pub fn set_path(&mut self, path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) {
         self.missing = false;
         self.disk_changed = false;
-        // A notebook given another kind of name: its cells, written as they are (as text).
-        if !is_notebook_path(&path) {
-            self.notebook = None;
-        }
+
         self.release_lsp(cx);
         self.spans.clear();
         self.spans_for = None;

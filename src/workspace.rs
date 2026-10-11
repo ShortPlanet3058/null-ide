@@ -3063,6 +3063,7 @@ impl Workspace {
                 EditorEvent::ReadFromDisk => {
                     // Its other copy has what's on disk too (reloaded itself, or given it now):
                     // the read isn't replayed on it as an edit (that doubled its end).
+                    this.share_unsaved(editor, cx);
                     let (text, saved, on_disk, notebook) = {
                         let e = editor.read(cx);
                         (e.buffer.rope().clone(), !e.buffer.is_dirty(), e.on_disk, e.notebook.clone())
@@ -3821,6 +3822,7 @@ impl Workspace {
             };
             this.update_in(cx, |this, window, cx| {
                 let saved = editor.update(cx, |editor, cx| {
+                    editor.saving_as(&path);
                     editor.set_path(path, Some(lsp), cx);
                     editor.save_to_disk(cx)
                 });
@@ -3955,7 +3957,26 @@ impl Workspace {
         }
         let mut changed_on_disk = 0;
         for backup in &backups {
-            let editor = match &backup.path {
+            // A notebook's unsaved cells (or its JSON, from an older Null), into a copy that
+            // writes them back the same way; else a new file holds them, the notebook untouched.
+            let text = match &backup.path {
+                Some(path) if path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ipynb")) => {
+                    let (opened, _) = crate::encoding::read(path).unwrap_or_default();
+                    let as_cells = crate::notebook::to_cells_text(&opened).is_some();
+                    let backup_is_json = crate::notebook::is_notebook(&backup.text);
+                    match (as_cells, backup_is_json) {
+                        (true, true) => crate::notebook::to_cells_text(&backup.text),
+                        (true, false) | (false, true) => Some(backup.text.clone()),
+                        (false, false) => None,
+                    }
+                }
+                _ => Some(backup.text.clone()),
+            };
+            let (path, text) = match text {
+                Some(text) => (backup.path.clone(), text),
+                None => (None, backup.text.clone()),
+            };
+            let editor = match &path {
                 Some(path) if path.is_file() => {
                     if backup.disk != crate::session::disk_fingerprint(path) {
                         changed_on_disk += 1;
@@ -3973,10 +3994,10 @@ impl Workspace {
                     Some(editor)
                 }
             };
-            let disk_changed = backup.path.as_ref().is_some_and(|p| backup.disk != crate::session::disk_fingerprint(p));
+            let disk_changed = path.as_ref().is_some_and(|p| backup.disk != crate::session::disk_fingerprint(p));
             if let Some(editor) = editor {
                 editor.update(cx, |editor, cx| {
-                    editor.restore_unsaved(&backup.text, cx);
+                    editor.restore_unsaved(&text, cx);
                     // Written over a file that changed since: saving asks first.
                     editor.disk_changed |= disk_changed && editor.buffer.is_dirty();
                 });
@@ -4186,6 +4207,7 @@ impl Workspace {
             let Ok(Ok(Some(path))) = answer.await else { return };
             this.update_in(cx, |this, window, cx| {
                 editor.update(cx, |editor, cx| {
+                    editor.saving_as(&path);
                     editor.set_path(path.clone(), Some(lsp), cx);
                     editor.save_to_disk(cx);
                 });

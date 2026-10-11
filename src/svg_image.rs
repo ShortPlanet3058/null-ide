@@ -85,10 +85,8 @@ pub type Job = Box<dyn FnOnce() -> Option<String> + Send>;
 /// asked for and not drawn yet; and pictures let go, for their window to free.
 #[derive(Default)]
 struct MadeCache {
-    /// Each drawing, and the frame it was last used in.
-    done: Vec<(String, Option<Drawn>, u64)>,
-    /// Counts the frames that drew from here.
-    frame: u64,
+    /// Each drawing, and when it was last used.
+    done: Vec<(String, Option<Drawn>, std::time::Instant)>,
     waiting: Vec<(String, Job)>,
     asked: std::collections::HashSet<String>,
     let_go: Vec<Arc<RenderImage>>,
@@ -103,11 +101,10 @@ const MADE_KEPT: usize = 256;
 /// drawn once, in the background (see `take_waiting`), not as the preview draws.
 pub fn made(key: &str, make: impl FnOnce() -> Option<String> + Send + 'static) -> Made {
     let Ok(mut cache) = MADE.lock() else { return Made::Failed };
-    let frame = cache.frame;
     if let Some(at) = cache.done.iter().position(|(k, _, _)| k == key) {
         // Used: last to go.
         let mut entry = cache.done.remove(at);
-        entry.2 = frame;
+        entry.2 = std::time::Instant::now();
         let made = match &entry.1 {
             Some(drawn) => Made::Ready(drawn.clone()),
             None => Made::Failed,
@@ -122,14 +119,8 @@ pub fn made(key: &str, make: impl FnOnce() -> Option<String> + Send + 'static) -
 }
 
 /// The drawings asked for, to make in the background, each then given to `finish`.
-/// A new frame drew: the drawings used in it and the one before are kept, however many.
 pub fn take_waiting() -> Vec<(String, Job)> {
-    MADE.lock()
-        .map(|mut cache| {
-            cache.frame += 1;
-            std::mem::take(&mut cache.waiting)
-        })
-        .unwrap_or_default()
+    MADE.lock().map(|mut cache| std::mem::take(&mut cache.waiting)).unwrap_or_default()
 }
 
 /// Makes and draws `job` (sharp on a Retina screen); a panic in it is a drawing that
@@ -144,12 +135,13 @@ pub fn make(job: Job) -> Option<Drawn> {
 pub fn finish(key: String, drawn: Option<Drawn>) {
     let Ok(mut cache) = MADE.lock() else { return };
     cache.asked.remove(&key);
-    let frame = cache.frame;
-    cache.done.push((key, drawn, frame));
-    // Past the limit: the ones used longest ago, but none the screen shows now (they'd be
-    // drawn again and again).
+    let now = std::time::Instant::now();
+    cache.done.push((key, drawn, now));
+    // Past the limit: the ones used longest ago, but none used in the last moments (what
+    // the screen shows: they'd be drawn again and again).
     while cache.done.len() > MADE_KEPT {
-        let Some(old) = cache.done.iter().position(|(_, _, used)| *used + 1 < frame) else { break };
+        let recent = |used: &std::time::Instant| now.duration_since(*used) < std::time::Duration::from_secs(2);
+        let Some(old) = cache.done.iter().position(|(_, _, used)| !recent(used)) else { break };
         if let (_, Some((image, _)), _) = cache.done.remove(old) {
             cache.let_go.push(image);
         }
