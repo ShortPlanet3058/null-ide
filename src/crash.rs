@@ -30,6 +30,14 @@ pub fn record() {
             "\n== {when} · Null {} · thread {thread}\n{info}\n{backtrace}\n",
             env!("CARGO_PKG_VERSION")
         );
+        // (Kept to a size: past 1 MB, the older half goes.)
+        if std::fs::metadata(&file).is_ok_and(|m| m.len() > 1_000_000)
+            && let Ok(text) = std::fs::read_to_string(&file)
+        {
+            let half = text.len() / 2;
+            let cut = text[half..].find("\n== ").map_or(half, |i| half + i);
+            std::fs::write(&file, &text[cut..]).ok();
+        }
         if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
             log.write_all(entry.as_bytes()).ok();
         }

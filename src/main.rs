@@ -122,13 +122,31 @@ fn resolve_args() -> Opening {
         Some(file) if !file.exists() => {
             let name = file.to_string_lossy().into_owned();
             match split_place(&name) {
-                (path, Some(place)) if std::path::Path::new(path).exists() => (Some(PathBuf::from(path)), Some(place)),
+                (path, Some(place)) if std::path::Path::new(path).is_file() => (Some(PathBuf::from(path)), Some(place)),
                 _ => (Some(file), None),
             }
         }
         file => (file, None),
     };
+    // `--wait` is for a file (git's message); its project, the repository it's in (or its
+    // folder): not where the one asking happens to be (an app's is `/`).
+    let wait = wait && file.is_some();
+    let root = match (&file, wait) {
+        (Some(file), true) => repository_of(file),
+        _ => root,
+    };
     Opening { root, file, place, wait }
+}
+
+/// The repository `file` is in (the folder holding `.git`), else its own folder.
+fn repository_of(file: &std::path::Path) -> PathBuf {
+    let folder = file.parent().unwrap_or(file);
+    folder
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(|dir| if dir.ends_with(".git") { dir.parent().unwrap_or(dir) } else { dir })
+        .unwrap_or(folder)
+        .to_path_buf()
 }
 
 /// `null` opens the current folder, `null <folder>` opens that folder, and
@@ -428,6 +446,20 @@ pub(crate) fn quit_next(cx: &mut gpui::App) {
 #[cfg(test)]
 mod url_tests {
     use super::*;
+
+    #[test]
+    fn a_waited_file_s_project_is_its_repository() {
+        let dir = crate::tools::test_dir("wait-root");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        assert_eq!(repository_of(&dir.join(".git/COMMIT_EDITMSG")), dir);
+        assert_eq!(repository_of(&dir.join("docs/a.md")), dir);
+        let alone = crate::tools::test_dir("wait-alone");
+        std::fs::create_dir_all(&alone).unwrap();
+        assert_eq!(repository_of(&alone.join("x.txt")), alone);
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&alone).ok();
+    }
 
     #[test]
     fn places_after_a_file_s_name() {

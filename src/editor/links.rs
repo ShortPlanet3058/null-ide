@@ -18,6 +18,8 @@ const FOLDERS_UP: usize = 8;
 pub(super) enum Target {
     Url(String),
     File { path: PathBuf, line: Option<u32>, column: Option<u32> },
+    /// A Markdown file's heading, by its anchor: found when followed.
+    Heading { path: PathBuf, anchor: String },
 }
 
 /// Where `written` (as in the text) is, from the file in `dir`: there, or in a folder above.
@@ -94,11 +96,7 @@ impl Editor {
             && let Some((columns, anchor)) = anchor_link_at(&row, column)
             && let Some(path) = self.path.clone()
         {
-            let heading = heading_line(&self.buffer.to_string(), &anchor)?;
-            return Some((
-                start + columns.start..start + columns.end,
-                Target::File { path, line: Some(heading + 1), column: None },
-            ));
+            return Some((start + columns.start..start + columns.end, Target::Heading { path, anchor }));
         }
         // A click lands on the nearest gap between letters: past a link's last letter too.
         let (columns, link) = link_at(&row, column).or_else(|| link_at(&row, column.checked_sub(1)?))?;
@@ -108,12 +106,13 @@ impl Editor {
                 let dir = self.path.as_deref().and_then(Path::parent);
                 let path = resolve(&written, dir)?;
                 // `setup.md#install`: at that heading.
-                let heading = written
+                let anchor = written
                     .split_once('#')
                     .filter(|_| path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")))
-                    .and_then(|(_, anchor)| heading_line(&std::fs::read_to_string(&path).ok()?, anchor));
-                match heading {
-                    Some(heading) => Target::File { path, line: Some(heading + 1), column: None },
+                    .map(|(_, anchor)| anchor.to_string())
+                    .filter(|a| !a.is_empty());
+                match anchor {
+                    Some(anchor) => Target::Heading { path, anchor },
                     None => Target::File { path, line, column },
                 }
             }
@@ -123,8 +122,23 @@ impl Editor {
 
     /// Opens what ⌘-click found: the address in the browser, the file in Null.
     pub(super) fn follow_link(&mut self, target: Target, cx: &mut Context<Self>) {
+        let target = match target {
+            // The heading's line, now: this file's text as it is, another's as saved; its top
+            // if there's no such heading.
+            Target::Heading { path, anchor } => {
+                let text = if self.path.as_deref() == Some(path.as_path()) {
+                    self.buffer.to_string()
+                } else {
+                    std::fs::read_to_string(&path).unwrap_or_default()
+                };
+                let line = heading_line(&text, &anchor).map(|l| l + 1);
+                Target::File { path, line, column: None }
+            }
+            other => other,
+        };
         match target {
             Target::Url(url) => cx.open_url(&url),
+            Target::Heading { .. } => {}
             Target::File { path, line, column } => {
                 let at = lsp_types::Position {
                     line: line.unwrap_or(1).saturating_sub(1),
@@ -179,7 +193,9 @@ mod tests {
             assert_eq!(e.buffer.slice(range), "src/lib.rs:12:5");
             assert!(matches!(target, Target::File { path, line: Some(12), column: Some(5) } if path == root.join("src/lib.rs")));
             let (_, target) = e.link_under(at("README")).unwrap();
-            assert!(matches!(target, Target::File { path, line: None, .. } if path == root.join("README.md")));
+            assert!(
+                matches!(&target, Target::File { path, line: None, .. } | Target::Heading { path, .. } if *path == root.join("README.md"))
+            );
             // Just past the address's last letter (where a click on its right half lands).
             let end = text.find("/docs").unwrap() + 5;
             assert!(matches!(e.link_under(end), Some((_, Target::Url(_)))));

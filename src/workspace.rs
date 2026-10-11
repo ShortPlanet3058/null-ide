@@ -595,7 +595,7 @@ pub struct Workspace {
     /// How each test (file, name) did when last run.
     test_status: std::collections::HashMap<(PathBuf, String), TestStatus>,
     /// A run's output that came before the project's tests were known (see `find_tests`).
-    results_waiting: Option<crate::terminal::Ran>,
+    results_waiting: Vec<crate::terminal::Ran>,
     /// The tests run from the list, and the command running them.
     tests_running: Option<(String, Vec<(PathBuf, String)>)>,
     tests_scroll: UniformListScrollHandle,
@@ -891,7 +891,7 @@ impl Workspace {
             tests: None,
             tests_task: None,
             test_status: std::collections::HashMap::new(),
-            results_waiting: None,
+            results_waiting: Vec::new(),
             tests_running: None,
             tests_scroll: UniformListScrollHandle::new(),
             outline: None,
@@ -1047,7 +1047,9 @@ impl Workspace {
         }));
         workspace.python_env = crate::python_env::find(workspace.tree.read(cx).root());
         // Null crashed last time: said once, with where it's written down.
-        if let Some(said) = crate::crash::untold().filter(|_| !cfg!(test)) {
+        if !cfg!(test)
+            && let Some(said) = crate::crash::untold()
+        {
             workspace.show_notice(said, cx);
         }
         // settings.json couldn't be read at launch: said, not left to pass for the defaults.
@@ -3247,6 +3249,7 @@ impl Workspace {
         // Another project's tests: looked for again, if they show.
         self.tests = None;
         self.tests_task = None;
+        self.results_waiting.clear();
         self.test_status.clear();
         self.tests_running = None;
         self.refresh_git(cx);
@@ -3317,10 +3320,12 @@ impl Workspace {
         }
         // (Mid-⌃Tab: the walk ends here, where it was.)
         self.settle_switch();
-        // The file `null --wait` was for, closed: done, the one waiting goes on.
+        // The file `null --wait` was for, closed (its last copy): done, the one waiting goes
+        // on, once the rest is asked about as quitting does.
         let path = self.tabs[ix].editor.read(cx).path().map(Path::to_path_buf);
-        if self.waiting_for.is_some() && self.waiting_for == path {
-            cx.defer(|cx| cx.quit());
+        let copies = self.tabs.iter().filter(|t| t.editor.read(cx).path().map(Path::to_path_buf) == path).count();
+        if self.waiting_for.is_some() && self.waiting_for == path && copies == 1 {
+            cx.defer_in(window, |this, window, cx| this.quit(&Quit, window, cx));
         }
         self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
@@ -5334,7 +5339,7 @@ impl Workspace {
             let found = cx.background_executor().spawn(async move { crate::test_at::discover(&root) }).await;
             this.update(cx, |this, cx| {
                 this.tests = Some(std::rc::Rc::new(found));
-                if let Some(ran) = this.results_waiting.take() {
+                for ran in std::mem::take(&mut this.results_waiting) {
                     this.read_test_results(&ran);
                 }
                 cx.notify();
@@ -6826,8 +6831,11 @@ impl Workspace {
                 // Tests run before the project's were looked for (from the text, or typed):
                 // looked for now, and how they did read once they're known.
                 if this.tests.is_none() && !crate::test_at::results(&ran.output).is_empty() {
-                    this.results_waiting = Some(ran.clone());
-                    this.find_tests(cx);
+                    // (One search for them, however many runs wait.)
+                    if this.results_waiting.is_empty() {
+                        this.find_tests(cx);
+                    }
+                    this.results_waiting.push(ran.clone());
                 } else {
                     this.read_test_results(ran);
                 }
@@ -8547,8 +8555,10 @@ fn shell_script(launch: &str, waiting: &str) -> String {
          [ $# -eq 0 ] && set -- .\n\
          for p in \"$@\"; do\n\
          \tcase \"$p\" in /*) ;; *) p=\"$PWD/$p\" ;; esac\n\
-         \tf=\"${{p%%:[0-9]*}}\"\n\
-         \t[ -e \"$p\" ] || [ -e \"$f\" ] || : > \"$f\"\n\
+         \tf=\"$p\"\n\
+         \tfor i in 1 2; do r=\"${{f##*:}}\"; case \"$r\" in ''|*[!0-9]*) break ;; esac; [ \"$r\" = \"$f\" ] && break; f=\"${{f%:*}}\"; done\n\
+         \t[ -e \"$p\" ] && f=\"$p\"\n\
+         \t[ -e \"$f\" ] || : > \"$f\"\n\
          \tif [ -n \"$wait\" ]; then {waiting}; else {launch}; fi\n\
          done\n"
     )
@@ -11414,6 +11424,11 @@ mod tests {
         assert!(run.unwrap().success());
         assert!(!dir.join("new.txt:4:2").exists());
         assert!(std::fs::read_to_string(&log).unwrap().lines().last().unwrap().ends_with("/new.txt:4:2"));
+        // A folder with a `:2` in its name isn't cut: only a place at the end is.
+        std::fs::create_dir_all(dir.join("notes:2026")).unwrap();
+        let run = std::process::Command::new("sh").arg(&command).args(["notes:2026/todo.md"]).current_dir(&dir).status();
+        assert!(run.unwrap().success());
+        assert!(dir.join("notes:2026/todo.md").exists() && !dir.join("notes").exists());
         // --wait: the other way of handing it over.
         let run = std::process::Command::new("sh").arg(&command).args(["--wait", "MSG"]).current_dir(&dir).status();
         assert!(run.unwrap().success());
