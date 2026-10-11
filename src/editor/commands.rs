@@ -1155,6 +1155,21 @@ mod editor_tests {
         e.update(cx, |e, cx| assert!(!e.empty_pair_around_caret(cx)));
     }
 
+    /// Past the last match, the search goes round to the first, and says so.
+    #[gpui::test]
+    fn finding_says_when_it_goes_round(cx: &mut TestAppContext) {
+        let e = editor(cx, "a x a x", "x.txt");
+        let query = crate::search::SearchQuery { text: "a".into(), case_sensitive: false, whole_word: false, regex: false };
+        e.update(cx, |e, cx| {
+            e.set_search(query, cx);
+            e.selection = super::super::Selection { anchor: 4, head: 5 };
+            e.select_next_match(cx);
+            assert_eq!(e.selection.range(), 0..1);
+            let said = e.hover.as_ref().map(|h| h.blocks[0].text.clone());
+            assert_eq!(said.as_deref(), Some("Back at the top"));
+        });
+    }
+
     #[gpui::test]
     fn finds_the_matching_bracket(cx: &mut TestAppContext) {
         let e = editor(cx, "f(a, [b], c)", "x.rs");

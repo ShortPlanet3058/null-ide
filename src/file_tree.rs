@@ -18,6 +18,9 @@ actions!(
         NewFolder,
         Rename,
         Duplicate,
+        CopyFiles,
+        CutFiles,
+        PasteFiles,
         Trash,
         CopyPath,
         CopyRelativePath,
@@ -58,11 +61,21 @@ pub fn bind_keys(cx: &mut App) {
         keys.extend([
             KeyBinding::new("enter", Rename, tree),
             KeyBinding::new("cmd-down", Activate, tree),
+            // As in Finder: copied, or cut, then pasted into the folder picked.
+            KeyBinding::new("cmd-c", CopyFiles, tree),
+            KeyBinding::new("cmd-x", CutFiles, tree),
+            KeyBinding::new("cmd-v", PasteFiles, tree),
             KeyBinding::new("cmd-backspace", Trash, tree),
             KeyBinding::new("delete", Trash, tree),
         ]);
     } else {
-        keys.extend([KeyBinding::new("enter", Activate, tree), KeyBinding::new("delete", Trash, tree)]);
+        keys.extend([
+            KeyBinding::new("enter", Activate, tree),
+            KeyBinding::new("delete", Trash, tree),
+            KeyBinding::new("ctrl-c", CopyFiles, tree),
+            KeyBinding::new("ctrl-x", CutFiles, tree),
+            KeyBinding::new("ctrl-v", PasteFiles, tree),
+        ]);
     }
     // Last, so that with the menu open its keys win over the tree's (Return renames otherwise).
     keys.extend([
@@ -90,6 +103,15 @@ pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
 } else {
     "Open Containing Folder"
 };
+
+/// Files copied (⌘C) or cut (⌘X) in the files, for ⌘V: one for all windows.
+#[derive(Clone)]
+struct FileClipboard {
+    paths: Vec<PathBuf>,
+    cut: bool,
+}
+
+impl gpui::Global for FileClipboard {}
 
 /// A file or folder being dragged to another folder.
 #[derive(Clone)]
@@ -211,6 +233,23 @@ fn terminal_dir(target: Option<(&Path, bool)>, root: &Path) -> PathBuf {
     }
 }
 
+/// Whether opening the file with its app would run it: a script or a program (`.sh`,
+/// `.command`, or anything executable).
+fn runs_when_opened(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if matches!(ext.as_str(), "sh" | "command" | "tool" | "zsh" | "bash" | "app" | "pkg") {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Whether the file is a page or a picture a browser shows (HTML, SVG): it can open there.
 pub fn opens_in_browser(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
@@ -244,6 +283,8 @@ fn default_browser() -> Option<std::path::PathBuf> {
 enum MenuItem {
     Open,
     OpenInBrowser,
+    /// In the app the system opens its kind with (Preview, Numbers...).
+    OpenWithApp,
     NewFile,
     NewFolder,
     Rename,
@@ -267,6 +308,7 @@ impl MenuItem {
         match self {
             MenuItem::Open => "Open",
             MenuItem::OpenInBrowser => "Open in Browser",
+            MenuItem::OpenWithApp => "Open with Default App",
             MenuItem::NewFile => "New File…",
             MenuItem::NewFolder => "New Folder…",
             MenuItem::Rename => "Rename…",
@@ -931,7 +973,56 @@ impl FileTree {
     /// A file or folder dropped on a folder: it moves there (through the workspace, which
     /// lets language servers update the code naming it).
     fn drop_into(&mut self, dragged: &DraggedEntry, dir: PathBuf, cx: &mut Context<Self>) {
-        let paths = dragged.paths();
+        self.move_into(dragged.paths(), dir, cx);
+    }
+
+    /// ⌘C, ⌘X: what's picked, to paste into a folder (⌘V), copied there or moved.
+    fn copy_files(&mut self, _: &CopyFiles, _: &mut Window, cx: &mut Context<Self>) {
+        self.keep_files(false, cx);
+    }
+
+    fn cut_files(&mut self, _: &CutFiles, _: &mut Window, cx: &mut Context<Self>) {
+        self.keep_files(true, cx);
+    }
+
+    fn keep_files(&mut self, cut: bool, cx: &mut Context<Self>) {
+        let paths: Vec<PathBuf> = self.picked().into_iter().map(|e| e.path).collect();
+        if paths.is_empty() {
+            return;
+        }
+        let what = match paths.as_slice() {
+            [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            many => format!("{} items", many.len()),
+        };
+        let note = if cut { format!("{what}: ⌘V in a folder moves it there") } else { format!("Copied {what}") };
+        cx.set_global(FileClipboard { paths, cut });
+        cx.emit(FileTreeEvent::Notice(note));
+    }
+
+    /// ⌘V: what was copied, into the folder picked (or the picked file's), beside what has
+    /// the same name; what was cut, moved there.
+    fn paste_files(&mut self, _: &PasteFiles, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(FileClipboard { paths, cut }) = cx.try_global::<FileClipboard>().cloned() else { return };
+        let dir = self.dir_for(self.selected_entry().as_ref());
+        let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.exists()).collect();
+        if paths.is_empty() {
+            cx.remove_global::<FileClipboard>();
+            return cx.emit(FileTreeEvent::Notice("What was copied isn't there any more".into()));
+        }
+        if cut {
+            // Kept while nothing moves (pasted where it already is, or into itself).
+            if paths.iter().all(|p| p.parent() == Some(dir.as_path()) || dir.starts_with(p)) {
+                return;
+            }
+            cx.remove_global::<FileClipboard>();
+            self.move_into(paths, dir, cx);
+        } else {
+            self.copy_in(&paths, &dir, cx);
+        }
+    }
+
+    /// Moves `paths` into `dir` (see `drop_into`).
+    fn move_into(&mut self, paths: Vec<PathBuf>, dir: PathBuf, cx: &mut Context<Self>) {
         // Two with one name (`a/index.ts`, `b/index.ts`) can't both go there: none go.
         let mut names = HashSet::new();
         if let Some(twice) = paths.iter().filter_map(|p| p.file_name()).find(|name| !names.insert(*name)) {
@@ -1226,6 +1317,10 @@ impl FileTree {
                 if opens_in_browser(&e.path) {
                     items.push(OpenInBrowser);
                 }
+                // (Not a script or a program: its app would run it.)
+                if !e.is_dir && !runs_when_opened(&e.path) {
+                    items.push(OpenWithApp);
+                }
                 items.extend([
                     NewFile,
                     NewFolder,
@@ -1275,6 +1370,11 @@ impl FileTree {
             MenuItem::OpenInBrowser => {
                 if let Some(entry) = target {
                     open_in_browser(&entry.path, cx);
+                }
+            }
+            MenuItem::OpenWithApp => {
+                if let Some(entry) = target {
+                    cx.open_with_system(&entry.path);
                 }
             }
             MenuItem::NewFile => {
@@ -1634,6 +1734,9 @@ impl Render for FileTree {
             .on_action(cx.listener(Self::new_folder))
             .on_action(cx.listener(Self::rename))
             .on_action(cx.listener(Self::duplicate))
+            .on_action(cx.listener(Self::copy_files))
+            .on_action(cx.listener(Self::cut_files))
+            .on_action(cx.listener(Self::paste_files))
             .on_action(cx.listener(Self::trash))
             .on_action(cx.listener(Self::copy_path))
             .on_action(cx.listener(Self::copy_relative_path))
@@ -1829,6 +1932,36 @@ mod tests {
             t.click(0, 1, Default::default(), window, cx);
             assert_eq!(t.picked().len(), 1);
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ⌘C then ⌘V in a folder: a copy there; ⌘X then ⌘V: moved there.
+    #[gpui::test]
+    fn files_copied_cut_and_pasted(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("tree-paste");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("dest")).unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (tree, cx) = cx.add_window_view(|_, cx| FileTree::new(root, cx));
+        tree.update_in(cx, |t, window, cx| {
+            t.selected = Some(dir.join("a.txt"));
+            t.copy_files(&CopyFiles, window, cx);
+            t.selected = Some(dir.join("dest"));
+            t.paste_files(&PasteFiles, window, cx);
+            t.selected = Some(dir.join("b.txt"));
+            t.cut_files(&CutFiles, window, cx);
+            t.selected = Some(dir.join("dest"));
+            t.paste_files(&PasteFiles, window, cx);
+        });
+        assert!(dir.join("a.txt").exists() && dir.join("dest/a.txt").exists(), "copied");
+        assert!(!dir.join("b.txt").exists() && dir.join("dest/b.txt").exists(), "moved");
         std::fs::remove_dir_all(&dir).ok();
     }
 
