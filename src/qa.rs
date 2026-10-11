@@ -11,7 +11,8 @@
 //! `click [cmd|alt|shift|ctrl|double|triple…] X Y`, `hover [mods] X Y`, `drag X1 Y1 X2 Y2` (the mouse,
 //! in the window's points: half a Retina screenshot's pixels; the keys named are held for
 //! the click, not pressed: what waits for ⌥ itself, as the hover's info, doesn't see them),
-//! `ready` (the last: steps after it aren't done). A line starting with `#` is a note.
+//! `switch` (⌃Tab with ⌃ still held, which keys can't hold), `ready` (the last: steps
+//! after it aren't done). A line starting with `#` is a note.
 //!
 //! A run copies to and pastes from a clipboard of its own, never reads or changes the
 //! keychain, and installs nothing (see `system_clipboard::kept_apart`).
@@ -120,6 +121,7 @@ pub fn run(cx: &mut App) {
                         Err(err) => eprintln!("null qa: no action {name}: {err}"),
                     }
                 }),
+                "switch" => handle.update(cx, |workspace, window, cx| workspace.switch_tab(false, true, window, cx)),
                 "rows" => handle.update(cx, |workspace, _, cx| {
                     if let Some(editor) = workspace.qa_editor() {
                         let editor = editor.read(cx);

@@ -4037,7 +4037,7 @@ impl Workspace {
 
     /// ⌃Tab: the tab used before this one; again with ⌃ still held, the one before that,
     /// and so on (⌃⇧Tab back). Letting go of ⌃ stays there.
-    fn switch_tab(&mut self, back: bool, held: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn switch_tab(&mut self, back: bool, held: bool, window: &mut Window, cx: &mut Context<Self>) {
         let open: Vec<gpui::EntityId> = self.tabs.iter().map(|t| t.editor.entity_id()).collect();
         self.used.retain(|id| open.contains(id));
         // Tabs never shown yet (opened with others, from the last session) come last.
@@ -8073,6 +8073,60 @@ impl Workspace {
         cx.notify();
     }
 
+    /// While ⌃ is held after ⌃Tab: the tabs used lately, the one it has reached marked, so
+    /// it isn't a blind walk past a few.
+    fn render_tab_switcher(&self, cx: &App) -> Option<AnyElement> {
+        let at = self.switching?;
+        let theme = cx.global::<Theme>();
+        let labels = self.tab_labels(cx);
+        const SHOWN: usize = 9;
+        // A window of them, around the one reached.
+        let first = at.saturating_sub(SHOWN - 1);
+        let rows = self.used.iter().enumerate().skip(first).take(SHOWN).filter_map(|(i, id)| {
+            let ix = self.tabs.iter().position(|t| t.editor.entity_id() == *id)?;
+            let (name, folder) = labels.get(ix).cloned()?;
+            Some(
+                div()
+                    .h(px(28.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(ui::R_ROW))
+                    .text_color(if i == at { theme.foreground } else { theme.muted })
+                    .when(i == at, |row| row.bg(theme.accent_soft))
+                    .child(div().truncate().child(name))
+                    .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
+            )
+        });
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(120.))
+                .child(
+                    div()
+                        .w(px(320.))
+                        .p(px(6.))
+                        .flex()
+                        .flex_col()
+                        .rounded(px(ui::R_MODAL))
+                        .border_1()
+                        .border_color(theme.hairline)
+                        .bg(theme.raised)
+                        .shadow_lg()
+                        .text_size(px(ui::T_MD))
+                        .children(rows),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_text_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.text_menu.as_ref()?;
         let theme = cx.global::<Theme>();
@@ -8829,6 +8883,7 @@ impl Render for Workspace {
         let welcome = self.welcome.as_ref().map(|(w, _)| w.clone());
         let tab_menu = self.render_tab_menu(cx);
         let text_menu = self.render_text_menu(cx);
+        let tab_switcher = self.render_tab_switcher(cx);
         let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
@@ -9552,6 +9607,7 @@ impl Render for Workspace {
             .when(!self.focus_mode, |root| root.child(status))
             .children(tab_menu)
             .children(text_menu)
+            .children(tab_switcher)
             .when_some(overlay, |root, layer| {
                 root.child(
                     div()
@@ -11095,8 +11151,11 @@ mod tests {
             assert_eq!(shown(w, cx), "c.txt");
             w.switch_tab(false, true, window, cx);
             assert_eq!(shown(w, cx), "b.txt");
+            // While held, the tabs show, by last use.
+            assert!(w.render_tab_switcher(cx).is_some());
             // Let go: b is the last used, so ⌃Tab alone goes back to a.
             w.settle_switch();
+            assert!(w.render_tab_switcher(cx).is_none(), "gone with ⌃");
             w.switch_tab(false, false, window, cx);
             assert_eq!(shown(w, cx), "a.txt");
             w.switch_tab(false, false, window, cx);
