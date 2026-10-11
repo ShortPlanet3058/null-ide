@@ -730,71 +730,85 @@ fn search_files(
             .cloned()
             .collect(),
         None => {
+            use ignore::WalkState;
             let mut walk = ignore::WalkBuilder::new(root);
             if let Some(wanted) = wanted {
                 walk.overrides(wanted);
             }
             // (What the `hide` setting keeps out, folders and all.)
             let hidden = crate::project_index::hidden_rules(root, hide);
+            // Folders read side by side.
+            let found: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
             walk.hidden(false)
                 .filter_entry(move |e| {
                     e.file_name() != ".git"
                         && !hidden.matched(e.path(), e.file_type().is_some_and(|t| t.is_dir())).is_ignore()
                 })
-                .build()
-                .filter_map(Result::ok)
-                .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-                .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_FILE_SIZE))
-                .map(|e| e.into_path())
-                .collect()
+                .build_parallel()
+                .run(|| {
+                    let found = &found;
+                    Box::new(move |entry| {
+                        if cancel.load(Ordering::Relaxed) {
+                            return WalkState::Quit;
+                        }
+                        let Ok(entry) = entry else { return WalkState::Continue };
+                        let wanted = entry.file_type().is_some_and(|t| t.is_file())
+                            && entry.metadata().is_ok_and(|m| m.len() <= MAX_FILE_SIZE);
+                        if wanted && let Ok(mut found) = found.lock() {
+                            found.push(entry.into_path());
+                        }
+                        WalkState::Continue
+                    })
+                });
+            found.into_inner().unwrap_or_default()
         }
     };
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
     files.sort();
 
+    // Files read and searched on every core, a window of them at a time, then reported in
+    // order (one by one, a project of 42,000 files took 11 s).
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let window = cores * 32;
     let mut batch = Vec::new();
     let mut sent = Instant::now();
     let mut total = 0;
-    for path in files {
+    for paths in files.chunks(window) {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        let text = match unsaved.get(&path) {
-            Some(rope) => rope.to_string(),
-            // In its own encoding, so an old Latin-1 file is searched too; a notebook, as
-            // its cells (as it's written in: its lines are those).
-            None => match crate::encoding::read(&path) {
-                Ok((text, _)) => crate::notebook::cells_of_file(&path, text),
-                Err(_) => continue,
-            },
-        };
-        if text.contains('\0') {
-            continue;
-        }
-        let mut matches = Vec::new();
-        if query.spans_lines() {
-            matches = spanning_matches(&text, &regex, MAX_MATCHES - total);
-            total += matches.len();
-        } else {
-            for (line, line_text) in text.lines().enumerate() {
-                let found: Vec<Range<usize>> =
-                    regex.find_iter(line_text).filter(|m| !m.is_empty()).map(|m| m.range()).collect();
-                let Some(first) = found.first() else { continue };
-                let columns = line_text[..first.start].chars().count()..line_text[..first.end].chars().count();
-                let (preview, highlights) = preview(line_text, &found);
-                matches.push(LineMatch { line, columns, end: None, preview, highlights });
-                total += 1;
-                if total >= MAX_MATCHES {
-                    break;
-                }
+        let most = MAX_MATCHES - total;
+        let per_core = paths.len().div_ceil(cores);
+        let searched: Vec<Vec<LineMatch>> = std::thread::scope(|s| {
+            let parts: Vec<_> = paths
+                .chunks(per_core)
+                .map(|part| {
+                    let (regex, query) = (&regex, query);
+                    s.spawn(move || {
+                        part.iter()
+                            .map(|path| matches_in(path, unsaved, regex, query, most, cancel))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            parts.into_iter().flat_map(|part| part.join().unwrap_or_default()).collect()
+        });
+        for (path, mut matches) in paths.iter().zip(searched) {
+            if cancel.load(Ordering::Relaxed) {
+                return;
             }
-        }
-        if !matches.is_empty() {
-            let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
-            batch.push(FileResult { path, relative, matches, dismissed: false });
-        }
-        if total >= MAX_MATCHES {
-            report(Found::Files(batch));
-            return report(Found::Done { truncated: true });
+            matches.truncate(MAX_MATCHES - total);
+            total += matches.len();
+            if !matches.is_empty() {
+                let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
+                batch.push(FileResult { path: path.clone(), relative, matches, dismissed: false });
+            }
+            if total >= MAX_MATCHES {
+                report(Found::Files(batch));
+                return report(Found::Done { truncated: true });
+            }
         }
         if !batch.is_empty() && sent.elapsed() >= BATCH_EVERY {
             report(Found::Files(std::mem::take(&mut batch)));
@@ -805,6 +819,54 @@ fn search_files(
         report(Found::Files(batch));
     }
     report(Found::Done { truncated: false });
+}
+
+/// A file's matches of `regex` (at most `most`): the file as it's being written if it's open
+/// with changes (`unsaved`), else as it is on disk.
+fn matches_in(
+    path: &Path,
+    unsaved: &std::collections::HashMap<PathBuf, ropey::Rope>,
+    regex: &regex::Regex,
+    query: &SearchQuery,
+    most: usize,
+    cancel: &AtomicBool,
+) -> Vec<LineMatch> {
+    if cancel.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+    let text = match unsaved.get(path) {
+        Some(rope) => rope.to_string(),
+        // In its own encoding, so an old Latin-1 file is searched too; a notebook, as
+        // its cells (as it's written in: its lines are those).
+        None => match crate::encoding::read(path) {
+            Ok((text, _)) => crate::notebook::cells_of_file(path, text),
+            Err(_) => return Vec::new(),
+        },
+    };
+    if text.contains('\0') {
+        return Vec::new();
+    }
+    if query.spans_lines() {
+        return spanning_matches(&text, regex, most);
+    }
+    // Most files have none: one look through the whole text says so (line by line was most
+    // of the time a search took).
+    if !regex.is_match(&text) {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for (line, line_text) in text.lines().enumerate() {
+        let found: Vec<Range<usize>> =
+            regex.find_iter(line_text).filter(|m| !m.is_empty()).map(|m| m.range()).collect();
+        let Some(first) = found.first() else { continue };
+        let columns = line_text[..first.start].chars().count()..line_text[..first.end].chars().count();
+        let (preview, highlights) = preview(line_text, &found);
+        matches.push(LineMatch { line, columns, end: None, preview, highlights });
+        if matches.len() >= most {
+            break;
+        }
+    }
+    matches
 }
 
 /// A line's matches (of a pattern across lines): the line, their ranges on it, and where its
@@ -1197,6 +1259,31 @@ impl Render for ProjectSearch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long searching a big project takes (NULL_BENCH_DIR), to the end:
+    /// `cargo test --release -- --ignored searching_a_big_project --nocapture`.
+    #[test]
+    #[ignore]
+    fn searching_a_big_project() {
+        let Some(dir) = std::env::var_os("NULL_BENCH_DIR") else { return };
+        let root = PathBuf::from(dir);
+        for text in ["zzqq_never_there", "unsafe impl Send", "TODO"] {
+            let query = SearchQuery { text: text.into(), ..Default::default() };
+            let started = Instant::now();
+            let (mut files, mut lines) = (0, 0);
+            let cancel = AtomicBool::new(false);
+            search_files(&root, &query, "", &[], None, &Default::default(), &cancel, |found| {
+                if let Found::Files(batch) = found {
+                    files += batch.len();
+                    lines += batch.iter().map(|f| f.matches.len()).sum::<usize>();
+                }
+            });
+            println!(
+                "{text:>18}: {lines:>5} lines in {files:>5} files, {:.0} ms",
+                started.elapsed().as_secs_f64() * 1000.
+            );
+        }
+    }
 
     /// A pattern with `\n` matches across lines: listed by the line each starts on, its end
     /// where it ends; replaced whole (only those starting on the lines asked, if any).

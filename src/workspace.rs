@@ -896,6 +896,7 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let _step = crate::trace::step(|| "workspace made (its session restored)".into());
+        crate::palette::list_files_soon(root.clone(), cx);
         // This project's own settings, over yours, while its window is in front.
         crate::settings::use_project(&root, cx);
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
@@ -3515,6 +3516,7 @@ impl Workspace {
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // (Its git, not the last project's: a commit shown would act there.)
         self.drop_pages(cx);
+        crate::palette::list_files_soon(path.clone(), cx);
         self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
         self.git_view.update(cx, |view, cx| view.set_root(path.clone(), cx));
         // Language servers work per project: restart them for the new folder.

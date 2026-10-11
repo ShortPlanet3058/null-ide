@@ -8,6 +8,7 @@
 #
 # FILE is a path in PROJECT, opened as `null FILE` would. NULL_TRACE_TABS="a.rs b.rs"
 # (paths in PROJECT) starts it with those tabs open, as a session left that way would.
+# NULL_TRACE_IN_PLACE=1 opens PROJECT itself, not a copy (a big one, yours to risk).
 # The window comes to the front while it runs.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -30,8 +31,12 @@ finish() {
 }
 trap finish EXIT
 mkdir -p "$home/.config/null" "$home/tmp" "$home/project"
-project="$home/project/$(basename "$(cd "$1" && pwd)")"
-rsync -a --exclude target/ --exclude node_modules/ "$(cd "$1" && pwd)/" "$project/"
+if [ -n "${NULL_TRACE_IN_PLACE:-}" ]; then
+    project="$(cd "$1" && pwd)"
+else
+    project="$home/project/$(basename "$(cd "$1" && pwd)")"
+    rsync -a --exclude target/ --exclude node_modules/ "$(cd "$1" && pwd)/" "$project/"
+fi
 printf '{ "welcomed": true }\n' > "$home/.config/null/settings.json"
 session=""
 if [ -n "${NULL_TRACE_TABS:-}" ]; then
