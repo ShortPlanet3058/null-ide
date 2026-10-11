@@ -85,7 +85,8 @@ pub type Job = Box<dyn FnOnce() -> Option<String> + Send>;
 /// asked for and not drawn yet; and pictures let go, for their window to free.
 #[derive(Default)]
 struct MadeCache {
-    done: Vec<(String, Option<Drawn>)>,
+    /// Each drawing, and when it was last used.
+    done: Vec<(String, Option<Drawn>, std::time::Instant)>,
     waiting: Vec<(String, Job)>,
     asked: std::collections::HashSet<String>,
     let_go: Vec<Arc<RenderImage>>,
@@ -100,9 +101,10 @@ const MADE_KEPT: usize = 256;
 /// drawn once, in the background (see `take_waiting`), not as the preview draws.
 pub fn made(key: &str, make: impl FnOnce() -> Option<String> + Send + 'static) -> Made {
     let Ok(mut cache) = MADE.lock() else { return Made::Failed };
-    if let Some(at) = cache.done.iter().position(|(k, _)| k == key) {
+    if let Some(at) = cache.done.iter().position(|(k, _, _)| k == key) {
         // Used: last to go.
-        let entry = cache.done.remove(at);
+        let mut entry = cache.done.remove(at);
+        entry.2 = std::time::Instant::now();
         let made = match &entry.1 {
             Some(drawn) => Made::Ready(drawn.clone()),
             None => Made::Failed,
@@ -133,9 +135,14 @@ pub fn make(job: Job) -> Option<Drawn> {
 pub fn finish(key: String, drawn: Option<Drawn>) {
     let Ok(mut cache) = MADE.lock() else { return };
     cache.asked.remove(&key);
-    cache.done.push((key, drawn));
+    let now = std::time::Instant::now();
+    cache.done.push((key, drawn, now));
+    // Past the limit: the ones used longest ago, but none used in the last moments (what
+    // the screen shows: they'd be drawn again and again).
     while cache.done.len() > MADE_KEPT {
-        if let (_, Some((image, _))) = cache.done.remove(0) {
+        let recent = |used: &std::time::Instant| now.duration_since(*used) < std::time::Duration::from_secs(2);
+        let Some(old) = cache.done.iter().position(|(_, _, used)| !recent(used)) else { break };
+        if let (_, Some((image, _)), _) = cache.done.remove(old) {
             cache.let_go.push(image);
         }
     }

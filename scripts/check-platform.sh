@@ -1,21 +1,28 @@
 #!/bin/bash
-# Type-checks Null for Linux on a Mac, without a VM: `cargo check` for the Linux target,
-# so the compiler sees every `cfg(target_os = "linux")` / `cfg(unix)` path. Nothing is
-# linked, so the C parts of dependencies (tree-sitter, ring) compile against small
-# stand-in headers and the system libraries gpui looks for (FreeType, xkbcommon…) are
-# answered by stand-in pkg-config files: all of them written under target/, never used
-# to build anything that runs.
+# Type-checks Null for Linux or Windows on a Mac, without a VM: `cargo check` for that
+# target, so the compiler sees every path of its own (`cfg(target_os = "linux")`,
+# `cfg(windows)`, `cfg(unix)`). Nothing is linked, so the C parts of dependencies
+# (tree-sitter, ring) compile against small stand-in headers, and the system libraries
+# gpui looks for on Linux (FreeType, xkbcommon…) are answered by stand-in pkg-config
+# files: all of them written under target/, never used to build anything that runs.
 #
-#   scripts/check-linux.sh            (needs: rustup target add x86_64-unknown-linux-gnu)
+#   scripts/check-platform.sh linux|windows [--all-targets]
+#   (needs: rustup target add x86_64-unknown-linux-gnu / x86_64-pc-windows-msvc)
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-target=x86_64-unknown-linux-gnu
+platform="${1:-}"
+shift || true
+case "$platform" in
+    linux) target=x86_64-unknown-linux-gnu ;;
+    windows) target=x86_64-pc-windows-msvc ;;
+    *) echo "which: scripts/check-platform.sh linux|windows [--all-targets]" >&2; exit 1 ;;
+esac
 rustup target list --installed | grep -qx "$target" || {
     echo "first: rustup target add $target" >&2
     exit 1
 }
-stubs="$repo/target/linux-check/include"
-pcs="$repo/target/linux-check/pkgconfig"
+stubs="$repo/target/platform-check/include"
+pcs="$repo/target/platform-check/pkgconfig"
 mkdir -p "$stubs" "$pcs"
 
 header() { printf '#pragma once\n/* A stand-in for type-checking only: never linked. */\n%s\n' "$2" > "$stubs/$1"; }
@@ -102,9 +109,70 @@ for lib in freetype2:26.1.20 fontconfig:2.15.0 xkbcommon:1.7.0 xkbcommon-x11:1.7
         "$name" "${lib##*:}" "$name" > "$pcs/$name.pc"
 done
 
+# Windows: its own headers over those (MSVC's names), and lib.exe's way of making an
+# archive done by ar.
+win="$repo/target/platform-check/windows"
+mkdir -p "$win"
+whead() { printf '#pragma once\n/* A stand-in for type-checking only: never linked. */\n%s\n' "$2" > "$win/$1"; }
+whead intrin.h '#define _byteswap_ushort(x) __builtin_bswap16(x)
+#define _byteswap_ulong(x) __builtin_bswap32(x)
+#define _byteswap_uint64(x) __builtin_bswap64(x)'
+whead stdlib.h "#include \"$stubs/stdlib.h\"
+#include <intrin.h>
+size_t wcstombs(char *, const wchar_t *, size_t);"
+whead stdio.h "#include \"$stubs/stdio.h\"
+FILE *_fdopen(int, const char *);"
+whead io.h '#include <stdint.h>
+#include <stddef.h>
+intptr_t _get_osfhandle(int); int _open_osfhandle(intptr_t, int);
+int _open(const char *, int, ...); int _wopen(const wchar_t *, int, ...); int _close(int);
+int _read(int, void *, unsigned int); int _write(int, const void *, unsigned int);
+long long _lseeki64(int, long long, int); long _lseek(int, long, int);
+#define open _open
+#define close _close
+#define read _read
+#define write _write
+#define lseek _lseek'
+mkdir -p "$win/sys"
+whead sys/stat.h '#define _S_IREAD 0400
+#define _S_IWRITE 0200
+struct stat { long st_size; unsigned short st_mode; };
+int stat(const char *, struct stat *); int fstat(int, struct stat *);'
+whead windows.h '#include <stdint.h>
+typedef void *PVOID; typedef void *HANDLE; typedef int BOOL; typedef unsigned long DWORD;
+typedef union { struct { DWORD LowPart; long HighPart; }; long long QuadPart; } LARGE_INTEGER;
+#define FALSE 0
+#define TRUE 1
+#define DUPLICATE_SAME_ACCESS 2
+PVOID GetCurrentFiber(void); HANDLE GetCurrentProcess(void);
+BOOL DuplicateHandle(HANDLE, HANDLE, HANDLE, HANDLE *, DWORD, BOOL, DWORD);
+BOOL QueryPerformanceCounter(LARGE_INTEGER *); BOOL QueryPerformanceFrequency(LARGE_INTEGER *);
+long InterlockedIncrement(long volatile *); long InterlockedDecrement(long volatile *);'
+cat > "$win/lib.sh" <<'LIB'
+#!/bin/bash
+out=""; objects=()
+for a in "$@"; do
+    case "$a" in
+        -out:*|/out:*) out="${a#*:}" ;;
+        -nologo|/nologo) ;;
+        *) objects+=("$a") ;;
+    esac
+done
+exec ar crs "$out" "${objects[@]}"
+LIB
+chmod +x "$win/lib.sh"
+
 cd "$repo"
-CC_x86_64_unknown_linux_gnu=clang AR_x86_64_unknown_linux_gnu=ar \
-    CFLAGS_x86_64_unknown_linux_gnu="-isystem $stubs" \
-    PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH="$pcs" PKG_CONFIG_LIBDIR="$pcs" \
-    LIBGIT2_NO_VENDOR=1 LIBSSH2_SYS_USE_PKG_CONFIG=1 \
-    cargo check --target "$target" "$@"
+if [ "$platform" = linux ]; then
+    CC_x86_64_unknown_linux_gnu=clang AR_x86_64_unknown_linux_gnu=ar \
+        CFLAGS_x86_64_unknown_linux_gnu="-isystem $stubs" \
+        PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH="$pcs" PKG_CONFIG_LIBDIR="$pcs" \
+        LIBGIT2_NO_VENDOR=1 LIBSSH2_SYS_USE_PKG_CONFIG=1 \
+        cargo check --target "$target" "$@"
+else
+    CC_x86_64_pc_windows_msvc=clang AR_x86_64_pc_windows_msvc="$win/lib.sh" \
+        CFLAGS_x86_64_pc_windows_msvc="-isystem $win -isystem $stubs" \
+        PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH="$pcs" PKG_CONFIG_LIBDIR="$pcs" \
+        LIBGIT2_NO_VENDOR=1 LIBSSH2_SYS_USE_PKG_CONFIG=1 \
+        cargo check --target "$target" "$@"
+fi

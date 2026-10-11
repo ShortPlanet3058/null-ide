@@ -760,9 +760,10 @@ fn search_files(
         }
         let text = match unsaved.get(&path) {
             Some(rope) => rope.to_string(),
-            // In its own encoding, so an old Latin-1 file is searched too.
+            // In its own encoding, so an old Latin-1 file is searched too; a notebook, as
+            // its cells (as it's written in: its lines are those).
             None => match crate::encoding::read(&path) {
-                Ok((text, _)) => text,
+                Ok((text, _)) => crate::notebook::cells_of_file(&path, text),
                 Err(_) => continue,
             },
         };

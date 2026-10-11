@@ -3063,9 +3063,10 @@ impl Workspace {
                 EditorEvent::ReadFromDisk => {
                     // Its other copy has what's on disk too (reloaded itself, or given it now):
                     // the read isn't replayed on it as an edit (that doubled its end).
-                    let (text, saved, on_disk) = {
+                    this.share_unsaved(editor, cx);
+                    let (text, saved, on_disk, notebook) = {
                         let e = editor.read(cx);
-                        (e.buffer.rope().clone(), !e.buffer.is_dirty(), e.on_disk)
+                        (e.buffer.rope().clone(), !e.buffer.is_dirty(), e.on_disk, e.notebook.clone())
                     };
                     for twin in this.twins_of(editor, cx) {
                         if *twin.read(cx).buffer.rope() != text {
@@ -3075,6 +3076,7 @@ impl Workspace {
                         if saved {
                             twin.update(cx, |t, _| {
                                 t.on_disk = on_disk;
+                                t.notebook = notebook.clone();
                                 t.disk_changed = false;
                             });
                         }
@@ -3098,9 +3100,9 @@ impl Workspace {
                     this.refresh_git_status(cx);
                     // Saving (and tidying) one copy saves the other: same text, same file.
                     this.sync_twins(editor, cx);
-                    let (text, on_disk) = {
+                    let (text, on_disk, notebook) = {
                         let e = editor.read(cx);
-                        (e.buffer.rope().clone(), e.on_disk)
+                        (e.buffer.rope().clone(), e.on_disk, e.notebook.clone())
                     };
                     for twin in this.twins_of(editor, cx) {
                         twin.update(cx, |twin, cx| {
@@ -3108,6 +3110,7 @@ impl Workspace {
                             if *twin.buffer.rope() == text {
                                 twin.buffer.mark_saved();
                                 twin.on_disk = on_disk;
+                                twin.notebook = notebook.clone();
                                 twin.disk_changed = false;
                             }
                             cx.notify();
@@ -3819,6 +3822,7 @@ impl Workspace {
             };
             this.update_in(cx, |this, window, cx| {
                 let saved = editor.update(cx, |editor, cx| {
+                    editor.saving_as(&path);
                     editor.set_path(path, Some(lsp), cx);
                     editor.save_to_disk(cx)
                 });
@@ -3953,7 +3957,26 @@ impl Workspace {
         }
         let mut changed_on_disk = 0;
         for backup in &backups {
-            let editor = match &backup.path {
+            // A notebook's unsaved cells (or its JSON, from an older Null), into a copy that
+            // writes them back the same way; else a new file holds them, the notebook untouched.
+            let text = match &backup.path {
+                Some(path) if path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ipynb")) => {
+                    let (opened, _) = crate::encoding::read(path).unwrap_or_default();
+                    let as_cells = crate::notebook::to_cells_text(&opened).is_some();
+                    let backup_is_json = crate::notebook::is_notebook(&backup.text);
+                    match (as_cells, backup_is_json) {
+                        (true, true) => crate::notebook::to_cells_text(&backup.text),
+                        (true, false) | (false, true) => Some(backup.text.clone()),
+                        (false, false) => None,
+                    }
+                }
+                _ => Some(backup.text.clone()),
+            };
+            let (path, text) = match text {
+                Some(text) => (backup.path.clone(), text),
+                None => (None, backup.text.clone()),
+            };
+            let editor = match &path {
                 Some(path) if path.is_file() => {
                     if backup.disk != crate::session::disk_fingerprint(path) {
                         changed_on_disk += 1;
@@ -3971,10 +3994,10 @@ impl Workspace {
                     Some(editor)
                 }
             };
-            let disk_changed = backup.path.as_ref().is_some_and(|p| backup.disk != crate::session::disk_fingerprint(p));
+            let disk_changed = path.as_ref().is_some_and(|p| backup.disk != crate::session::disk_fingerprint(p));
             if let Some(editor) = editor {
                 editor.update(cx, |editor, cx| {
-                    editor.restore_unsaved(&backup.text, cx);
+                    editor.restore_unsaved(&text, cx);
                     // Written over a file that changed since: saving asks first.
                     editor.disk_changed |= disk_changed && editor.buffer.is_dirty();
                 });
@@ -4184,6 +4207,7 @@ impl Workspace {
             let Ok(Ok(Some(path))) = answer.await else { return };
             this.update_in(cx, |this, window, cx| {
                 editor.update(cx, |editor, cx| {
+                    editor.saving_as(&path);
                     editor.set_path(path.clone(), Some(lsp), cx);
                     editor.save_to_disk(cx);
                 });
@@ -5131,7 +5155,8 @@ impl Workspace {
     fn share_unsaved(&self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
         let editor = editor.read(cx);
         let Some(path) = editor.path().map(Path::to_path_buf) else { return };
-        let text = editor.buffer.is_dirty().then(|| editor.buffer.rope().clone());
+        // (A notebook's always: its cells are what's searched and replaced in, not its JSON.)
+        let text = (editor.buffer.is_dirty() || editor.notebook.is_some()).then(|| editor.buffer.rope().clone());
         let unsaved = &mut cx.default_global::<crate::project_search::UnsavedFiles>().0;
         match text {
             Some(text) => unsaved.insert(path, text),
@@ -5441,6 +5466,10 @@ impl Workspace {
                         failed.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                         continue;
                     };
+                    // A notebook: replaced in its cells (as searched), written back into its JSON.
+                    let json = text.clone();
+                    let text = crate::notebook::cells_of_file(path, text);
+                    let notebook = text != json;
                     let edits = crate::project_search::replacements(&text, query, replacement, line.as_deref());
                     if edits.is_empty() {
                         continue;
@@ -5449,6 +5478,18 @@ impl Workspace {
                     for (range, with) in edits.iter().rev() {
                         new.replace_range(range.clone(), with);
                     }
+                    let new = match notebook {
+                        true => match crate::notebook::with_cells(&json, &new) {
+                            Some(new) => new,
+                            None => {
+                                failed.push(
+                                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                                );
+                                continue;
+                            }
+                        },
+                        false => new,
+                    };
                     // Written back in its own encoding; one that can't hold the new text fails.
                     let written = crate::encoding::encode(&new, encoding)
                         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))
@@ -10593,15 +10634,18 @@ mod tests {
         editor.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
         cx.simulate_keystrokes("cmd-z");
         editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "saved\nchanged\n", "⌘Z brings the changes back"));
-        // The saved file unreadable now: the changes stay, still unsaved.
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
-        workspace.update(cx, |w, cx| w.revert_to_saved(cx));
-        editor.read_with(cx, |e, _| {
-            assert_eq!(e.buffer.to_string(), "saved\nchanged\n");
-            assert!(e.buffer.is_dirty(), "not marked saved");
-        });
-        std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        // The saved file unreadable now (Unix's permissions): the changes stay, still unsaved.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
+            workspace.update(cx, |w, cx| w.revert_to_saved(cx));
+            editor.read_with(cx, |e, _| {
+                assert_eq!(e.buffer.to_string(), "saved\nchanged\n");
+                assert!(e.buffer.is_dirty(), "not marked saved");
+            });
+            std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -12332,6 +12376,35 @@ mod tests {
         }
         workspace.update(cx, |w, cx| w.lsp.update(cx, |s, _| s.shutdown()));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Replacing in a notebook that isn't open: in its cells, as it's searched; written back
+    /// into its JSON (a quote replaced in stays a notebook), what it printed kept.
+    #[gpui::test]
+    fn notebooks_are_replaced_in_as_their_cells(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("replace-notebook");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let notebook = r#"{"cells":[{"cell_type":"code","execution_count":1,"metadata":{},"outputs":[{"name":"stdout","output_type":"stream","text":["hi\n"]}],"source":["print('hi')"]}],"metadata":{},"nbformat":4,"nbformat_minor":4}"#;
+        let path = dir.join("a.ipynb");
+        std::fs::write(&path, notebook).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let query = crate::search::SearchQuery { text: "'hi'".into(), ..Default::default() };
+        // Searched as its cells: the match on the cell's line (line 1, after `# %%`).
+        let text = crate::notebook::cells_of_file(&path, notebook.to_string());
+        assert_eq!(text.lines().nth(1), Some("print('hi')"));
+        workspace.update(cx, |w, cx| w.replace_in_files(&query, "\"bye\"", &[(path.clone(), Some(vec![1]))], cx));
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).expect("a notebook");
+        assert_eq!(saved["cells"][0]["source"][0], "print(\"bye\")");
+        assert_eq!(saved["cells"][0]["outputs"][0]["text"][0], "hi\n");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// ⌥⌘+ / ⌥⌘− / ⌥⌘0: the interface bigger, smaller, back to 100%, within its bounds;
