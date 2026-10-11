@@ -14,14 +14,17 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 mod branches;
+mod github_tab;
 
 pub use branches::Branches;
+pub use github_tab::GitHub;
 
 actions!(git_view, [CommitChanges]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("secondary-enter", CommitChanges, Some("GitMessage"))]);
     branches::bind_keys(cx);
+    github_tab::bind_keys(cx);
 }
 
 /// A change within a file (as `git::diff` finds them), to commit or leave for later.
@@ -60,6 +63,7 @@ pub enum Tab {
     Changes,
     History,
     Branches,
+    GitHub,
 }
 
 /// How a commit's row draws its part of the branches' graph: its lane (and colour), and
@@ -154,6 +158,9 @@ pub fn graph(commits: &[git::LogCommit]) -> Vec<GraphRow> {
 pub enum GitViewEvent {
     /// A commit clicked in the history: shown.
     ShowCommit(git::LogCommit),
+    /// A pull request (by number) clicked: shown.
+    ShowPull(u64),
+    ShowIssue(u64),
     /// A file's row clicked: shown with its changes.
     Open(PathBuf),
     /// Commit asked for: the open files are saved first (then `commit` runs).
@@ -211,6 +218,11 @@ pub struct GitView {
     /// The branch clicked, its actions shown under it.
     pub picked: Option<String>,
     branches_task: Option<Task<()>>,
+    pub github: GitHub,
+    github_task: Option<Task<()>>,
+    pr_title: Entity<TextInput>,
+    pr_body: Entity<TextInput>,
+    pr_base: Entity<TextInput>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -274,7 +286,11 @@ impl GitView {
         let filter = cx.new(|cx| TextInput::new("Filter: message, author, id", cx));
         let branch_name = cx.new(|cx| TextInput::new("New branch…", cx));
         let rename_input = cx.new(|cx| TextInput::new("Its new name", cx));
+        let pr_title = cx.new(|cx| TextInput::new("Title", cx));
+        let pr_body = cx.new(|cx| TextInput::new("What and why (optional)", cx));
+        let pr_base = cx.new(|cx| TextInput::new("Into", cx));
         let subscriptions = vec![
+            cx.subscribe(&pr_title, |_, _, _: &TextInputEvent, cx| cx.notify()),
             cx.subscribe(&branch_name, |_, _, _: &TextInputEvent, cx| cx.notify()),
             cx.subscribe(&rename_input, |_, _, _: &TextInputEvent, cx| cx.notify()),
             cx.subscribe(&summary, |_, _, _: &TextInputEvent, cx| cx.notify()),
@@ -304,6 +320,11 @@ impl GitView {
             renaming: None,
             picked: None,
             branches_task: None,
+            github: GitHub::default(),
+            github_task: None,
+            pr_title,
+            pr_body,
+            pr_base,
             _subscriptions: subscriptions,
         }
     }
@@ -321,6 +342,12 @@ impl GitView {
             Tab::Changes => self.refresh_changes(cx),
             Tab::History => self.refresh_history(cx),
             Tab::Branches => self.refresh_branches(cx),
+            // (GitHub's asked only when the tab's shown or refreshed: not on every change here.)
+            Tab::GitHub => {
+                if self.github.account.is_none() {
+                    self.refresh_github(cx);
+                }
+            }
         }
     }
 
@@ -341,7 +368,11 @@ impl GitView {
 
     pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
-        self.refresh(cx);
+        if tab == Tab::GitHub {
+            self.refresh_github(cx);
+        } else {
+            self.refresh(cx);
+        }
         cx.notify();
     }
 
@@ -653,6 +684,7 @@ impl GitView {
             .child(tab("git-tab-changes", "Changes", Tab::Changes, cx))
             .child(tab("git-tab-history", "History", Tab::History, cx))
             .child(tab("git-tab-branches", "Branches", Tab::Branches, cx))
+            .child(tab("git-tab-github", "GitHub", Tab::GitHub, cx))
             .into_any_element()
     }
 
@@ -950,6 +982,7 @@ impl Render for GitView {
         let shown = match self.tab {
             Tab::Changes => self.render_changes(cx),
             Tab::Branches => self.render_branches(cx),
+            Tab::GitHub => self.render_github(cx),
             Tab::History => self.render_history(cx),
         };
         div()

@@ -61,6 +61,18 @@ pub enum BlockKind {
     Writing(Vec<String>),
     /// The keys for a reviewed change, with how many more there are.
     ReviewHint(usize),
+    /// A conversation on the line above (`threads`' index).
+    Thread(usize),
+}
+
+/// A conversation between the lines: a pull request's review comments on a line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Thread {
+    pub id: u64,
+    /// The line it's on (0-based): it's shown under it.
+    pub line: usize,
+    /// Each comment: who and when, then what it says.
+    pub comments: Vec<(String, String)>,
 }
 
 pub struct Block {
@@ -592,9 +604,51 @@ impl Editor {
         ((needed / row).ceil() as usize).clamp(2, NOTE_MAX_ROWS)
     }
 
+    /// Whether some of the blocks are drawn as elements over the text, placed from its layout.
+    pub fn has_overlay_blocks(&self) -> bool {
+        !self.threads.is_empty() || self.prompt.is_some() || self.note.is_some()
+    }
+
+    #[cfg(all(test, unix))]
+    pub fn threads(&self) -> &[Thread] {
+        &self.threads
+    }
+
+    /// Conversations to show between the lines, each under its line.
+    pub fn set_threads(&mut self, threads: Vec<Thread>, cx: &mut Context<Self>) {
+        self.threads = threads;
+        self.rebuild_blocks();
+        cx.notify();
+    }
+
+    /// A thread's rows: as drawn (see the Thread block), rounded up so nothing's cut off.
+    fn thread_rows(&self, thread: &Thread) -> usize {
+        let per_row = self
+            .layout
+            .as_ref()
+            .map(|l| ((l.text_bounds.size.width - px(60.)) / (l.char_width * 0.9)).floor().max(20.) as usize)
+            .unwrap_or(80);
+        let comments: f32 = thread
+            .comments
+            .iter()
+            .map(|(_, body)| {
+                let lines: usize = body.lines().map(|l| l.chars().count().div_ceil(per_row).max(1)).sum();
+                18. + 20. * lines.max(1) as f32 + 8.
+            })
+            .sum();
+        let needed = 8. + 12. + comments + 30.;
+        let row = f32::from(self.line_height()).max(1.);
+        ((needed / row).ceil() as usize).clamp(2, 40)
+    }
+
     pub(super) fn rebuild_blocks(&mut self) {
         self.refresh_review();
         let mut blocks = Vec::new();
+        let lines = self.buffer.len_lines();
+        for (i, thread) in self.threads.iter().enumerate() {
+            let rows = self.thread_rows(thread);
+            blocks.push(Block { before_line: (thread.line + 1).min(lines), rows, kind: BlockKind::Thread(i) });
+        }
         if let Some(prompt) = &self.prompt {
             blocks.push(Block { before_line: prompt.lines.start, rows: 1, kind: BlockKind::Prompt });
             // The new code appears line by line as it's written, above the code it replaces.
@@ -908,6 +962,56 @@ impl Editor {
                                             ),
                                     )
                                     .children(body),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                BlockKind::Thread(i) => {
+                    let Some(thread) = self.threads.get(*i) else { continue };
+                    let id = thread.id;
+                    let comments = thread.comments.iter().map(|(who, body)| {
+                        div()
+                            .pb(px(8.))
+                            .child(
+                                div().text_size(px(ui::T_XS)).line_height(px(18.)).text_color(theme.muted).child(who.clone()),
+                            )
+                            .children(body.lines().map(|l| div().min_h(px(20.)).child(l.to_string())))
+                    });
+                    out.push(
+                        place(div())
+                            .py(px(4.))
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                div()
+                                    .size_full()
+                                    .overflow_hidden()
+                                    .rounded(px(ui::R_CONTROL))
+                                    .border_1()
+                                    .border_color(theme.hairline)
+                                    .bg(theme.surface)
+                                    .px(px(12.))
+                                    .py(px(6.))
+                                    .font_family(cx.global::<crate::fonts::Fonts>().ui.clone())
+                                    .text_size(px(13.))
+                                    .line_height(px(20.))
+                                    .text_color(theme.foreground)
+                                    .children(comments)
+                                    .child(
+                                        div()
+                                            .id(("thread-reply", *i))
+                                            .px(px(8.))
+                                            .py(px(3.))
+                                            .rounded(px(ui::R_KEY))
+                                            .border_1()
+                                            .border_color(theme.hairline)
+                                            .text_color(theme.faint)
+                                            .cursor_pointer()
+                                            .hover(|s| s.text_color(theme.muted))
+                                            .child("Reply…")
+                                            .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                                                cx.emit(EditorEvent::ReplyAsked(id))
+                                            })),
+                                    ),
                             )
                             .into_any_element(),
                     );

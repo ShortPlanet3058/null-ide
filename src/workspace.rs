@@ -700,6 +700,8 @@ pub struct Workspace {
     git_view: Entity<crate::git_view::GitView>,
     /// A commit looked at, in the place of the code (until a file's opened, or Esc).
     git_page: Option<(Entity<crate::commit_page::CommitPage>, Subscription)>,
+    /// A pull request (or issue) looked at, the same way.
+    github_page: Option<(Entity<crate::github_page::GitHubPage>, Subscription)>,
     /// A merge (rebase, cherry-pick, revert) git is waiting in, and the files in it with
     /// conflicts left.
     joining: Option<git::JoiningState>,
@@ -1024,6 +1026,7 @@ impl Workspace {
             sidebar_git: false,
             git_view,
             git_page: None,
+            github_page: None,
             joining: None,
             to_settle: Vec::new(),
             python_env: None,
@@ -3262,6 +3265,8 @@ impl Workspace {
                 }
                 EditorEvent::RunCommand(command) => this.run_in_terminal(command.clone(), None, window, cx),
                 EditorEvent::Reviewed => this.file_reviewed(editor, cx),
+                // (Only a pull request's page shows threads: it hears this itself.)
+                EditorEvent::ReplyAsked(_) => {}
                 EditorEvent::FilesDropped { paths, at } => this.link_dropped(editor.clone(), paths, *at, cx),
                 EditorEvent::SaveFailed(message) => this.show_notice(message.clone(), cx),
                 EditorEvent::ChangedOnDisk => {
@@ -3500,8 +3505,9 @@ impl Workspace {
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        // A commit looked at gives way to the file.
+        // A commit (or pull request) looked at gives way to the file.
         self.git_page = None;
+        self.github_page = None;
         self.show_tab(ix, true, window, cx);
     }
 
@@ -5606,6 +5612,7 @@ impl Workspace {
     fn show_commit(&mut self, commit: git::LogCommit, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
         let page = cx.new(|cx| crate::commit_page::CommitPage::new(root, commit, cx));
+        self.github_page = None;
         let subscription = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
             use crate::commit_page::CommitPageEvent;
             match event {
@@ -5619,6 +5626,32 @@ impl Workspace {
         });
         window.focus(&page.focus_handle(cx));
         self.git_page = Some((page, subscription));
+        cx.notify();
+    }
+
+    /// A pull request (or issue) from the GitHub tab, in the place of the code.
+    fn show_github(&mut self, number: u64, issue: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let page = cx.new(|cx| crate::github_page::GitHubPage::new(root, number, issue, cx));
+        let subscription = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
+            use crate::github_page::GitHubPageEvent;
+            match event {
+                GitHubPageEvent::Close => {
+                    if this.github_page.take().is_some() {
+                        this.focus_main(window, cx);
+                        cx.notify();
+                    }
+                }
+                GitHubPageEvent::Said(said) => this.show_notice(said.clone(), cx),
+                GitHubPageEvent::Changed => {
+                    this.reload_open_files(cx);
+                    this.refresh_git(cx);
+                }
+            }
+        });
+        window.focus(&page.focus_handle(cx));
+        self.git_page = None;
+        self.github_page = Some((page, subscription));
         cx.notify();
     }
 
@@ -5662,6 +5695,8 @@ impl Workspace {
             }
             GitViewEvent::Draft(files) => self.write_commit_message_into(files.clone(), CommitTarget::Changes, cx),
             GitViewEvent::ShowCommit(commit) => self.show_commit(commit.clone(), window, cx),
+            GitViewEvent::ShowPull(number) => self.show_github(*number, false, window, cx),
+            GitViewEvent::ShowIssue(number) => self.show_github(*number, true, window, cx),
             GitViewEvent::Push => self.push_branch(&PushBranch, window, cx),
             GitViewEvent::Pull => self.pull_branch(&PullBranch, window, cx),
             GitViewEvent::SwitchTo(branch) => self.change_branch(Ok(branch.clone()), window, cx),
@@ -5727,6 +5762,7 @@ impl Workspace {
     fn open_first_conflict(&mut self, conflicts: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(first) = conflicts.into_iter().next() else { return };
         self.git_page = None;
+        self.github_page = None;
         self.open_file(first, window, cx);
         if let Some(editor) = self.active_editor().cloned() {
             editor.update(cx, |e, cx| {
@@ -9929,9 +9965,10 @@ impl Render for Workspace {
             })
         };
         // A commit looked at takes the code's place.
-        let body = match &self.git_page {
-            Some((page, _)) => div().size_full().child(page.clone()),
-            None => body,
+        let body = match (&self.git_page, &self.github_page) {
+            (Some((page, _)), _) => div().size_full().child(page.clone()),
+            (_, Some((page, _))) => div().size_full().child(page.clone()),
+            _ => body,
         };
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
         // The welcome covers the whole window; the rest float over the work.
@@ -12979,6 +13016,139 @@ mod tests {
         let log = String::from_utf8_lossy(&git(&["log", "-1", "--format=%P"]).stdout).into_owned();
         assert_eq!(log.split_whitespace().count(), 2, "a merge commit");
         assert_eq!(String::from_utf8_lossy(&git(&["show", "HEAD:a.txt"]).stdout), "both\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The GitHub tab, through a stand-in for gh: a pull request listed, opened in the
+    /// code's place, a file's changes with the review's thread under its line, and a reply
+    /// sent to that thread.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_pull_request_reviewed(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("github-page");
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = std::fs::canonicalize(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        if std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q", "-b", "main"]).status().is_err() {
+            return;
+        }
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(repo.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "-q", "-c", "feature"]);
+        std::fs::write(repo.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        git(&["commit", "-q", "-am", "b"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "-q", "main"]);
+
+        // gh's answers, and what it was asked.
+        let pull = format!(
+            r#"{{"number":5,"title":"Add b","author":{{"login":"ada"}},"headRefName":"feature","baseRefName":"main",
+               "isDraft":false,"state":"OPEN","comments":[],"reviewDecision":"","updatedAt":"2026-10-11T00:00:00Z",
+               "url":"u","statusCheckRollup":[],"body":"Adds b.","files":[{{"path":"a.rs","additions":1,"deletions":0,
+               "changeType":"MODIFIED"}}],"baseRefOid":"{base}","headRefOid":"{head}","mergeable":"MERGEABLE"}}"#
+        )
+        .replace('\n', " ");
+        std::fs::write(dir.join("pulls.json"), format!("[{pull}]")).unwrap();
+        std::fs::write(dir.join("pull.json"), &pull).unwrap();
+        std::fs::write(
+            dir.join("review.json"),
+            r#"{"id":11,"user":{"login":"bo"},"body":"Why b?","created_at":"2026-10-11T00:00:00Z","path":"a.rs","line":2}"#,
+        )
+        .unwrap();
+        let asked = dir.join("asked.log");
+        let script = format!(
+            r#"#!/bin/sh
+echo "$@" >> '{log}'
+case "$1 $2" in
+  "api user") echo ada ;;
+  "pr list") cat '{d}/pulls.json' ;;
+  "issue list") echo '[]' ;;
+  "pr view") if [ "$3" = "5" ]; then cat '{d}/pull.json'; else echo 'no pull requests found' >&2; exit 1; fi ;;
+  "api --paginate") cat '{d}/review.json' ;;
+  *) echo '{{}}' ;;
+esac
+"#,
+            log = asked.display(),
+            d = dir.display()
+        );
+        let fake = dir.join("gh");
+        std::fs::write(&fake, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        *crate::github::FAKE.lock().unwrap() = Some(fake);
+
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = repo.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        fn wait(cx: &mut gpui::VisualTestContext, done: &mut dyn FnMut(&mut gpui::VisualTestContext) -> bool) {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                if done(cx) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        workspace.update_in(cx, |w, window, cx| {
+            w.show_changes(&ShowChanges, window, cx);
+            w.git_view.update(cx, |v, cx| v.show_tab(crate::git_view::Tab::GitHub, cx));
+        });
+        let view = workspace.read_with(cx, |w, _| w.git_view.clone());
+        wait(cx, &mut |cx| view.read_with(cx, |v, _| v.github.pulls.len() == 1));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.github.account, Some(crate::github::Account::SignedIn("ada".into())));
+            assert_eq!(v.github.pulls[0].title, "Add b");
+            assert!(v.github.mine.is_none(), "main has no pull request");
+        });
+        workspace.update_in(cx, |w, window, cx| {
+            let view = w.git_view.clone();
+            w.git_view_event(&view, &crate::git_view::GitViewEvent::ShowPull(5), window, cx)
+        });
+        let page = workspace.read_with(cx, |w, _| w.github_page.as_ref().map(|(p, _)| p.clone())).expect("shown");
+        wait(cx, &mut |cx| page.read_with(cx, |p, _| p.detail.is_some()));
+        page.update(cx, |p, cx| p.show_file(0, cx));
+        wait(cx, &mut |cx| page.read_with(cx, |p, _| p.shown.is_some()));
+        page.read_with(cx, |p, cx| {
+            let editor = p.shown.as_ref().unwrap().read(cx);
+            assert_eq!(editor.buffer.rope().to_string(), "fn a() {}\nfn b() {}\n");
+            assert!(editor.in_review(), "its changes shown");
+            let threads = editor.threads();
+            assert_eq!(threads.len(), 1);
+            assert_eq!(threads[0].line, 1, "under the line it's on");
+            assert_eq!(threads[0].comments[0].1, "Why b?");
+        });
+        // Reply, from the thread's Reply…
+        let editor = page.read_with(cx, |p, _| p.shown.clone().unwrap());
+        editor.update(cx, |_, cx| cx.emit(crate::editor::EditorEvent::ReplyAsked(11)));
+        cx.run_until_parked();
+        assert_eq!(page.read_with(cx, |p, _| p.replying), Some(11));
+        page.update_in(cx, |p, window, cx| {
+            p.composer_for_test().update(cx, |input, cx| input.set_text("Because.", cx));
+            p.send_for_test(window, cx);
+        });
+        wait(cx, &mut |cx| page.read_with(cx, |p, _| p.replying.is_none()));
+        let asked_for = std::fs::read_to_string(&asked).unwrap();
+        assert!(asked_for.contains("api -X POST repos/{owner}/{repo}/pulls/5/comments/11/replies -f body=Because."), "{asked_for}");
+        cx.dispatch_action(crate::github_page::CloseGitHubPage);
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.github_page.is_none()));
+        *crate::github::FAKE.lock().unwrap() = None;
         std::fs::remove_dir_all(&dir).ok();
     }
 

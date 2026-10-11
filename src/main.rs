@@ -26,6 +26,8 @@ mod fs_ops;
 mod fuzzy;
 mod git;
 mod git_view;
+mod github;
+mod github_page;
 mod highlight;
 mod html_markdown;
 mod json_format;

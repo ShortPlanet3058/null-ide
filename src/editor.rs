@@ -1,4 +1,5 @@
 mod assist;
+pub use assist::Thread;
 mod bookmarks;
 mod brackets;
 mod breakpoints;
@@ -435,6 +436,8 @@ pub enum EditorEvent {
     },
     /// Every change of a review was kept or undone.
     Reviewed,
+    /// A thread's Reply clicked (a pull request's review comments): its id.
+    ReplyAsked(u64),
     /// Files dropped from the Finder on a Markdown file, at char offset `at`: the workspace
     /// puts links to them there.
     FilesDropped {
@@ -775,6 +778,8 @@ pub struct Editor {
     /// An AI task's changes to this file, being reviewed.
     review: Option<review::Review>,
     note: Option<assist::Note>,
+    /// Conversations shown between the lines (a pull request's review comments).
+    threads: Vec<assist::Thread>,
     ghost: Option<ghost::Ghost>,
     ghost_task: Option<Task<()>>,
     ghost_cache: Vec<(String, Vec<String>)>,
@@ -1006,6 +1011,7 @@ impl Editor {
             ai_change: None,
             review: None,
             note: None,
+            threads: Vec::new(),
             ghost: None,
             ghost_task: None,
             ghost_cache: Vec::new(),
