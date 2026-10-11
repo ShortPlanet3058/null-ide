@@ -791,6 +791,22 @@ impl Workspace {
                 }
                 FileTreeEvent::DiscardChanges(path, status) => this.discard_changes(path.clone(), *status, window, cx),
                 FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),
+                FileTreeEvent::Hide(path, folder) => {
+                    let root = this.tree.read(cx).root().to_path_buf();
+                    let Ok(inside) = path.strip_prefix(&root) else { return };
+                    // From the project's top, as .gitignore writes it: `/build/` (a folder), its
+                    // names as they are (`a[1].txt` not read as a pattern).
+                    let names: Vec<String> =
+                        inside.components().map(|c| gitignore_literal(&c.as_os_str().to_string_lossy())).collect();
+                    let pattern = format!("/{}{}", names.join("/"), if *folder { "/" } else { "" });
+                    match crate::settings::hide_in_project(&root, &pattern, cx) {
+                        Ok(()) => this.show_notice(
+                            format!("{pattern} hidden from the files, ⌘P and search (this project's settings)"),
+                            cx,
+                        ),
+                        Err(message) => this.show_notice(message, cx),
+                    }
+                }
             }),
             cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
             cx.observe(&lsp, |_, _, cx| cx.notify()),
@@ -3250,6 +3266,8 @@ impl Workspace {
         if ix >= self.tabs.len() {
             return;
         }
+        // (Mid-⌃Tab: the walk ends here, where it was.)
+        self.settle_switch();
         self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
         // A menu open on it (or on any text): gone with it.
@@ -4037,7 +4055,7 @@ impl Workspace {
 
     /// ⌃Tab: the tab used before this one; again with ⌃ still held, the one before that,
     /// and so on (⌃⇧Tab back). Letting go of ⌃ stays there.
-    fn switch_tab(&mut self, back: bool, held: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn switch_tab(&mut self, back: bool, held: bool, window: &mut Window, cx: &mut Context<Self>) {
         let open: Vec<gpui::EntityId> = self.tabs.iter().map(|t| t.editor.entity_id()).collect();
         self.used.retain(|id| open.contains(id));
         // Tabs never shown yet (opened with others, from the last session) come last.
@@ -4073,7 +4091,7 @@ impl Workspace {
 
     /// ⌃ let go after ⌃Tab: the tab reached is now the last used.
     fn settle_switch(&mut self) {
-        if let Some(at) = self.switching.take() {
+        if let Some(at) = self.switching.take().filter(|&at| at < self.used.len()) {
             let id = self.used.remove(at);
             self.used.insert(0, id);
         }
@@ -8073,6 +8091,60 @@ impl Workspace {
         cx.notify();
     }
 
+    /// While ⌃ is held after ⌃Tab: the tabs used lately, the one it has reached marked, so
+    /// it isn't a blind walk past a few.
+    fn render_tab_switcher(&self, cx: &App) -> Option<AnyElement> {
+        let at = self.switching?;
+        let theme = cx.global::<Theme>();
+        let labels = self.tab_labels(cx);
+        const SHOWN: usize = 9;
+        // A window of them, around the one reached.
+        let first = at.saturating_sub(SHOWN - 1);
+        let rows = self.used.iter().enumerate().skip(first).take(SHOWN).filter_map(|(i, id)| {
+            let ix = self.tabs.iter().position(|t| t.editor.entity_id() == *id)?;
+            let (name, folder) = labels.get(ix).cloned()?;
+            Some(
+                div()
+                    .h(px(28.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(ui::R_ROW))
+                    .text_color(if i == at { theme.foreground } else { theme.muted })
+                    .when(i == at, |row| row.bg(theme.accent_soft))
+                    .child(div().truncate().child(name))
+                    .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
+            )
+        });
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(120.))
+                .child(
+                    div()
+                        .w(px(320.))
+                        .p(px(6.))
+                        .flex()
+                        .flex_col()
+                        .rounded(px(ui::R_MODAL))
+                        .border_1()
+                        .border_color(theme.hairline)
+                        .bg(theme.raised)
+                        .shadow_lg()
+                        .text_size(px(ui::T_MD))
+                        .children(rows),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_text_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.text_menu.as_ref()?;
         let theme = cx.global::<Theme>();
@@ -8473,6 +8545,22 @@ fn moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
     Some(if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) })
 }
 
+/// A file or folder name as .gitignore matches it literally: its `\ * ? [ ]` and a trailing
+/// space escaped.
+fn gitignore_literal(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if matches!(c, '\\' | '*' | '?' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    if out.ends_with(' ') {
+        out.insert(out.len() - 1, '\\');
+    }
+    out
+}
+
 /// What's said before quitting with these commands running in terminals.
 fn still_running(running: &[String]) -> Option<String> {
     match running {
@@ -8829,6 +8917,7 @@ impl Render for Workspace {
         let welcome = self.welcome.as_ref().map(|(w, _)| w.clone());
         let tab_menu = self.render_tab_menu(cx);
         let text_menu = self.render_text_menu(cx);
+        let tab_switcher = self.render_tab_switcher(cx);
         let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
@@ -9246,9 +9335,11 @@ impl Render for Workspace {
         div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
-            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, _| {
-                if !event.modifiers.control {
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                if !event.modifiers.control && this.switching.is_some() {
                     this.settle_switch();
+                    // (The tabs' card goes now, not at the next redraw.)
+                    cx.notify();
                 }
             }))
             // Files dropped from the Finder open, as with Open With (a folder becomes the project).
@@ -9552,6 +9643,7 @@ impl Render for Workspace {
             .when(!self.focus_mode, |root| root.child(status))
             .children(tab_menu)
             .children(text_menu)
+            .children(tab_switcher)
             .when_some(overlay, |root, layer| {
                 root.child(
                     div()
@@ -9804,6 +9896,18 @@ mod tests {
     }
 
     /// A terminal's menu: Copy only with something selected.
+    /// Hidden by name: a name's pattern characters matched as they are.
+    #[test]
+    fn hidden_names_are_matched_as_written() {
+        assert_eq!(gitignore_literal("a[1].txt"), "a\\[1\\].txt");
+        assert_eq!(gitignore_literal("*"), "\\*");
+        assert_eq!(gitignore_literal("x "), "x\\ ");
+        let root = std::path::Path::new("/p");
+        let rules = crate::project_index::hidden_rules(root, &[format!("/{}", gitignore_literal("a[1].txt"))]);
+        assert!(rules.matched(root.join("a[1].txt"), false).is_ignore());
+        assert!(!rules.matched(root.join("a1.txt"), false).is_ignore());
+    }
+
     #[test]
     fn quitting_says_what_still_runs() {
         assert_eq!(still_running(&[]), None);
@@ -11095,8 +11199,11 @@ mod tests {
             assert_eq!(shown(w, cx), "c.txt");
             w.switch_tab(false, true, window, cx);
             assert_eq!(shown(w, cx), "b.txt");
+            // While held, the tabs show, by last use.
+            assert!(w.render_tab_switcher(cx).is_some());
             // Let go: b is the last used, so ⌃Tab alone goes back to a.
             w.settle_switch();
+            assert!(w.render_tab_switcher(cx).is_none(), "gone with ⌃");
             w.switch_tab(false, false, window, cx);
             assert_eq!(shown(w, cx), "a.txt");
             w.switch_tab(false, false, window, cx);
@@ -11786,6 +11893,33 @@ mod tests {
             w.read_reported(&ran("make", "nothing to be done\n"), cx);
             assert!(w.problem_places(cx).is_empty());
         });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hide from Files: the folder goes from the files, written into the project's settings.
+    #[gpui::test]
+    fn hiding_from_the_files(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("hide-from-files");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/out.txt"), "x").unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let names = |cx: &mut gpui::VisualTestContext| workspace.read_with(cx, |w, cx| w.tree.read(cx).shown_names());
+        assert!(names(cx).contains(&"build".to_string()));
+        cx.update(|_, cx| crate::settings::hide_in_project(&dir, "/build/", cx)).unwrap();
+        cx.run_until_parked();
+        // (The project's settings folder shows now, beside what's left.)
+        assert_eq!(names(cx), [".null", "a.txt"]);
+        let written = std::fs::read_to_string(crate::settings::project_file(&dir)).unwrap();
+        assert!(written.contains("files_exclude") && written.contains("/build/"), "{written}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -180,6 +180,8 @@ pub enum FileTreeEvent {
     DiscardChanges(PathBuf, crate::git::FileStatus),
     /// Something to tell the person, like a failed operation.
     Notice(String),
+    /// Hide from Files: this path (a folder, if so) kept out, in the project's settings.
+    Hide(PathBuf, bool),
 }
 
 #[derive(Clone)]
@@ -294,6 +296,8 @@ enum MenuItem {
     Reveal,
     OpenInTerminal,
     FindInFolder,
+    /// Kept out of the files, ⌘P and search, in this project (its settings).
+    Hide,
     DiscardChanges,
     CollapseAll,
     Trash,
@@ -318,6 +322,7 @@ impl MenuItem {
             MenuItem::Reveal => REVEAL_LABEL,
             MenuItem::OpenInTerminal => "Open in Terminal",
             MenuItem::FindInFolder => "Find in Folder…",
+            MenuItem::Hide => "Hide from Files",
             MenuItem::DiscardChanges => "Discard Changes…",
             MenuItem::CollapseAll => "Collapse All Folders",
             MenuItem::Trash => "Move to Trash",
@@ -674,6 +679,12 @@ impl FileTree {
         if let Some(ix) = self.selected_ix() {
             self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
+    }
+
+    /// The names shown, in order.
+    #[cfg(test)]
+    pub fn shown_names(&self) -> Vec<String> {
+        (0..self.rows.len()).filter_map(|i| self.entry_at(i)).map(|e| e.name.to_string()).collect()
     }
 
     fn entry_at(&self, ix: usize) -> Option<&Entry> {
@@ -1299,7 +1310,7 @@ impl FileTree {
         self.also.clear();
         let items = match &target {
             Some(e) if e.is_dir => {
-                vec![
+                let mut items = vec![
                     NewFile,
                     NewFolder,
                     Rename,
@@ -1309,8 +1320,13 @@ impl FileTree {
                     Reveal,
                     OpenInTerminal,
                     FindInFolder,
-                    Trash,
-                ]
+                ];
+                // (Not the project's settings folder: what's hidden is written there.)
+                if e.name.as_ref() != ".null" {
+                    items.push(Hide);
+                }
+                items.push(Trash);
+                items
             }
             Some(e) => {
                 let mut items = vec![Open];
@@ -1335,7 +1351,7 @@ impl FileTree {
                 if self.git.get(&e.path).is_some_and(|s| *s != crate::git::FileStatus::Conflicted) {
                     items.push(DiscardChanges);
                 }
-                items.push(Trash);
+                items.extend([Hide, Trash]);
                 items
             }
             None => vec![NewFile, NewFolder, CopyPath, Reveal, OpenInTerminal, CollapseAll],
@@ -1400,6 +1416,11 @@ impl FileTree {
             MenuItem::FindInFolder => {
                 if let Some(entry) = target {
                     cx.emit(FileTreeEvent::FindInFolder(entry.path));
+                }
+            }
+            MenuItem::Hide => {
+                if let Some(entry) = target {
+                    cx.emit(FileTreeEvent::Hide(entry.path, entry.is_dir));
                 }
             }
             MenuItem::OpenInTerminal => {
