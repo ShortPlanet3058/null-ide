@@ -6760,6 +6760,8 @@ impl Workspace {
     }
 
     fn render_sidebar_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let conflicts = self.git_status.iter().filter(|(_, s)| *s == git::FileStatus::Conflicted).count();
+        let badge = if conflicts > 0 { conflicts } else { self.git_status.len() };
         let theme = cx.global::<Theme>();
         let searching = self.sidebar_search.on;
         let outlining = !searching && self.sidebar_outline;
@@ -6801,9 +6803,24 @@ impl Workspace {
                     .child(tab("search", "Search", searching).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
                     ))
-                    .child(tab("changes", "Changes", changes).active(|s| s.opacity(0.7)).on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_changes(&ShowChanges, window, cx)),
-                    )),
+                    .child(
+                        tab("changes", "Changes", changes)
+                            .gap(px(3.))
+                            // How many files changed (conflicts, when there are some, in red).
+                            .when(badge > 0, |t| {
+                                t.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(ui::T_XS))
+                                        .text_color(if conflicts > 0 { theme.git_deleted } else { theme.caret })
+                                        .child(badge.to_string()),
+                                )
+                            })
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_changes(&ShowChanges, window, cx)
+                            })),
+                    ),
             )
             .into_any_element()
     }
