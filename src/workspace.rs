@@ -2827,10 +2827,20 @@ impl Workspace {
     }
 
     /// A Markdown preview beside its source follows it: the block at the source's top
-    /// is at the preview's.
+    /// is at the preview's. Scrolled by hand, the preview leads: the source follows it.
     fn sync_preview(&mut self, source: &Entity<Editor>, cx: &mut Context<Self>) {
         // (A Markdown file's lines are its preview's; a notebook's JSON lines aren't.)
-        if source.read(cx).reading || !source.read(cx).is_markdown() {
+        if !source.read(cx).is_markdown() {
+            return;
+        }
+        if source.read(cx).reading {
+            let preview = source;
+            let Some(line) = preview.update(cx, |p, _| p.take_preview_scroll()) else { return };
+            for twin in self.twins_of(preview, cx) {
+                if !twin.read(cx).reading {
+                    twin.update(cx, |source, cx| source.show_line_at_top(line, cx));
+                }
+            }
             return;
         }
         let line = source.read(cx).top_line();
@@ -12866,6 +12876,52 @@ mod tests {
         assert!(!marked(&file, cx), "a warning isn't an error");
         report(None, cx);
         assert!(!marked(&dir.join("src"), cx));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A preview scrolled by hand: its source beside it follows, the block at the
+    /// preview's top at the source's; the source's own following doesn't move it back.
+    #[gpui::test]
+    fn the_source_follows_its_preview(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("preview-leads");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text: String = (0..120).map(|i| format!("## Part {i}\n\nWords about part {i}.\n\n")).collect();
+        std::fs::write(dir.join("guide.md"), &text).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("guide.md"), window, cx);
+            w.open_preview_to_the_side(&OpenPreviewToTheSide, window, cx);
+        });
+        cx.run_until_parked();
+        let (source, preview) = workspace.read_with(cx, |w, cx| {
+            let reading = |t: &&Tab| t.editor.read(cx).reading;
+            let preview = w.tabs.iter().find(reading).expect("a preview").editor.clone();
+            let source = w.tabs.iter().find(|t| !reading(t)).expect("the source").editor.clone();
+            (source, preview)
+        });
+        assert_eq!(source.read_with(cx, |e, _| e.top_line()), 0);
+        let at = cx.debug_bounds("markdown-preview").expect("the preview drawn").center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Lines(gpui::point(0., -10.)),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let top = source.read_with(cx, |e, _| e.top_line());
+        assert!(top > 0, "the source didn't follow");
+        // At the start of the block shown at the preview's top: a heading or its words.
+        assert!(top % 4 == 0 || top % 4 == 2, "{top}");
+        let offset = preview.read_with(cx, |p, _| p.reading_scroll.offset().y);
+        cx.run_until_parked();
+        assert_eq!(preview.read_with(cx, |p, _| p.reading_scroll.offset().y), offset, "the preview stays put");
         std::fs::remove_dir_all(&dir).ok();
     }
 
