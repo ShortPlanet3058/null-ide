@@ -705,6 +705,9 @@ pub struct Editor {
     symbol_marks: marks::SymbolMarks,
     /// Lines (from 0) where the debugger should stop; they move with edits.
     pub breakpoints: Vec<usize>,
+    /// How the tests on these lines did, from the Tests view: (line, 0 running, 1 passed,
+    /// 2 failed). A dot in the gutter each.
+    pub test_marks: Vec<(usize, u8)>,
     /// Breakpoints that only stop when something holds: (line, condition).
     pub breakpoint_conditions: Vec<(usize, String)>,
     breakpoints_revision: u64,
@@ -948,6 +951,7 @@ impl Editor {
             expansions: Default::default(),
             cursor_history: Vec::new(),
             snippet: None,
+            test_marks: Vec::new(),
             breakpoints: Vec::new(),
             breakpoint_conditions: Vec::new(),
             breakpoints_revision: 0,

@@ -594,6 +594,8 @@ pub struct Workspace {
     tests_task: Option<Task<()>>,
     /// How each test (file, name) did when last run.
     test_status: std::collections::HashMap<(PathBuf, String), TestStatus>,
+    /// A run's output that came before the project's tests were known (see `find_tests`).
+    results_waiting: Vec<crate::terminal::Ran>,
     /// The tests run from the list, and the command running them.
     tests_running: Option<(String, Vec<(PathBuf, String)>)>,
     tests_scroll: UniformListScrollHandle,
@@ -718,6 +720,9 @@ pub struct Workspace {
     pub quitting: bool,
     /// Unsaved work was just kept for next time: the backup stays.
     keeping_unsaved: bool,
+    /// Opened by `null --wait <file>` (git's editor): that file's tab closing quits, and
+    /// nothing of the project's session or backups is written.
+    pub waiting_for: Option<PathBuf>,
     /// Quitting (or closing the window) though a command runs in a terminal: said yes to.
     stopping_commands: bool,
     /// Writing unsaved work to its backup, once typing pauses.
@@ -886,6 +891,7 @@ impl Workspace {
             tests: None,
             tests_task: None,
             test_status: std::collections::HashMap::new(),
+            results_waiting: Vec::new(),
             tests_running: None,
             tests_scroll: UniformListScrollHandle::new(),
             outline: None,
@@ -933,6 +939,7 @@ impl Workspace {
             backup_task: None,
             quitting: false,
             keeping_unsaved: false,
+            waiting_for: None,
             stopping_commands: false,
             view_before_preview: None,
             ai_task: None,
@@ -1039,6 +1046,12 @@ impl Workspace {
             }
         }));
         workspace.python_env = crate::python_env::find(workspace.tree.read(cx).root());
+        // Null crashed last time: said once, with where it's written down.
+        if !cfg!(test)
+            && let Some(said) = crate::crash::untold()
+        {
+            workspace.show_notice(said, cx);
+        }
         // settings.json couldn't be read at launch: said, not left to pass for the defaults.
         if let Some(why) = Settings::unreadable() {
             workspace.show_notice(
@@ -1090,6 +1103,9 @@ impl Workspace {
     }
 
     fn save_session(&self, cx: &App) {
+        if self.waiting_for.is_some() {
+            return;
+        }
         self.session(cx).save(self.tree.read(cx).root());
     }
 
@@ -1660,7 +1676,7 @@ impl Workspace {
     }
 
     /// Opens `path` with `range` selected, remembering where the caret was.
-    fn go_to(&mut self, path: PathBuf, range: lsp_types::Range, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_to(&mut self, path: PathBuf, range: lsp_types::Range, window: &mut Window, cx: &mut Context<Self>) {
         let here = self.here(cx);
         if here.as_ref().is_some_and(|h| h.path == path) {
             self.remember_place(here);
@@ -2814,6 +2830,36 @@ impl Workspace {
     }
 
     /// Tabs on `side`, by index.
+    /// How the tests of the files shown did, as dots in their gutters (see
+    /// `Editor::test_marks`); handed over only when changed.
+    fn show_test_marks(&mut self, cx: &mut Context<Self>) {
+        let shown: Vec<Entity<Editor>> = self.shown.iter().flatten().cloned().collect();
+        for editor in shown {
+            let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { continue };
+            let marks: Vec<(usize, u8)> = self
+                .tests
+                .iter()
+                .flat_map(|files| files.iter())
+                .filter(|file| file.path == path)
+                .flat_map(|file| &file.tests)
+                .filter_map(|test| {
+                    let status = match self.test_status.get(&(path.clone(), test.id.clone()))? {
+                        TestStatus::Running => 0,
+                        TestStatus::Passed => 1,
+                        TestStatus::Failed => 2,
+                    };
+                    Some((test.line, status))
+                })
+                .collect();
+            if editor.read(cx).test_marks != marks {
+                editor.update(cx, |editor, cx| {
+                    editor.test_marks = marks;
+                    cx.notify();
+                });
+            }
+        }
+    }
+
     /// ⌘1…⌘9 (see `GoToTab`).
     fn go_to_tab(&mut self, &GoToTab(n): &GoToTab, window: &mut Window, cx: &mut Context<Self>) {
         let side = self.active.map_or(0, |a| self.tabs[a].side);
@@ -3121,11 +3167,16 @@ impl Workspace {
         let Ok(exe) = std::env::current_exe() else { return };
         // From the app, `open -a` hands paths to the running Null; from a build, run it directly.
         let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf);
-        let launch = match &bundle {
-            Some(app) => format!("open -a \"{}\" \"$p\"", app.display()),
-            None => format!("\"{}\" \"$p\" &", exe.display()),
+        // (`--wait`: until the file's tab closes, as git's editor. The app gets a Null of its
+        // own for it; `open` can't hand a running one a line, so the app gets the file alone.)
+        let (launch, waiting) = match &bundle {
+            Some(app) => (
+                format!("open -a \"{}\" \"$f\"", app.display()),
+                format!("open -W -n -a \"{}\" --args --wait \"$p\"", app.display()),
+            ),
+            None => (format!("\"{}\" \"$p\" &", exe.display()), format!("\"{}\" --wait \"$p\"", exe.display())),
         };
-        let script = shell_script(&launch);
+        let script = shell_script(&launch, &waiting);
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         let system = PathBuf::from("/usr/local/bin");
         let writable = |dir: &Path| {
@@ -3198,6 +3249,7 @@ impl Workspace {
         // Another project's tests: looked for again, if they show.
         self.tests = None;
         self.tests_task = None;
+        self.results_waiting.clear();
         self.test_status.clear();
         self.tests_running = None;
         self.refresh_git(cx);
@@ -3268,6 +3320,13 @@ impl Workspace {
         }
         // (Mid-⌃Tab: the walk ends here, where it was.)
         self.settle_switch();
+        // The file `null --wait` was for, closed (its last copy): done, the one waiting goes
+        // on, once the rest is asked about as quitting does.
+        let path = self.tabs[ix].editor.read(cx).path().map(Path::to_path_buf);
+        let copies = self.tabs.iter().filter(|t| t.editor.read(cx).path().map(Path::to_path_buf) == path).count();
+        if self.waiting_for.is_some() && self.waiting_for == path && copies == 1 {
+            cx.defer_in(window, |this, window, cx| this.quit(&Quit, window, cx));
+        }
         self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
         // A menu open on it (or on any text): gone with it.
@@ -3529,7 +3588,10 @@ impl Workspace {
         }
         // Quitting, closing the window, opening another project: unsaved work is kept for
         // next time rather than asked about (closing a tab still asks).
-        if cx.global::<Settings>().keep_unsaved && !matches!(action, CloseAction::CloseTabs(_)) {
+        if cx.global::<Settings>().keep_unsaved
+            && !matches!(action, CloseAction::CloseTabs(_))
+            && self.waiting_for.is_none()
+        {
             let root = self.tree.read(cx).root().to_path_buf();
             crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
             self.keeping_unsaved = true;
@@ -3686,6 +3748,10 @@ impl Workspace {
     }
 
     fn write_backups(&mut self, cx: &mut Context<Self>) {
+        // (A `--wait` window keeps nothing for the project: it's git's message, not its work.)
+        if self.waiting_for.is_some() {
+            return;
+        }
         let root = self.tree.read(cx).root().to_path_buf();
         let unsaved = self.unsaved_files(cx);
         cx.background_executor()
@@ -3696,7 +3762,7 @@ impl Workspace {
     /// Null quitting without asking (logging out, the Mac restarting): unsaved work is
     /// kept now, not a moment later, so it comes back next time.
     fn write_backups_now(&mut self, cx: &mut Context<Self>) {
-        if self.quitting {
+        if self.quitting || self.waiting_for.is_some() {
             return;
         }
         let root = self.tree.read(cx).root().to_path_buf();
@@ -5273,6 +5339,9 @@ impl Workspace {
             let found = cx.background_executor().spawn(async move { crate::test_at::discover(&root) }).await;
             this.update(cx, |this, cx| {
                 this.tests = Some(std::rc::Rc::new(found));
+                for ran in std::mem::take(&mut this.results_waiting) {
+                    this.read_test_results(&ran);
+                }
                 cx.notify();
             })
             .ok();
@@ -6759,7 +6828,17 @@ impl Workspace {
                 }
             }
             TerminalEvent::Ran(ran) => {
-                this.read_test_results(ran);
+                // Tests run before the project's were looked for (from the text, or typed):
+                // looked for now, and how they did read once they're known.
+                if this.tests.is_none() && !crate::test_at::results(&ran.output).is_empty() {
+                    // (One search for them, however many runs wait.)
+                    if this.results_waiting.is_empty() {
+                        this.find_tests(cx);
+                    }
+                    this.results_waiting.push(ran.clone());
+                } else {
+                    this.read_test_results(ran);
+                }
                 this.read_reported(ran, cx);
                 // `poetry install`, `poetry env use`: Poetry's environments are kept outside
                 // the project, where no change is seen.
@@ -8464,16 +8543,23 @@ fn shorten_path(path: &str, max: usize) -> String {
     format!("…/{kept}")
 }
 
-/// The `null` command: each path made absolute (created when missing, as editors do),
-/// then handed to Null with `launch`, which reads it as `$p`.
-fn shell_script(launch: &str) -> String {
+/// The `null` command: each path made absolute (created when missing, as editors do; a
+/// place after it, `a.rs:42`, isn't part of its name), then handed to Null with `launch`
+/// (or `waiting`, after `--wait`), which reads it as `$p` (`$f` without its place).
+fn shell_script(launch: &str, waiting: &str) -> String {
     format!(
-        "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`.\n\
+        "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`, `null a.rs:42`.\n\
+         # `null --wait <file>` returns once its tab is closed (git's editor: GIT_EDITOR=\"null --wait\").\n\
+         wait=\n\
+         [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
          for p in \"$@\"; do\n\
          \tcase \"$p\" in /*) ;; *) p=\"$PWD/$p\" ;; esac\n\
-         \t[ -e \"$p\" ] || : > \"$p\"\n\
-         \t{launch}\n\
+         \tf=\"$p\"\n\
+         \tfor i in 1 2; do r=\"${{f##*:}}\"; case \"$r\" in ''|*[!0-9]*) break ;; esac; [ \"$r\" = \"$f\" ] && break; f=\"${{f%:*}}\"; done\n\
+         \t[ -e \"$p\" ] && f=\"$p\"\n\
+         \t[ -e \"$f\" ] || : > \"$f\"\n\
+         \tif [ -n \"$wait\" ]; then {waiting}; else {launch}; fi\n\
          done\n"
     )
 }
@@ -8587,6 +8673,7 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.show_test_marks(cx);
         // The files open in tabs, for a search of those only.
         let open: Vec<PathBuf> =
             self.tabs.iter().filter_map(|t| t.editor.read(cx).path().map(Path::to_path_buf)).collect();
@@ -11319,7 +11406,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("log");
         // A stand-in for Null that writes down what it was given.
-        let script = shell_script(&format!("echo \"$p\" >> \"{}\"", log.display()));
+        let script = shell_script(
+            &format!("echo \"$p\" >> \"{}\"", log.display()),
+            &format!("echo \"wait $p\" >> \"{}\"", log.display()),
+        );
         let command = dir.join("null");
         std::fs::write(&command, script).unwrap();
         let run = std::process::Command::new("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
@@ -11329,6 +11419,21 @@ mod tests {
         assert!(given.lines().next().unwrap().ends_with("/new.txt"), "{given}");
         assert!(dir.join("new.txt").exists());
         assert_eq!(given.lines().count(), 2);
+        // A place after the name: handed over, but no file named with it.
+        let run = std::process::Command::new("sh").arg(&command).args(["new.txt:4:2"]).current_dir(&dir).status();
+        assert!(run.unwrap().success());
+        assert!(!dir.join("new.txt:4:2").exists());
+        assert!(std::fs::read_to_string(&log).unwrap().lines().last().unwrap().ends_with("/new.txt:4:2"));
+        // A folder with a `:2` in its name isn't cut: only a place at the end is.
+        std::fs::create_dir_all(dir.join("notes:2026")).unwrap();
+        let run = std::process::Command::new("sh").arg(&command).args(["notes:2026/todo.md"]).current_dir(&dir).status();
+        assert!(run.unwrap().success());
+        assert!(dir.join("notes:2026/todo.md").exists() && !dir.join("notes").exists());
+        // --wait: the other way of handing it over.
+        let run = std::process::Command::new("sh").arg(&command).args(["--wait", "MSG"]).current_dir(&dir).status();
+        assert!(run.unwrap().success());
+        let last = std::fs::read_to_string(&log).unwrap().lines().last().unwrap().to_string();
+        assert!(last.starts_with("wait ") && last.ends_with("/MSG"), "{last}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -11842,6 +11947,9 @@ mod tests {
         // A test added and saved: listed.
         workspace.update_in(cx, |w, window, cx| w.open_file(path.clone(), window, cx));
         let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+        // How they did, in the file's gutter: adds passed (line 3); takes not known.
+        workspace.update(cx, |w, cx| w.show_test_marks(cx));
+        assert_eq!(editor.read_with(cx, |e, _| e.test_marks.clone()), [(3, 1)]);
         let more = code.replace("    fn takes() {}\n", "    fn takes() {}\n    #[test]\n    fn more() {}\n");
         editor.update(cx, |e, cx| {
             e.restore_unsaved(&more, cx);
