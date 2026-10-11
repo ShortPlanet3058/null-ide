@@ -395,6 +395,12 @@ impl Editor {
     fn apply_change(&mut self, answer: String, instruction: String, cx: &mut Context<Self>) {
         let Some(prompt) = self.prompt.take() else { return };
         let mut text = ai::strip_code_fence(&answer);
+        // A small model sends back code around the part asked about too (the function, or
+        // the whole file): what repeats the lines above it and below it is left out.
+        let asked = &prompt.lines;
+        let before: Vec<String> = (0..asked.start).map(|l| self.buffer.line_text(l)).collect();
+        let after: Vec<String> = (asked.end..self.buffer.len_lines()).map(|l| self.buffer.line_text(l)).collect();
+        text = without_context(&text, &before, &after);
         if prompt.original.ends_with('\n') && !text.ends_with('\n') {
             text.push('\n');
         }
@@ -924,9 +930,54 @@ impl Editor {
     }
 }
 
+/// `answer` without the lines at its start that repeat the end of `before` (the file above
+/// the part asked about), and those at its end that repeat the start of `after`: something
+/// of the answer stays.
+fn without_context(answer: &str, before: &[String], after: &[String]) -> String {
+    let lines: Vec<&str> = answer.lines().collect();
+    let same = |a: &str, b: &str| a.trim_end() == b.trim_end();
+    let most = lines.len().saturating_sub(1);
+    let head = (1..=most.min(before.len()))
+        .rev()
+        .find(|&k| lines[..k].iter().zip(&before[before.len() - k..]).all(|(a, b)| same(a, b)))
+        .unwrap_or(0);
+    let room = lines.len() - head - 1;
+    let tail = (1..=room.min(after.len()))
+        .rev()
+        .find(|&m| lines[lines.len() - m..].iter().zip(&after[..m]).all(|(a, b)| same(a, b)))
+        .unwrap_or(0);
+    if head == 0 && tail == 0 {
+        return answer.to_string();
+    }
+    let mut kept = lines[head..lines.len() - tail].join("\n");
+    if answer.ends_with('\n') {
+        kept.push('\n');
+    }
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The function around the lines asked about (or the whole file) sent back: only the
+    /// part asked about is kept.
+    #[test]
+    fn code_around_the_part_asked_about_is_left_out() {
+        let lines = |text: &str| text.lines().map(String::from).collect::<Vec<_>>();
+        let before = lines("fn main() {");
+        let after = lines("    let unused = 3;\n}\n\nfn helper() -> i32 {\n    42\n}");
+        let answer = "fn main() {\n    let first = 5;\n    let second = 2;\n    println!(\"{}\", first + second);\n    let unused = 3;\n}\n\nfn helper() -> i32 {\n    42\n}\n";
+        assert_eq!(
+            without_context(answer, &before, &after),
+            "    let first = 5;\n    let second = 2;\n    println!(\"{}\", first + second);\n"
+        );
+        // Just the part: as it is.
+        let part = "    let first = 5;\n";
+        assert_eq!(without_context(part, &before, &after), part);
+        // An answer that is only the lines around: one line of it stays (not nothing).
+        assert_eq!(without_context("fn main() {\n", &before, &after), "fn main() {\n");
+    }
     use crate::buffer::Buffer;
     use gpui::{EntityInputHandler as _, TestAppContext, VisualTestContext};
     use std::path::PathBuf;
