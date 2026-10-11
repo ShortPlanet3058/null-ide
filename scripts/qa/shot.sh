@@ -21,6 +21,8 @@
 # first frame.) A program run in its terminal is yours to choose: `run pbcopy` would
 # reach the Mac's clipboard.
 #
+# NULL_TRACE=1 has it say how long starting and opening files take (in OUT.png.log).
+#
 # Needs `cargo build` first (target/debug/null).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -113,6 +115,7 @@ env -i \
     RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
     CARGO_TARGET_DIR="$home/target" CARGO_NET_OFFLINE=true \
     NULL_DATA_DIR="$home/data" NULL_QA="$steps" NULL_QA_FRONT="${NULL_QA_FRONT:-1}" NULL_QA_ACK="$home/ack" \
+    ${NULL_TRACE:+NULL_TRACE=1} \
     "$bin" ${NULL_QA_WAIT:+--wait} "$project${NULL_QA_FILE:+/$NULL_QA_FILE}" > "$log" 2>&1 &
 pid=$!
 set +m

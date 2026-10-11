@@ -6,7 +6,19 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
+
+/// Whether the Mac's checker has started (see `warm`): until it has, lines aren't checked,
+/// so opening a file never waits for it (its first use took 48 ms of the first drawing).
+static READY: AtomicBool = AtomicBool::new(cfg!(test));
+
+/// The checker started (its languages found), once the window is up.
+pub fn warm() {
+    #[cfg(all(target_os = "macos", not(test)))]
+    LazyLock::force(&mac::LANGUAGES);
+    READY.store(true, Ordering::Relaxed);
+}
 
 /// Lines asked about (by a hash of their text), and the byte ranges in them the checker
 /// found wrong.
@@ -82,7 +94,7 @@ pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
 /// The misspelled words of `line`: its `words` (those `keep` says are checked) that the
 /// checker finds wrong.
 pub fn misspelled_words(line: &str, keep: impl Fn(&Range<usize>) -> bool) -> Vec<Range<usize>> {
-    if line.len() > LONGEST {
+    if line.len() > LONGEST || !READY.load(Ordering::Relaxed) {
         return Vec::new();
     }
     let checked: Vec<Range<usize>> = words(line).into_iter().filter(|r| keep(r)).collect();

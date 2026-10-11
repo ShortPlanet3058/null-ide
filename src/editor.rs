@@ -555,6 +555,8 @@ pub struct Editor {
     pub spans: Vec<Span>,
     /// The longest line's width in columns, for the buffer revision it was measured at.
     longest_line: std::cell::Cell<(u64, usize)>,
+    /// A big file's longest line, being measured in the background as it opens.
+    measuring_longest: Option<Task<()>>,
     /// Set for an image or a file that isn't text, shown instead of the text.
     pub preview: Option<crate::preview::Preview>,
     /// What a tab with no file is called, when it's one Null opened ("Language server log").
@@ -606,6 +608,8 @@ pub struct Editor {
     pub(crate) reading_scroll: gpui::ScrollHandle,
     /// The merge conflicts in the text, and the revision they were found at.
     conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
+    /// A big file's conflicts, being looked for in the background as it opens.
+    finding_conflicts: Option<Task<()>>,
     /// The buffer revision and byte range `spans` cover.
     spans_for: Option<(u64, Range<usize>)>,
     /// `problems()` for a (diagnostics version, buffer revision).
@@ -787,6 +791,10 @@ pub struct Editor {
     threads: Vec<assist::Thread>,
     /// The text's width the blocks drawn over it were last sized for.
     pub blocks_width: Option<Pixels>,
+    /// A big file's first syntax tree, being made in the background.
+    parse_task: Option<Task<()>>,
+    /// With `NULL_TRACE`: when its file began opening, until it's first drawn.
+    pub trace_opened: Option<(PathBuf, std::time::Instant)>,
     ghost: Option<ghost::Ghost>,
     ghost_task: Option<Task<()>>,
     ghost_cache: Vec<(String, Vec<String>)>,
@@ -845,6 +853,26 @@ pub fn fingerprint(text: &str) -> Fingerprint {
     (text.len(), hasher.finish())
 }
 
+/// A file this big has its longest line counted in bytes, and measured in the background
+/// as it opens.
+const BIG_FILE: usize = 4 * 1024 * 1024;
+
+/// The longest line of `rope`, in bytes.
+fn longest_in_bytes(rope: &ropey::Rope) -> usize {
+    let (mut longest, mut current) = (0, 0);
+    for chunk in rope.chunks() {
+        let bytes = chunk.as_bytes();
+        let mut start = 0;
+        for end in memchr::memchr_iter(b'\n', bytes) {
+            longest = longest.max(current + end - start);
+            current = 0;
+            start = end + 1;
+        }
+        current += bytes.len() - start;
+    }
+    longest.max(current)
+}
+
 /// Colours for a file, unless it's too big to colour as you type: a minified bundle's one
 /// long line, or a file of many megabytes, is parsed again after every keystroke, which
 /// took longer than the keystroke. Those show as plain text, as in other editors.
@@ -872,13 +900,18 @@ impl Editor {
             Some(language_pick::Kind::Grammar(l)) => Some(l),
             _ => None,
         };
-        let highlighter = highlighter_for(language, &buffer);
+        let highlighter = {
+            let _step = crate::trace::step(|| "    highlighter made (its query, once a language)".into());
+            highlighter_for(language, &buffer)
+        };
         let language_name = by_name.or(first_line_language).map_or(language_pick::PLAIN, |k| k.name());
+        let _style_step = crate::trace::step(|| "    indentation and line endings read".into());
         let style = crate::file_style::FileStyle::for_file(
             path.as_deref(),
             &buffer.slice(0..buffer.len_chars().min(200_000)),
             cx.global::<Settings>().indent_for(language_name),
         );
+        drop(_style_step);
         let mut editor = Self {
             focus_handle: cx.focus_handle(),
             writing_focus: cx.focus_handle(),
@@ -889,6 +922,7 @@ impl Editor {
             spans: Vec::new(),
             spans_for: None,
             longest_line: std::cell::Cell::new((u64::MAX, 0)),
+            measuring_longest: None,
             preview: None,
             untitled_name: None,
             binary: None,
@@ -912,6 +946,7 @@ impl Editor {
             preview_scrolled: false,
             reading_scroll: gpui::ScrollHandle::new(),
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
+            finding_conflicts: None,
             problems_cache: Default::default(),
             data_column_cache: Default::default(),
             pinned: Default::default(),
@@ -1021,6 +1056,7 @@ impl Editor {
             note: None,
             threads: Vec::new(),
             blocks_width: None,
+            trace_opened: None,
             ghost: None,
             ghost_task: None,
             ghost_cache: Vec::new(),
@@ -1030,14 +1066,78 @@ impl Editor {
             search_task: None,
             paste_format_task: None,
             blocks: Vec::new(),
+            parse_task: None,
         };
+        editor.start_colouring(cx);
         editor.rehighlight();
         editor
     }
 
+    /// A big file's longest line, measured in the background (59 ms of 170 MB held up its
+    /// first drawing): until then, scrolling sideways goes as far as the rows on screen.
+    fn measure_longest_line(&mut self, cx: &mut Context<Self>) {
+        if self.buffer.rope().len_bytes() <= BIG_FILE {
+            return;
+        }
+        let (rope, revision) = (self.buffer.rope().clone(), self.buffer.revision());
+        self.measuring_longest = Some(cx.spawn(async move |this, cx| {
+            let cols = cx.background_executor().spawn(async move { longest_in_bytes(&rope) }).await;
+            this.update(cx, |this, cx| {
+                // (Edited since: those lines are measured from here, next time it's asked.)
+                if this.longest_line.get().0 == u64::MAX {
+                    this.longest_line.set((revision, cols));
+                }
+                this.measuring_longest = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The file's syntax, first made: now for a file of an ordinary size (coloured from the
+    /// first drawing), else in the background (a big file shows as plain text for a moment,
+    /// then in colour), so opening it never waits long.
+    fn start_colouring(&mut self, cx: &mut Context<Self>) {
+        /// Up to this size, made now: about 150 ms at most on this 2018 Mac.
+        const NOW_UP_TO: usize = 512 * 1024;
+        /// …and never longer than this, whatever the file (one slow to parse).
+        const BUDGET: Duration = Duration::from_millis(250);
+        self.parse_task = None;
+        let Some(highlighter) = &mut self.highlighter else { return };
+        let _step = crate::trace::step(|| "  syntax tree started".into());
+        if self.buffer.rope().len_bytes() <= NOW_UP_TO && highlighter.try_first_sync(&self.buffer, BUDGET) {
+            return;
+        }
+        highlighter.parsing = true;
+        let parse = highlighter.background_parse(&self.buffer);
+        self.parse_task = Some(cx.spawn(async move |this, cx| {
+            let made = cx.background_executor().spawn(async move { parse() }).await;
+            this.update(cx, |this, cx| {
+                let Some(highlighter) = &mut this.highlighter else { return };
+                match made {
+                    Some((tree, revision)) => highlighter.install(tree, revision),
+                    // (Couldn't: made here when next needed.)
+                    None => highlighter.parsing = false,
+                }
+                crate::trace::mark("syntax tree made in the background");
+                // Coloured now, folds and all.
+                this.spans_for = None;
+                this.pinned_spans.clear();
+                this.folds.forget_foldable();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// Opens `path`, or an empty buffer that will be saved there if it doesn't exist yet.
     pub fn open(path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) -> Self {
-        let read = crate::encoding::read(&path);
+        let _opening = crate::trace::step(|| format!("opened {}", path.display()));
+        let began = crate::trace::on().then(|| (path.clone(), std::time::Instant::now()));
+        let read = {
+            let _step = crate::trace::step(|| "  read and decoded".into());
+            crate::encoding::read(&path)
+        };
         // An image, or a file that isn't text: shown, never edited or saved over.
         if let Some(preview) = crate::preview::of(&path, &read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind()))
         {
@@ -1049,7 +1149,24 @@ impl Editor {
         let (text, encoding) = read.unwrap_or_default();
         // A notebook: its cells as text to write in.
         let cells = is_notebook_path(&path).then(|| crate::notebook::to_cells_text(&text)).flatten();
-        let mut editor = Self::new(Buffer::from_text(cells.as_deref().unwrap_or(&text)), Some(path), cx);
+        let (buffer, on_disk) = {
+            let _step = crate::trace::step(|| "  buffer made (and the file's fingerprint)".into());
+            // A big file's fingerprint taken meanwhile, on another core (46 ms of 170 MB).
+            const BESIDE_FROM: usize = 4 * 1024 * 1024;
+            if text.len() > BESIDE_FROM {
+                std::thread::scope(|s| {
+                    let print = s.spawn(|| fingerprint(&text));
+                    let buffer = Buffer::from_text(cells.as_deref().unwrap_or(&text));
+                    (buffer, print.join().unwrap_or_else(|_| fingerprint(&text)))
+                })
+            } else {
+                (Buffer::from_text(cells.as_deref().unwrap_or(&text)), fingerprint(&text))
+            }
+        };
+        let mut editor = {
+            let _step = crate::trace::step(|| "  editor made".into());
+            Self::new(buffer, Some(path), cx)
+        };
         if cells.is_some() {
             editor.notebook = Some(text.clone());
             // In its kernel's language (Python's colours, not JSON's).
@@ -1061,7 +1178,11 @@ impl Editor {
                 editor.choose_language(Some(kind), cx);
             }
         }
-        editor.on_disk = Some(fingerprint(&text));
+        let _rest = crate::trace::step(|| "  fingerprint, git base, language server".into());
+        editor.trace_opened = began;
+        editor.on_disk = Some(on_disk);
+        editor.measure_longest_line(cx);
+        editor.find_conflicts_meanwhile(cx);
         editor.disk_stamp = disk_stamp(&editor.path.clone().unwrap_or_default());
         editor.read_only = is_read_only(&editor.path.clone().unwrap_or_default());
         editor.encoding = encoding;
@@ -1234,6 +1355,7 @@ impl Editor {
             self.chosen_language = None;
         }
         self.highlighter = highlighter_for(self.language(), &self.buffer);
+        self.start_colouring(cx);
         *self.brackets.borrow_mut() = None;
         // Now that its language is known (name, first line, or chosen): its indentation.
         self.indent_as_language(cx);
@@ -1338,7 +1460,6 @@ impl Editor {
     /// after typing, only the edited lines, so it can stay a little wide after a long line
     /// shrinks (some extra room to scroll) but never costs a pass over the file.
     pub(crate) fn longest_line(&self) -> usize {
-        const BIG_FILE: usize = 4 * 1024 * 1024;
         let width = |line: ropey::RopeSlice| {
             // A very long line counts a column a character, as it's drawn (see `wrap::LONG_LINE`).
             if line.len_chars() > crate::wrap::LONG_LINE {
@@ -1350,6 +1471,10 @@ impl Editor {
         if revision == self.buffer.revision() {
             return cols;
         }
+        // Being measured (see `measure_longest_line`): the rows on screen meanwhile.
+        if revision == u64::MAX && self.measuring_longest.is_some() {
+            return 0;
+        }
         let rope = self.buffer.rope();
         let last = self.buffer.len_lines().saturating_sub(1);
         let cols = match self.buffer.edits_since(revision).filter(|_| revision != u64::MAX) {
@@ -1360,7 +1485,9 @@ impl Editor {
             // A big file is measured a column a character: counting columns through every
             // character of a 70 MB log took half a second, on opening and after each undo.
             // The rows on screen are measured as drawn, so a wide one still scrolls fully.
-            None if rope.len_bytes() > BIG_FILE => rope.lines().map(|l| l.len_chars()).max().unwrap_or(0),
+            // (In bytes, from where the line breaks are: ropey's line by line took 275 ms on a
+            // 170 MB log. An accented line counts a little wide: only more room to scroll.)
+            None if rope.len_bytes() > BIG_FILE => longest_in_bytes(rope),
             None => rope.lines().map(width).max().unwrap_or(0),
         };
         self.longest_line.set((self.buffer.revision(), cols));
@@ -1386,6 +1513,12 @@ impl Editor {
             return self.basic_highlight(wanted, MAX_ROOM_BYTES);
         }
         let Some(highlighter) = &mut self.highlighter else { return };
+        // (The first tree still being made: plain text until it comes.)
+        if !highlighter.ready(&self.buffer) {
+            self.spans.clear();
+            self.spans_for = None;
+            return;
+        }
         let revision = self.buffer.revision();
         let edited = match &self.spans_for {
             Some((r, range)) if *r == revision => {
@@ -1532,7 +1665,9 @@ impl Editor {
             return spans;
         }
         let Some(highlighter) = &mut self.highlighter else { return Vec::new() };
-        highlighter.sync(&self.buffer);
+        if !highlighter.ready(&self.buffer) {
+            return Vec::new();
+        }
         highlighter.spans(self.buffer.rope(), start..end)
     }
 
@@ -5483,6 +5618,88 @@ mod tests {
     /// matches as they are now, never text that was one before the last replace.
     #[gpui::test]
     fn replacing_quickly_in_a_big_file_replaces_only_matches(cx: &mut TestAppContext) {
+        replacing_quickly(cx)
+    }
+
+    /// A big file opens at once, plain: its syntax is made in the background, then it's
+    /// coloured (an edit made meanwhile caught up with).
+    #[gpui::test]
+    fn a_big_file_is_coloured_in_the_background(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let item = "pub fn item(x: u32) -> u32 {\n    let y = x.wrapping_mul(7);\n    if y % 3 == 0 { y + 1 } else { y }\n}\n\n";
+        let text = item.repeat((6 << 20) / item.len());
+        // (Looked at as it's made: the test's executor may finish the parse right after.)
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            let mut e = Editor::new(Buffer::from_text(&text), Some(PathBuf::from("big.rs")), cx);
+            assert!(e.highlighter.as_ref().is_some_and(|h| h.parsing), "too big to make while opening");
+            e.highlight_bytes(0..200);
+            assert!(e.spans.is_empty(), "plain meanwhile");
+            e.type_text_for_test(0, "// note\n", cx);
+            e
+        });
+        for _ in 0..600 {
+            cx.run_until_parked();
+            if e.read_with(cx, |e, _| e.highlighter.as_ref().is_some_and(|h| !h.parsing)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        e.update(cx, |e, _| {
+            e.highlight_bytes(0..200);
+            assert!(!e.spans.is_empty(), "coloured once the tree came");
+            // The comment typed meanwhile is one.
+            let (comment, _) = e.spans.iter().find(|(range, _)| range.start == 0).expect("the first line coloured");
+            assert!(comment.end >= "// note".len());
+        });
+    }
+
+    /// A big file opened: its longest line and its conflicts are found in the background
+    /// (none shown meanwhile), then known, and kept up to date as it's edited.
+    #[gpui::test]
+    fn a_big_file_measured_in_the_background(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = crate::tools::test_dir("big-file-measured");
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = "2026-10-11 INFO request served\n";
+        let wide = "x".repeat(5000);
+        let text = format!(
+            "{}{wide}\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> side\n",
+            line.repeat((5 << 20) / line.len())
+        );
+        let path = dir.join("big.log");
+        std::fs::write(&path, &text).unwrap();
+        let (e, cx) = cx.add_window_view(|_, cx| {
+            let e = Editor::open(path.clone(), None, cx);
+            assert_eq!(e.longest_line(), 0, "the rows on screen meanwhile");
+            assert!(e.conflicts().is_empty(), "none shown meanwhile");
+            e
+        });
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if e.read_with(cx, |e, _| e.measuring_longest.is_none() && e.finding_conflicts.is_none()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        e.update(cx, |e, cx| {
+            assert_eq!(e.longest_line(), 5000, "the wide line");
+            assert_eq!(e.conflicts().len(), 1);
+            // A wider line typed at the top: measured from what changed.
+            e.type_text_for_test(0, &"y".repeat(6000), cx);
+            assert!(e.longest_line() >= 6000);
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn replacing_quickly(cx: &mut TestAppContext) {
         cx.update(|cx| {
             cx.set_global(Settings::default());
             cx.set_global(Theme::oled());

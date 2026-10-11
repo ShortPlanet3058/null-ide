@@ -92,9 +92,11 @@ fn marker(line: RopeSlice) -> Option<Marker> {
 /// conflict, and this runs after every edit.
 fn might_have_conflicts(rope: &Rope) -> bool {
     // Seven in a row can straddle two chunks: count the `<` that end the last one.
+    // (memchr's search: `str::contains` took most of 57 ms over a 170 MB log.)
+    let markers = memchr::memmem::Finder::new(b"<<<<<<<");
     let mut trailing = 0;
     for chunk in rope.chunks() {
-        if chunk.contains("<<<<<<<") {
+        if markers.find(chunk.as_bytes()).is_some() {
             return true;
         }
         let leading = chunk.bytes().take_while(|&b| b == b'<').count();
@@ -149,8 +151,34 @@ fn label(line: &str) -> Option<String> {
 }
 
 impl Editor {
+    /// A big file's conflicts looked for in the background (35 ms of a 170 MB log held up
+    /// its first drawing): none shown until then.
+    pub(super) fn find_conflicts_meanwhile(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.buffer.rope().len_bytes() <= super::BIG_FILE {
+            return;
+        }
+        let (rope, revision) = (self.buffer.rope().clone(), self.buffer.revision());
+        self.finding_conflicts = Some(cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async move { find(&rope) }).await;
+            this.update(cx, |this, cx| {
+                let mut known = this.conflicts.borrow_mut();
+                // (Edited since: looked for again from there, when next asked.)
+                if known.0 == u64::MAX {
+                    *known = (revision, found.into());
+                }
+                drop(known);
+                this.finding_conflicts = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// The file's conflicts, found again only after the text changes.
     pub fn conflicts(&self) -> Rc<[Conflict]> {
+        if self.finding_conflicts.is_some() && self.conflicts.borrow().0 == u64::MAX {
+            return Rc::from([]);
+        }
         let mut known = self.conflicts.borrow_mut();
         let revision = self.buffer.revision();
         if known.0 != revision {

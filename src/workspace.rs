@@ -895,6 +895,7 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let _step = crate::trace::step(|| "workspace made (its session restored)".into());
         // This project's own settings, over yours, while its window is in front.
         crate::settings::use_project(&root, cx);
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
@@ -9779,6 +9780,11 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        let _first = FIRST
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+            .then(|| crate::trace::step(|| "window first laid out".into()))
+            .flatten();
         ui::apply_zoom(window, cx);
         self.show_test_marks(cx);
         // The files open in tabs, for a search of those only.

@@ -599,6 +599,9 @@ impl Element for EditorElement {
         let theme = cx.global::<Theme>().clone();
         let code_font = cx.global::<Fonts>().code.clone();
         self.editor.update(cx, |editor, cx| {
+            if editor.trace_opened.is_some() {
+                crate::trace::mark("    its drawing begins");
+            }
             let now = Instant::now();
             let focused = editor.focus_handle(cx).is_focused(window) && window.is_window_active();
             let font_size = editor.font_size;
@@ -672,7 +675,12 @@ impl Element for EditorElement {
                 let window = ((text_width - BAR - cw) / cw).floor().max(1.) as usize;
                 guide.map_or(window, |guide| window.min(guide.max(1)))
             });
+            // (With NULL_TRACE, the first drawing of a file opened: its steps timed.)
+            let first = editor.trace_opened.is_some();
+            let step = |what: &'static str| first.then(|| crate::trace::step(|| format!("    {what}"))).flatten();
+            let wrapping = step("rows laid out");
             editor.wrap.update(&editor.buffer, wrap_width, &editor.block_specs());
+            drop(wrapping);
             let total_rows = editor.wrap.rows();
             let (caret_row, _) = editor.wrap.to_display(caret_line, caret_col, &editor.buffer);
 
@@ -769,12 +777,17 @@ impl Element for EditorElement {
                     line + byte_in_line(&editor.buffer, text, r.line, r.cols.start)..end
                 })
                 .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end));
+            let colouring = step("coloured");
             if let Some(bytes) = &shown_bytes {
                 editor.highlight_bytes(bytes.clone());
             }
             editor.ensure_meaning(cx);
+            drop(colouring);
+            let spanning = step("colours with brackets' and the server's");
             // The server's colours over the grammar's, when it has said what names are.
             let meant = editor.spans_to_draw(shown_bytes.unwrap_or_default(), cx.global::<Settings>().bracket_colours);
+            drop(spanning);
+            let before_rows = step("folds, changes and rows of text");
             // The lines that can fold, needed only while the mouse is over the gutter.
             let over_gutter = editor.mouse_position.is_some_and(|p| {
                 p.x >= bounds.left() && p.x < text_bounds.left() && p.y >= bounds.top() && p.y < bounds.bottom()
@@ -827,6 +840,7 @@ impl Element for EditorElement {
             }
             // Links to nothing (Markdown), then misspelled words faintly: after the problems,
             // so a problem's colour wins.
+            let spelling = step("links and spelling checked");
             for (i, line) in lines_shown.clone().enumerate() {
                 for link in editor.broken_links_on_line(line, &texts[i]) {
                     underlines[i].push((link, Mark::Wavy(theme.warning)));
@@ -835,6 +849,7 @@ impl Element for EditorElement {
                     underlines[i].push((word, Mark::Wavy(theme.muted)));
                 }
             }
+            drop(spelling);
 
             let show_blame = cx.global::<crate::settings::Settings>().line_blame;
             // Something wrong on the caret's line: said at its end, before who changed it; with
@@ -870,6 +885,8 @@ impl Element for EditorElement {
             // In a changed line, the words that changed (drawn plainer in the old line, and
             // tinted on both sides below).
             let words = editor.word_changes(lines_shown.clone());
+            drop(before_rows);
+            let shaping = step("rows shaped");
             let row_layouts: Vec<RowLayout> = rows
                 .into_iter()
                 .map(|row| {
@@ -1065,6 +1082,7 @@ impl Element for EditorElement {
                     RowLayout { x: char_width * row.indent as f32, row, text, shaped, gaps }
                 })
                 .collect();
+            drop(shaping);
             // A tag's name with the caret in it, and its pair's (asked for before the rows
             // are borrowed below).
             let tag_pair = editor.tag_pair_at_caret();
@@ -1090,10 +1108,12 @@ impl Element for EditorElement {
             }
             // The limit is the file's longest line, not the longest on screen: scrolling down
             // past a long line doesn't pull the view back.
+            let measuring = step("longest line measured");
             let widest = row_layouts
                 .iter()
                 .map(|r| f32::from(r.x + r.shaped.width))
                 .fold(caret_x.max(editor.longest_line() as f32 * cw), f32::max);
+            drop(measuring);
             editor.scroll.x = editor.scroll.x.clamp(0., (widest + cw * 4. - text_width).max(0.));
             // A long line was built around where the view was: build it again where it is now.
             if editor.scroll.x != scrolled_from && windowed {
@@ -1891,6 +1911,13 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if crate::trace::on() {
+            let opened = self.editor.update(cx, |e, _| e.trace_opened.take());
+            if let Some((path, at)) = opened {
+                let since = at.elapsed().as_secs_f64() * 1000.;
+                crate::trace::mark(&format!("first drawn: {} ({since:.1} ms after opening began)", path.display()));
+            }
+        }
         let focus_handle = self.editor.read(cx).focus_handle(cx);
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.editor.clone()), cx);
         // A drag is followed everywhere in the window, not just over the editor.
