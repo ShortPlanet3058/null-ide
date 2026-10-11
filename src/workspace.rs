@@ -594,6 +594,8 @@ pub struct Workspace {
     tests_task: Option<Task<()>>,
     /// How each test (file, name) did when last run.
     test_status: std::collections::HashMap<(PathBuf, String), TestStatus>,
+    /// A run's output that came before the project's tests were known (see `find_tests`).
+    results_waiting: Option<crate::terminal::Ran>,
     /// The tests run from the list, and the command running them.
     tests_running: Option<(String, Vec<(PathBuf, String)>)>,
     tests_scroll: UniformListScrollHandle,
@@ -889,6 +891,7 @@ impl Workspace {
             tests: None,
             tests_task: None,
             test_status: std::collections::HashMap::new(),
+            results_waiting: None,
             tests_running: None,
             tests_scroll: UniformListScrollHandle::new(),
             outline: None,
@@ -2825,6 +2828,36 @@ impl Workspace {
     }
 
     /// Tabs on `side`, by index.
+    /// How the tests of the files shown did, as dots in their gutters (see
+    /// `Editor::test_marks`); handed over only when changed.
+    fn show_test_marks(&mut self, cx: &mut Context<Self>) {
+        let shown: Vec<Entity<Editor>> = self.shown.iter().flatten().cloned().collect();
+        for editor in shown {
+            let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { continue };
+            let marks: Vec<(usize, u8)> = self
+                .tests
+                .iter()
+                .flat_map(|files| files.iter())
+                .filter(|file| file.path == path)
+                .flat_map(|file| &file.tests)
+                .filter_map(|test| {
+                    let status = match self.test_status.get(&(path.clone(), test.id.clone()))? {
+                        TestStatus::Running => 0,
+                        TestStatus::Passed => 1,
+                        TestStatus::Failed => 2,
+                    };
+                    Some((test.line, status))
+                })
+                .collect();
+            if editor.read(cx).test_marks != marks {
+                editor.update(cx, |editor, cx| {
+                    editor.test_marks = marks;
+                    cx.notify();
+                });
+            }
+        }
+    }
+
     /// ⌘1…⌘9 (see `GoToTab`).
     fn go_to_tab(&mut self, &GoToTab(n): &GoToTab, window: &mut Window, cx: &mut Context<Self>) {
         let side = self.active.map_or(0, |a| self.tabs[a].side);
@@ -5301,6 +5334,9 @@ impl Workspace {
             let found = cx.background_executor().spawn(async move { crate::test_at::discover(&root) }).await;
             this.update(cx, |this, cx| {
                 this.tests = Some(std::rc::Rc::new(found));
+                if let Some(ran) = this.results_waiting.take() {
+                    this.read_test_results(&ran);
+                }
                 cx.notify();
             })
             .ok();
@@ -6787,7 +6823,14 @@ impl Workspace {
                 }
             }
             TerminalEvent::Ran(ran) => {
-                this.read_test_results(ran);
+                // Tests run before the project's were looked for (from the text, or typed):
+                // looked for now, and how they did read once they're known.
+                if this.tests.is_none() && !crate::test_at::results(&ran.output).is_empty() {
+                    this.results_waiting = Some(ran.clone());
+                    this.find_tests(cx);
+                } else {
+                    this.read_test_results(ran);
+                }
                 this.read_reported(ran, cx);
                 // `poetry install`, `poetry env use`: Poetry's environments are kept outside
                 // the project, where no change is seen.
@@ -8620,6 +8663,7 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.show_test_marks(cx);
         // The files open in tabs, for a search of those only.
         let open: Vec<PathBuf> =
             self.tabs.iter().filter_map(|t| t.editor.read(cx).path().map(Path::to_path_buf)).collect();
@@ -11888,6 +11932,9 @@ mod tests {
         // A test added and saved: listed.
         workspace.update_in(cx, |w, window, cx| w.open_file(path.clone(), window, cx));
         let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+        // How they did, in the file's gutter: adds passed (line 3); takes not known.
+        workspace.update(cx, |w, cx| w.show_test_marks(cx));
+        assert_eq!(editor.read_with(cx, |e, _| e.test_marks.clone()), [(3, 1)]);
         let more = code.replace("    fn takes() {}\n", "    fn takes() {}\n    #[test]\n    fn more() {}\n");
         editor.update(cx, |e, cx| {
             e.restore_unsaved(&more, cx);

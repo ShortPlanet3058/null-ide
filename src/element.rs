@@ -421,6 +421,8 @@ pub struct Prepaint {
     /// Each breakpoint's dot, and what kind: 0 plain, 1 with a condition or count, 2 a
     /// log point (prints, doesn't stop).
     breakpoint_dots: Vec<(Bounds<Pixels>, u8)>,
+    /// How each test on a line shown did (see `Editor::test_marks`): a small dot each.
+    test_dots: Vec<(Bounds<Pixels>, u8)>,
     /// Bookmarked lines when line numbers are hidden (shown, the number takes the accent).
     bookmark_dots: Vec<Bounds<Pixels>>,
     /// The line the debugger stopped on: a band across it, and a mark in the gutter.
@@ -1244,6 +1246,20 @@ impl Element for EditorElement {
                     })
                 })
                 .collect();
+            // Tests: a small dot where a breakpoint's would be (not over one).
+            let test_dot = px(6.);
+            let test_dots: Vec<(Bounds<Pixels>, u8)> = editor
+                .test_marks
+                .iter()
+                .filter(|(line, _)| lines_shown.contains(line) && !editor.breakpoints.contains(line))
+                .filter_map(|&(line, status)| {
+                    let rows = rows_of(line..line + 1);
+                    (!rows.is_empty()).then(|| {
+                        let y = row_top(rows.start) + (line_height - test_dot) / 2.;
+                        (Bounds::new(point(bounds.left() + px(6.), y), size(test_dot, test_dot)), status)
+                    })
+                })
+                .collect();
             let mark = px(6.);
             let bookmark_dots: Vec<Bounds<Pixels>> = editor
                 .bookmarks
@@ -1811,6 +1827,7 @@ impl Element for EditorElement {
                 line_height,
                 current_line,
                 breakpoint_dots,
+                test_dots,
                 bookmark_dots,
                 execution,
                 indent_guides,
@@ -1882,6 +1899,14 @@ impl Element for EditorElement {
                 _ => fill(*dot, theme.error).corner_radii(px(4.)),
             };
             window.paint_quad(quad);
+        }
+        for (dot, status) in &prepaint.test_dots {
+            let color = match status {
+                1 => theme.git_added,
+                2 => theme.error,
+                _ => theme.faint,
+            };
+            window.paint_quad(fill(*dot, color).corner_radii(dot.size.width / 2.));
         }
         for dot in &prepaint.bookmark_dots {
             window.paint_quad(fill(*dot, theme.caret).corner_radii(dot.size.width / 2.));
