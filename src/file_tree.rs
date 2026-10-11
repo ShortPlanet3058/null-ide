@@ -1310,7 +1310,7 @@ impl FileTree {
         self.also.clear();
         let items = match &target {
             Some(e) if e.is_dir => {
-                vec![
+                let mut items = vec![
                     NewFile,
                     NewFolder,
                     Rename,
@@ -1320,9 +1320,13 @@ impl FileTree {
                     Reveal,
                     OpenInTerminal,
                     FindInFolder,
-                    Hide,
-                    Trash,
-                ]
+                ];
+                // (Not the project's settings folder: what's hidden is written there.)
+                if e.name.as_ref() != ".null" {
+                    items.push(Hide);
+                }
+                items.push(Trash);
+                items
             }
             Some(e) => {
                 let mut items = vec![Open];

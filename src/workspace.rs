@@ -794,9 +794,11 @@ impl Workspace {
                 FileTreeEvent::Hide(path, folder) => {
                     let root = this.tree.read(cx).root().to_path_buf();
                     let Ok(inside) = path.strip_prefix(&root) else { return };
-                    // From the project's top, as .gitignore writes it: `/build/` (a folder).
-                    let pattern =
-                        format!("/{}{}", inside.to_string_lossy().replace('\\', "/"), if *folder { "/" } else { "" });
+                    // From the project's top, as .gitignore writes it: `/build/` (a folder), its
+                    // names as they are (`a[1].txt` not read as a pattern).
+                    let names: Vec<String> =
+                        inside.components().map(|c| gitignore_literal(&c.as_os_str().to_string_lossy())).collect();
+                    let pattern = format!("/{}{}", names.join("/"), if *folder { "/" } else { "" });
                     match crate::settings::hide_in_project(&root, &pattern, cx) {
                         Ok(()) => this.show_notice(
                             format!("{pattern} hidden from the files, ⌘P and search (this project's settings)"),
@@ -3264,6 +3266,8 @@ impl Workspace {
         if ix >= self.tabs.len() {
             return;
         }
+        // (Mid-⌃Tab: the walk ends here, where it was.)
+        self.settle_switch();
         self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
         // A menu open on it (or on any text): gone with it.
@@ -4087,7 +4091,7 @@ impl Workspace {
 
     /// ⌃ let go after ⌃Tab: the tab reached is now the last used.
     fn settle_switch(&mut self) {
-        if let Some(at) = self.switching.take() {
+        if let Some(at) = self.switching.take().filter(|&at| at < self.used.len()) {
             let id = self.used.remove(at);
             self.used.insert(0, id);
         }
@@ -8541,6 +8545,22 @@ fn moved_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
     Some(if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) })
 }
 
+/// A file or folder name as .gitignore matches it literally: its `\ * ? [ ]` and a trailing
+/// space escaped.
+fn gitignore_literal(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if matches!(c, '\\' | '*' | '?' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    if out.ends_with(' ') {
+        out.insert(out.len() - 1, '\\');
+    }
+    out
+}
+
 /// What's said before quitting with these commands running in terminals.
 fn still_running(running: &[String]) -> Option<String> {
     match running {
@@ -9315,9 +9335,11 @@ impl Render for Workspace {
         div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
-            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, _| {
-                if !event.modifiers.control {
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                if !event.modifiers.control && this.switching.is_some() {
                     this.settle_switch();
+                    // (The tabs' card goes now, not at the next redraw.)
+                    cx.notify();
                 }
             }))
             // Files dropped from the Finder open, as with Open With (a folder becomes the project).
@@ -9874,6 +9896,18 @@ mod tests {
     }
 
     /// A terminal's menu: Copy only with something selected.
+    /// Hidden by name: a name's pattern characters matched as they are.
+    #[test]
+    fn hidden_names_are_matched_as_written() {
+        assert_eq!(gitignore_literal("a[1].txt"), "a\\[1\\].txt");
+        assert_eq!(gitignore_literal("*"), "\\*");
+        assert_eq!(gitignore_literal("x "), "x\\ ");
+        let root = std::path::Path::new("/p");
+        let rules = crate::project_index::hidden_rules(root, &[format!("/{}", gitignore_literal("a[1].txt"))]);
+        assert!(rules.matched(root.join("a[1].txt"), false).is_ignore());
+        assert!(!rules.matched(root.join("a1.txt"), false).is_ignore());
+    }
+
     #[test]
     fn quitting_says_what_still_runs() {
         assert_eq!(still_running(&[]), None);

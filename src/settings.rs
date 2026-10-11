@@ -188,6 +188,14 @@ fn layered(mut under: JsonMap, over: &JsonMap) -> JsonMap {
     use serde_json::Value;
     for (key, value) in over {
         match (under.get_mut(key), value) {
+            // A project's hidden paths: VS Code's and Null's own, both.
+            (Some(Value::Array(theirs)), Value::Array(own)) if key == "files_exclude" => {
+                for path in own {
+                    if !theirs.contains(path) {
+                        theirs.push(path.clone());
+                    }
+                }
+            }
             (Some(Value::Object(langs)), Value::Object(theirs)) if key == "languages" => {
                 for (lang, set) in theirs {
                     let same = langs.keys().find(|k| k.eq_ignore_ascii_case(lang)).cloned();
@@ -827,7 +835,7 @@ impl Settings {
                 && !project.unreadable
                 && let Some(file) = &project.path
             {
-                save_project(file, &own);
+                save_project(file, &own).ok();
             }
             with_project(|p| {
                 if let Some(p) = p.as_mut()
@@ -982,7 +990,7 @@ pub fn reload(cx: &mut App) {
 }
 
 /// The project's settings, written into its file as it's written.
-fn save_project(file: &std::path::Path, values: &JsonMap) {
+fn save_project(file: &std::path::Path, values: &JsonMap) -> Result<(), String> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).ok();
     }
@@ -991,7 +999,10 @@ fn save_project(file: &std::path::Path, values: &JsonMap) {
         // Into it as it's written; one this can't follow isn't written over whole.
         Some(text) => match written_into(text, values, &serde_json::Value::Object(JsonMap::new())) {
             Some(text) => text,
-            None => return eprintln!("null: not saving over {}, which can't be followed", file.display()),
+            None => {
+                eprintln!("null: not saving over {}, which can't be followed", file.display());
+                return Err("This project's settings are written in a way Null can't follow: nothing changed".into());
+            }
         },
         None => serde_json::to_string_pretty(values).unwrap_or_default() + "\n",
     };
@@ -999,27 +1010,29 @@ fn save_project(file: &std::path::Path, values: &JsonMap) {
         && let Err(err) = crate::fs_ops::write_file(file, text.as_bytes())
     {
         eprintln!("null: couldn't save {}: {err}", file.display());
+        return Err(format!("Couldn't save this project's settings: {err}"));
     }
+    Ok(())
 }
 
 /// Hide from Files: `pattern` (`/build/`, as `.gitignore` writes it) added to the project's
-/// own `files_exclude`, in its `.null/settings.json`, and in use at once. What it hid
-/// already (VS Code's `files.exclude` too) goes on being hidden.
+/// own `files_exclude`, in its `.null/settings.json` (beside VS Code's `files.exclude`, read
+/// with it), and in use at once.
 pub fn hide_in_project(root: &std::path::Path, pattern: &str, cx: &mut App) -> Result<(), String> {
     use serde_json::Value;
     let path = project_file(root);
     let mut own = read_project(&path).map_err(|()| "This project's settings can't be read: put them right first")?;
-    let mut hidden: Vec<Value> = match own.get("files_exclude") {
-        Some(Value::Array(own)) => own.clone(),
-        _ => vscode_settings(root).get("files_exclude").and_then(Value::as_array).cloned().unwrap_or_default(),
-    };
+    let mut hidden: Vec<Value> = own.get("files_exclude").and_then(Value::as_array).cloned().unwrap_or_default();
     let pattern = Value::String(pattern.to_string());
     if !hidden.contains(&pattern) {
         hidden.push(pattern);
     }
     own.insert("files_exclude".into(), Value::Array(hidden));
-    save_project(&path, &own);
-    use_project(root, cx);
+    save_project(&path, &own)?;
+    // (Another window's project in use: this one's comes in when its window does.)
+    if project_in_use(root) || with_project(|p| p.is_none()) {
+        use_project(root, cx);
+    }
     Ok(())
 }
 
@@ -1359,6 +1372,10 @@ mod tests {
         assert!(!now.format_on_save_for("TypeScript") && !now.format_on_save_for("TSX"));
         assert!(now.format_on_save_for("Rust"));
         assert!(!now.languages.contains_key("markdown"), "nothing Null has for it");
+        // Hidden paths: .null's beside VS Code's, not in their place.
+        let own_hidden = serde_json::from_str::<JsonMap>(r#"{ "files_exclude": ["/build/"] }"#).unwrap();
+        let (both, _) = merged(&user, &layered(read.clone(), &own_hidden));
+        assert_eq!(both.files_exclude, ["**/*.pyc", "/build/"]);
         // .null's own win, a language's settings added to its.
         let own = serde_json::from_str::<JsonMap>(r#"{ "indent_size": 3, "languages": { "Python": { "word_wrap": false } } }"#)
             .unwrap();
