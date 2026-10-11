@@ -688,6 +688,8 @@ pub struct Workspace {
     /// The sidebar shows the Changes tab (git).
     sidebar_git: bool,
     git_view: Entity<crate::git_view::GitView>,
+    /// A commit looked at, in the place of the code (until a file's opened, or Esc).
+    git_page: Option<(Entity<crate::commit_page::CommitPage>, Subscription)>,
     /// The project's own Python environment (`.venv`), if it has one.
     python_env: Option<PathBuf>,
     /// The open file's (its package's own, in a monorepo), and which file that was for.
@@ -1007,6 +1009,7 @@ impl Workspace {
             sidebar_tests: false,
             sidebar_git: false,
             git_view,
+            git_page: None,
             python_env: None,
             python_env_here: None,
             tests: None,
@@ -3463,6 +3466,8 @@ impl Workspace {
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // A commit looked at gives way to the file.
+        self.git_page = None;
         self.show_tab(ix, true, window, cx);
     }
 
@@ -5563,6 +5568,37 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A commit from the history, in the place of the code.
+    fn show_commit(&mut self, commit: git::LogCommit, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let page = cx.new(|cx| crate::commit_page::CommitPage::new(root, commit, cx));
+        let subscription = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
+            use crate::commit_page::CommitPageEvent;
+            match event {
+                CommitPageEvent::Close => this.close_commit(window, cx),
+                CommitPageEvent::Said(said) => this.show_notice(said.clone(), cx),
+                CommitPageEvent::Changed => {
+                    this.refresh_git(cx);
+                    this.git_view.update(cx, |view, cx| view.refresh(cx));
+                }
+            }
+        });
+        window.focus(&page.focus_handle(cx));
+        self.git_page = Some((page, subscription));
+        cx.notify();
+    }
+
+    fn close_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_page.take().is_some() {
+            self.git_view.update(cx, |view, cx| {
+                view.shown = None;
+                cx.notify();
+            });
+            self.focus_main(window, cx);
+            cx.notify();
+        }
+    }
+
     fn git_view_event(
         &mut self,
         _: &Entity<crate::git_view::GitView>,
@@ -5591,6 +5627,7 @@ impl Workspace {
                 self.refresh_git(cx);
             }
             GitViewEvent::Draft(files) => self.write_commit_message_into(files.clone(), CommitTarget::Changes, cx),
+            GitViewEvent::ShowCommit(commit) => self.show_commit(commit.clone(), window, cx),
             GitViewEvent::Push => self.push_branch(&PushBranch, window, cx),
             GitViewEvent::Pull => self.pull_branch(&PullBranch, window, cx),
         }
@@ -9651,6 +9688,11 @@ impl Render for Workspace {
                 )
             })
         };
+        // A commit looked at takes the code's place.
+        let body = match &self.git_page {
+            Some((page, _)) => div().size_full().child(page.clone()),
+            None => body,
+        };
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
         // The welcome covers the whole window; the rest float over the work.
         let welcome = self.welcome.as_ref().map(|(w, _)| w.clone());
@@ -12561,6 +12603,71 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&git(&["show", "HEAD:new.txt"]).stdout), "hello\n");
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "ONE\ntwo\nthree\nfour\nfive\nSIX\n");
         assert!(view.read_with(cx, |v, cx| v.summary.read(cx).text().is_empty()), "the message cleared");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The history: a commit clicked opens in the code's place, its first file's changes
+    /// shown; Esc, or a file opened, gives the place back.
+    #[gpui::test]
+    fn a_commit_from_the_history(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("history-tab");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&["commit", "-q", "-am", "second"]);
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.show_changes(&ShowChanges, window, cx);
+            w.git_view.update(cx, |v, cx| v.show_tab(crate::git_view::Tab::History, cx));
+        });
+        let view = workspace.read_with(cx, |w, _| w.git_view.clone());
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |v, _| v.history.len() == 2) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let second = view.read_with(cx, |v, _| v.history[0].clone());
+        assert_eq!(second.subject, "second");
+        workspace.update_in(cx, |w, window, cx| {
+            let view = w.git_view.clone();
+            w.git_view_event(&view, &crate::git_view::GitViewEvent::ShowCommit(second), window, cx)
+        });
+        let page = workspace.read_with(cx, |w, _| w.git_page.as_ref().map(|(p, _)| p.clone())).expect("shown");
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if page.read_with(cx, |p, _| p.shown.is_some()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        page.read_with(cx, |p, cx| {
+            assert_eq!(p.files.len(), 1);
+            assert_eq!(p.files[0].added, 1);
+            let editor = p.shown.as_ref().expect("the file's changes").read(cx);
+            assert_eq!(editor.buffer.rope().to_string(), "one\ntwo\n");
+        });
+        cx.dispatch_action(crate::commit_page::CloseCommit);
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.git_page.is_none()), "Esc closes it");
         std::fs::remove_dir_all(&dir).ok();
     }
 

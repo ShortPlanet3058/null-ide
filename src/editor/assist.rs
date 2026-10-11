@@ -630,7 +630,8 @@ impl Editor {
                     });
                 }
             }
-            if let Some(index) = self.current_hunk() {
+            // (Text only looked at, as a commit has it: nothing to keep or undo.)
+            if let Some(index) = self.current_hunk().filter(|_| !self.read_only) {
                 let hunk = &review.hunks[index];
                 blocks.push(Block {
                     before_line: hunk.new.end.max(hunk.new.start),

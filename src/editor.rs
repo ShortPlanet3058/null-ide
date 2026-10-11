@@ -78,7 +78,7 @@ pub use fold::{Fold, FoldAll, FoldLevel1, FoldLevel2, FoldLevel3, Unfold, Unfold
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
 pub use invisible::RemoveInvisibleCharacters;
-pub use language_pick::{SetLanguage, by_name as language_by_name, names as language_names};
+pub use language_pick::{SetLanguage, by_name as language_by_name, by_path as language_by_path, names as language_names};
 pub use meaning::SEMANTIC_TYPES;
 pub use numbers::{Decrement, Increment};
 pub use refactor::{

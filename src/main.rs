@@ -10,6 +10,7 @@ mod buffer;
 mod clipboard_history;
 mod color_panel;
 mod colors;
+mod commit_page;
 mod crash;
 mod dap;
 mod debugger;

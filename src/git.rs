@@ -288,6 +288,123 @@ pub fn file_history(path: &Path, max: usize) -> Vec<FileCommit> {
         .collect()
 }
 
+/// A commit, as the repository's history lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogCommit {
+    pub id: String,
+    pub short: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    /// Unix seconds.
+    pub time: i64,
+    pub subject: String,
+    /// Branches and tags at it (`HEAD -> main`, `origin/main`, `tag: v1`).
+    pub refs: Vec<String>,
+}
+
+/// The repository's commits, newest first, every branch's (`max` at most).
+pub fn log(root: &Path, max: usize) -> Vec<LogCommit> {
+    let count = format!("-n{max}");
+    let format = "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%s%x1f%D%x1e";
+    let Some(out) = git(root, &["log", "--all", "--date-order", &count, format]) else { return Vec::new() };
+    out.split('\x1e')
+        .filter_map(|record| {
+            let fields: Vec<&str> = record.trim_start_matches('\n').split('\x1f').collect();
+            let [id, short, parents, author, time, subject, refs] = fields.as_slice() else { return None };
+            Some(LogCommit {
+                id: id.to_string(),
+                short: short.to_string(),
+                parents: parents.split_whitespace().map(str::to_string).collect(),
+                author: author.to_string(),
+                time: time.parse().unwrap_or(0),
+                subject: subject.to_string(),
+                refs: refs.split(", ").filter(|r| !r.is_empty()).map(str::to_string).collect(),
+            })
+        })
+        .collect()
+}
+
+/// A commit's whole message.
+pub fn message_of(root: &Path, id: &str) -> String {
+    git(root, &["log", "-n1", "--format=%B", id]).unwrap_or_default().trim_end().to_string()
+}
+
+/// A file a commit changed: its path from the repository's top, its lines added and taken
+/// out (none for a picture or other bytes), and how (`A`dded, `M`odified, `D`eleted…).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommitFile {
+    pub path: String,
+    pub added: usize,
+    pub removed: usize,
+    pub kind: char,
+}
+
+/// The files commit `id` changed (against its first parent, for a merge).
+pub fn commit_files(root: &Path, id: &str, first_parent: Option<&str>) -> Vec<CommitFile> {
+    let range: Vec<&str> = match first_parent {
+        Some(parent) => vec![parent, id],
+        None => vec!["--root", id],
+    };
+    let mut numstat = vec!["diff-tree", "-r", "--no-commit-id", "--numstat", "-M"];
+    numstat.extend(&range);
+    let mut kinds = vec!["diff-tree", "-r", "--no-commit-id", "--name-status", "-M"];
+    kinds.extend(&range);
+    let kinds: Vec<(char, String)> = git(root, &kinds)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.split('\t');
+            let kind = parts.next()?.chars().next()?;
+            Some((kind, parts.next_back()?.to_string()))
+        })
+        .collect();
+    git(root, &numstat)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.split('\t');
+            let (added, removed) = (parts.next()?, parts.next()?);
+            let path = parts.next_back()?.to_string();
+            // A rename's path is written `old => new`: the new one.
+            let path = path.rsplit(" => ").next().unwrap_or(&path).trim_end_matches('}').to_string();
+            let kind = kinds.iter().find(|(_, p)| *p == path).map_or('M', |(k, _)| *k);
+            Some(CommitFile { path, added: added.parse().unwrap_or(0), removed: removed.parse().unwrap_or(0), kind })
+        })
+        .collect()
+}
+
+/// A file (by its path from the repository's top) as commit `rev` has it.
+pub fn text_at(root: &Path, rev: &str, path: &str) -> Option<String> {
+    let output = command(root).args(["show", &format!("{rev}:{path}")]).output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Puts the work at commit `id` (no branch: looking at it, as it was).
+pub fn check_out(root: &Path, id: &str) -> Result<(), String> {
+    run(root, &["checkout", "-q", id]).map(|_| ())
+}
+
+/// A new commit taking commit `id`'s changes back.
+pub fn revert_commit(root: &Path, id: &str) -> Result<(), String> {
+    run(root, &with_mainline(root, &["revert", "--no-edit"], id)).map(|_| ())
+}
+
+/// Commit `id`'s changes, made again on this branch as a commit of its own.
+pub fn cherry_pick(root: &Path, id: &str) -> Result<(), String> {
+    run(root, &with_mainline(root, &["cherry-pick"], id)).map(|_| ())
+}
+
+/// `args` then `id`; a merge's changes are the ones it brought to its first parent (`-m 1`).
+fn with_mainline<'a>(root: &Path, args: &[&'a str], id: &'a str) -> Vec<&'a str> {
+    let parents = git(root, &["rev-list", "--parents", "-n", "1", id]).map_or(0, |l| l.split_whitespace().count() - 1);
+    let mut all = args.to_vec();
+    if parents > 1 {
+        all.extend(["-m", "1"]);
+    }
+    all.push(id);
+    all
+}
+
 /// The file as it was in `commit`, in its own encoding.
 pub fn file_at(path: &Path, commit: &FileCommit, encoding: crate::encoding::Encoding) -> Option<String> {
     let top = git(path.parent()?, &["rev-parse", "--show-toplevel"])?;
@@ -769,6 +886,56 @@ mod tests {
         assert_eq!(committed_text(&dir.join("link/src/a.rs"), Default::default()).as_deref(), Some("committed\n"));
         assert_eq!(committed_text(&repo.join("src/new.rs"), Default::default()), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The history: each commit with its parents, refs and files; a file as a commit had it.
+    #[test]
+    fn the_history_and_a_commit_s_files() {
+        let repo = crate::tools::test_dir("git-log");
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| git(&repo, args);
+        if run(&["init", "-q", "-b", "main"]).is_none() {
+            return;
+        }
+        run(&["config", "user.name", "t"]).unwrap();
+        run(&["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        run(&["add", "."]).unwrap();
+        run(&["commit", "-q", "-m", "first"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        run(&["add", "."]).unwrap();
+        run(&["commit", "-q", "-m", "second\n\nwhy it is"]).unwrap();
+        run(&["tag", "v1"]).unwrap();
+        let log = log(&repo, 10);
+        assert_eq!(log.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(), ["second", "first"]);
+        assert_eq!(log[0].parents, [log[1].id.clone()]);
+        assert!(log[0].refs.iter().any(|r| r == "tag: v1"), "{:?}", log[0].refs);
+        assert_eq!(message_of(&repo, &log[0].id), "second\n\nwhy it is");
+        let files = commit_files(&repo, &log[0].id, Some(&log[1].id));
+        assert_eq!(files.len(), 2);
+        let a = files.iter().find(|f| f.path == "a.txt").unwrap();
+        assert_eq!((a.added, a.removed, a.kind), (1, 0, 'M'));
+        assert_eq!(files.iter().find(|f| f.path == "b.txt").unwrap().kind, 'A');
+        assert_eq!(commit_files(&repo, &log[1].id, None).len(), 1, "the first commit's own");
+        assert_eq!(text_at(&repo, &log[1].id, "a.txt").as_deref(), Some("one\n"));
+        // Taken back: a new commit; made again: another.
+        revert_commit(&repo, &log[0].id).unwrap();
+        assert!(!repo.join("b.txt").exists());
+        cherry_pick(&repo, &log[0].id).unwrap();
+        assert!(repo.join("b.txt").exists());
+        // A merge, taken back: what it brought in goes.
+        run(&["checkout", "-q", "-b", "side", &log[1].id]).unwrap();
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        run(&["add", "."]).unwrap();
+        run(&["commit", "-q", "-m", "side"]).unwrap();
+        run(&["checkout", "-q", "main"]).unwrap();
+        run(&["merge", "-q", "--no-ff", "side", "-m", "merge side"]).unwrap();
+        assert!(repo.join("c.txt").exists());
+        revert_commit(&repo, "HEAD").unwrap();
+        assert!(!repo.join("c.txt").exists());
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     /// Some of a file's changes: the committed text with those only.
