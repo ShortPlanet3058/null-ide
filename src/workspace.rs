@@ -113,6 +113,7 @@ actions!(
         StepInto,
         StepOut,
         AddWatch,
+        EvaluateInDebugger,
         PauseDebugging,
         NextProblem,
         ToggleIndentGuides,
@@ -205,6 +206,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f11", StepInto, ctx),
         KeyBinding::new("shift-f11", StepOut, ctx),
         KeyBinding::new("enter", AddWatch, Some("DebugWatch")),
+        KeyBinding::new("enter", EvaluateInDebugger, Some("DebugConsole")),
         KeyBinding::new("enter", ConfirmTerminalName, Some("TerminalName")),
         KeyBinding::new("escape", CancelTerminalName, Some("TerminalName")),
         KeyBinding::new("f8", NextProblem, ctx),
@@ -689,7 +691,7 @@ pub struct Workspace {
     /// While paused, the panel shows the variables and the calls; this shows the output instead.
     debug_show_output: bool,
     /// The paused call's variables the code shows, with values worth showing.
-    debug_locals: Vec<(String, String)>,
+    debug_locals: Vec<crate::debugger::Variable>,
     /// Renames asked for and waiting their turn (see `queue_rename`), and whether one is
     /// under way.
     renames: std::collections::VecDeque<(PathBuf, PathBuf)>,
@@ -702,6 +704,8 @@ pub struct Workspace {
     terminal_rename: Option<TerminalRename>,
     /// Where an expression to watch is typed, under the variables while paused.
     debug_watch: Entity<crate::text_input::TextInput>,
+    /// The Debug panel's console line (while paused).
+    debug_console: Entity<crate::text_input::TextInput>,
     /// The program to debug, when the project doesn't say (no Cargo.toml): asked once.
     debug_program: Option<PathBuf>,
     /// The projects for the list about to open.
@@ -959,6 +963,7 @@ impl Workspace {
             debug_show_output: false,
             debug_locals: Vec::new(),
             debug_watch: cx.new(|cx| crate::text_input::TextInput::new("Watch an expression", cx)),
+            debug_console: cx.new(|cx| crate::text_input::TextInput::new("An expression, or an lldb command", cx)),
             terminal_rename: None,
             reported: Vec::new(),
             renames: Default::default(),
@@ -6322,11 +6327,7 @@ impl Workspace {
         }
         // Unless the paused call's code is open, every variable with a value worth showing.
         self.debug_locals = match event {
-            DebuggerEvent::Stopped(stop) => stop
-                .locals
-                .iter()
-                .filter_map(|(name, value)| Some((name.clone(), crate::debugger::clean_value(value)?)))
-                .collect(),
+            DebuggerEvent::Stopped(stop) => crate::debugger::panel_variables(None, &stop.variables),
             _ => Vec::new(),
         };
         if let DebuggerEvent::Stopped(stop) = event
@@ -6353,7 +6354,7 @@ impl Workspace {
                             .iter()
                             .filter_map(|(n, v)| Some((n.clone(), crate::debugger::clean_value(v)?)))
                             .collect();
-                        shown = Some(crate::debugger::shown_locals(&lines, &stop.locals));
+                        shown = Some(crate::debugger::panel_variables(Some(&lines), &stop.variables));
                     });
                 }
             }
@@ -6477,13 +6478,45 @@ impl Workspace {
         let body = match stopped.filter(|_| !showing_output) {
             // Paused: the call's variables, and the calls that led to it (a click looks at one).
             Some(stop) => {
-                let variables = self.debug_locals.iter().map(|(name, value)| {
+                // Each, and inside the ones unfolded (a click on one with something inside).
+                let rows = crate::debugger::variable_rows(&self.debug_locals, &debugger.fields, &debugger.unfolded);
+                let variables = rows.into_iter().enumerate().map(|(i, row)| {
+                    let reference = row.variable.reference;
+                    let value = if row.depth == 0 {
+                        row.variable.value.clone()
+                    } else {
+                        crate::debugger::clean_value(&row.variable.value).unwrap_or_default()
+                    };
+                    let turn = if row.unfolded { std::f32::consts::FRAC_PI_2 } else { 0. };
+                    let marker = div().flex_none().size(px(12.)).flex().items_center().justify_center().when(
+                        reference > 0,
+                        |d| {
+                            d.child(
+                                svg()
+                                    .path("icons/chevron-right.svg")
+                                    .size(px(10.))
+                                    .text_color(theme.faint)
+                                    .with_transformation(gpui::Transformation::rotate(gpui::radians(turn))),
+                            )
+                        },
+                    );
+                    let path = row.path;
                     div()
+                        .id(("dbg-var", i))
                         .flex()
-                        .gap(px(10.))
+                        .items_center()
+                        .gap(px(6.))
+                        .pl(px(row.depth as f32 * 14.))
                         .whitespace_nowrap()
-                        .child(div().text_color(theme.foreground).child(name.clone()))
-                        .child(div().min_w_0().truncate().text_color(theme.muted).child(value.clone()))
+                        .child(marker)
+                        .child(div().flex_none().text_color(theme.foreground).child(row.variable.name.clone()))
+                        .child(div().pl(px(4.)).min_w_0().truncate().text_color(theme.muted).child(value))
+                        .when(reference > 0, |d| {
+                            d.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                let path = path.clone();
+                                this.debugger.update(cx, |d, cx| d.toggle_unfolded(path, reference, cx));
+                            }))
+                        })
                 });
                 let watches: Vec<AnyElement> = debugger
                     .watches
@@ -6600,6 +6633,8 @@ impl Workspace {
             }
             None => {
                 let output = debugger.output.lines().map(|line| div().child(line.to_string()));
+                // While paused, a line to work out an expression (or give lldb a command) at.
+                let paused = matches!(debugger.state, DebugState::Stopped(_));
                 div()
                     .id("debug-output")
                     .flex_1()
@@ -6612,6 +6647,18 @@ impl Workspace {
                     .text_size(px(12.5))
                     .text_color(theme.muted)
                     .children(output)
+                    .when(paused, |d| {
+                        d.child(
+                            div()
+                                .key_context("DebugConsole")
+                                .mt(px(4.))
+                                .flex()
+                                .gap(px(6.))
+                                .text_color(theme.foreground)
+                                .child(div().flex_none().text_color(theme.caret).child("›"))
+                                .child(div().flex_1().min_w_0().child(self.debug_console.clone())),
+                        )
+                    })
             }
         };
         Some(
@@ -9624,6 +9671,11 @@ impl Render for Workspace {
                 let expression = this.debug_watch.read(cx).text().to_string();
                 this.debugger.update(cx, |d, cx| d.add_watch(&expression, cx));
                 this.debug_watch.update(cx, |input, cx| input.set_text("", cx));
+            }))
+            .on_action(cx.listener(|this, _: &EvaluateInDebugger, _, cx| {
+                let expression = this.debug_console.read(cx).text().to_string();
+                this.debugger.update(cx, |d, cx| d.evaluate(&expression, cx));
+                this.debug_console.update(cx, |input, cx| input.set_text("", cx));
             }))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::next_terminal))
