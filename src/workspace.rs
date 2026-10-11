@@ -364,6 +364,16 @@ struct TextMenu {
 
 /// What a terminal's menu offers: copying what's selected, pasting, clearing; another
 /// terminal beside it or a new one.
+/// What a merge (rebase, …) is called in what's said about it.
+fn joining_name(kind: git::Joining) -> &'static str {
+    match kind {
+        git::Joining::Merge => "the merge",
+        git::Joining::Rebase => "the rebase",
+        git::Joining::CherryPick => "the cherry-pick",
+        git::Joining::Revert => "the revert",
+    }
+}
+
 fn terminal_menu_items(selected: bool) -> Vec<TextMenuItem> {
     let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group, at_click: false };
     let mut items = Vec::new();
@@ -690,6 +700,10 @@ pub struct Workspace {
     git_view: Entity<crate::git_view::GitView>,
     /// A commit looked at, in the place of the code (until a file's opened, or Esc).
     git_page: Option<(Entity<crate::commit_page::CommitPage>, Subscription)>,
+    /// A merge (rebase, cherry-pick, revert) git is waiting in, and the files in it with
+    /// conflicts left.
+    joining: Option<git::JoiningState>,
+    to_settle: Vec<PathBuf>,
     /// The project's own Python environment (`.venv`), if it has one.
     python_env: Option<PathBuf>,
     /// The open file's (its package's own, in a monorepo), and which file that was for.
@@ -1010,6 +1024,8 @@ impl Workspace {
             sidebar_git: false,
             git_view,
             git_page: None,
+            joining: None,
+            to_settle: Vec::new(),
             python_env: None,
             python_env_here: None,
             tests: None,
@@ -1549,9 +1565,23 @@ impl Workspace {
         self.git_status_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, _| this.git_status_at = Instant::now()).ok();
-            let (changed, sync) =
-                cx.background_executor().spawn(async move { (git::status(&root), git::ahead_behind(&root)) }).await;
+            let (changed, sync, joining, to_settle) = cx
+                .background_executor()
+                .spawn(async move {
+                    let changed = git::status(&root);
+                    let joining = git::joining(&root);
+                    // (Conflicted in git's index, and markers still in the file.)
+                    let to_settle: Vec<PathBuf> = changed
+                        .iter()
+                        .filter(|(path, status)| *status == git::FileStatus::Conflicted && git::still_marked(path))
+                        .map(|(path, _)| path.clone())
+                        .collect();
+                    (changed, git::ahead_behind(&root), joining, to_settle)
+                })
+                .await;
             this.update(cx, |this, cx| {
+                this.joining = joining;
+                this.to_settle = to_settle;
                 this.tree.update(cx, |tree, cx| tree.set_git_status(changed.clone(), cx));
                 this.git_status = changed;
                 this.sync = sync;
@@ -1759,12 +1789,18 @@ impl Workspace {
 
     /// Returns the changes set aside last. Conflicts open at the first, where ⌘. resolves each.
     fn bring_back_changes(&mut self, _: &BringBackChanges, window: &mut Window, cx: &mut Context<Self>) {
+        self.bring_back_at(0, window, cx);
+    }
+
+    /// Returns the changes set aside at `index` (0: the latest).
+    fn bring_back_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
+        self.save_named_tabs(cx);
         let root = self.tree.read(cx).root().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { git::bring_back(&root) }).await;
+            let result = cx.background_executor().spawn(async move { git::bring_back_at(&root, index) }).await;
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(conflicts) if conflicts.is_empty() => this.show_notice("Brought the changes back.".into(), cx),
@@ -1772,9 +1808,7 @@ impl Workspace {
                         let n = conflicts.len();
                         let files = if n == 1 { "1 file".to_string() } else { format!("{n} files") };
                         this.show_notice(format!("Brought back, with conflicts in {files}: ⌘. resolves each."), cx);
-                        if let Some(first) = conflicts.into_iter().next() {
-                            this.open_file(first, window, cx);
-                        }
+                        this.open_first_conflict(conflicts, window, cx);
                     }
                     Err(error) => this.show_notice(error, cx),
                 }
@@ -5630,7 +5664,213 @@ impl Workspace {
             GitViewEvent::ShowCommit(commit) => self.show_commit(commit.clone(), window, cx),
             GitViewEvent::Push => self.push_branch(&PushBranch, window, cx),
             GitViewEvent::Pull => self.pull_branch(&PullBranch, window, cx),
+            GitViewEvent::SwitchTo(branch) => self.change_branch(Ok(branch.clone()), window, cx),
+            GitViewEvent::NewBranch(name) => self.change_branch(Err(name.clone()), window, cx),
+            GitViewEvent::Join { branch, rebase } => self.join_branch(branch.clone(), *rebase, window, cx),
+            GitViewEvent::BringBack(index) => self.bring_back_at(*index, window, cx),
+            GitViewEvent::SetAside => self.set_changes_aside(&SetChangesAside, window, cx),
+            GitViewEvent::Said(said) => self.show_notice(said.clone(), cx),
+            GitViewEvent::Changed => self.refresh_git(cx),
         }
+    }
+
+    /// Merges `branch` into the one checked out, or rebases this one onto it (asked
+    /// first: its commits are made again). Conflicts open at the first; the banner over
+    /// the work finishes or stops it.
+    fn join_branch(&mut self, branch: String, rebase: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(here) = self.branch.clone() else {
+            return self.show_notice("This folder isn't a git repository.".into(), cx);
+        };
+        let asked = rebase.then(|| {
+            window.prompt(
+                PromptLevel::Info,
+                &format!("Rebase {here} onto {branch}?"),
+                Some("Its own commits are made again on top of that branch, one by one: new commits, so one already pushed would have to be pushed by force."),
+                &["Rebase", "Cancel"],
+                cx,
+            )
+        });
+        self.save_named_tabs(cx);
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(asked) = asked
+                && asked.await != Ok(0)
+            {
+                return;
+            }
+            let b = branch.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { if rebase { git::rebase_onto(&root, &b) } else { git::merge_in(&root, &b) } })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let files = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+                let notice = match &result {
+                    Ok(conflicts) if conflicts.is_empty() && rebase => format!("Rebased onto {branch}."),
+                    Ok(conflicts) if conflicts.is_empty() => format!("Merged {branch} in."),
+                    Ok(conflicts) => format!("Conflicts in {}: ⌘. resolves each.", files(conflicts.len())),
+                    Err(error) if rebase => format!("Couldn't rebase: {error}"),
+                    Err(error) => format!("Couldn't merge: {error}"),
+                };
+                this.show_notice(notice, cx);
+                this.refresh_git(cx);
+                if let Ok(conflicts) = result {
+                    this.open_first_conflict(conflicts, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The first of `conflicts` opened (read again from disk), at its first conflict.
+    fn open_first_conflict(&mut self, conflicts: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(first) = conflicts.into_iter().next() else { return };
+        self.git_page = None;
+        self.open_file(first, window, cx);
+        if let Some(editor) = self.active_editor().cloned() {
+            editor.update(cx, |e, cx| {
+                e.reload_from_disk(cx);
+                e.go_to_conflict(true, cx);
+            });
+        }
+    }
+
+    /// The banner's Stop: the merge (rebase, …) undone, after asking.
+    fn stop_joining(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.joining.clone() else { return };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Stop {}?", joining_name(state.kind)),
+            Some("Everything goes back to how it was before it, conflicts settled so far too."),
+            &["Stop", "Cancel"],
+            cx,
+        );
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let result = cx.background_executor().spawn(async move { git::stop_joining(&root, state.kind) }).await;
+            this.update(cx, |this, cx| {
+                let notice = match result {
+                    Ok(()) => format!("Stopped {}: back as before.", joining_name(state.kind)),
+                    Err(error) => error,
+                };
+                this.show_notice(notice, cx);
+                this.reload_open_files(cx);
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The banner's Commit (Continue): the open files saved, then the merge's commit made
+    /// once no file has conflicts left.
+    fn finish_joining(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.joining.clone() else { return };
+        self.save_named_tabs(cx);
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::finish_joining(&root, state.kind) }).await;
+            this.update_in(cx, |this, window, cx| {
+                let notice = match &result {
+                    Ok(next) if next.is_empty() => match state.kind {
+                        git::Joining::Merge => format!("Merged {} in.", state.other),
+                        git::Joining::Rebase => format!("Rebased onto {}.", state.other),
+                        git::Joining::CherryPick => format!("Cherry-picked {}.", state.other),
+                        git::Joining::Revert => format!("Reverted {}.", state.other),
+                    },
+                    Ok(_) => "The next commit conflicts too: ⌘. resolves each.".to_string(),
+                    Err(error) => error.clone(),
+                };
+                this.show_notice(notice, cx);
+                this.reload_open_files(cx);
+                this.refresh_git(cx);
+                if let Ok(next) = result {
+                    this.open_first_conflict(next, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Open files changed on disk by git (and not here): read again.
+    fn reload_open_files(&mut self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            tab.editor.update(cx, |e, cx| {
+                if !e.buffer.is_dirty() && e.path().is_some() {
+                    e.reload_from_disk(cx);
+                }
+            });
+        }
+    }
+
+    /// The banner over the work while git waits in a merge (rebase, …).
+    fn render_joining(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let state = self.joining.clone()?;
+        let theme = cx.global::<Theme>().clone();
+        let (title, stop, finish) = match state.kind {
+            git::Joining::Merge => (format!("Merging {} into {}", state.other, state.into), "Stop the Merge", "Commit the Merge"),
+            git::Joining::Rebase => (format!("Rebasing {} onto {}", state.into, state.other), "Stop the Rebase", "Continue"),
+            git::Joining::CherryPick => (format!("Cherry-picking {}", state.other), "Stop", "Commit"),
+            git::Joining::Revert => (format!("Reverting {}", state.other), "Stop", "Commit"),
+        };
+        let left = self.to_settle.len();
+        let settled = left == 0;
+        let settle = match left {
+            0 => "Conflicts settled".to_string(),
+            1 => "1 file to settle".to_string(),
+            n => format!("{n} files to settle"),
+        };
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .px(px(10.))
+                .py(px(3.))
+                .rounded(px(ui::R_KEY))
+                .cursor_pointer()
+                .when(primary, |b| b.bg(theme.caret).text_color(theme.background))
+                .when(!primary, |b| b.border_1().border_color(theme.caret.opacity(0.35)))
+                .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.7))
+                .child(label)
+        };
+        Some(
+            div()
+                .h(px(40.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(18.))
+                .bg(theme.caret.opacity(0.08))
+                .border_b_1()
+                .border_color(theme.caret.opacity(0.25))
+                .text_size(px(ui::T_SM))
+                .child(div().text_color(theme.caret).child(title))
+                .child(
+                    div()
+                        .id("joining-settle")
+                        .text_color(theme.muted)
+                        .when(!settled, |d| d.cursor_pointer().hover(|s| s.text_color(theme.foreground)))
+                        .child(settle)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            let next = this.to_settle.clone();
+                            this.open_first_conflict(next, window, cx);
+                        })),
+                )
+                .child(div().flex_1())
+                .child(button("joining-stop", stop, false).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.stop_joining(window, cx))))
+                .child(
+                    button("joining-finish", finish, settled)
+                        .when(!settled, |b| b.text_color(theme.muted))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.finish_joining(window, cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
@@ -9720,6 +9960,7 @@ impl Render for Workspace {
             ),
             None => (None, false),
         };
+        let joining = self.render_joining(cx);
         let theme = cx.global::<Theme>();
 
         let titlebar = div()
@@ -10422,6 +10663,7 @@ impl Render for Workspace {
                     root.child(titlebar)
                 }
             })
+            .children(joining)
             .child(
                 div().flex_1().min_h_0().flex().child(sidebar_panel).child(
                     div()
@@ -12668,6 +12910,75 @@ mod tests {
         cx.dispatch_action(crate::commit_page::CloseCommit);
         cx.run_until_parked();
         assert!(workspace.read_with(cx, |w, _| w.git_page.is_none()), "Esc closes it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A branch merged in from the Branches tab: conflicting, the banner says so; settled
+    /// and saved, Commit the Merge makes the merge's commit.
+    #[gpui::test]
+    fn a_branch_merged_in(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("merge-banner");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        git(&["switch", "-q", "-c", "side"]);
+        std::fs::write(dir.join("a.txt"), "side\n").unwrap();
+        git(&["commit", "-q", "-am", "side's"]);
+        git(&["switch", "-q", "main"]);
+        std::fs::write(dir.join("a.txt"), "main\n").unwrap();
+        git(&["commit", "-q", "-am", "main's"]);
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let wait_for = |cx: &mut gpui::VisualTestContext, done: &dyn Fn(&Workspace) -> bool| {
+            for _ in 0..300 {
+                // (git's status is read again after a pause: test timers wait to be moved on.)
+                cx.executor().advance_clock(Duration::from_millis(200));
+                cx.run_until_parked();
+                if workspace.read_with(cx, |w, _| done(w)) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        wait_for(cx, &|w| w.branch.is_some());
+        workspace.update_in(cx, |w, window, cx| {
+            let view = w.git_view.clone();
+            let join = crate::git_view::GitViewEvent::Join { branch: "side".into(), rebase: false };
+            w.git_view_event(&view, &join, window, cx)
+        });
+        wait_for(cx, &|w| w.joining.is_some() && !w.to_settle.is_empty());
+        workspace.read_with(cx, |w, cx| {
+            let state = w.joining.as_ref().expect("merging");
+            assert_eq!((state.kind, state.other.as_str()), (git::Joining::Merge, "side"));
+            assert_eq!(w.to_settle, [dir.join("a.txt")]);
+            let editor = w.active_editor().expect("the conflict, open").read(cx);
+            assert_eq!(editor.conflicts().len(), 1);
+        });
+        // Settled, as ⌘. would, then committed.
+        workspace.update_in(cx, |w, window, cx| {
+            let editor = w.active_editor().unwrap().clone();
+            editor.update(cx, |e, cx| e.set_text_for_test("both\n", cx));
+            w.finish_joining(window, cx);
+        });
+        wait_for(cx, &|w| w.joining.is_none());
+        let log = String::from_utf8_lossy(&git(&["log", "-1", "--format=%P"]).stdout).into_owned();
+        assert_eq!(log.split_whitespace().count(), 2, "a merge commit");
+        assert_eq!(String::from_utf8_lossy(&git(&["show", "HEAD:a.txt"]).stdout), "both\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 

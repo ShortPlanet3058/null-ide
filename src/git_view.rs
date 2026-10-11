@@ -13,10 +13,15 @@ use gpui::{
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+mod branches;
+
+pub use branches::Branches;
+
 actions!(git_view, [CommitChanges]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("secondary-enter", CommitChanges, Some("GitMessage"))]);
+    branches::bind_keys(cx);
 }
 
 /// A change within a file (as `git::diff` finds them), to commit or leave for later.
@@ -54,6 +59,7 @@ impl ChangedFile {
 pub enum Tab {
     Changes,
     History,
+    Branches,
 }
 
 /// How a commit's row draws its part of the branches' graph: its lane (and colour), and
@@ -158,6 +164,20 @@ pub enum GitViewEvent {
     Draft(Vec<PathBuf>),
     Push,
     Pull,
+    /// A branch to switch to (open files saved first).
+    SwitchTo(git::Branch),
+    /// A branch to start here, and switch to.
+    NewBranch(String),
+    /// A branch to merge in, or rebase onto.
+    Join { branch: String, rebase: bool },
+    /// The changes set aside at this place, to bring back.
+    BringBack(usize),
+    /// The changes since the last commit, to set aside.
+    SetAside,
+    /// Something done (or not), to say.
+    Said(String),
+    /// The repository changed.
+    Changed,
 }
 
 impl EventEmitter<GitViewEvent> for GitView {}
@@ -182,6 +202,15 @@ pub struct GitView {
     /// The commit shown, in the history.
     pub shown: Option<String>,
     history_task: Option<Task<()>>,
+    pub branches: Branches,
+    /// A new branch's name, as typed.
+    pub branch_name: Entity<TextInput>,
+    rename_input: Entity<TextInput>,
+    /// The branch being renamed.
+    pub renaming: Option<String>,
+    /// The branch clicked, its actions shown under it.
+    pub picked: Option<String>,
+    branches_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -243,7 +272,11 @@ impl GitView {
         let summary = cx.new(|cx| TextInput::new("Commit message", cx));
         let body = cx.new(|cx| TextInput::new("Body: what and why (optional)", cx));
         let filter = cx.new(|cx| TextInput::new("Filter: message, author, id", cx));
+        let branch_name = cx.new(|cx| TextInput::new("New branch…", cx));
+        let rename_input = cx.new(|cx| TextInput::new("Its new name", cx));
         let subscriptions = vec![
+            cx.subscribe(&branch_name, |_, _, _: &TextInputEvent, cx| cx.notify()),
+            cx.subscribe(&rename_input, |_, _, _: &TextInputEvent, cx| cx.notify()),
             cx.subscribe(&summary, |_, _, _: &TextInputEvent, cx| cx.notify()),
             cx.subscribe(&body, |_, _, _: &TextInputEvent, cx| cx.notify()),
             cx.subscribe(&filter, |_, _, _: &TextInputEvent, cx| cx.notify()),
@@ -265,6 +298,12 @@ impl GitView {
             filter,
             shown: None,
             history_task: None,
+            branches: Branches::default(),
+            branch_name,
+            rename_input,
+            renaming: None,
+            picked: None,
+            branches_task: None,
             _subscriptions: subscriptions,
         }
     }
@@ -281,6 +320,7 @@ impl GitView {
         match self.tab {
             Tab::Changes => self.refresh_changes(cx),
             Tab::History => self.refresh_history(cx),
+            Tab::Branches => self.refresh_branches(cx),
         }
     }
 
@@ -612,6 +652,7 @@ impl GitView {
             .text_size(px(ui::T_SM))
             .child(tab("git-tab-changes", "Changes", Tab::Changes, cx))
             .child(tab("git-tab-history", "History", Tab::History, cx))
+            .child(tab("git-tab-branches", "Branches", Tab::Branches, cx))
             .into_any_element()
     }
 
@@ -908,6 +949,7 @@ impl Render for GitView {
         let tabs = self.render_tabs(cx);
         let shown = match self.tab {
             Tab::Changes => self.render_changes(cx),
+            Tab::Branches => self.render_branches(cx),
             Tab::History => self.render_history(cx),
         };
         div()

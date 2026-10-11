@@ -306,7 +306,7 @@ pub struct LogCommit {
 pub fn log(root: &Path, max: usize) -> Vec<LogCommit> {
     let count = format!("-n{max}");
     let format = "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%s%x1f%D%x1e";
-    let Some(out) = git(root, &["log", "--all", "--date-order", &count, format]) else { return Vec::new() };
+    let Some(out) = git(root, &["log", "--branches", "--tags", "--remotes", "HEAD", "--date-order", &count, format]) else { return Vec::new() };
     out.split('\x1e')
         .filter_map(|record| {
             let fields: Vec<&str> = record.trim_start_matches('\n').split('\x1f').collect();
@@ -584,22 +584,6 @@ pub fn set_aside(root: &Path) -> Result<(), String> {
     }
 }
 
-/// Returns the changes set aside last (`set_aside`, or a stash made elsewhere): the files
-/// they conflict in, if any (left marked, the changes still kept aside).
-pub fn bring_back(root: &Path) -> Result<Vec<PathBuf>, String> {
-    if git(root, &["rev-parse", "-q", "--verify", "refs/stash"]).is_none() {
-        return Err("Nothing is set aside.".into());
-    }
-    match run(root, &["stash", "pop", "-q"]) {
-        Ok(_) => Ok(Vec::new()),
-        Err(error) => {
-            let conflicted: Vec<PathBuf> =
-                status(root).into_iter().filter(|(_, s)| *s == FileStatus::Conflicted).map(|(p, _)| p).collect();
-            if conflicted.is_empty() { Err(format!("Couldn't bring them back: {error}")) } else { Ok(conflicted) }
-        }
-    }
-}
-
 /// Switches to `branch` taking the changes not committed along: set aside, switched,
 /// put back. The files they conflict in, if putting them back does (they're left marked).
 pub fn switch_carrying_changes(root: &Path, branch: &Branch) -> Result<Vec<PathBuf>, String> {
@@ -628,6 +612,276 @@ pub fn switch_carrying_changes(root: &Path, branch: &Branch) -> Result<Vec<PathB
             if conflicted.is_empty() { Err(error) } else { Ok(conflicted) }
         }
     }
+}
+
+/// A branch on this computer, with how far it is from the one it tracks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalBranch {
+    pub name: String,
+    pub current: bool,
+    /// The remote branch it tracks ("origin/dev").
+    pub upstream: Option<String>,
+    /// Its commits not there yet, and that one's not here yet.
+    pub ahead: usize,
+    pub behind: usize,
+}
+
+/// The branches on this computer, the one checked out first, then the most recently worked on.
+pub fn local_branches(root: &Path) -> Vec<LocalBranch> {
+    let list = git(
+        root,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(HEAD)%09%(refname:short)%09%(upstream:short)%09%(upstream:track,nobracket)",
+            "refs/heads",
+        ],
+    )
+    .unwrap_or_default();
+    let mut found: Vec<LocalBranch> = list
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let (head, name) = (parts.next()?, parts.next()?);
+            let upstream = parts.next().filter(|u| !u.is_empty()).map(str::to_string);
+            let track = parts.next().unwrap_or("");
+            // "ahead 2, behind 3", "ahead 2", "gone", or nothing.
+            let count = |word: &str| {
+                track
+                    .split(", ")
+                    .find_map(|part| part.strip_prefix(word))
+                    .and_then(|n| n.trim().parse().ok())
+                    .unwrap_or(0)
+            };
+            Some(LocalBranch {
+                name: name.to_string(),
+                current: head == "*",
+                upstream,
+                ahead: count("ahead "),
+                behind: count("behind "),
+            })
+        })
+        .collect();
+    found.sort_by_key(|b| !b.current);
+    found
+}
+
+/// The remotes' branches ("origin/dev"), by name.
+pub fn remote_branches(root: &Path) -> Vec<String> {
+    let list = git(root, &["for-each-ref", "--sort=refname", "--format=%(refname:short)", "refs/remotes"]);
+    list.unwrap_or_default()
+        .lines()
+        // ("origin" alone: its HEAD, pointing at one of the others.)
+        .filter(|name| name.contains('/') && !name.ends_with("/HEAD"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The tags, newest first.
+pub fn tags(root: &Path) -> Vec<String> {
+    let list = git(root, &["for-each-ref", "--sort=-creatordate", "--format=%(refname:short)", "refs/tags"]);
+    list.unwrap_or_default().lines().map(str::to_string).collect()
+}
+
+/// Changes set aside (a stash).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetAside {
+    /// Its place among them: 0 the latest.
+    pub index: usize,
+    /// What it says: the message given, or what the commit it came from said.
+    pub message: String,
+    /// The branch it was set aside on.
+    pub branch: String,
+    pub time: i64,
+}
+
+/// The changes set aside, latest first.
+pub fn set_aside_list(root: &Path) -> Vec<SetAside> {
+    let list = git(root, &["stash", "list", "--format=%gs%x1f%ct"]).unwrap_or_default();
+    list.lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let (subject, time) = line.split_once('\x1f')?;
+            // "On main: the message", or "WIP on main: 1a2b3c the commit's subject".
+            let (on, message) = subject.split_once(": ")?;
+            let branch = on.trim_start_matches("WIP ").trim_start_matches("On ").trim_start_matches("on ").to_string();
+            let message = if on.starts_with("WIP") {
+                message.split_once(' ').map_or(message, |(_, rest)| rest).to_string()
+            } else {
+                message.to_string()
+            };
+            Some(SetAside { index, message, branch, time: time.trim().parse().unwrap_or(0) })
+        })
+        .collect()
+}
+
+/// Brings back the changes set aside at `index` (see `set_aside_list`; 0 the latest, made
+/// by `set_aside` or elsewhere): the files they conflict in, if any (left marked, the
+/// changes still kept aside).
+pub fn bring_back_at(root: &Path, index: usize) -> Result<Vec<PathBuf>, String> {
+    let at = format!("stash@{{{index}}}");
+    if git(root, &["rev-parse", "-q", "--verify", &at]).is_none() {
+        return Err("Nothing is set aside.".into());
+    }
+    match run(root, &["stash", "pop", "-q", &at]) {
+        Ok(_) => Ok(Vec::new()),
+        Err(error) => {
+            let conflicted = conflicted(root);
+            if conflicted.is_empty() { Err(format!("Couldn't bring them back: {error}")) } else { Ok(conflicted) }
+        }
+    }
+}
+
+/// Throws away the changes set aside at `index`.
+pub fn drop_set_aside(root: &Path, index: usize) -> Result<(), String> {
+    run(root, &["stash", "drop", "-q", &format!("stash@{{{index}}}")]).map(|_| ())
+}
+
+pub fn rename_branch(root: &Path, old: &str, new: &str) -> Result<(), String> {
+    run(root, &["branch", "-m", old, new]).map(|_| ()).map_err(|e| explain_switch_error(&e))
+}
+
+/// What `delete_branch` says when the branch has commits no other branch has.
+pub const NOT_MERGED: &str = "That branch has commits merged nowhere else.";
+
+/// Deletes a branch on this computer; one with commits merged nowhere else only when
+/// `anyway`.
+pub fn delete_branch(root: &Path, name: &str, anyway: bool) -> Result<(), String> {
+    run(root, &["branch", if anyway { "-D" } else { "-d" }, name]).map(|_| ()).map_err(|e| {
+        if e.contains("not fully merged") { NOT_MERGED.into() } else { explain_switch_error(&e) }
+    })
+}
+
+/// The files git has left conflicting (in a merge, a rebase, changes brought back).
+pub fn conflicted(root: &Path) -> Vec<PathBuf> {
+    status(root).into_iter().filter(|(_, s)| *s == FileStatus::Conflicted).map(|(p, _)| p).collect()
+}
+
+/// Merges `branch` into the one checked out: the files it conflicts in, if it does (git
+/// then waits: see `joining`).
+pub fn merge_in(root: &Path, branch: &str) -> Result<Vec<PathBuf>, String> {
+    joined(root, run_without_editor(root, &["merge", "-q", "--no-edit", branch]))
+}
+
+/// Puts the branch checked out's own commits on top of `branch`, one by one: the files
+/// the one it's at conflicts in, if any.
+pub fn rebase_onto(root: &Path, branch: &str) -> Result<Vec<PathBuf>, String> {
+    joined(root, run_without_editor(root, &["rebase", "-q", branch]))
+}
+
+fn joined(root: &Path, result: Result<String, String>) -> Result<Vec<PathBuf>, String> {
+    match result {
+        Ok(_) => Ok(Vec::new()),
+        Err(error) => {
+            let conflicted = conflicted(root);
+            if conflicted.is_empty() { Err(error) } else { Ok(conflicted) }
+        }
+    }
+}
+
+/// git, with nothing to open an editor for a message: the one it has is taken.
+fn run_without_editor(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = command(dir)
+        .env("GIT_EDITOR", "true")
+        .args(args)
+        .output()
+        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let said = [output.stderr, output.stdout].concat();
+    let error = String::from_utf8_lossy(&said);
+    let message: Vec<&str> = error.lines().filter(|l| !l.trim().is_empty()).take(3).collect();
+    Err(message.join(" ").trim().to_string())
+}
+
+/// What git is in the middle of, waiting for conflicts to be settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Joining {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+/// A merge (or rebase, cherry-pick, revert) git is waiting in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoiningState {
+    pub kind: Joining,
+    /// What's coming in: the branch merged or rebased onto, or the commit.
+    pub other: String,
+    /// The branch it's coming into.
+    pub into: String,
+}
+
+/// What git is in the middle of, if anything.
+pub fn joining(root: &Path) -> Option<JoiningState> {
+    let dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?.trim());
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_string());
+    let name_of = |id: &str| {
+        git(root, &["name-rev", "--name-only", "--no-undefined", "--exclude=tags/*", id])
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty() && !n.contains('~') && !n.contains('^'))
+            .unwrap_or_else(|| id.chars().take(7).collect())
+    };
+    let into = || current_branch(root).unwrap_or_default();
+    let (kind, other, into) = if let Some(head) = read("MERGE_HEAD") {
+        // "Merge branch 'dev' into …": the name as merged.
+        let message = read("MERGE_MSG").unwrap_or_default();
+        let named = message.lines().next().and_then(|l| l.split('\'').nth(1)).map(str::to_string);
+        (Joining::Merge, named.unwrap_or_else(|| name_of(head.lines().next().unwrap_or(""))), into())
+    } else if let Some(onto) = read("rebase-merge/onto").or_else(|| read("rebase-apply/onto")) {
+        let branch = read("rebase-merge/head-name").or_else(|| read("rebase-apply/head-name")).unwrap_or_default();
+        (Joining::Rebase, name_of(&onto), branch.trim_start_matches("refs/heads/").to_string())
+    } else if let Some(id) = read("CHERRY_PICK_HEAD") {
+        (Joining::CherryPick, id.chars().take(7).collect(), into())
+    } else {
+        let id = read("REVERT_HEAD")?;
+        (Joining::Revert, id.chars().take(7).collect(), into())
+    };
+    Some(JoiningState { kind, other, into })
+}
+
+/// Whether a file still has conflict markers in it.
+pub fn still_marked(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|text| text.lines().any(|l| l.starts_with("<<<<<<< ")))
+}
+
+/// Stops a merge (rebase, cherry-pick, revert): everything back as it was before it.
+pub fn stop_joining(root: &Path, kind: Joining) -> Result<(), String> {
+    let what = match kind {
+        Joining::Merge => "merge",
+        Joining::Rebase => "rebase",
+        Joining::CherryPick => "cherry-pick",
+        Joining::Revert => "revert",
+    };
+    run(root, &[what, "--abort"]).map(|_| ())
+}
+
+/// Finishes a merge (rebase, cherry-pick, revert) once its conflicts are settled: the
+/// files settled marked so, then its commit made. A rebase can stop at its next commit,
+/// conflicting too: those files.
+pub fn finish_joining(root: &Path, kind: Joining) -> Result<Vec<PathBuf>, String> {
+    let conflicted = conflicted(root);
+    let marked = conflicted.iter().filter(|p| still_marked(p)).count();
+    match marked {
+        0 => {}
+        1 => return Err("A file still has conflicts: ⌘. resolves each.".into()),
+        n => return Err(format!("{n} files still have conflicts: ⌘. resolves each.")),
+    }
+    if !conflicted.is_empty() {
+        let names: Vec<String> = conflicted.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let mut args = vec!["add", "--"];
+        args.extend(names.iter().map(String::as_str));
+        run(root, &args)?;
+    }
+    let result = match kind {
+        Joining::Merge => run_without_editor(root, &["commit", "-q", "--no-edit"]),
+        Joining::Rebase => run_without_editor(root, &["rebase", "--continue"]),
+        Joining::CherryPick => run_without_editor(root, &["cherry-pick", "--continue"]),
+        Joining::Revert => run_without_editor(root, &["revert", "--continue"]),
+    };
+    joined(root, result)
 }
 
 fn explain_switch_error(error: &str) -> String {
@@ -908,6 +1162,9 @@ mod tests {
         run(&["add", "."]).unwrap();
         run(&["commit", "-q", "-m", "second\n\nwhy it is"]).unwrap();
         run(&["tag", "v1"]).unwrap();
+        // Changes set aside are commits too, but not the history's.
+        std::fs::write(repo.join("a.txt"), "aside\n").unwrap();
+        run(&["stash", "-q"]).unwrap();
         let log = log(&repo, 10);
         assert_eq!(log.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(), ["second", "first"]);
         assert_eq!(log[0].parents, [log[1].id.clone()]);
@@ -935,6 +1192,86 @@ mod tests {
         assert!(repo.join("c.txt").exists());
         revert_commit(&repo, "HEAD").unwrap();
         assert!(!repo.join("c.txt").exists());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Branches made, renamed, merged in (conflicting, settled, finished), rebased, deleted;
+    /// changes set aside and brought back by their place.
+    #[test]
+    fn branches_and_merging() {
+        let repo = crate::tools::test_dir("git-branching");
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = std::fs::canonicalize(&repo).unwrap();
+        let run = |args: &[&str]| git(&repo, args);
+        if run(&["init", "-q", "-b", "main"]).is_none() {
+            return;
+        }
+        run(&["config", "user.name", "t"]).unwrap();
+        run(&["config", "user.email", "t@t"]).unwrap();
+        let write = |name: &str, text: &str| std::fs::write(repo.join(name), text).unwrap();
+        write("a.txt", "one\n");
+        run(&["add", "."]).unwrap();
+        run(&["commit", "-q", "-m", "first"]).unwrap();
+        run(&["tag", "v1"]).unwrap();
+        create_branch(&repo, "side").unwrap();
+        write("a.txt", "side\n");
+        run(&["commit", "-q", "-am", "side's"]).unwrap();
+        run(&["switch", "-q", "main"]).unwrap();
+        write("a.txt", "main\n");
+        run(&["commit", "-q", "-am", "main's"]).unwrap();
+        let local = local_branches(&repo);
+        assert_eq!(local.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["main", "side"], "the current first");
+        assert!(local[0].current && local[0].upstream.is_none());
+        assert_eq!(tags(&repo), ["v1"]);
+        rename_branch(&repo, "side", "other").unwrap();
+        assert!(local_branches(&repo).iter().any(|b| b.name == "other"));
+        assert!(joining(&repo).is_none());
+
+        // Both changed the line: a conflict, git waiting.
+        let conflicts = merge_in(&repo, "other").unwrap();
+        assert_eq!(conflicts, [repo.join("a.txt")]);
+        let state = joining(&repo).unwrap();
+        assert_eq!((state.kind, state.other.as_str(), state.into.as_str()), (Joining::Merge, "other", "main"));
+        assert!(finish_joining(&repo, Joining::Merge).unwrap_err().contains("still has conflicts"));
+        write("a.txt", "both\n");
+        assert_eq!(finish_joining(&repo, Joining::Merge).unwrap(), Vec::<PathBuf>::new());
+        assert!(joining(&repo).is_none());
+        assert_eq!(log(&repo, 1)[0].parents.len(), 2, "a merge commit");
+
+        // Stopped: as before it.
+        create_branch(&repo, "third").unwrap();
+        write("a.txt", "third\n");
+        run(&["commit", "-q", "-am", "third's"]).unwrap();
+        run(&["switch", "-q", "main"]).unwrap();
+        write("a.txt", "main again\n");
+        run(&["commit", "-q", "-am", "main again"]).unwrap();
+        assert_eq!(rebase_onto(&repo, "third").unwrap().len(), 1);
+        assert_eq!(joining(&repo).unwrap().kind, Joining::Rebase);
+        assert_eq!(joining(&repo).unwrap().into, "main");
+        stop_joining(&repo, Joining::Rebase).unwrap();
+        assert!(joining(&repo).is_none());
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "main again\n");
+
+        // Merged nowhere: deleted only when asked again.
+        assert_eq!(delete_branch(&repo, "third", false).unwrap_err(), NOT_MERGED);
+        delete_branch(&repo, "third", true).unwrap();
+        delete_branch(&repo, "other", false).unwrap();
+        assert_eq!(local_branches(&repo).len(), 1);
+
+        // Two sets aside; the older one brought back first.
+        write("a.txt", "first set\n");
+        set_aside(&repo).unwrap();
+        write("b.txt", "second set\n");
+        set_aside(&repo).unwrap();
+        let sets = set_aside_list(&repo);
+        assert_eq!(sets.len(), 2);
+        assert_eq!((sets[0].branch.as_str(), sets[0].message.as_str()), ("main", "Null: set aside"));
+        assert_eq!(bring_back_at(&repo, 1).unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "first set\n");
+        assert!(!repo.join("b.txt").exists());
+        drop_set_aside(&repo, 0).unwrap();
+        assert!(set_aside_list(&repo).is_empty());
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -1244,7 +1581,7 @@ mod tests {
         run(&repo, &["config", "user.email", "t@t"]).unwrap();
         std::fs::write(repo.join("f.txt"), "one\n").unwrap();
         commit_all(&repo, "first").unwrap();
-        assert!(bring_back(&repo).unwrap_err().contains("Nothing is set aside"));
+        assert!(bring_back_at(&repo, 0).unwrap_err().contains("Nothing is set aside"));
         assert!(set_aside(&repo).unwrap_err().contains("Nothing to set aside"));
         std::fs::write(repo.join("f.txt"), "two\n").unwrap();
         std::fs::write(repo.join("new.txt"), "new\n").unwrap();
@@ -1252,7 +1589,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), "one\n");
         assert!(!repo.join("new.txt").exists());
         assert!(status(&repo).is_empty());
-        assert_eq!(bring_back(&repo), Ok(Vec::new()));
+        assert_eq!(bring_back_at(&repo, 0), Ok(Vec::new()));
         assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), "two\n");
         assert_eq!(std::fs::read_to_string(repo.join("new.txt")).unwrap(), "new\n");
         std::fs::remove_dir_all(&repo).ok();

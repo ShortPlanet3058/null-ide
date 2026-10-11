@@ -2859,6 +2859,13 @@ impl Editor {
         self.edit(at..at, text, EditKind::Typing, cx);
     }
 
+    /// All the text replaced with `text`, as typing would (for tests elsewhere in the crate).
+    #[cfg(test)]
+    pub fn set_text_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        let len = self.buffer.len_chars();
+        self.edit(0..len, text, EditKind::Typing, cx);
+    }
+
     /// An image from the clipboard saved next to this Markdown file as
     /// `pasted-2026-10-06-120312.png` (UTC), and a link to it in place of the selection.
     fn paste_image(&mut self, image: gpui::Image, cx: &mut Context<Self>) {
