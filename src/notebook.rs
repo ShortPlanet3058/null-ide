@@ -37,6 +37,16 @@ fn language_of(notebook: &Value) -> (String, &'static str) {
     (language, comment)
 }
 
+/// A file's text as it's searched and written in: a notebook's, its cells (see
+/// `to_cells_text`); any other's, as it is.
+pub fn cells_of_file(path: &std::path::Path, text: String) -> String {
+    let notebook = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ipynb"));
+    match notebook.then(|| to_cells_text(&text)).flatten() {
+        Some(cells) => cells,
+        None => text,
+    }
+}
+
 /// The notebook's language as Null names it (`python` is Python), for colouring its cells.
 pub fn language(json: &str) -> Option<String> {
     let notebook: Value = serde_json::from_str(json).ok()?;

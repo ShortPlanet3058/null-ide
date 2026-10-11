@@ -5444,6 +5444,10 @@ impl Workspace {
                         failed.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                         continue;
                     };
+                    // A notebook: replaced in its cells (as searched), written back into its JSON.
+                    let json = text.clone();
+                    let text = crate::notebook::cells_of_file(path, text);
+                    let notebook = text != json;
                     let edits = crate::project_search::replacements(&text, query, replacement, line.as_deref());
                     if edits.is_empty() {
                         continue;
@@ -5452,6 +5456,18 @@ impl Workspace {
                     for (range, with) in edits.iter().rev() {
                         new.replace_range(range.clone(), with);
                     }
+                    let new = match notebook {
+                        true => match crate::notebook::with_cells(&json, &new) {
+                            Some(new) => new,
+                            None => {
+                                failed.push(
+                                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                                );
+                                continue;
+                            }
+                        },
+                        false => new,
+                    };
                     // Written back in its own encoding; one that can't hold the new text fails.
                     let written = crate::encoding::encode(&new, encoding)
                         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))
@@ -12338,6 +12354,35 @@ mod tests {
         }
         workspace.update(cx, |w, cx| w.lsp.update(cx, |s, _| s.shutdown()));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Replacing in a notebook that isn't open: in its cells, as it's searched; written back
+    /// into its JSON (a quote replaced in stays a notebook), what it printed kept.
+    #[gpui::test]
+    fn notebooks_are_replaced_in_as_their_cells(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("replace-notebook");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let notebook = r#"{"cells":[{"cell_type":"code","execution_count":1,"metadata":{},"outputs":[{"name":"stdout","output_type":"stream","text":["hi\n"]}],"source":["print('hi')"]}],"metadata":{},"nbformat":4,"nbformat_minor":4}"#;
+        let path = dir.join("a.ipynb");
+        std::fs::write(&path, notebook).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let query = crate::search::SearchQuery { text: "'hi'".into(), ..Default::default() };
+        // Searched as its cells: the match on the cell's line (line 1, after `# %%`).
+        let text = crate::notebook::cells_of_file(&path, notebook.to_string());
+        assert_eq!(text.lines().nth(1), Some("print('hi')"));
+        workspace.update(cx, |w, cx| w.replace_in_files(&query, "\"bye\"", &[(path.clone(), Some(vec![1]))], cx));
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).expect("a notebook");
+        assert_eq!(saved["cells"][0]["source"][0], "print(\"bye\")");
+        assert_eq!(saved["cells"][0]["outputs"][0]["text"][0], "hi\n");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// ⌥⌘+ / ⌥⌘− / ⌥⌘0: the interface bigger, smaller, back to 100%, within its bounds;
