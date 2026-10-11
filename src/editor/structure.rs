@@ -287,7 +287,7 @@ impl Editor {
     }
 
     /// ⌘⇧D: each selection copied just after itself, the copy selected, as Sublime does;
-    /// with nothing selected, the line.
+    /// a cursor with nothing selected, its line.
     pub(super) fn duplicate_selection(&mut self, _: &DuplicateSelection, _: &mut Window, cx: &mut Context<Self>) {
         if self.all_selections().iter().all(|s| s.is_empty()) {
             return self.on_each_cursors_lines(cx, |this, cx| this.duplicate_lines(true, cx));
@@ -295,7 +295,7 @@ impl Editor {
         self.for_each_cursor(cx, |this, cx| {
             let range = this.selection.range();
             if range.is_empty() {
-                return;
+                return this.duplicate_lines(true, cx);
             }
             let text = this.buffer.slice(range.clone());
             let len = text.chars().count();
@@ -722,6 +722,14 @@ mod tests {
             e.extra = vec![crate::editor::Cursor { selection: Selection::caret(2), goal: None }];
             e.duplicate_selection(&DuplicateSelection, window, cx);
             assert_eq!(e.buffer.to_string(), "a\na\nb\nb\n");
+        });
+        // One selecting, one not: the selection copied, the other's line.
+        let (e, cx) = editor(cx, "ab\ncd\n");
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection { anchor: 0, head: 1 };
+            e.extra = vec![crate::editor::Cursor { selection: Selection::caret(4), goal: None }];
+            e.duplicate_selection(&DuplicateSelection, window, cx);
+            assert_eq!(e.buffer.to_string(), "aab\ncd\ncd\n");
         });
         // A bracket of another kind in between (in a string) isn't the one closing.
         let (e, cx) = editor(cx, "f(a, \"]\");\n");
