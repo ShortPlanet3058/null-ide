@@ -641,6 +641,12 @@ impl Editor {
         ((needed / row).ceil() as usize).clamp(2, 40)
     }
 
+    /// The blocks sized again (to the text's width now), and the rows laid out for them.
+    pub fn reflow_blocks(&mut self) {
+        self.rebuild_blocks();
+        self.wrap.update(&self.buffer, self.wrap.width(), &self.block_specs());
+    }
+
     pub(super) fn rebuild_blocks(&mut self) {
         self.refresh_review();
         let mut blocks = Vec::new();
@@ -685,7 +691,7 @@ impl Editor {
                 }
             }
             // (Text only looked at, as a commit has it: nothing to keep or undo.)
-            if let Some(index) = self.current_hunk().filter(|_| !self.read_only) {
+            if let Some(index) = self.current_hunk().filter(|_| !self.view_only) {
                 let hunk = &review.hunks[index];
                 blocks.push(Block {
                     before_line: hunk.new.end.max(hunk.new.start),
@@ -973,7 +979,11 @@ impl Editor {
                         div()
                             .pb(px(8.))
                             .child(
-                                div().text_size(px(ui::T_XS)).line_height(px(18.)).text_color(theme.muted).child(who.clone()),
+                                div()
+                                    .text_size(px(ui::T_XS))
+                                    .line_height(px(18.))
+                                    .text_color(theme.muted)
+                                    .child(who.clone()),
                             )
                             .children(body.lines().map(|l| div().min_h(px(20.)).child(l.to_string())))
                     });

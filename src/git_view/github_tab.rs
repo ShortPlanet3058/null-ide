@@ -46,15 +46,20 @@ pub struct GitHub {
     pub creating: bool,
     pub draft: bool,
     pub sending: bool,
+    /// The branch checked out (None: on no branch), when last read.
+    pub on_branch: Option<String>,
 }
 
 struct Read {
     account: Account,
+    on_branch: Option<String>,
     mine: Option<Pull>,
-    pulls: Result<Vec<Pull>, String>,
+    pulls: Vec<Pull>,
     issues: Vec<Issue>,
     review_asked: Vec<Pull>,
     assigned: Vec<Issue>,
+    /// The first of the lists that couldn't be read: why.
+    error: Option<String>,
 }
 
 impl GitView {
@@ -68,24 +73,51 @@ impl GitView {
                 .background_executor()
                 .spawn(async move {
                     let account = github::account(&root);
+                    let on_branch = crate::git::branch_checked_out(&root);
+                    let nothing = |account, on_branch| Read {
+                        account,
+                        on_branch,
+                        mine: None,
+                        pulls: Vec::new(),
+                        issues: Vec::new(),
+                        review_asked: Vec::new(),
+                        assigned: Vec::new(),
+                        error: None,
+                    };
                     if !matches!(account, Account::SignedIn(_)) {
-                        let pulls = Ok(Vec::new());
-                        return Read { account, mine: None, pulls, issues: Vec::new(), review_asked: Vec::new(), assigned: Vec::new() };
+                        return nothing(account, on_branch);
                     }
                     // Each a request to GitHub: side by side.
                     std::thread::scope(|s| {
                         let mine = s.spawn(|| github::pull_for_branch(&root));
-                        let issues = s.spawn(|| github::issues(&root, state, None).unwrap_or_default());
-                        let asked = s.spawn(|| github::pulls(&root, "open", Some("review-requested:@me")).unwrap_or_default());
-                        let assigned = s.spawn(|| github::issues(&root, "open", Some("assignee:@me")).unwrap_or_default());
+                        let issues = s.spawn(|| github::issues(&root, state, None));
+                        let asked = s.spawn(|| github::pulls(&root, "open", Some("review-requested:@me")));
+                        let assigned = s.spawn(|| github::issues(&root, "open", Some("assignee:@me")));
                         let pulls = github::pulls(&root, state, None);
+                        fn joined<T>(r: std::thread::Result<Result<T, String>>) -> Result<T, String> {
+                            r.unwrap_or_else(|_| Err("gh stopped.".to_string()))
+                        }
+                        let (issues, asked, assigned) =
+                            (joined(issues.join()), joined(asked.join()), joined(assigned.join()));
+                        let error = [
+                            pulls.as_ref().err(),
+                            issues.as_ref().err(),
+                            asked.as_ref().err(),
+                            assigned.as_ref().err(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .next()
+                        .cloned();
                         Read {
                             account,
+                            on_branch,
                             mine: mine.join().ok().flatten(),
-                            pulls,
-                            issues: issues.join().unwrap_or_default(),
-                            review_asked: asked.join().unwrap_or_default(),
-                            assigned: assigned.join().unwrap_or_default(),
+                            pulls: pulls.unwrap_or_default(),
+                            issues: issues.unwrap_or_default(),
+                            review_asked: asked.unwrap_or_default(),
+                            assigned: assigned.unwrap_or_default(),
+                            error,
                         }
                     })
                 })
@@ -94,20 +126,34 @@ impl GitView {
                 let github = &mut this.github;
                 github.reading = false;
                 github.account = Some(read.account);
+                github.on_branch = read.on_branch;
                 github.mine = read.mine;
-                match read.pulls {
-                    Ok(pulls) => {
-                        github.pulls = pulls;
-                        github.error = None;
-                    }
-                    Err(error) => github.error = Some(error),
-                }
+                github.pulls = read.pulls;
                 github.issues = read.issues;
                 github.review_asked = read.review_asked;
                 github.assigned = read.assigned;
+                github.error = read.error;
                 cx.notify();
             })
             .ok();
+        }));
+    }
+
+    /// Read again when what it shows has changed under it: first shown, or the branch
+    /// switched (GitHub's asked; never on every change here).
+    pub(super) fn refresh_github_if_stale(&mut self, cx: &mut Context<Self>) {
+        if self.github.reading {
+            return;
+        }
+        if self.github.account.is_none() {
+            return self.refresh_github(cx);
+        }
+        let (root, was) = (self.root.clone(), self.github.on_branch.clone());
+        self.github_task = Some(cx.spawn(async move |this, cx| {
+            let now = cx.background_executor().spawn(async move { crate::git::branch_checked_out(&root) }).await;
+            if now != was {
+                this.update(cx, |this, cx| this.refresh_github(cx)).ok();
+            }
         }));
     }
 
@@ -155,13 +201,16 @@ impl GitView {
         let (root, draft) = (self.root.clone(), self.github.draft);
         self.github.sending = true;
         cx.spawn(async move |this, cx| {
-            let result =
-                cx.background_executor().spawn(async move { github::create_pull(&root, &title, &body, &base, draft) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { github::create_pull(&root, &title, &body, &base, draft) })
+                .await;
             this.update(cx, |this, cx| {
                 this.github.sending = false;
                 let said = match result {
                     Ok(url) => {
                         this.github.creating = false;
+                        this.github.draft = false;
                         for input in [&this.pr_title, &this.pr_body, &this.pr_base] {
                             input.update(cx, |input, cx| input.set_text("", cx));
                         }
@@ -184,31 +233,54 @@ impl GitView {
         if self.repository == Some(false) {
             return quiet("This folder isn't a git repository.", &theme);
         }
-        match &self.github.account {
-            None => return quiet("Asking GitHub…", &theme),
-            Some(Account::Missing) => return quiet(github::MISSING, &theme),
-            Some(Account::SignedOut) => {
-                return quiet("gh isn't signed in to GitHub: run gh auth login in the terminal.", &theme);
-            }
-            Some(Account::SignedIn(_)) => {}
+        let said = match &self.github.account {
+            None => Some("Asking GitHub…".to_string()),
+            Some(Account::Missing) => Some(github::MISSING.to_string()),
+            Some(Account::SignedOut) => Some("gh isn't signed in to GitHub: run gh auth login in the terminal.".into()),
+            Some(Account::Failed(error)) => Some(format!("Couldn't ask GitHub: {error}")),
+            Some(Account::SignedIn(_)) => None,
+        };
+        if let Some(said) = said {
+            let retry = self.github.account.is_some();
+            return div()
+                .flex()
+                .flex_col()
+                .child(quiet(&said, &theme))
+                .when(retry, |d| {
+                    d.child(
+                        div()
+                            .id("github-retry")
+                            .px(px(18.))
+                            .pt(px(8.))
+                            .text_size(px(ui::T_SM))
+                            .text_color(theme.caret)
+                            .cursor_pointer()
+                            .child(if self.github.reading { "Asking…" } else { "Try again" })
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.refresh_github(cx))),
+                    )
+                })
+                .into_any_element();
         }
         let login = match &self.github.account {
             Some(Account::SignedIn(login)) => login.clone(),
             _ => String::new(),
         };
         let link = |id: &'static str, label: String| {
-            div()
-                .id(id)
-                .flex_none()
-                .text_color(theme.caret)
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.8))
-                .child(label)
+            div().id(id).flex_none().text_color(theme.caret).cursor_pointer().hover(|s| s.opacity(0.8)).child(label)
         };
 
         // The branch's pull request, or the way to make one.
-        let branch = self.branch.clone().unwrap_or_default();
-        let mine: gpui::AnyElement = if let Some(pull) = self.github.mine.clone() {
+        let branch = self.github.on_branch.clone();
+        let mine: gpui::AnyElement = if branch.is_none() {
+            div()
+                .mx(px(18.))
+                .mt(px(4.))
+                .mb(px(8.))
+                .text_size(px(ui::T_SM))
+                .text_color(theme.faint)
+                .child("On no branch: switch to one for its pull request.")
+                .into_any_element()
+        } else if let Some(pull) = self.github.mine.clone() {
             let number = pull.number;
             div()
                 .id("github-mine")
@@ -234,7 +306,14 @@ impl GitView {
                 .rounded(px(ui::R_ROW_LG))
                 .bg(theme.surface)
                 .text_size(px(ui::T_SM))
-                .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(format!("{branch} has no pull request")))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.muted)
+                        .child(format!("{} has no pull request", branch.unwrap_or_default())),
+                )
                 .child(
                     link("github-create", "Create…".into())
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_create_form(window, cx))),
@@ -355,7 +434,9 @@ impl GitView {
                         d.child(div().px(px(10.)).text_size(px(ui::T_SM)).text_color(theme.error).child(error))
                     })
                     .when(rows.is_empty() && self.github.error.is_none(), |d| {
-                        d.child(div().px(px(10.)).pt(px(6.)).text_size(px(ui::T_SM)).text_color(theme.faint).child(empty))
+                        d.child(
+                            div().px(px(10.)).pt(px(6.)).text_size(px(ui::T_SM)).text_color(theme.faint).child(empty),
+                        )
                     })
                     .children(rows)
                     .children(state_link),
@@ -412,7 +493,12 @@ impl GitView {
                     .items_center()
                     .gap(px(6.))
                     .py(px(4.))
-                    .child(div().flex_none().text_color(theme.muted).child(format!("{} →", self.branch.clone().unwrap_or_default())))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.muted)
+                            .child(format!("{} →", self.github.on_branch.clone().unwrap_or_default())),
+                    )
                     .child(div().flex_1().min_w_0().code_font(cx).child(self.pr_base.clone())),
             )
             .child(
@@ -444,7 +530,9 @@ impl GitView {
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme.foreground))
                             .child("Cancel")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.cancel_pull(&CancelPull, window, cx))),
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.cancel_pull(&CancelPull, window, cx)
+                            })),
                     )
                     .child(
                         div()
@@ -455,7 +543,9 @@ impl GitView {
                             .when(ready, |b| b.bg(theme.caret).text_color(theme.background).cursor_pointer())
                             .when(!ready, |b| b.bg(theme.hairline).text_color(theme.muted))
                             .child(if self.github.sending { "Pushing…" } else { "Create ⌘↵" })
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.create_pull(&CreatePull, window, cx))),
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.create_pull(&CreatePull, window, cx)
+                            })),
                     ),
             )
             .into_any_element()

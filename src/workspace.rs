@@ -1574,11 +1574,19 @@ impl Workspace {
                     let changed = git::status(&root);
                     let joining = git::joining(&root);
                     // (Conflicted in git's index, and markers still in the file.)
-                    let to_settle: Vec<PathBuf> = changed
+                    let mut to_settle: Vec<PathBuf> = changed
                         .iter()
                         .filter(|(path, status)| *status == git::FileStatus::Conflicted && git::still_marked(path))
                         .map(|(path, _)| path.clone())
                         .collect();
+                    // (And those with no markers, still to be decided.)
+                    if joining.is_some() {
+                        for (path, _) in git::undecided(&root) {
+                            if !to_settle.contains(&path) {
+                                to_settle.push(path);
+                            }
+                        }
+                    }
                     (changed, git::ahead_behind(&root), joining, to_settle)
                 })
                 .await;
@@ -1792,18 +1800,19 @@ impl Workspace {
 
     /// Returns the changes set aside last. Conflicts open at the first, where ⌘. resolves each.
     fn bring_back_changes(&mut self, _: &BringBackChanges, window: &mut Window, cx: &mut Context<Self>) {
-        self.bring_back_at(0, window, cx);
+        self.bring_back_at(0, None, window, cx);
     }
 
-    /// Returns the changes set aside at `index` (0: the latest).
-    fn bring_back_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Returns the changes set aside at `index` (0: the latest), if they're still commit `id`.
+    fn bring_back_at(&mut self, index: usize, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
         self.save_named_tabs(cx);
         let root = self.tree.read(cx).root().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { git::bring_back_at(&root, index) }).await;
+            let result =
+                cx.background_executor().spawn(async move { git::bring_back_at(&root, index, id.as_deref()) }).await;
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(conflicts) if conflicts.is_empty() => this.show_notice("Brought the changes back.".into(), cx),
@@ -2156,10 +2165,42 @@ impl Workspace {
     /// AI's commit message for `files`' changes, written into `target` as it comes.
     fn write_commit_message_into(&mut self, files: Vec<PathBuf>, target: CommitTarget, cx: &mut Context<Self>) {
         let git_view = self.git_view.downgrade();
+        // Into the Changes tab: one draft at a time, Commit waiting for it.
+        let generation = matches!(target, CommitTarget::Changes).then(|| {
+            self.git_view.update(cx, |v, cx| {
+                v.draft_generation += 1;
+                v.drafting = true;
+                cx.notify();
+                v.draft_generation
+            })
+        });
+        let into_changes = generation.is_some();
+        let finished = {
+            let git_view = git_view.clone();
+            move |cx: &mut App| {
+                git_view
+                    .update(cx, |v, cx| {
+                        if Some(v.draft_generation) == generation {
+                            v.drafting = false;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            }
+        };
         let put = move |message: &str, cx: &mut App| -> bool {
             match &target {
                 CommitTarget::Palette(palette) => palette.update(cx, |p, cx| p.set_query(message, cx)).is_ok(),
-                CommitTarget::Changes => git_view.update(cx, |v, cx| v.set_message(message, cx)).is_ok(),
+                // (Another draft asked for since: this one stops.)
+                CommitTarget::Changes => git_view
+                    .update(cx, |v, cx| {
+                        let current = Some(v.draft_generation) == generation;
+                        if current {
+                            v.set_message(message, cx);
+                        }
+                        current
+                    })
+                    .unwrap_or(false),
             }
         };
         let settings = cx.global::<Settings>().ai.clone();
@@ -2206,7 +2247,11 @@ impl Workspace {
                     crate::ai::AiEvent::Done => true,
                     crate::ai::AiEvent::Failed(error) => {
                         this.update(cx, |this, cx| {
-                            put("", cx);
+                            // (The Changes tab keeps what was in it.)
+                            if !into_changes {
+                                put("", cx);
+                            }
+                            finished(cx);
                             this.show_notice(format!("Couldn't write the message: {error}"), cx);
                         })
                         .ok();
@@ -2217,6 +2262,7 @@ impl Workspace {
                 if !cx.update(|cx| put(&shown, cx)).unwrap_or(false) || done {
                     // Written (or no longer wanted): not still said to be on its way.
                     this.update(cx, |this, cx| {
+                        finished(cx);
                         if this.notice.as_ref().is_some_and(|(n, _)| n == WRITING) {
                             this.notice = None;
                             cx.notify();
@@ -2226,6 +2272,8 @@ impl Workspace {
                     return;
                 }
             }
+            // (Ended without a word: not still drafting.)
+            cx.update(|cx| finished(cx)).ok();
         })
         .detach();
     }
@@ -3464,6 +3512,8 @@ impl Workspace {
     }
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // (Its git, not the last project's: a commit shown would act there.)
+        self.drop_pages(cx);
         self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
         self.git_view.update(cx, |view, cx| view.set_root(path.clone(), cx));
         // Language servers work per project: restart them for the new folder.
@@ -3505,15 +3555,17 @@ impl Workspace {
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        // A commit (or pull request) looked at gives way to the file.
-        self.git_page = None;
-        self.github_page = None;
         self.show_tab(ix, true, window, cx);
     }
 
     /// Makes tab `ix` the current one; `focus` also moves the keyboard to it.
     fn show_tab(&mut self, ix: usize, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(ix) else { return };
+        if ix >= self.tabs.len() {
+            return;
+        }
+        // A commit (or pull request) looked at gives way to the file.
+        self.drop_pages(cx);
+        let tab = &self.tabs[ix];
         // Leaving a file: Back comes back here, and it saves if files save when left.
         if let Some(leaving) = self.active_editor().filter(|e| **e != tab.editor).cloned() {
             let here = self.here(cx);
@@ -4364,6 +4416,11 @@ impl Workspace {
     }
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        // ⌘W over a commit (or pull request): that's what closes.
+        if self.git_page.is_some() || self.github_page.is_some() {
+            self.drop_pages(cx);
+            return self.focus_main(window, cx);
+        }
         if let Some(ix) = self.active {
             self.close_tab_at(ix, window, cx);
         }
@@ -5618,6 +5675,8 @@ impl Workspace {
             match event {
                 CommitPageEvent::Close => this.close_commit(window, cx),
                 CommitPageEvent::Said(said) => this.show_notice(said.clone(), cx),
+                CommitPageEvent::WillChange => this.save_named_tabs(cx),
+                CommitPageEvent::Conflicts(conflicts) => this.open_first_conflict(conflicts.clone(), window, cx),
                 CommitPageEvent::Changed => {
                     this.refresh_git(cx);
                     this.git_view.update(cx, |view, cx| view.refresh(cx));
@@ -5637,9 +5696,9 @@ impl Workspace {
             use crate::github_page::GitHubPageEvent;
             match event {
                 GitHubPageEvent::Close => {
-                    if this.github_page.take().is_some() {
+                    if this.github_page.is_some() {
+                        this.drop_pages(cx);
                         this.focus_main(window, cx);
-                        cx.notify();
                     }
                 }
                 GitHubPageEvent::Said(said) => this.show_notice(said.clone(), cx),
@@ -5656,13 +5715,9 @@ impl Workspace {
     }
 
     fn close_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.git_page.take().is_some() {
-            self.git_view.update(cx, |view, cx| {
-                view.shown = None;
-                cx.notify();
-            });
+        if self.git_page.is_some() {
+            self.drop_pages(cx);
             self.focus_main(window, cx);
-            cx.notify();
         }
     }
 
@@ -5702,7 +5757,7 @@ impl Workspace {
             GitViewEvent::SwitchTo(branch) => self.change_branch(Ok(branch.clone()), window, cx),
             GitViewEvent::NewBranch(name) => self.change_branch(Err(name.clone()), window, cx),
             GitViewEvent::Join { branch, rebase } => self.join_branch(branch.clone(), *rebase, window, cx),
-            GitViewEvent::BringBack(index) => self.bring_back_at(*index, window, cx),
+            GitViewEvent::BringBack(set) => self.bring_back_at(set.index, Some(set.id.clone()), window, cx),
             GitViewEvent::SetAside => self.set_changes_aside(&SetChangesAside, window, cx),
             GitViewEvent::Said(said) => self.show_notice(said.clone(), cx),
             GitViewEvent::Changed => self.refresh_git(cx),
@@ -5725,7 +5780,6 @@ impl Workspace {
                 cx,
             )
         });
-        self.save_named_tabs(cx);
         let root = self.tree.read(cx).root().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
             if let Some(asked) = asked
@@ -5733,6 +5787,8 @@ impl Workspace {
             {
                 return;
             }
+            // Saved once it's sure to go ahead, so git sees every change.
+            this.update(cx, |this, cx| this.save_named_tabs(cx)).ok();
             let b = branch.clone();
             let result = cx
                 .background_executor()
@@ -5761,8 +5817,7 @@ impl Workspace {
     /// The first of `conflicts` opened (read again from disk), at its first conflict.
     fn open_first_conflict(&mut self, conflicts: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(first) = conflicts.into_iter().next() else { return };
-        self.git_page = None;
-        self.github_page = None;
+        self.drop_pages(cx);
         self.open_file(first, window, cx);
         if let Some(editor) = self.active_editor().cloned() {
             editor.update(cx, |e, cx| {
@@ -5809,6 +5864,50 @@ impl Workspace {
         self.save_named_tabs(cx);
         let root = self.tree.read(cx).root().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
+            // A conflict with no markers to settle (a side deleted the file, or it isn't
+            // text) is decided first: committing would keep whatever's there, unasked.
+            let r = root.clone();
+            let undecided = cx.background_executor().spawn(async move { git::undecided(&r) }).await;
+            if let Some((path, kind)) = undecided.into_iter().next() {
+                let name =
+                    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                let other = state.other.clone();
+                let (title, buttons, decisions) = match kind {
+                    git::Undecided::DeletedThere => (
+                        format!("{name} was changed here and deleted in {other}."),
+                        ["Keep It", "Delete It", "Cancel"],
+                        [git::Decision::Keep, git::Decision::Delete],
+                    ),
+                    git::Undecided::DeletedHere => (
+                        format!("{name} was deleted here and changed in {other}."),
+                        ["Keep It", "Delete It", "Cancel"],
+                        [git::Decision::Keep, git::Decision::Delete],
+                    ),
+                    git::Undecided::Bytes => (
+                        format!("{name} changed on both sides, and isn't text."),
+                        ["Keep Yours", "Take Theirs", "Cancel"],
+                        [git::Decision::Keep, git::Decision::Theirs],
+                    ),
+                };
+                let Ok(answer) =
+                    this.update_in(cx, |_, window, cx| window.prompt(PromptLevel::Info, &title, None, &buttons, cx))
+                else {
+                    return;
+                };
+                let decision = match answer.await {
+                    Ok(0) => decisions[0],
+                    Ok(1) => decisions[1],
+                    _ => return,
+                };
+                let decided = cx.background_executor().spawn(async move { git::decide(&root, &path, decision) }).await;
+                this.update_in(cx, |this, window, cx| match decided {
+                    // The next one, or the commit.
+                    Ok(()) => this.finish_joining(window, cx),
+                    Err(error) => this.show_notice(error, cx),
+                })
+                .ok();
+                return;
+            }
             let result = cx.background_executor().spawn(async move { git::finish_joining(&root, state.kind) }).await;
             this.update_in(cx, |this, window, cx| {
                 let notice = match &result {
@@ -5849,8 +5948,12 @@ impl Workspace {
         let state = self.joining.clone()?;
         let theme = cx.global::<Theme>().clone();
         let (title, stop, finish) = match state.kind {
-            git::Joining::Merge => (format!("Merging {} into {}", state.other, state.into), "Stop the Merge", "Commit the Merge"),
-            git::Joining::Rebase => (format!("Rebasing {} onto {}", state.into, state.other), "Stop the Rebase", "Continue"),
+            git::Joining::Merge => {
+                (format!("Merging {} into {}", state.other, state.into), "Stop the Merge", "Commit the Merge")
+            }
+            git::Joining::Rebase => {
+                (format!("Rebasing {} onto {}", state.into, state.other), "Stop the Rebase", "Continue")
+            }
             git::Joining::CherryPick => (format!("Cherry-picking {}", state.other), "Stop", "Commit"),
             git::Joining::Revert => (format!("Reverting {}", state.other), "Stop", "Commit"),
         };
@@ -5899,7 +6002,10 @@ impl Workspace {
                         })),
                 )
                 .child(div().flex_1())
-                .child(button("joining-stop", stop, false).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.stop_joining(window, cx))))
+                .child(
+                    button("joining-stop", stop, false)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.stop_joining(window, cx))),
+                )
                 .child(
                     button("joining-finish", finish, settled)
                         .when(!settled, |b| b.text_color(theme.muted))
@@ -6620,10 +6726,33 @@ impl Workspace {
         if outline_hidden && self.outline_filter.focus_handle(cx).is_focused(window) {
             self.focus_main(window, cx);
         }
+        // The commit message (or another git field), out of sight: the same.
+        let git_hidden = !self.sidebar_git || self.sidebar_search.on || !cx.global::<Settings>().sidebar_visible;
+        if git_hidden && self.git_view.focus_handle(cx).contains_focused(window, cx) {
+            self.focus_main(window, cx);
+        }
     }
 
-    /// Focuses the open file, or the window itself when nothing is open.
+    /// The commit (or pull request) looked at in the code's place, gone.
+    fn drop_pages(&mut self, cx: &mut Context<Self>) {
+        if self.git_page.take().is_some() || self.github_page.take().is_some() {
+            self.git_view.update(cx, |view, cx| {
+                view.shown = None;
+                cx.notify();
+            });
+            cx.notify();
+        }
+    }
+
+    /// Focuses what's in the code's place: a commit (or pull request) looked at, the open
+    /// file, or the window itself when nothing is open.
     fn focus_main(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((page, _)) = &self.git_page {
+            return window.focus(&page.focus_handle(cx));
+        }
+        if let Some((page, _)) = &self.github_page {
+            return window.focus(&page.focus_handle(cx));
+        }
         match self.active_editor() {
             Some(editor) => window.focus(&editor.focus_handle(cx)),
             None => window.focus(&self.focus_handle),
@@ -6631,6 +6760,8 @@ impl Workspace {
     }
 
     fn render_sidebar_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let conflicts = self.git_status.iter().filter(|(_, s)| *s == git::FileStatus::Conflicted).count();
+        let badge = if conflicts > 0 { conflicts } else { self.git_status.len() };
         let theme = cx.global::<Theme>();
         let searching = self.sidebar_search.on;
         let outlining = !searching && self.sidebar_outline;
@@ -6672,9 +6803,24 @@ impl Workspace {
                     .child(tab("search", "Search", searching).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
                     ))
-                    .child(tab("changes", "Changes", changes).active(|s| s.opacity(0.7)).on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_changes(&ShowChanges, window, cx)),
-                    )),
+                    .child(
+                        tab("changes", "Changes", changes)
+                            .gap(px(3.))
+                            // How many files changed (conflicts, when there are some, in red).
+                            .when(badge > 0, |t| {
+                                t.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(ui::T_XS))
+                                        .text_color(if conflicts > 0 { theme.git_deleted } else { theme.caret })
+                                        .child(badge.to_string()),
+                                )
+                            })
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_changes(&ShowChanges, window, cx)
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -12882,6 +13028,41 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&git(&["show", "HEAD:new.txt"]).stdout), "hello\n");
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "ONE\ntwo\nthree\nfour\nfive\nSIX\n");
         assert!(view.read_with(cx, |v, cx| v.summary.read(cx).text().is_empty()), "the message cleared");
+
+        // A change made after the parts were listed: the choices would land on others, so
+        // nothing's committed until they're looked at again.
+        std::fs::write(dir.join("a.txt"), "ONE\nTWO\nthree\nfour\nfive\nSIX\n").unwrap();
+        view.update(cx, |v, cx| v.refresh(cx));
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |v, _| v.files.iter().any(|f| f.path.ends_with("a.txt") && f.parts.len() == 2)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        view.read_with(cx, |v, _| {
+            let a = v.files.iter().find(|f| f.path.ends_with("a.txt")).unwrap();
+            // SIX, left out before and moved since: still left out; TWO in.
+            assert_eq!(a.parts.iter().map(|p| p.kept).collect::<Vec<_>>(), [true, false]);
+            assert!(a.kept);
+        });
+        // (Saved from the editor just before committing: a third change, above the others' places.)
+        std::fs::write(dir.join("a.txt"), "ONE\nTWO\nthree\nFOUR\nfive\nSIX\n").unwrap();
+        let commits = || String::from_utf8_lossy(&git(&["rev-list", "--count", "HEAD"]).stdout).trim().to_string();
+        let before = commits();
+        view.update(cx, |v, cx| v.summary.update(cx, |input, cx| input.set_text("More", cx)));
+        workspace.update_in(cx, |w, window, cx| {
+            let view = w.git_view.clone();
+            w.git_view_event(&view, &crate::git_view::GitViewEvent::CommitAsked, window, cx)
+        });
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if view.read_with(cx, |v, _| !v.committing) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(commits(), before, "nothing committed");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -12944,9 +13125,28 @@ mod tests {
             let editor = p.shown.as_ref().expect("the file's changes").read(cx);
             assert_eq!(editor.buffer.rope().to_string(), "one\ntwo\n");
         });
-        cx.dispatch_action(crate::commit_page::CloseCommit);
+        // Esc in its changes (a review's undo elsewhere): the page closes, the text as it was.
+        let editor = page.read_with(cx, |p, _| p.shown.clone().unwrap());
+        cx.update(|window, cx| window.focus(&editor.focus_handle(cx)));
+        cx.simulate_keystrokes("tab escape");
         cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.buffer.rope().to_string()), "one\ntwo\n");
         assert!(workspace.read_with(cx, |w, _| w.git_page.is_none()), "Esc closes it");
+        // Shown again, ⌘W closes the page, not a file under it.
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("b.txt"), window, cx);
+            let view = w.git_view.clone();
+            let second = view.read(cx).history[0].clone();
+            w.git_view_event(&view, &crate::git_view::GitViewEvent::ShowCommit(second), window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| {
+            assert!(w.git_page.is_none());
+            assert_eq!(w.tabs.len(), 1, "the file stays open");
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -13060,6 +13260,11 @@ mod tests {
         std::fs::write(dir.join("pulls.json"), format!("[{pull}]")).unwrap();
         std::fs::write(dir.join("pull.json"), &pull).unwrap();
         std::fs::write(
+            dir.join("files.json"),
+            r#"{"filename":"a.rs","status":"modified","additions":1,"deletions":0}"#,
+        )
+        .unwrap();
+        std::fs::write(
             dir.join("review.json"),
             r#"{"id":11,"user":{"login":"bo"},"body":"Why b?","created_at":"2026-10-11T00:00:00Z","path":"a.rs","line":2}"#,
         )
@@ -13068,12 +13273,15 @@ mod tests {
         let script = format!(
             r#"#!/bin/sh
 echo "$@" >> '{log}'
-case "$1 $2" in
-  "api user") echo ada ;;
-  "pr list") cat '{d}/pulls.json' ;;
-  "issue list") echo '[]' ;;
-  "pr view") if [ "$3" = "5" ]; then cat '{d}/pull.json'; else echo 'no pull requests found' >&2; exit 1; fi ;;
-  "api --paginate") cat '{d}/review.json' ;;
+case "$*" in
+  "repo view"*) echo '{{"nameWithOwner":"o/r","url":"https://github.com/o/r"}}' ;;
+  *" user --jq .login") echo ada ;;
+  "pr list"*) cat '{d}/pulls.json' ;;
+  "issue list"*) echo '[]' ;;
+  "pr view 5"*) cat '{d}/pull.json' ;;
+  "pr view"*) echo 'no pull requests found' >&2; exit 1 ;;
+  *"pulls/5/files --paginate"*) cat '{d}/files.json' ;;
+  *"pulls/5/comments --paginate"*) cat '{d}/review.json' ;;
   *) echo '{{}}' ;;
 esac
 "#,
@@ -13144,7 +13352,11 @@ esac
         });
         wait(cx, &mut |cx| page.read_with(cx, |p, _| p.replying.is_none()));
         let asked_for = std::fs::read_to_string(&asked).unwrap();
-        assert!(asked_for.contains("api -X POST repos/{owner}/{repo}/pulls/5/comments/11/replies -f body=Because."), "{asked_for}");
+        assert!(
+            asked_for
+                .contains("api --hostname github.com repos/o/r/pulls/5/comments/11/replies -X POST -f body=Because."),
+            "{asked_for}"
+        );
         cx.dispatch_action(crate::github_page::CloseGitHubPage);
         cx.run_until_parked();
         assert!(workspace.read_with(cx, |w, _| w.github_page.is_none()));

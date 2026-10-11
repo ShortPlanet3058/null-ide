@@ -278,6 +278,9 @@ impl Editor {
 
     /// ⇥: the change stays as it is.
     pub(super) fn keep_hunk(&mut self, _: &KeepHunk, _: &mut Window, cx: &mut Context<Self>) {
+        if self.view_only {
+            return cx.propagate();
+        }
         self.refresh_review();
         let Some(index) = self.current_hunk() else { return };
         let text = self.buffer.to_string();
@@ -293,6 +296,9 @@ impl Editor {
 
     /// Esc: the change is undone, the old lines put back.
     pub(super) fn undo_hunk(&mut self, _: &UndoHunk, _: &mut Window, cx: &mut Context<Self>) {
+        if self.view_only {
+            return cx.propagate();
+        }
         self.refresh_review();
         let Some(index) = self.current_hunk() else { return };
         let Some(review) = &self.review else { return };

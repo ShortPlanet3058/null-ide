@@ -33,7 +33,7 @@ pub enum GitHubPageEvent {
 impl EventEmitter<GitHubPageEvent> for GitHubPage {}
 
 pub enum Detail {
-    Pull(PullDetail),
+    Pull(Box<PullDetail>),
     Issue(IssueDetail),
 }
 
@@ -53,8 +53,16 @@ pub struct GitHubPage {
     pub showing: Showing,
     /// The file shown, as the pull request leaves it, its changes against where it began.
     pub shown: Option<Entity<Editor>>,
-    /// Where the pull request's branch left its base (read once).
-    merge_base: Option<String>,
+    /// Where the pull request's branch left its base, for the base and head it was
+    /// worked out for (read again when either moves).
+    merge_base: Option<(String, String, String)>,
+    /// The file shown (its path), and where each of its lines before is in it now (for
+    /// comments on lines taken out).
+    shown_path: Option<String>,
+    old_to_new: Vec<usize>,
+    /// A Merge, Approve or Check Out running: another click waits for it.
+    acting: bool,
+    editor_subscription: Option<Subscription>,
     composer: Entity<TextInput>,
     /// The review thread being answered.
     pub replying: Option<u64>,
@@ -87,6 +95,10 @@ impl GitHubPage {
             showing: Showing::Conversation,
             shown: None,
             merge_base: None,
+            shown_path: None,
+            old_to_new: Vec::new(),
+            acting: false,
+            editor_subscription: None,
             composer,
             replying: None,
             sending: false,
@@ -110,7 +122,7 @@ impl GitHubPage {
                     if issue {
                         github::issue_detail(&root, number).map(Detail::Issue)
                     } else {
-                        github::pull_detail(&root, number).map(Detail::Pull)
+                        github::pull_detail(&root, number).map(|p| Detail::Pull(Box::new(p)))
                     }
                 })
                 .await;
@@ -119,10 +131,24 @@ impl GitHubPage {
                     Ok(detail) => {
                         this.detail = Some(detail);
                         this.error = None;
-                        match this.showing {
-                            Showing::File(ix) if this.shown.is_some() => this.refresh_threads(ix, cx),
-                            Showing::File(ix) => this.show_file(ix, cx),
-                            Showing::Conversation => {}
+                        // The file shown again: the same one (new pushes can change the list),
+                        // or read again if it changed.
+                        if let Showing::File(ix) = this.showing {
+                            let file = this.pull().and_then(|p| p.files.get(ix)).map(|f| f.path.clone());
+                            match file {
+                                Some(path) if this.shown_path.as_deref() == Some(path.as_str()) => {
+                                    this.show_file(ix, cx)
+                                }
+                                _ => {
+                                    let again = this.shown_path.clone().and_then(|shown| {
+                                        this.pull().and_then(|p| p.files.iter().position(|f| f.path == shown))
+                                    });
+                                    match again {
+                                        Some(ix) => this.show_file(ix, cx),
+                                        None => this.show_conversation(cx),
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(error) => this.error = Some(error),
@@ -143,59 +169,71 @@ impl GitHubPage {
     fn threads_of(&self, path: &str) -> Vec<Thread> {
         let Some(pull) = self.pull() else { return Vec::new() };
         let now = now();
-        let said = |c: &Comment| (format!("{} · {}", c.author, crate::git::ago(c.time, now)), c.body.clone());
+        let said = |c: &Comment| {
+            let outdated = if c.outdated { " · on an earlier version" } else { "" };
+            (format!("{} · {}{outdated}", c.author, crate::git::ago(c.time, now)), c.body.clone())
+        };
         pull.review
             .iter()
             .filter(|c| c.reply_to.is_none() && c.path.as_deref() == Some(path))
             .map(|top| {
                 let mut comments = vec![said(top)];
                 comments.extend(pull.review.iter().filter(|c| c.reply_to == Some(top.id)).map(said));
-                Thread { id: top.id, line: top.line.unwrap_or(1).saturating_sub(1), comments }
+                let line = top.line.unwrap_or(1).saturating_sub(1);
+                // On a line taken out: where it went, in the file as it is.
+                let line = if top.left { self.old_to_new.get(line).copied().unwrap_or(line) } else { line };
+                Thread { id: top.id, line, comments }
             })
             .collect()
-    }
-
-    fn refresh_threads(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(file) = self.pull().and_then(|p| p.files.get(ix)).cloned() else { return };
-        let threads = self.threads_of(&file.path);
-        if let Some(editor) = &self.shown {
-            editor.update(cx, |e, cx| e.set_threads(threads, cx));
-        }
     }
 
     /// File `ix`'s changes: as the pull request leaves it, against where its branch began.
     pub fn show_file(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(pull) = self.pull() else { return };
         let Some(file) = pull.files.get(ix).cloned() else { return };
-        let (base_oid, head_oid) = (pull.base_oid.clone(), pull.head_oid.clone());
+        let (base_oid, head_oid, repo) = (pull.base_oid.clone(), pull.head_oid.clone(), pull.repo.clone());
         self.showing = Showing::File(ix);
         self.replying = None;
-        let (root, known_base) = (self.root.clone(), self.merge_base.clone());
+        let known_base = self
+            .merge_base
+            .clone()
+            .filter(|(base, head, _)| *base == base_oid && *head == head_oid)
+            .map(|(_, _, sha)| sha);
+        let root = self.root.clone();
         self.file_task = Some(cx.spawn(async move |this, cx| {
             let read = file.clone();
-            let (base, before, after) = cx
+            let (b, h) = (base_oid.clone(), head_oid.clone());
+            let (base, before, after, old_to_new) = cx
                 .background_executor()
                 .spawn(async move {
                     let file = read;
-                    let base = known_base.or_else(|| github::merge_base(&root, &base_oid, &head_oid)).unwrap_or(base_oid);
-                    let before = if file.kind == 'A' { None } else { github::text_at(&root, &base, &file.path) };
-                    let after = if file.kind == 'D' { None } else { github::text_at(&root, &head_oid, &file.path) };
-                    (base, before.unwrap_or_default(), after.unwrap_or_default())
+                    let found = known_base.or_else(|| github::merge_base(&root, &repo, &b, &h));
+                    let base = found.clone().unwrap_or(b);
+                    // A renamed file was elsewhere before.
+                    let was = file.old_path.as_deref().unwrap_or(&file.path);
+                    let before = if file.kind == 'A' { None } else { github::text_at(&root, &repo, &base, was) };
+                    let after = if file.kind == 'D' { None } else { github::text_at(&root, &repo, &h, &file.path) };
+                    let (before, after) = (before.unwrap_or_default(), after.unwrap_or_default());
+                    let old_to_new = old_to_new(&before, &after);
+                    (found, before, after, old_to_new)
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.merge_base = Some(base);
+                // (Kept only when found: the base's tip isn't where the branch began.)
+                this.merge_base = base.map(|sha| (base_oid, head_oid, sha));
+                this.shown_path = Some(file.path.clone());
+                this.old_to_new = old_to_new;
                 let threads = this.threads_of(&file.path);
                 let editor = cx.new(|cx| {
                     // No file behind it: nothing typed here is saved anywhere.
                     let mut editor = Editor::new(crate::buffer::Buffer::from_text(&after), None, cx);
                     editor.choose_language(crate::editor::language_by_path(std::path::Path::new(&file.path)), cx);
-                    editor.read_only = true;
+                    editor.view_only = true;
                     editor.start_review(before, cx);
                     editor.set_threads(threads, cx);
                     editor
                 });
-                this._subscriptions.push(cx.subscribe(&editor, |this, _, event: &EditorEvent, cx| {
+                this.editor_subscription = Some(cx.subscribe(&editor, |this, _, event: &EditorEvent, cx| {
                     if let EditorEvent::ReplyAsked(id) = event {
                         this.reply_to(*id, cx);
                     }
@@ -234,14 +272,15 @@ impl GitHubPage {
             return;
         }
         let (root, number, issue, replying) = (self.root.clone(), self.number, self.issue, self.replying);
+        let repo = self.pull().map(|p| p.repo.clone());
         self.sending = true;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match replying {
-                        Some(id) => github::reply(&root, number, id, &body),
-                        None => github::comment(&root, number, &body, issue),
+                    match (replying, repo) {
+                        (Some(id), Some(repo)) => github::reply(&root, &repo, number, id, &body),
+                        _ => github::comment(&root, number, &body, issue),
                     }
                 })
                 .await;
@@ -278,11 +317,21 @@ impl GitHubPage {
     }
 
     /// Runs a gh action on this pull request (off the main thread), then says how it went.
-    fn act(&mut self, done: String, action: impl FnOnce(&std::path::Path, u64) -> Result<(), String> + Send + 'static, cx: &mut Context<Self>) {
+    fn act(
+        &mut self,
+        done: String,
+        action: impl FnOnce(&std::path::Path, u64) -> Result<(), String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.acting {
+            return;
+        }
+        self.acting = true;
         let (root, number) = (self.root.clone(), self.number);
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { action(&root, number) }).await;
             this.update(cx, |this, cx| {
+                this.acting = false;
                 let said = match result {
                     Ok(()) => done,
                     Err(error) => error,
@@ -320,7 +369,6 @@ impl GitHubPage {
         })
         .detach();
     }
-
 }
 
 #[cfg(all(test, unix))]
@@ -332,6 +380,34 @@ impl GitHubPage {
     pub fn send_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.send(&SendComment, window, cx);
     }
+}
+
+/// Where each line of `before` is in `after`: itself if kept, else the line the change
+/// that took it out is at (so a comment on it shows by that change).
+fn old_to_new(before: &str, after: &str) -> Vec<usize> {
+    use similar::DiffOp;
+    let mut map = vec![0; crate::git::lines(before).len()];
+    for op in crate::git::line_ops(before, after) {
+        match op {
+            DiffOp::Equal { old_index, new_index, len } => {
+                for i in 0..len {
+                    map[old_index + i] = new_index + i;
+                }
+            }
+            DiffOp::Delete { old_index, old_len, new_index } => {
+                for slot in &mut map[old_index..old_index + old_len] {
+                    *slot = new_index.saturating_sub(1);
+                }
+            }
+            DiffOp::Replace { old_index, old_len, new_index, new_len } => {
+                for i in 0..old_len {
+                    map[old_index + i] = new_index + i.min(new_len.saturating_sub(1));
+                }
+            }
+            DiffOp::Insert { .. } => {}
+        }
+    }
+    map
 }
 
 fn now() -> i64 {
@@ -352,7 +428,9 @@ fn markdown(text: &str, theme: &Theme, cx: &App) -> Vec<gpui::AnyElement> {
                     .bg(theme.surface)
                     .code_font(cx)
                     .text_size(px(ui::T_SM))
-                    .children(b.text.lines().map(|l| div().whitespace_nowrap().child(l.to_string())).collect::<Vec<_>>())
+                    .children(
+                        b.text.lines().map(|l| div().whitespace_nowrap().child(l.to_string())).collect::<Vec<_>>(),
+                    )
                     .into_any_element()
             } else {
                 div()
@@ -423,17 +501,31 @@ impl Render for GitHubPage {
                 if !checks.is_empty() {
                     meta.push(div().text_color(colour).child(checks).into_any_element());
                 }
-                let (added, removed) = p.files.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
-                let n = p.files.len();
+                let n = p.changed_files;
+                let shown =
+                    if p.files.len() < n { format!(" (the first {} here)", p.files.len()) } else { String::new() };
                 meta.push(
                     div()
-                        .child(format!("{} · +{added} −{removed}", if n == 1 { "1 file".into() } else { format!("{n} files") }))
+                        .child(format!(
+                            "{}{shown} · +{} −{}",
+                            if n == 1 { "1 file".into() } else { format!("{n} files") },
+                            p.added,
+                            p.removed
+                        ))
                         .into_any_element(),
                 );
+                if let Some(warning) = &p.warning {
+                    meta.push(div().text_color(theme.error).child(warning.clone()).into_any_element());
+                }
                 let threads: Vec<usize> = p
                     .files
                     .iter()
-                    .map(|f| p.review.iter().filter(|c| c.reply_to.is_none() && c.path.as_deref() == Some(f.path.as_str())).count())
+                    .map(|f| {
+                        p.review
+                            .iter()
+                            .filter(|c| c.reply_to.is_none() && c.path.as_deref() == Some(f.path.as_str()))
+                            .count()
+                    })
                     .collect();
                 for (ix, file) in p.files.iter().enumerate() {
                     let name = std::path::Path::new(&file.path)
@@ -463,12 +555,22 @@ impl Render for GitHubPage {
                                     .flex()
                                     .gap(px(4.))
                                     .text_size(px(ui::T_XS))
-                                    .when(threads[ix] > 0, |d| d.child(div().text_color(theme.muted).child(format!("💬 {}", threads[ix]))))
+                                    .when(threads[ix] > 0, |d| {
+                                        d.child(div().text_color(theme.muted).child(format!("💬 {}", threads[ix])))
+                                    })
                                     .when(threads[ix] == 0, |d| {
                                         d.code_font(cx)
-                                            .when(file.added > 0, |d| d.child(div().text_color(theme.git_added).child(format!("+{}", file.added))))
+                                            .when(file.added > 0, |d| {
+                                                d.child(
+                                                    div().text_color(theme.git_added).child(format!("+{}", file.added)),
+                                                )
+                                            })
                                             .when(file.removed > 0, |d| {
-                                                d.child(div().text_color(theme.git_deleted).child(format!("−{}", file.removed)))
+                                                d.child(
+                                                    div()
+                                                        .text_color(theme.git_deleted)
+                                                        .child(format!("−{}", file.removed)),
+                                                )
                                             })
                                     }),
                             )
@@ -500,7 +602,9 @@ impl Render for GitHubPage {
                 .rounded(px(ui::R_KEY))
                 .text_size(px(ui::T_SM))
                 .cursor_pointer()
-                .when(primary, |b| b.bg(theme.caret).text_color(theme.background).font_weight(gpui::FontWeight::SEMIBOLD))
+                .when(primary, |b| {
+                    b.bg(theme.caret).text_color(theme.background).font_weight(gpui::FontWeight::SEMIBOLD)
+                })
                 .when(!primary, |b| b.border_1().border_color(theme.hairline).hover(|s| s.bg(theme.hairline)))
                 .active(|s| s.opacity(0.7))
                 .child(label)
@@ -530,7 +634,12 @@ impl Render for GitHubPage {
                             .text_size(px(ui::T_XL))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(title)
-                            .child(div().text_color(theme.faint).font_weight(gpui::FontWeight::NORMAL).child(format!("#{}", self.number))),
+                            .child(
+                                div()
+                                    .text_color(theme.faint)
+                                    .font_weight(gpui::FontWeight::NORMAL)
+                                    .child(format!("#{}", self.number)),
+                            ),
                     )
                     .child(close),
             )
@@ -551,17 +660,24 @@ impl Render for GitHubPage {
                     .items_center()
                     .gap(px(8.))
                     .when(is_pull && open, |d| {
-                        d.child(button("pull-merge", "Merge", true).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.merge(window, cx))))
-                            .child(button("pull-approve", "Approve", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        d.child(
+                            button("pull-merge", "Merge", true)
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.merge(window, cx))),
+                        )
+                        .child(button("pull-approve", "Approve", false).on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
                                 let n = this.number;
                                 this.act(format!("Approved #{n}."), github::approve, cx)
-                            })))
+                            },
+                        )))
                     })
                     .when(is_pull, |d| {
-                        d.child(button("pull-checkout", "Check Out", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            let n = this.number;
-                            this.act(format!("Checked out #{n}'s branch."), github::check_out, cx)
-                        })))
+                        d.child(button("pull-checkout", "Check Out", false).on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                let n = this.number;
+                                this.act(format!("Checked out #{n}'s branch."), github::check_out, cx)
+                            },
+                        )))
                     })
                     .child(
                         div()
@@ -631,11 +747,9 @@ impl Render for GitHubPage {
                     .flex_col()
                     .gap(px(10.))
                     .child(div().max_w(px(720.)).text_color(theme.foreground).children(markdown(&body, &theme, cx)))
-                    .children(
-                        conversation
-                            .iter()
-                            .map(|c| card(format!("{} · {}", c.author, crate::git::ago(c.time, now)), &c.body, cx).max_w(px(720.))),
-                    )
+                    .children(conversation.iter().map(|c| {
+                        card(format!("{} · {}", c.author, crate::git::ago(c.time, now)), &c.body, cx).max_w(px(720.))
+                    }))
                     .child(div().w_full().max_w(px(720.)).child(composer(self, cx)))
                     .into_any_element()
             }
@@ -693,3 +807,16 @@ impl Render for GitHubPage {
 }
 
 use crate::fonts::CodeFont as _;
+
+#[cfg(test)]
+mod tests {
+    /// A comment on a line taken out shows by the change that took it out.
+    #[test]
+    fn lines_before_found_after() {
+        let before = "a\nb\nc\nd\ne\n";
+        let after = "a\nB\nd\ne\nf\n";
+        // b replaced by B, c taken out (shown by B), the rest moved up.
+        assert_eq!(super::old_to_new(before, after), [0, 1, 1, 2, 3]);
+        assert_eq!(super::old_to_new("x\n", ""), [0], "a file emptied: by its top");
+    }
+}

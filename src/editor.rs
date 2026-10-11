@@ -79,7 +79,9 @@ pub use fold::{Fold, FoldAll, FoldLevel1, FoldLevel2, FoldLevel3, Unfold, Unfold
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
 pub use invisible::RemoveInvisibleCharacters;
-pub use language_pick::{SetLanguage, by_name as language_by_name, by_path as language_by_path, names as language_names};
+pub use language_pick::{
+    SetLanguage, by_name as language_by_name, by_path as language_by_path, names as language_names,
+};
 pub use meaning::SEMANTIC_TYPES;
 pub use numbers::{Decrement, Increment};
 pub use refactor::{
@@ -578,6 +580,9 @@ pub struct Editor {
     disk_stamp: Option<DiskStamp>,
     /// The file can't be written (its permissions): saving would fail, its tab says so.
     pub read_only: bool,
+    /// Only looked at (a commit's or pull request's version of a file): typing changes
+    /// nothing, and a review's keys (⇥, Esc) go to what shows it.
+    pub view_only: bool,
     /// How the file's bytes are text, kept when saving.
     pub encoding: crate::encoding::Encoding,
     /// The view's height when last drawn, to keep the caret in view as it shrinks.
@@ -780,6 +785,8 @@ pub struct Editor {
     note: Option<assist::Note>,
     /// Conversations shown between the lines (a pull request's review comments).
     threads: Vec<assist::Thread>,
+    /// The text's width the blocks drawn over it were last sized for.
+    pub blocks_width: Option<Pixels>,
     ghost: Option<ghost::Ghost>,
     ghost_task: Option<Task<()>>,
     ghost_cache: Vec<(String, Vec<String>)>,
@@ -893,6 +900,7 @@ impl Editor {
             on_disk: None,
             disk_stamp: None,
             read_only: false,
+            view_only: false,
             encoding: Default::default(),
             viewport_height: None,
             reading: false,
@@ -1012,6 +1020,7 @@ impl Editor {
             review: None,
             note: None,
             threads: Vec::new(),
+            blocks_width: None,
             ghost: None,
             ghost_task: None,
             ghost_cache: Vec::new(),
@@ -2216,6 +2225,9 @@ impl Editor {
     }
 
     fn edit(&mut self, range: Range<usize>, text: &str, kind: EditKind, cx: &mut Context<Self>) {
+        if self.view_only {
+            return;
+        }
         if kind == EditKind::Other {
             self.close_completion(cx);
         }

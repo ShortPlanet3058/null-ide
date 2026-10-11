@@ -75,9 +75,11 @@ impl GitView {
         cx.notify();
     }
 
-    pub(super) fn rename_branch(&mut self, _: &RenameBranch, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn rename_branch(&mut self, _: &RenameBranch, window: &mut Window, cx: &mut Context<Self>) {
         let Some(old) = self.renaming.take() else { return };
         let new = git::branch_name(self.rename_input.read(cx).text());
+        // (The field goes: the keys stay in the tab.)
+        window.focus(&self.focus_handle);
         cx.notify();
         if new.is_empty() || new == old {
             return;
@@ -88,12 +90,16 @@ impl GitView {
                 let (old, new) = (old.clone(), new.clone());
                 async move { git::rename_branch(&root, &old, &new) }
             });
-            let said = match result.await {
+            let result = result.await;
+            let renamed = result.is_ok();
+            let said = match result {
                 Ok(()) => format!("Renamed {old} to {new}."),
                 Err(error) => error,
             };
             this.update(cx, |this, cx| {
-                this.picked = Some(new);
+                if renamed {
+                    this.picked = Some(new);
+                }
                 cx.emit(GitViewEvent::Said(said));
                 cx.emit(GitViewEvent::Changed);
                 this.refresh_branches(cx);
@@ -103,8 +109,9 @@ impl GitView {
         .detach();
     }
 
-    pub(super) fn cancel_rename(&mut self, _: &CancelRename, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn cancel_rename(&mut self, _: &CancelRename, window: &mut Window, cx: &mut Context<Self>) {
         self.renaming = None;
+        window.focus(&self.focus_handle);
         cx.notify();
     }
 
@@ -170,7 +177,8 @@ impl GitView {
             if answer.await != Ok(0) {
                 return;
             }
-            let result = cx.background_executor().spawn(async move { git::drop_set_aside(&root, set.index) }).await;
+            let result =
+                cx.background_executor().spawn(async move { git::drop_set_aside(&root, set.index, &set.id) }).await;
             this.update(cx, |this, cx| {
                 if let Err(error) = result {
                     cx.emit(GitViewEvent::Said(error));
@@ -213,7 +221,16 @@ impl GitView {
                 .when(!picked, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
         };
         let actions_row = || {
-            div().flex().flex_wrap().gap_x(px(12.)).gap_y(px(2.)).pl(px(25.)).pr(px(10.)).pt(px(2.)).pb(px(6.)).text_size(px(ui::T_SM))
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_x(px(12.))
+                .gap_y(px(2.))
+                .pl(px(25.))
+                .pr(px(10.))
+                .pt(px(2.))
+                .pb(px(6.))
+                .text_size(px(ui::T_SM))
         };
 
         let mut local_rows = Vec::new();
@@ -248,17 +265,14 @@ impl GitView {
             let pick = name.clone();
             local_rows.push(
                 row(format!("branch-{name}"), picked)
+                    .child(div().flex_none().size(px(7.)).rounded_full().when(branch.current, |d| d.bg(theme.caret)))
                     .child(
-                        div()
-                            .flex_none()
-                            .size(px(7.))
-                            .rounded_full()
-                            .when(branch.current, |d| d.bg(theme.caret)),
+                        div().flex_1().min_w_0().truncate().code_font(cx).text_size(px(ui::T_SM)).child(name.clone()),
                     )
-                    .child(div().flex_1().min_w_0().truncate().code_font(cx).text_size(px(ui::T_SM)).child(name.clone()))
                     .child(div().flex_none().text_size(px(ui::T_XS)).text_color(theme.muted).child(counts))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.picked = if this.picked.as_deref() == Some(pick.as_str()) { None } else { Some(pick.clone()) };
+                        this.picked =
+                            if this.picked.as_deref() == Some(pick.as_str()) { None } else { Some(pick.clone()) };
                         cx.notify();
                     }))
                     .into_any_element(),
@@ -270,38 +284,41 @@ impl GitView {
             if !branch.current {
                 let (a, b, c) = (name.clone(), name.clone(), name.clone());
                 actions = actions
-                    .child(link(format!("switch-{name}"), "Switch").on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                        cx.emit(GitViewEvent::SwitchTo(git::Branch {
-                            name: a.clone(),
-                            current: false,
-                            remote: false,
-                            when: String::new(),
-                        }))
-                    })))
-                    .child(link(format!("merge-{name}"), "Merge in").on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                        cx.emit(GitViewEvent::Join { branch: b.clone(), rebase: false })
-                    })))
+                    .child(link(format!("switch-{name}"), "Switch").on_click(cx.listener(
+                        move |_, _: &ClickEvent, _, cx| {
+                            cx.emit(GitViewEvent::SwitchTo(git::Branch {
+                                name: a.clone(),
+                                current: false,
+                                remote: false,
+                                when: String::new(),
+                            }))
+                        },
+                    )))
+                    .child(link(format!("merge-{name}"), "Merge in").on_click(cx.listener(
+                        move |_, _: &ClickEvent, _, cx| {
+                            cx.emit(GitViewEvent::Join { branch: b.clone(), rebase: false })
+                        },
+                    )))
                     .child(link(format!("rebase-{name}"), "Rebase onto").on_click(cx.listener(
                         move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::Join { branch: c.clone(), rebase: true }),
                     )));
             }
             let (r, d) = (name.clone(), name.clone());
-            actions = actions.child(
-                link(format!("rename-{name}"), "Rename")
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.start_rename(r.clone(), window, cx))),
-            );
+            actions = actions.child(link(format!("rename-{name}"), "Rename").on_click(
+                cx.listener(move |this, _: &ClickEvent, window, cx| this.start_rename(r.clone(), window, cx)),
+            ));
             if !branch.current {
-                actions = actions.child(
-                    link(format!("delete-{name}"), "Delete")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.delete_branch(d.clone(), window, cx))),
-                );
+                actions = actions.child(link(format!("delete-{name}"), "Delete").on_click(
+                    cx.listener(move |this, _: &ClickEvent, window, cx| this.delete_branch(d.clone(), window, cx)),
+                ));
             }
             local_rows.push(actions.into_any_element());
         }
 
         // The remotes' branches, under each remote's name.
         let mut remote_sections = Vec::new();
-        let mut remotes: Vec<&str> = self.branches.remote.iter().filter_map(|r| r.split_once('/').map(|(r, _)| r)).collect();
+        let mut remotes: Vec<&str> =
+            self.branches.remote.iter().filter_map(|r| r.split_once('/').map(|(r, _)| r)).collect();
         remotes.dedup();
         for remote in remotes {
             remote_sections.push(heading(remote.to_uppercase()).mx(px(-6.)).into_any_element());
@@ -347,10 +364,14 @@ impl GitView {
                                 )))
                             })
                             .child(link(format!("merge-{full}"), "Merge in").on_click(cx.listener(
-                                move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::Join { branch: b.clone(), rebase: false }),
+                                move |_, _: &ClickEvent, _, cx| {
+                                    cx.emit(GitViewEvent::Join { branch: b.clone(), rebase: false })
+                                },
                             )))
                             .child(link(format!("rebase-{full}"), "Rebase onto").on_click(cx.listener(
-                                move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::Join { branch: c.clone(), rebase: true }),
+                                move |_, _: &ClickEvent, _, cx| {
+                                    cx.emit(GitViewEvent::Join { branch: c.clone(), rebase: true })
+                                },
                             )))
                             .into_any_element(),
                     );
@@ -361,8 +382,9 @@ impl GitView {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let set_rows = self.branches.set_aside.clone().into_iter().map(|set| {
             let index = set.index;
-            let message = if set.message == "Null: set aside" { "Changes set aside".to_string() } else { set.message.clone() };
-            let dropped = set.clone();
+            let message =
+                if set.message == "Null: set aside" { "Changes set aside".to_string() } else { set.message.clone() };
+            let (dropped, brought) = (set.clone(), set.clone());
             div()
                 .flex()
                 .items_center()
@@ -371,25 +393,16 @@ impl GitView {
                 .pr(px(10.))
                 .py(px(4.))
                 .text_size(px(ui::T_SM))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(div().truncate().child(message))
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(ui::T_XS))
-                                .text_color(theme.faint)
-                                .child(format!("on {} · {}", set.branch, git::ago(set.time, now))),
-                        ),
-                )
-                .child(
-                    link(format!("bring-back-{index}"), "Bring back")
-                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::BringBack(index)))),
-                )
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().truncate().child(message)).child(
+                    div().truncate().text_size(px(ui::T_XS)).text_color(theme.faint).child(format!(
+                        "on {} · {}",
+                        set.branch,
+                        git::ago(set.time, now)
+                    )),
+                ))
+                .child(link(format!("bring-back-{index}"), "Bring back").on_click(
+                    cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::BringBack(brought.clone()))),
+                ))
                 .child(
                     div()
                         .id(("drop-set-aside", index))
@@ -442,19 +455,12 @@ impl GitView {
                 )
             })
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .pr(px(16.))
-                    .child(div().flex_1().child(heading("SET ASIDE".into())))
-                    .child(
-                        div()
-                            .pt(px(10.))
-                            .text_size(px(ui::T_SM))
-                            .child(link("set-aside-now".into(), "Set aside changes").on_click(
-                                cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::SetAside)),
-                            )),
+                div().flex().items_center().pr(px(16.)).child(div().flex_1().child(heading("SET ASIDE".into()))).child(
+                    div().pt(px(10.)).text_size(px(ui::T_SM)).child(
+                        link("set-aside-now".into(), "Set aside changes")
+                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::SetAside))),
                     ),
+                ),
             )
             .when(self.branches.set_aside.is_empty(), |d| {
                 d.child(div().pl(px(31.)).text_size(px(ui::T_SM)).text_color(theme.faint).child("Nothing set aside."))
