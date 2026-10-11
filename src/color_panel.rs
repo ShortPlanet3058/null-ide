@@ -14,6 +14,8 @@ pub fn open(color: Rgba) {
 
 /// What the panel shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
+// (Only the Mac's panel says where it is.)
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum Panel {
     /// Open, on this color.
     Open(Rgba),

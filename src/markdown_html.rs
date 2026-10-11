@@ -29,7 +29,7 @@ pub fn fragment(source: &str) -> String {
 }
 
 /// Says a copy is Null's own Markdown, so pasting it back isn't read from its HTML.
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, not(target_os = "macos")), allow(dead_code))]
 pub const OWN_COPY: &str = "dev.null-ide.markdown";
 
 /// Puts `text` on the clipboard with `html` for apps that paste formatted text. Returns
