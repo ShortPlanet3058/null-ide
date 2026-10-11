@@ -214,6 +214,9 @@ pub struct GitView {
     graph: Vec<GraphRow>,
     /// Where the branches, tags and HEAD were when the history was read.
     history_refs: String,
+    /// The commits the filter lets through (their places in `history`), and whether it's set.
+    history_shown: Vec<usize>,
+    history_filtered: bool,
     pub filter: Entity<TextInput>,
     /// The commit shown, in the history.
     pub shown: Option<String>,
@@ -323,6 +326,8 @@ impl GitView {
             history: Vec::new(),
             graph: Vec::new(),
             history_refs: String::new(),
+            history_shown: Vec::new(),
+            history_filtered: false,
             filter,
             shown: None,
             history_task: None,
@@ -576,9 +581,7 @@ impl GitView {
             return quiet("This folder isn't a git repository.", &theme);
         }
         let query = self.filter.read(cx).text().trim().to_lowercase();
-        // Filtered, the graph's lines don't join: shown without them.
-        let filtered = !query.is_empty();
-        let shown: Vec<usize> = (0..self.history.len())
+        self.history_shown = (0..self.history.len())
             .filter(|&i| {
                 let c = &self.history[i];
                 query.is_empty()
@@ -587,6 +590,48 @@ impl GitView {
                     || c.id.starts_with(&query)
             })
             .collect();
+        self.history_filtered = !query.is_empty();
+        let nothing = self.history_shown.is_empty();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .mx(px(12.))
+                    .mt(px(4.))
+                    .mb(px(6.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(ui::R_ROW_LG))
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .text_size(px(ui::T_SM))
+                    .child(self.filter.clone()),
+            )
+            .when(nothing && !self.history.is_empty(), |d| d.child(quiet("No commit says that.", &theme)))
+            .child(
+                // Only the rows in sight are made (all 500, each with its graph, were made
+                // every frame).
+                gpui::uniform_list(
+                    "git-history",
+                    self.history_shown.len(),
+                    cx.processor(|this, range: Range<usize>, _, cx| {
+                        range.filter_map(|ix| this.history_shown.get(ix).map(|&i| this.history_row(i, cx))).collect()
+                    }),
+                )
+                .flex_1()
+                .min_h_0()
+                .text_size(px(ui::T_SM)),
+            )
+            .into_any_element()
+    }
+
+    /// Commit `i` of the history's row: its part of the graph (unless filtered), its
+    /// message, who, when, and the branches and tags at it.
+    fn history_row(&self, i: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.global::<Theme>().clone();
+        let filtered = self.history_filtered;
         let palette: Vec<gpui::Hsla> =
             vec![theme.caret, theme.ansi[12], theme.ansi[10], theme.ansi[13], theme.ansi[14], theme.ansi[11]];
         // One width for the graph in every row, so the messages line up.
@@ -594,7 +639,7 @@ impl GitView {
         const MOST_LANES: usize = 8;
         let lanes = self.graph.iter().map(|r| r.width).max().unwrap_or(1).min(MOST_LANES);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        let rows = shown.into_iter().map(|i| {
+        {
             let commit = self.history[i].clone();
             let row = self.graph.get(i).cloned();
             let selected = self.shown.as_deref() == Some(commit.id.as_str());
@@ -704,37 +749,8 @@ impl GitView {
                     }
                     cx.notify();
                 }))
-        });
-        let rows: Vec<_> = rows.collect();
-        let nothing = rows.is_empty();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .mx(px(12.))
-                    .mt(px(4.))
-                    .mb(px(6.))
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(ui::R_ROW_LG))
-                    .border_1()
-                    .border_color(theme.hairline)
-                    .text_size(px(ui::T_SM))
-                    .child(self.filter.clone()),
-            )
-            .child(
-                div()
-                    .id("git-history")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .text_size(px(ui::T_SM))
-                    .when(nothing && !self.history.is_empty(), |d| d.child(quiet("No commit says that.", &theme)))
-                    .children(rows),
-            )
-            .into_any_element()
+        }
+        .into_any_element()
     }
 
     fn render_tabs(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
