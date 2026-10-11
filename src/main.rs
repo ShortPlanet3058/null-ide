@@ -2,6 +2,7 @@
 #![allow(clippy::single_range_in_vec_init)]
 
 mod ai;
+mod crash;
 mod ollama;
 mod system_clipboard;
 #[cfg(debug_assertions)]
@@ -202,6 +203,7 @@ fn window_bounds(saved: Option<session::WindowState>, cx: &App) -> WindowBounds 
 }
 
 fn main() {
+    crash::record();
     let Opening { root, file, place, wait } = resolve_args();
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)

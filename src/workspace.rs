@@ -1043,6 +1043,10 @@ impl Workspace {
             }
         }));
         workspace.python_env = crate::python_env::find(workspace.tree.read(cx).root());
+        // Null crashed last time: said once, with where it's written down.
+        if let Some(said) = crate::crash::untold().filter(|_| !cfg!(test)) {
+            workspace.show_notice(said, cx);
+        }
         // settings.json couldn't be read at launch: said, not left to pass for the defaults.
         if let Some(why) = Settings::unreadable() {
             workspace.show_notice(
