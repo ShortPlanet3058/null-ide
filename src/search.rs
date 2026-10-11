@@ -4,7 +4,8 @@ use std::ops::Range;
 /// More matches than this aren't highlighted; the count shows "10000+".
 pub const MAX_MATCHES: usize = 10_000;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SearchQuery {
     pub text: String,
     pub case_sensitive: bool,
@@ -13,6 +14,17 @@ pub struct SearchQuery {
 }
 
 impl SearchQuery {
+    /// Whether it can match across lines: a pattern with `\n` in it (searched in the whole
+    /// text, not line by line).
+    pub fn spans_lines(&self) -> bool {
+        // An `n` after an odd number of backslashes (`\\n` is a backslash and an n).
+        self.regex
+            && self
+                .text
+                .match_indices('n')
+                .any(|(at, _)| self.text[..at].bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1)
+    }
+
     /// The query as a regex. Plain-text queries are escaped first.
     pub fn build(&self) -> Result<Regex, regex::Error> {
         let mut pattern = if self.regex { self.text.clone() } else { regex::escape(&self.text) };

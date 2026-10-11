@@ -440,12 +440,13 @@ fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
     };
     // Read as it comes (a long list would fill the pipe and wait).
     let mut out = child.stdout.take();
-    let reader = std::thread::spawn(move || {
+    let (sender, list) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut text = String::new();
         if let Some(out) = out.as_mut() {
             out.read_to_string(&mut text).ok();
         }
-        text
+        sender.send(text).ok();
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -461,7 +462,12 @@ fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
             }
         }
     }
-    reader.join().unwrap_or_default().lines().any(|l| l == format!("{id}: test"))
+    // (Something it started may hold its output open: not waited for past the deadline.)
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    list.recv_timeout(left.max(std::time::Duration::from_millis(200)))
+        .unwrap_or_default()
+        .lines()
+        .any(|l| l == format!("{id}: test"))
 }
 
 fn cargo_program(root: &Path) -> Option<PathBuf> {
@@ -920,8 +926,8 @@ impl Workspace {
                 }
             }),
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
-                ProjectSearchEvent::Open { path, line, columns, query, keep_focus } => {
-                    let (line, columns, query) = (*line, columns.clone(), query.clone());
+                ProjectSearchEvent::Open { path, line, columns, end, query, keep_focus } => {
+                    let (line, columns, end, query) = (*line, columns.clone(), *end, query.clone());
                     // It becomes the latest search: ⌘G and ⌘F in any file go on with it.
                     crate::find_bar::remember_search(&query.text, cx);
                     if this.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf)).as_ref()
@@ -932,7 +938,11 @@ impl Workspace {
                     }
                     this.open_file(path.clone(), window, cx);
                     if let Some(editor) = this.active_editor() {
-                        editor.update(cx, |editor, cx| editor.reveal_match(line, columns, query, cx));
+                        editor.update(cx, |editor, cx| match end {
+                            // Across lines: all of it selected.
+                            Some(end) => editor.reveal_range((line, columns.start), end, query, cx),
+                            None => editor.reveal_match(line, columns, query, cx),
+                        });
                     }
                     if *keep_focus {
                         let search = this.project_search.focus_handle(cx);
@@ -1090,7 +1100,14 @@ impl Workspace {
         })
         .detach();
         // Typed in the Outline's filter: the list shows what fits.
-        let filter_changes = cx.observe(&workspace.outline_filter, |_, _, cx| cx.notify());
+        let filter_changes =
+            cx.subscribe(&workspace.outline_filter, |this, filter, _: &crate::text_input::TextInputEvent, cx| {
+                // Emptied (by ⌫ too): the list follows the caret again.
+                if filter.read(cx).text().is_empty() {
+                    this.outline_followed = None;
+                }
+                cx.notify()
+            });
         workspace._subscriptions.push(filter_changes);
         workspace._subscriptions.push(debugger_events);
         workspace._subscriptions.push(debugger_changes);
@@ -1195,6 +1212,7 @@ impl Workspace {
             tabs,
             expanded: self.tree.read(cx).expanded_folders(),
             recent_files: self.recent_files.iter().take(20).cloned().collect(),
+            searches: self.project_search.read(cx).history.clone(),
             terminal_open: self.terminal_open.on,
             window: self.window_state,
         }
@@ -1269,6 +1287,8 @@ impl Workspace {
         if let Some(active) = session.active.and_then(|i| session.tabs.get(i)) {
             self.open_file(active.path.clone(), window, cx);
         }
+        let searches = session.searches.clone();
+        self.project_search.update(cx, |search, _| search.history = searches);
         // Opening the tabs moved each to the front of the recent files: put the saved order back.
         for path in session.recent_files.iter().rev() {
             self.recent_files.retain(|p| p != path);
@@ -3368,9 +3388,13 @@ impl Workspace {
         self.tests = None;
         self.tests_task = None;
         self.results_waiting.clear();
-        // What was debugged there isn't Debug Again here.
+        // What was debugged there isn't Debug Again here, nor a build for it run here.
         self.debugged_test = None;
         self.debug_program = None;
+        self.debug_builds += 1;
+        if self.debugger.read(cx).state == crate::debugger::DebugState::Building {
+            self.debugger.update(cx, |d, cx| d.stop(cx));
+        }
         self.test_status.clear();
         self.tests_running = None;
         self.refresh_git(cx);
@@ -5436,14 +5460,25 @@ impl Workspace {
     }
 
     fn show_outline(&mut self, _: &ShowOutline, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_outline(window, cx);
+        // Typing then narrows it (Esc goes back to the text), when there's an outline.
+        let has_outline = self
+            .active_editor()
+            .cloned()
+            .is_some_and(|editor| self.outline_items(&editor, 1_000_000, cx).is_some_and(|items| !items.is_empty()));
+        if has_outline {
+            window.focus(&self.outline_filter.focus_handle(cx));
+        }
+    }
+
+    /// The Outline in the sidebar (its tab clicked: the text keeps the keys).
+    fn open_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_outline = true;
         self.sidebar_tests = false;
         self.outline_followed = None;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
-        // Typing then narrows it (Esc goes back to the text).
-        window.focus(&self.outline_filter.focus_handle(cx));
         cx.notify();
     }
 
@@ -5460,7 +5495,12 @@ impl Workspace {
         let Ok(written) = crate::settings::read_project(&path) else {
             return self.show_notice(format!("{editor}'s settings couldn't be read"), cx);
         };
-        let (after, changed) = crate::vscode_import::changes(cx.global::<Settings>(), &written);
+        let here = crate::vscode_import::Here::of(cx);
+        // Yours (a project's over them stays the project's).
+        let Some(own) = settings::own() else {
+            return self.show_notice("Your settings.json can't be read: put it right first".into(), cx);
+        };
+        let (_, changed) = crate::vscode_import::changes(&own, &written, &here);
         if changed.is_empty() {
             return self.show_notice(format!("Null has {editor}'s settings already"), cx);
         }
@@ -5477,8 +5517,13 @@ impl Workspace {
                 return;
             }
             this.update(cx, |this, cx| {
-                settings::update(cx, |s| *s = after);
-                this.show_notice(format!("{count} brought over from {editor}"), cx);
+                let saved = settings::update_own(cx, |s| *s = crate::vscode_import::changes(s, &written, &here).0);
+                let said = if saved {
+                    format!("{count} brought over from {editor}")
+                } else {
+                    "Your settings.json can't be read: nothing brought over".to_string()
+                };
+                this.show_notice(said, cx);
             })
             .ok();
         })
@@ -6108,6 +6153,11 @@ impl Workspace {
         if search_hidden && self.project_search.focus_handle(cx).contains_focused(window, cx) {
             self.focus_main(window, cx);
         }
+        // The Outline's filter, out of sight: the keys back to the text.
+        let outline_hidden = !self.sidebar_outline || !cx.global::<Settings>().sidebar_visible;
+        if outline_hidden && self.outline_filter.focus_handle(cx).is_focused(window) {
+            self.focus_main(window, cx);
+        }
     }
 
     /// Focuses the open file, or the window itself when nothing is open.
@@ -6145,9 +6195,11 @@ impl Workspace {
                                 cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
                             ),
                     )
-                    .child(tab("outline", "Outline", outlining).active(|s| s.opacity(0.7)).on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_outline(&ShowOutline, window, cx)),
-                    ))
+                    .child(
+                        tab("outline", "Outline", outlining)
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_outline(window, cx))),
+                    )
                     .child(tab("tests", "Tests", testing).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.show_tests(&ShowTests, window, cx)),
                     ))
@@ -6462,7 +6514,13 @@ impl Workspace {
         if let Some(cargo) = launch.cargo.clone() {
             return self.build_and_debug(root, cargo, Some(launch), cx);
         }
-        if root.join("Cargo.toml").is_file() {
+        // Its program cargo's (in a target folder) or not there yet: built as a Rust
+        // project's is, first. One built some other way runs as it is.
+        let cargo_s = launch.program.as_ref().is_none_or(|p| {
+            !p.is_file()
+                || p.strip_prefix(&root).is_ok_and(|inside| inside.components().any(|c| c.as_os_str() == "target"))
+        });
+        if root.join("Cargo.toml").is_file() && cargo_s {
             return self.build_and_debug(root, vec!["build".into()], Some(launch), cx);
         }
         let Some(program) = launch.program.clone().filter(|p| p.is_file()) else {
@@ -13119,8 +13177,13 @@ mod tests {
         cx.run_until_parked();
         let top = source.read_with(cx, |e, _| e.top_line());
         assert!(top > 0, "the source didn't follow");
-        // At the start of the block shown at the preview's top: a heading or its words.
-        assert!(top % 4 == 0 || top % 4 == 2, "{top}");
+        // In the block shown at the preview's top (as far down it as the preview is).
+        let block = preview.read_with(cx, |p, _| {
+            let (_, blocks) = p.markdown.as_ref().unwrap();
+            let ix = p.reading_scroll.top_item();
+            (blocks[ix].0, blocks.get(ix + 1).map_or(usize::MAX, |b| b.0))
+        });
+        assert!(block.0 <= top && top < block.1.max(block.0 + 1), "{top} not in {block:?}");
         let offset = preview.read_with(cx, |p, _| p.reading_scroll.offset().y);
         cx.run_until_parked();
         assert_eq!(preview.read_with(cx, |p, _| p.reading_scroll.offset().y), offset, "the preview stays put");

@@ -90,19 +90,24 @@ pub fn filtered(items: &[Item], query: &str) -> Vec<(usize, bool)> {
         return (0..items.len()).map(|ix| (ix, true)).collect();
     }
     let mut shown = vec![None; items.len()];
+    // The items the one looked at sits inside, outermost first.
+    let mut around: Vec<usize> = Vec::new();
     for (ix, item) in items.iter().enumerate() {
-        if !crate::fuzzy::fits(&item.name, &folded) {
-            continue;
+        while around.last().is_some_and(|&a| items[a].depth >= item.depth) {
+            around.pop();
         }
-        shown[ix] = Some(true);
-        // Its parents: the nearest shallower one above, and so on out.
-        let mut depth = item.depth;
-        for (up, parent) in items[..ix].iter().enumerate().rev() {
-            if parent.depth < depth {
-                shown[up].get_or_insert(false);
-                depth = parent.depth;
+        if crate::fuzzy::fits(&item.name, &folded) {
+            shown[ix] = Some(true);
+            // Its parents, from the nearest out (those further out are there already
+            // once one is).
+            for &up in around.iter().rev() {
+                if shown[up].is_some() {
+                    break;
+                }
+                shown[up] = Some(false);
             }
         }
+        around.push(ix);
     }
     shown.into_iter().enumerate().filter_map(|(ix, s)| Some((ix, s?))).collect()
 }
@@ -148,6 +153,10 @@ mod tests {
         assert_eq!(filtered(&items, "o"), [(0, true), (1, true), (2, true)]);
         assert_eq!(filtered(&items, " ").len(), 4, "nothing typed: all");
         assert!(filtered(&items, "zz").is_empty());
+        // Deep inside: each one around it, once (the walk out stops at one shown already).
+        let deep = "class A:\n  class B:\n    def x(self): pass\n    def xy(self): pass\ndef y(): pass\n";
+        let items = outline(Path::new("a.py"), deep);
+        assert_eq!(filtered(&items, "x"), [(0, false), (1, false), (2, true), (3, true)]);
     }
 
     #[test]

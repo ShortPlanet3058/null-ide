@@ -979,6 +979,24 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     }
 }
 
+/// Your own settings, as your file has them (without a project's over them).
+/// None when the file can't be read (then nothing is saved over it either).
+pub fn own() -> Option<Settings> {
+    Settings::load()
+}
+
+/// Changes your own settings: what `change` makes of the ones in your file is saved there
+/// (none of it into a project's file), and the project's go back over them.
+/// False when your file can't be read: nothing saved over it.
+pub fn update_own(cx: &mut App, change: impl FnOnce(&mut Settings)) -> bool {
+    let (Some(mut own), Some(path)) = (Settings::load(), Settings::path()) else { return false };
+    change(&mut own);
+    own.font_size = own.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+    own.save_with(&path, None);
+    reload(cx);
+    true
+}
+
 /// Re-reads the settings file, after it was edited by hand.
 pub fn reload(cx: &mut App) {
     // Can't be read: the settings stay as they were (see `Settings::unreadable`).

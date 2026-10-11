@@ -582,7 +582,7 @@ pub struct Editor {
     svg_task: Option<(u64, f32, Task<()>)>,
     /// The parsed document for the preview, and the revision it's of.
     #[allow(clippy::type_complexity)]
-    markdown: Option<(u64, Rc<Vec<(usize, crate::markdown_view::Block)>>)>,
+    pub(crate) markdown: Option<(u64, Rc<Vec<(usize, crate::markdown_view::Block)>>)>,
     /// The source line the preview last scrolled to, following the other side.
     followed_line: Option<usize>,
     /// The preview was scrolled by hand: its source beside it follows (once).
@@ -1729,9 +1729,20 @@ impl Editor {
 
     /// Selects a match found by project search and highlights the query's other matches.
     pub fn reveal_match(&mut self, line: usize, columns: Range<usize>, query: SearchQuery, cx: &mut Context<Self>) {
+        self.reveal_range((line, columns.start), (line, columns.end), query, cx);
+    }
+
+    /// Selects from `start` to `end` (line, char column each), as a match found elsewhere.
+    pub fn reveal_range(
+        &mut self,
+        (line, column): (usize, usize),
+        (end_line, end_column): (usize, usize),
+        query: SearchQuery,
+        cx: &mut Context<Self>,
+    ) {
         self.show_text_for_place();
-        let start = self.buffer.offset(line, columns.start);
-        let end = self.buffer.offset(line, columns.end);
+        let start = self.buffer.offset(line, column);
+        let end = self.buffer.offset(end_line, end_column);
         self.single_cursor();
         self.selection = Selection { anchor: start, head: end };
         self.set_search(query, cx);
@@ -4647,8 +4658,20 @@ impl Editor {
             return None;
         }
         let (_, blocks) = self.markdown.as_ref()?;
-        let line =
-            if self.reading_scroll.offset().y >= px(0.) { 0 } else { blocks.get(self.reading_scroll.top_item())?.0 };
+        let line = if self.reading_scroll.offset().y >= px(0.) {
+            0
+        } else {
+            // Partway down a long block (a code block, a long list): as far down its lines.
+            let ix = self.reading_scroll.top_item();
+            let start = blocks.get(ix)?.0;
+            let end = blocks.get(ix + 1).map_or(self.buffer.len_lines(), |(next, _)| *next).max(start + 1);
+            let top = self.reading_scroll.bounds().top() - self.reading_scroll.offset().y;
+            let through = self
+                .reading_scroll
+                .bounds_for_item(ix)
+                .map_or(0., |block| f32::from(top - block.top()) / f32::from(block.size.height).max(1.));
+            start + ((end - start) as f32 * through.clamp(0., 1.)) as usize
+        };
         self.followed_line = Some(line);
         Some(line)
     }

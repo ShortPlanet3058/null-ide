@@ -97,7 +97,7 @@ pub fn register(cx: &mut App) {
 }
 
 /// The families of the fonts above: there, whatever the computer has.
-const BUNDLED: &[&str] =
+pub const BUNDLED: &[&str] =
     &["Geist Mono", "CommitMono", "JetBrains Mono", "IBM Plex Mono", "Source Code Pro", "Instrument Sans"];
 
 /// Picks the families to use for code and interface text.

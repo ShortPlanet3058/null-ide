@@ -423,8 +423,10 @@ impl Welcome {
                             .active(|s| s.opacity(0.7))
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 if let Ok(written) = crate::settings::read_project(&path) {
-                                    let (after, _) = crate::vscode_import::changes(cx.global::<Settings>(), &written);
-                                    settings::update(cx, |s| *s = after);
+                                    let here = crate::vscode_import::Here::of(cx);
+                                    settings::update_own(cx, |s| {
+                                        *s = crate::vscode_import::changes(s, &written, &here).0
+                                    });
                                 }
                                 this.next(&WelcomeNext, window, cx);
                             }))

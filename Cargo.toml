@@ -66,7 +66,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSEvent", "NSGraphicsContext",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSRange", "NSArray", "NSURL", "NSUserDefaults", "NSGeometry", "NSEnumerator"] }
-# copyfile(3): a save keeps the file's tags, extended attributes and ACLs.
+
+# Every Unix: process locks (flock), signals, permissions; on the Mac also copyfile(3), so
+# a save keeps the file's tags, extended attributes and ACLs.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
