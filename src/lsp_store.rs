@@ -389,7 +389,6 @@ impl LspStore {
         }
     }
 
-    /// Whether a language server answers for this file now.
     /// Organize Imports as a server's own command, for one that has no code action for it
     /// (pyright's, basedpyright's): None for the others.
     pub fn organize_command(&self, path: &Path) -> Option<lsp_types::Command> {
@@ -408,6 +407,7 @@ impl LspStore {
         })
     }
 
+    /// Whether a language server answers for this file now.
     pub fn serves(&self, path: &Path) -> bool {
         self.server_for(path).is_some()
     }
@@ -1283,7 +1283,7 @@ impl LspStore {
         &self,
         path: &Path,
         command: lsp_types::Command,
-    ) -> impl Future<Output = Result<(), String>> + use<> {
+    ) -> impl Future<Output = Result<Option<lsp_types::WorkspaceEdit>, String>> + use<> {
         let request = self.server_for(path).map(|server| {
             server.request::<lsp_types::request::ExecuteCommand>(lsp_types::ExecuteCommandParams {
                 command: command.command,
@@ -1292,10 +1292,16 @@ impl LspStore {
             })
         });
         async move {
-            // (Its edits come as workspace/applyEdit, made as they come: an answer carrying
-            // the edit too, as pyright's does, isn't made a second time.)
+            // (Its edits come as workspace/applyEdit, made as they come. An answer carrying the
+            // edit too, as pyright's does, is given back to say one is coming, not to make
+            // a second time.)
+            let edit = |value: Option<serde_json::Value>| {
+                value
+                    .filter(|v| v.get("changes").is_some() || v.get("documentChanges").is_some())
+                    .and_then(|v| serde_json::from_value::<lsp_types::WorkspaceEdit>(v).ok())
+            };
             match request {
-                Some(request) => request.await.map(|_| ()),
+                Some(request) => request.await.map(edit),
                 None => Err("No language server for this file.".into()),
             }
         }

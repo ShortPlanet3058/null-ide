@@ -49,6 +49,15 @@ pub fn diagram_svg(source: &str, theme: &crate::theme::Theme, font: &str) -> Opt
 /// \frac{1}{n}` is "α² ≤ 1⁄n". What has no character of its own stays as written, its
 /// braces gone (`x^{ab}` is x^(ab)).
 pub fn as_text(latex: &str) -> String {
+    as_text_within(latex, 0)
+}
+
+/// `as_text`, `depth` groups in (very deep ones are left as they're written).
+fn as_text_within(latex: &str, depth: usize) -> String {
+    if depth > 32 {
+        return latex.to_string();
+    }
+    let as_text = |inner: &str| as_text_within(inner, depth + 1);
     let chars: Vec<char> = latex.chars().collect();
     let mut out = String::new();
     let mut i = 0;

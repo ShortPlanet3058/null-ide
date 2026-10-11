@@ -139,11 +139,21 @@ pub(crate) fn in_null_words(written: &JsonMap) -> JsonMap {
         }
         // `"editor.codeActionsOnSave": { "source.organizeImports": "explicit" }` (or true,
         // or "always"; "never" or false is off).
-        if let Some(Value::Object(actions)) = from.get("editor.codeActionsOnSave")
-            && let Some(how) = actions.iter().find(|(k, _)| k.starts_with("source.organizeImports")).map(|(_, v)| v)
-        {
-            let on = matches!(how, Value::Bool(true)) || matches!(how.as_str(), Some("explicit" | "always"));
-            out.insert("organize_imports_on_save".into(), Value::Bool(on));
+        // (Or as a list of the actions: `["source.organizeImports"]`.)
+        match from.get("editor.codeActionsOnSave") {
+            Some(Value::Object(actions)) => {
+                if let Some(how) = actions.iter().find(|(k, _)| k.starts_with("source.organizeImports")).map(|(_, v)| v)
+                {
+                    let on = matches!(how, Value::Bool(true)) || matches!(how.as_str(), Some("explicit" | "always"));
+                    out.insert("organize_imports_on_save".into(), Value::Bool(on));
+                }
+            }
+            Some(Value::Array(actions))
+                if actions.iter().any(|a| a.as_str().is_some_and(|a| a.starts_with("source.organizeImports"))) =>
+            {
+                out.insert("organize_imports_on_save".into(), Value::Bool(true));
+            }
+            _ => {}
         }
         if let Some(Value::String(wrap)) = from.get("editor.wordWrap") {
             out.insert("word_wrap".into(), Value::Bool(wrap != "off"));
@@ -1404,6 +1414,7 @@ mod tests {
         assert_eq!(read(r#"{ "editor.codeActionsOnSave": { "source.organizeImports.ruff": true } }"#), on);
         assert_eq!(read(r#"{ "editor.codeActionsOnSave": { "source.organizeImports": "never" } }"#), off);
         assert_eq!(read(r#"{ "editor.codeActionsOnSave": { "source.fixAll": "explicit" } }"#), None);
+        assert_eq!(read(r#"{ "editor.codeActionsOnSave": ["source.organizeImports"] }"#), on);
         let python = read(r#"{ "[python]": { "editor.codeActionsOnSave": { "source.organizeImports": "always" } } }"#);
         assert_eq!(python, None, "a language's own goes under languages");
     }

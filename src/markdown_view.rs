@@ -329,8 +329,12 @@ fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
             i += 1;
             continue;
         }
-        // A formula on lines of its own: `$$ … $$`, as a ```math block.
-        if let Some(rest) = trimmed.strip_prefix("$$") {
+        // A formula on lines of its own: `$$ … $$`, as a ```math block (when it closes:
+        // a `$$` left open is text).
+        let closes_later = || lines[i + 1..].iter().any(|l| l.trim_end().ends_with("$$"));
+        if let Some(rest) = trimmed.strip_prefix("$$")
+            && (rest.trim_end().strip_suffix("$$").is_some() || closes_later())
+        {
             let mut formula = Vec::new();
             match rest.trim_end().strip_suffix("$$") {
                 // `$$ x $$`, on one line.
@@ -964,10 +968,27 @@ pub fn inlines(text: &str) -> Vec<Inline> {
                 i += 1;
                 continue;
             }
+            // A formula in the line (`$$x$$` too): as its characters, in italics.
+            '$' if chars.get(i + 1) == Some(&'$') && chars.get(i + 2).is_some_and(|n| *n != '$') => {
+                let rest = &chars[i + 2..];
+                let end = rest.windows(2).position(|w| w == ['$', '$']).filter(|&p| p > 0 && !rest[..p].contains(&'`'));
+                if let Some(end) = end {
+                    let latex: String = rest[..end].iter().collect();
+                    flush(&mut plain, &mut out);
+                    out.push(Inline::Emphasis(vec![Inline::Text(crate::math::as_text(&latex))]));
+                    i += 2 + end + 2;
+                    continue;
+                }
+            }
             // A formula in the line (`$x^2$`): as the characters it reads as, in italics.
-            // Not money: nothing spaced inside its dollars, no digit just after the second.
+            // Not money: nothing spaced inside its dollars, no digit just after the second;
+            // never into a code span.
             '$' if chars.get(i + 1).is_some_and(|n| *n != ' ' && *n != '$') => {
-                let end = chars[i + 1..].iter().position(|&c| c == '$').map(|p| i + 1 + p);
+                let end = chars[i + 1..]
+                    .iter()
+                    .position(|&c| c == '$' || c == '`')
+                    .map(|p| i + 1 + p)
+                    .filter(|&e| chars[e] == '$');
                 if let Some(end) = end.filter(|&e| {
                     chars[e - 1] != ' ' && chars[e - 1] != '\\' && !chars.get(e + 1).is_some_and(|c| c.is_ascii_digit())
                 }) {
@@ -1503,16 +1524,21 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
         // A formula, drawn as TeX lays it out; a Mermaid diagram, drawn. As code when they
         // don't read as such.
         Block::Code { language, text, .. } if language == "math" || language == "mermaid" => {
+            use crate::svg_image::Made;
             let theme = &style.theme;
-            let drawn = if language == "math" {
+            let made = if language == "math" {
                 let key = format!("math {:?} {text}", theme.foreground);
-                crate::svg_image::made(&key, || crate::math::formula_svg(text, theme.foreground, 19.))
+                let (text, colour) = (text.clone(), theme.foreground);
+                crate::svg_image::made(&key, move || crate::math::formula_svg(&text, colour, 19.))
             } else {
                 let key = format!("mermaid {:?} {:?} {} {text}", theme.foreground, theme.raised, style.ui_font);
-                crate::svg_image::made(&key, || crate::math::diagram_svg(text, theme, &style.ui_font))
+                let (text, theme, font) = (text.clone(), theme.clone(), style.ui_font.to_string());
+                crate::svg_image::made(&key, move || crate::math::diagram_svg(&text, &theme, &font))
             };
-            match drawn {
-                Some((image, (width, height))) => div()
+            match made {
+                // Being drawn: its room, for a moment.
+                Made::Waiting => div().h(px(28.)).into_any_element(),
+                Made::Ready((image, (width, height))) => div()
                     .id((if language == "math" { "math" } else { "diagram" }, id))
                     .w_full()
                     .flex()
@@ -1520,7 +1546,7 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
                     .overflow_x_scroll()
                     .child(gpui::img(gpui::ImageSource::Render(image)).flex_none().w(px(width)).h(px(height)))
                     .into_any_element(),
-                None => render_block(
+                Made::Failed => render_block(
                     &Block::Code { language: String::new(), text: text.clone(), colours: Vec::new() },
                     style,
                     counter,
@@ -1879,7 +1905,9 @@ mod tests {
     /// characters they read as, in italics. Money isn't a formula.
     #[test]
     fn formulas() {
-        let blocks = parse("$$\nE = mc^2\n$$\n\n$$ a + b $$\n\nThe area is $\\pi r^2$ here.\n\nIt costs $5 and $10.\n");
+        let blocks = parse(
+            "$$\nE = mc^2\n$$\n\n$$ a + b $$\n\nThe area is $\\pi r^2$ here.\n\nIt costs $5 and $10.\n\n$$ left open\n\nThen $$x^2$$, and $a `b$`.\n",
+        );
         assert!(matches!(&blocks[0], Block::Code { language, text, .. } if language == "math" && text == "E = mc^2"));
         assert!(matches!(&blocks[1], Block::Code { language, text, .. } if language == "math" && text == "a + b"));
         let Block::Paragraph(line) = &blocks[2] else { panic!("{:?}", blocks[2]) };
@@ -1889,6 +1917,13 @@ mod tests {
         );
         let Block::Paragraph(money) = &blocks[3] else { panic!() };
         assert_eq!(money, &vec![Inline::Text("It costs $5 and $10.".into())]);
+        assert!(matches!(&blocks[4], Block::Paragraph(_)), "a $$ left open is text: {:?}", blocks[4]);
+        let Block::Paragraph(last) = &blocks[5] else { panic!("{:?}", blocks[5]) };
+        assert!(
+            matches!(&last[1], Inline::Emphasis(inner) if matches!(&inner[0], Inline::Text(t) if t == "x²")),
+            "{last:?}"
+        );
+        assert!(last.iter().any(|i| matches!(i, Inline::Code(c) if c == "b$")), "the code span stays: {last:?}");
     }
 
     #[test]

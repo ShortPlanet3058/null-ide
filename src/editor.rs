@@ -4356,7 +4356,9 @@ impl Render for Editor {
             window.drop_image(image).ok();
         }
         if self.reading {
-            return self.render_reading(cx);
+            let shown = self.render_reading(cx);
+            self.draw_what_was_asked(window, cx);
+            return shown;
         }
         // The find bar sits beside the text, not inside the "Editor" key context,
         // so typing in it never triggers editor shortcuts.
@@ -4848,6 +4850,22 @@ impl Editor {
                     }),
             )
             .into_any_element()
+    }
+
+    /// The formulas and diagrams the preview asked for: drawn in the background, shown when
+    /// they are; those no longer kept, let go of on the GPU.
+    fn draw_what_was_asked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for image in crate::svg_image::take_let_go() {
+            window.drop_image(image).ok();
+        }
+        for (key, job) in crate::svg_image::take_waiting() {
+            cx.spawn(async move |this, cx| {
+                let drawn = cx.background_executor().spawn(async move { crate::svg_image::make(job) }).await;
+                crate::svg_image::finish(key, drawn);
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
     }
 
     fn render_reading(&mut self, cx: &mut Context<Self>) -> AnyElement {

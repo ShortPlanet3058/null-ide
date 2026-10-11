@@ -544,6 +544,9 @@ impl Editor {
         let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else {
             return self.format_or_save(close, cx);
         };
+        // To save (and close) when done, even if a format started meanwhile takes over.
+        let close = close || self.format_after.1;
+        self.format_after = (true, close);
         let last = self.buffer.len_lines().saturating_sub(1);
         let end = Position::new(last as u32, self.buffer.line_text(last).encode_utf16().count() as u32);
         let whole = lsp_types::Range::new(Position::new(0, 0), end);
@@ -575,22 +578,40 @@ impl Editor {
                     }
                 };
                 match (edit, command) {
-                    (Some(edit), _) => Some(edit),
-                    // A command's edit comes as the server's workspace/applyEdit, made in the
-                    // text before its answer: nothing more to make here.
+                    (Some(edit), _) => Some((Some(edit), None)),
+                    // A command's edit comes as the server's workspace/applyEdit, made as it
+                    // comes: once its answer says one is coming, waited for (a moment at most),
+                    // the text after it being the one to compare typing with.
                     (None, Some(command)) => {
                         let request = this.update(cx, |_, cx| lsp.read(cx).execute_command(&path, command)).ok()?;
-                        request.await.ok()?;
-                        None
+                        let coming = request.await.ok()?.is_some_and(|edit| {
+                            let own = this.read_with(cx, |this, _| this.path.clone()).ok().flatten();
+                            crate::lsp::edits_by_file(edit).iter().any(|(p, e)| Some(p) == own.as_ref() && !e.is_empty())
+                        });
+                        let before = this.read_with(cx, |this, _| this.buffer.revision()).ok()?;
+                        if coming {
+                            for _ in 0..50 {
+                                if this.read_with(cx, |this, _| this.buffer.revision()).ok()? != before {
+                                    break;
+                                }
+                                // (A real pause, off the main thread: the server's edit lands meanwhile.)
+                                let pause = std::time::Duration::from_millis(10);
+                                cx.background_executor().spawn(async move { std::thread::sleep(pause) }).await;
+                            }
+                        }
+                        Some((None, this.read_with(cx, |this, _| this.buffer.revision()).ok()))
                     }
                     (None, None) => None,
                 }
             };
-            let edit = futures::select_biased! {
-                edit = futures::FutureExt::fuse(work) => edit,
-                _ = futures::FutureExt::fuse(timeout) => None,
+            let (edit, revision) = futures::select_biased! {
+                done = futures::FutureExt::fuse(work) => done.map_or((None, revision), |(edit, after)| (edit, after.unwrap_or(revision))),
+                _ = futures::FutureExt::fuse(timeout) => (None, revision),
             };
             this.update(cx, |this, cx| {
+                // (A format started meanwhile saves, or this one does.)
+                let close = close || this.format_after.1;
+                this.format_after = (false, false);
                 let typed = this.buffer.revision() != revision;
                 let mine = edit
                     .map(crate::lsp::edits_by_file)

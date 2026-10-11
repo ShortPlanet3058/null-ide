@@ -9333,7 +9333,8 @@ impl Render for Workspace {
             Some(panel) => Some(panel),
             None => {
                 // As dragged, or maximized: all the room but a little of the code's.
-                let room = f32::from(window.viewport_size().height) - 170.;
+                // (The bars above and below grow with the interface.)
+                let room = f32::from(window.viewport_size().height) - ui::zoomed(170., cx);
                 let full = if self.terminal_maximized { room } else { self.terminal_height.min(room) }.max(80.);
                 (!self.focus_mode).then(|| self.render_terminal_panel(full * terminal_shown, full, cx)).flatten()
             }
