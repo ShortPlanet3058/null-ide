@@ -1,0 +1,110 @@
+//! Ollama, started when it's needed: with the AI set to Ollama on this Mac and nothing
+//! answering there, Null runs `ollama serve` itself (if it's installed), and stops it when
+//! Null quits. One already running, or one on another computer, is left as it is.
+
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::process::Child;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// The `ollama serve` Null started, to stop when it quits.
+static STARTED: Mutex<Option<Child>> = Mutex::new(None);
+
+/// How long a starting Ollama is waited for.
+const START_WAIT: Duration = Duration::from_secs(8);
+
+/// The address Ollama would listen on for `base` (`http://127.0.0.1:11434/v1`), when it's
+/// this computer's: another computer's isn't Null's to start.
+fn local_address(base: &str) -> Option<(String, SocketAddr)> {
+    let url = url::Url::parse(base).ok()?;
+    let host = url.host_str()?;
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
+        return None;
+    }
+    let port = url.port_or_known_default()?;
+    let address = (host.trim_matches(['[', ']']), port).to_socket_addrs().ok()?.next()?;
+    Some((format!("{}:{port}", host.trim_matches(['[', ']'])), address))
+}
+
+fn answers(address: &SocketAddr) -> bool {
+    TcpStream::connect_timeout(address, Duration::from_millis(300)).is_ok()
+}
+
+/// Before asking Ollama at `base`: started if it's this computer's, isn't running, and is
+/// installed. Waits a few seconds for it to answer. (Runs off the main thread.)
+pub fn ensure_running(base: &str) {
+    // (Tests and screenshot runs keep to themselves: nothing of yours is started, and
+    // their stand-in servers aren't knocked on.)
+    if cfg!(test) || crate::system_clipboard::kept_apart() {
+        return;
+    }
+    let Some((host, address)) = local_address(base) else { return };
+    if !answers(&address) {
+        start(&host, &address);
+    }
+}
+
+/// Runs `ollama serve` on `host` (if it's installed and not started already), and waits for
+/// it at `address`.
+fn start(host: &str, address: &SocketAddr) {
+    let Some(program) = crate::tools::find("ollama") else { return };
+    let mut started = STARTED.lock().unwrap_or_else(|e| e.into_inner());
+    // Started already, and still starting: wait for that one.
+    let running = started.as_mut().is_some_and(|child| child.try_wait().is_ok_and(|done| done.is_none()));
+    if !running {
+        let child = std::process::Command::new(program)
+            .arg("serve")
+            .env("OLLAMA_HOST", host)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match child {
+            Ok(child) => *started = Some(child),
+            Err(err) => return eprintln!("null: couldn't start ollama: {err}"),
+        }
+    }
+    drop(started);
+    let since = Instant::now();
+    while since.elapsed() < START_WAIT && !answers(address) {
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Null quitting: the Ollama it started stops too.
+pub fn stop() {
+    if let Some(mut child) = STARTED.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        child.kill().ok();
+        child.wait().ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_this_computer_s_ollama_is_started() {
+        let (host, address) = local_address("http://127.0.0.1:11434/v1").unwrap();
+        assert_eq!((host.as_str(), address.port()), ("127.0.0.1:11434", 11434));
+        assert!(local_address("http://localhost:11434").is_some());
+        assert!(local_address("http://192.168.1.20:11434/v1").is_none(), "another computer's");
+        assert!(local_address("https://api.example.com/v1").is_none());
+        assert!(local_address("not a url").is_none());
+    }
+
+    /// Needs Ollama installed (on the PATH): `cargo test ollama_starts_and_stops -- --ignored`
+    #[test]
+    #[ignore]
+    fn ollama_starts_and_stops() {
+        // A port of its own, not the one an Ollama of yours may be on.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (host, address) = local_address(&format!("http://127.0.0.1:{port}/v1")).unwrap();
+        assert!(!answers(&address));
+        start(&host, &address);
+        assert!(answers(&address), "started");
+        stop();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!answers(&address), "stopped with Null");
+    }
+}

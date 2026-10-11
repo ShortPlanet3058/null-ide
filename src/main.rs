@@ -2,6 +2,7 @@
 #![allow(clippy::single_range_in_vec_init)]
 
 mod ai;
+mod ollama;
 mod system_clipboard;
 #[cfg(debug_assertions)]
 mod qa;
@@ -198,6 +199,12 @@ fn main() {
         });
         menus::init(cx);
         menus::set(cx);
+        // The Ollama Null started (see `ollama`) goes with it.
+        cx.on_app_quit(|_| {
+            ollama::stop();
+            async {}
+        })
+        .detach();
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();

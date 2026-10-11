@@ -208,6 +208,9 @@ fn openai_loop(
     stop: &AtomicBool,
     on_event: &mut dyn FnMut(TaskEvent),
 ) -> Result<String, String> {
+    if id == ProviderId::Ollama {
+        crate::ollama::ensure_running(base);
+    }
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
     let tools: Vec<Value> = tools()
         .into_iter()
