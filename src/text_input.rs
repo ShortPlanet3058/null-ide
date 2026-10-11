@@ -263,13 +263,19 @@ impl TextInput {
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected.is_empty() {
-            crate::system_clipboard::write(cx, ClipboardItem::new_string(self.content[self.selected.clone()].to_string()));
+            crate::system_clipboard::write(
+                cx,
+                ClipboardItem::new_string(self.content[self.selected.clone()].to_string()),
+            );
         }
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected.is_empty() {
-            crate::system_clipboard::write(cx, ClipboardItem::new_string(self.content[self.selected.clone()].to_string()));
+            crate::system_clipboard::write(
+                cx,
+                ClipboardItem::new_string(self.content[self.selected.clone()].to_string()),
+            );
             self.replace(self.selected.clone(), "", cx);
         }
     }

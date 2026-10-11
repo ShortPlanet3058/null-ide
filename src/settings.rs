@@ -359,7 +359,11 @@ fn parted(out: &mut JsonMap, project: &ProjectFile) -> (JsonMap, JsonMap) {
 /// What goes into a project's own file of `now` (its settings in use): what the file
 /// says already, and what isn't as it was (`before`, with .vscode's), down to a
 /// language's fields: VS Code's settings aren't copied in.
-fn own_part(now: &serde_json::Value, before: Option<&serde_json::Value>, own: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+fn own_part(
+    now: &serde_json::Value,
+    before: Option<&serde_json::Value>,
+    own: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
     use serde_json::Value;
     match (now, before) {
         (Value::Object(now), Some(Value::Object(before))) => {
@@ -1096,7 +1100,8 @@ fn written_into(
     let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
     for (key, range) in &members {
         let Some(value) = out.get(key) else { continue };
-        let written: Option<Value> = serde_json::from_str(&crate::snippets::without_comments(&text[range.clone()])).ok();
+        let written: Option<Value> =
+            serde_json::from_str(&crate::snippets::without_comments(&text[range.clone()])).ok();
         if !written.as_ref().is_some_and(|w| same_json(w, value)) {
             edits.push((range.clone(), shown(value, &indent_at(range.start))?));
         }
@@ -1137,7 +1142,8 @@ fn same_json(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     match (a, b) {
         // (A value kept as f32, written back, reads as 13.300000190734863 for 13.3.)
         (Value::Number(a), Value::Number(b)) => {
-            a.as_f64() == b.as_f64() || ((a.is_f64() || b.is_f64()) && a.as_f64().map(|x| x as f32) == b.as_f64().map(|x| x as f32))
+            a.as_f64() == b.as_f64()
+                || ((a.is_f64() || b.is_f64()) && a.as_f64().map(|x| x as f32) == b.as_f64().map(|x| x as f32))
         }
         (Value::Array(a), Value::Array(b)) => a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_json(a, b)),
         (Value::Object(a), Value::Object(b)) => {
@@ -1377,8 +1383,10 @@ mod tests {
         let (both, _) = merged(&user, &layered(read.clone(), &own_hidden));
         assert_eq!(both.files_exclude, ["**/*.pyc", "/build/"]);
         // .null's own win, a language's settings added to its.
-        let own = serde_json::from_str::<JsonMap>(r#"{ "indent_size": 3, "languages": { "Python": { "word_wrap": false } } }"#)
-            .unwrap();
+        let own = serde_json::from_str::<JsonMap>(
+            r#"{ "indent_size": 3, "languages": { "Python": { "word_wrap": false } } }"#,
+        )
+        .unwrap();
         let (now, _) = merged(&user, &layered(read, &own));
         assert_eq!(now.indent_size, 3);
         assert_eq!(now.indent_for("python"), crate::file_style::Indent::Spaces(4));
@@ -1405,7 +1413,10 @@ mod tests {
         std::fs::create_dir_all(dir.join(".null")).unwrap();
         let user_path = dir.join("user.json");
         let mut user = Settings { own_theme: Some("Solar".into()), ..Settings::default() };
-        user.languages.insert("Python".into(), LanguageSettings { indent_size: Some(2), format_on_save: Some(true), ..Default::default() });
+        user.languages.insert(
+            "Python".into(),
+            LanguageSettings { indent_size: Some(2), format_on_save: Some(true), ..Default::default() },
+        );
         user.save_to(&user_path);
         std::fs::write(
             vscode_file(&dir),
@@ -1413,7 +1424,8 @@ mod tests {
                  "[javascript]": { "editor.tabSize": 4 }, "[javascriptreact]": { "editor.formatOnSave": true } }"#,
         )
         .unwrap();
-        std::fs::write(project_file(&dir), "{\n  // ours\n  \"languages\": { \"Go\": { \"word_wrap\": true } }\n}\n").unwrap();
+        std::fs::write(project_file(&dir), "{\n  // ours\n  \"languages\": { \"Go\": { \"word_wrap\": true } }\n}\n")
+            .unwrap();
         let (now, project) = project_at(&dir, &user);
         // What the project names over yours, field by field; VS Code's two names for one.
         assert_eq!(now.indent_for("Python"), crate::file_style::Indent::Spaces(2), "your Python indent stays");

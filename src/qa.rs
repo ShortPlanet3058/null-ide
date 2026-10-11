@@ -83,7 +83,13 @@ pub fn run(cx: &mut App) {
                 }),
                 "click" | "hover" | "drag" => {
                     let (modifiers, numbers) = mouse_args(arg);
-                    let clicks = if arg.contains("triple") { 3 } else if arg.contains("double") { 2 } else { 1 };
+                    let clicks = if arg.contains("triple") {
+                        3
+                    } else if arg.contains("double") {
+                        2
+                    } else {
+                        1
+                    };
                     let (from, to) = match numbers[..] {
                         [x, y] => ((x, y), None),
                         [x1, y1, x2, y2] if step == "drag" => ((x1, y1), Some((x2, y2))),
@@ -140,7 +146,10 @@ pub fn run(cx: &mut App) {
                     "run" => workspace.qa_run(arg.to_string(), window, cx),
                     _ => {
                         let (line, column) = arg.split_once(':').unwrap_or((arg, "1"));
-                        let place = (line.parse::<usize>().unwrap_or(1).max(1) - 1, column.parse::<usize>().unwrap_or(1).max(1) - 1);
+                        let place = (
+                            line.parse::<usize>().unwrap_or(1).max(1) - 1,
+                            column.parse::<usize>().unwrap_or(1).max(1) - 1,
+                        );
                         if let Some(editor) = workspace.qa_editor() {
                             editor.update(cx, |e, cx| e.set_caret_point(place, cx));
                         }

@@ -26,10 +26,8 @@ pub fn record() {
         let when = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let backtrace = std::backtrace::Backtrace::force_capture();
         let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
-        let entry = format!(
-            "\n== {when} · Null {} · thread {thread}\n{info}\n{backtrace}\n",
-            env!("CARGO_PKG_VERSION")
-        );
+        let entry =
+            format!("\n== {when} · Null {} · thread {thread}\n{info}\n{backtrace}\n", env!("CARGO_PKG_VERSION"));
         // (Kept to a size: past 1 MB, the older half goes.)
         if std::fs::metadata(&file).is_ok_and(|m| m.len() > 1_000_000)
             && let Ok(text) = std::fs::read_to_string(&file)

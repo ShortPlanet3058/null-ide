@@ -5,6 +5,7 @@ use crate::dap::{AdapterMessage, DebugAdapter};
 use futures::StreamExt;
 use gpui::{Context, EventEmitter, Task};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -37,7 +38,21 @@ pub struct Stop {
     pub frame: usize,
     /// That frame's local variables: name and value.
     pub locals: Vec<(String, String)>,
+    /// The same, with what each has inside (a structure's fields, a list's items).
+    pub variables: Vec<Variable>,
 }
+
+/// A variable as the debugger gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Variable {
+    pub name: String,
+    pub value: String,
+    /// What it has inside, to ask for (0: nothing).
+    pub reference: i64,
+}
+
+/// How many of a variable's fields or items are shown when it's unfolded.
+pub const MOST_FIELDS: usize = 100;
 
 /// One call on the stack.
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +89,107 @@ fn why_not(error: &str) -> String {
         _ => first,
     };
     if message.is_empty() { "not known here".to_string() } else { message.to_string() }
+}
+
+/// lldb's answer in the console, without what it puts before a value (`(int) $0 = 74`
+/// says `74`) or after it.
+fn console_answer(said: &str) -> String {
+    let said = said.trim_end();
+    let value = said
+        .strip_prefix('(')
+        .and_then(|rest| rest.split_once(") $"))
+        .and_then(|(_, rest)| rest.split_once(" = "))
+        .filter(|(number, _)| number.chars().all(|c| c.is_ascii_digit()))
+        .map(|(_, value)| value);
+    value.unwrap_or(said).to_string()
+}
+
+/// The variables in a `variables` answer.
+fn variables_in(answer: &Value) -> Vec<Variable> {
+    answer["variables"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            Some(Variable {
+                name: v["name"].as_str()?.to_string(),
+                value: v["value"].as_str()?.to_string(),
+                reference: v["variablesReference"].as_i64().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// The reference of the variable at `path` (names, from `top` down through `fields`), when
+/// it's there and has something inside.
+pub fn reference_at(top: &[Variable], fields: &HashMap<i64, Vec<Variable>>, path: &[String]) -> Option<i64> {
+    let mut list = top;
+    let mut reference = 0;
+    for (i, name) in path.iter().enumerate() {
+        reference = list.iter().find(|v| &v.name == name)?.reference;
+        if i + 1 < path.len() {
+            list = fields.get(&reference)?;
+        }
+    }
+    (reference > 0).then_some(reference)
+}
+
+/// One line of the Debug panel's variables: a variable, how deep inside another it is, and
+/// its names from the call's own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VariableRow {
+    pub depth: usize,
+    pub path: Vec<String>,
+    pub variable: Variable,
+    pub unfolded: bool,
+}
+
+/// The variables' lines: each, and inside the unfolded ones (when their fields are here)
+/// their fields, at most `MOST_FIELDS` (then a line saying there are more).
+pub fn variable_rows(
+    top: &[Variable],
+    fields: &HashMap<i64, Vec<Variable>>,
+    unfolded: &[Vec<String>],
+) -> Vec<VariableRow> {
+    fn walk(
+        list: &[Variable],
+        depth: usize,
+        parent: &[String],
+        fields: &HashMap<i64, Vec<Variable>>,
+        unfolded: &[Vec<String>],
+        rows: &mut Vec<VariableRow>,
+    ) {
+        for (i, variable) in list.iter().enumerate() {
+            if depth > 0 && i == MOST_FIELDS {
+                let more = Variable { name: "…".into(), value: "more not shown".into(), reference: 0 };
+                rows.push(VariableRow { depth, path: Vec::new(), variable: more, unfolded: false });
+                break;
+            }
+            let mut path = parent.to_vec();
+            path.push(variable.name.clone());
+            let open = variable.reference > 0 && unfolded.contains(&path);
+            rows.push(VariableRow { depth, path: path.clone(), variable: variable.clone(), unfolded: open });
+            if open && let Some(inside) = fields.get(&variable.reference) {
+                walk(inside, depth + 1, &path, fields, unfolded, rows);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    walk(top, 0, &[], fields, unfolded, &mut rows);
+    rows
+}
+
+/// The variables the Debug panel lists: those the code shows (named in `lines`, when the
+/// paused call's code is open), with a value worth showing or something inside to unfold.
+pub fn panel_variables(lines: Option<&[(usize, String)]>, variables: &[Variable]) -> Vec<Variable> {
+    variables
+        .iter()
+        .filter(|v| lines.is_none_or(|lines| lines.iter().any(|(_, text)| names(code_of(text), &v.name))))
+        .filter_map(|v| {
+            let value = clean_value(&v.value).or_else(|| (v.reference > 0).then(String::new))?;
+            Some(Variable { value, ..v.clone() })
+        })
+        .collect()
 }
 
 /// Whether `name` appears in `text` as a whole word.
@@ -136,6 +252,22 @@ pub fn rust_formatters() -> Option<String> {
     script.is_file().then(|| format!("command script import \"{}\"", script.display()))
 }
 
+/// What to run under the debugger: the program, where, with what.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    pub program: PathBuf,
+    pub cwd: PathBuf,
+    pub args: Vec<String>,
+    /// Added to its environment.
+    pub env: Vec<(String, String)>,
+}
+
+impl Run {
+    pub fn new(program: PathBuf, cwd: PathBuf) -> Self {
+        Self { program, cwd, args: Vec::new(), env: Vec::new() }
+    }
+}
+
 /// How many calls of the stack are asked for.
 const FRAMES: usize = 40;
 
@@ -168,6 +300,13 @@ pub struct Debugger {
     stop_task: Option<Task<()>>,
     /// Working out the watches.
     watch_task: Option<Task<()>>,
+    /// The variables unfolded, by their names from the call's own (`self`, `items`): kept
+    /// unfolded from one stop to the next.
+    pub unfolded: Vec<Vec<String>>,
+    /// What the unfolded ones have inside, at this stop, by their reference.
+    pub fields: HashMap<i64, Vec<Variable>>,
+    /// Counts the stops (and calls looked at): a variable's reference is only good for one.
+    looks: u64,
     /// The program being debugged, for the panel.
     pub program: Option<PathBuf>,
     /// Stop where the program fails: a Rust panic, a thrown exception.
@@ -186,6 +325,9 @@ impl Default for Debugger {
             output: String::new(),
             stop_task: None,
             watch_task: None,
+            unfolded: Vec::new(),
+            fields: HashMap::new(),
+            looks: 0,
             program: None,
             stop_on_errors: false,
             throw_filters: Vec::new(),
@@ -216,15 +358,15 @@ impl Debugger {
         cx.notify();
     }
 
-    /// Runs `program` in `cwd` under the debugger, stopping at `breakpoints` (lines from 0).
+    /// Runs the program under the debugger, stopping at `breakpoints` (lines from 0).
     pub fn start(
         &mut self,
-        program: PathBuf,
-        cwd: PathBuf,
+        run: Run,
         breakpoints: Vec<(PathBuf, Vec<crate::editor::Breakpoint>)>,
         init_commands: Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        let Run { program, cwd, args, env } = run;
         if self.state != DebugState::Building {
             self.output.clear();
         }
@@ -306,7 +448,8 @@ impl Debugger {
             let launch = adapter.request(
                 "launch",
                 json!({
-                    "program": program.display().to_string(), "cwd": cwd_text, "args": [], "stopOnEntry": false,
+                    "program": program.display().to_string(), "cwd": cwd_text, "args": args, "stopOnEntry": false,
+                    "env": env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
                     "initCommands": init_commands,
                 }),
             );
@@ -442,13 +585,18 @@ impl Debugger {
                 .collect();
             // Stopped inside a library with no source: look at the first call that has some.
             let frame = frames.iter().position(|f| f.place.is_some()).unwrap_or(0);
-            let locals = match frames.get(frame) {
+            let variables = match frames.get(frame) {
                 Some(f) => Self::locals_of(&adapter, f.id).await,
                 None => Vec::new(),
             };
+            let unfolded = this.update(cx, |this, _| this.unfolded.clone()).unwrap_or_default();
+            let fields = Self::unfold(&adapter, &variables, &unfolded).await;
             this.update(cx, |this, cx| {
                 let place = frames.get(frame).and_then(|f| f.place.clone());
-                let stop = Stop { thread, place, reason, description, frames, frame, locals };
+                let locals = variables.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
+                let stop = Stop { thread, place, reason, description, frames, frame, locals, variables };
+                this.looks += 1;
+                this.fields = fields;
                 this.state = DebugState::Stopped(stop.clone());
                 cx.emit(DebuggerEvent::Stopped(stop));
                 this.evaluate_watches(cx);
@@ -458,32 +606,106 @@ impl Debugger {
         }));
     }
 
-    /// A frame's local variables, as the debugger shows them (name, value).
-    async fn locals_of(adapter: &DebugAdapter, frame: i64) -> Vec<(String, String)> {
+    /// A frame's local variables, as the debugger shows them.
+    async fn locals_of(adapter: &DebugAdapter, frame: i64) -> Vec<Variable> {
         let Ok(scopes) = adapter.request("scopes", json!({ "frameId": frame })).await else { return Vec::new() };
         // The first scope is the locals (then globals, registers: not wanted here).
         let Some(reference) = scopes["scopes"].get(0).and_then(|s| s["variablesReference"].as_i64()) else {
             return Vec::new();
         };
-        let Ok(variables) = adapter.request("variables", json!({ "variablesReference": reference })).await else {
-            return Vec::new();
-        };
-        variables["variables"]
-            .as_array()
-            .map(|list| {
-                list.iter()
-                    .filter_map(|v| Some((v["name"].as_str()?.to_string(), v["value"].as_str()?.to_string())))
-                    .collect()
+        Self::variables_of(adapter, reference).await
+    }
+
+    /// What `reference` has inside: a scope's variables, a variable's fields or items (the
+    /// first ones of a long list).
+    async fn variables_of(adapter: &DebugAdapter, reference: i64) -> Vec<Variable> {
+        let asked = json!({ "variablesReference": reference, "start": 0, "count": MOST_FIELDS + 1 });
+        let Ok(variables) = adapter.request("variables", asked).await else { return Vec::new() };
+        variables_in(&variables)
+    }
+
+    /// The fields of the variables unfolded (`paths`, by names from `top`), at this stop:
+    /// a path whose variable isn't here (any more) is left out.
+    async fn unfold(adapter: &DebugAdapter, top: &[Variable], paths: &[Vec<String>]) -> HashMap<i64, Vec<Variable>> {
+        let mut fields: HashMap<i64, Vec<Variable>> = HashMap::new();
+        let mut paths = paths.to_vec();
+        // Outer ones first: what's inside them is where the inner ones are found.
+        paths.sort_by_key(Vec::len);
+        for path in paths {
+            let Some(reference) = reference_at(top, &fields, &path) else { continue };
+            if let std::collections::hash_map::Entry::Vacant(entry) = fields.entry(reference) {
+                entry.insert(Self::variables_of(adapter, reference).await);
+            }
+        }
+        fields
+    }
+
+    /// Unfolds the variable at `path` (names from the call's own), whose reference is
+    /// `reference` at this stop, or folds it (and what's unfolded inside it) back.
+    pub fn toggle_unfolded(&mut self, path: Vec<String>, reference: i64, cx: &mut Context<Self>) {
+        if self.unfolded.contains(&path) {
+            self.unfolded.retain(|p| !p.starts_with(&path));
+            return cx.notify();
+        }
+        self.unfolded.push(path);
+        cx.notify();
+        let Some(adapter) = self.adapter.clone() else { return };
+        if reference <= 0 || self.fields.contains_key(&reference) {
+            return;
+        }
+        let looks = self.looks;
+        cx.spawn(async move |this, cx| {
+            let inside = Self::variables_of(&adapter, reference).await;
+            this.update(cx, |this, cx| {
+                // Still the same stop: its references are the ones asked about.
+                if this.looks == looks {
+                    this.fields.insert(reference, inside);
+                    cx.notify();
+                }
             })
-            .unwrap_or_default()
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Works out `expression` where the program is paused, as typed in the console: it
+    /// and its value go in the output.
+    pub fn evaluate(&mut self, expression: &str, cx: &mut Context<Self>) {
+        let expression = expression.trim().to_string();
+        if expression.is_empty() {
+            return;
+        }
+        let (Some(adapter), DebugState::Stopped(stop)) = (self.adapter.clone(), &self.state) else {
+            return self.append_output(&format!("› {expression}\n  (only while paused)\n"), cx);
+        };
+        let frame = stop.frames.get(stop.frame).map(|f| f.id);
+        self.append_output(&format!("› {expression}\n"), cx);
+        cx.spawn(async move |this, cx| {
+            let mut asked = json!({ "expression": expression, "context": "repl" });
+            if let Some(frame) = frame {
+                asked["frameId"] = json!(frame);
+            }
+            let said = match adapter.request("evaluate", asked).await {
+                Ok(body) => console_answer(body["result"].as_str().unwrap_or_default()),
+                Err(error) => why_not(&error),
+            };
+            this.update(cx, |this, cx| {
+                let said: String = said.lines().map(|l| format!("  {l}\n")).collect();
+                this.append_output(if said.is_empty() { "  (done)\n" } else { &said }, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Looks at another call on the stack: its place and its locals.
     pub fn select_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
         let (Some(adapter), DebugState::Stopped(stop)) = (self.adapter.clone(), &self.state) else { return };
         let Some(id) = stop.frames.get(frame).map(|f| f.id) else { return };
+        let unfolded = self.unfolded.clone();
         self.stop_task = Some(cx.spawn(async move |this, cx| {
-            let locals = Self::locals_of(&adapter, id).await;
+            let variables = Self::locals_of(&adapter, id).await;
+            let fields = Self::unfold(&adapter, &variables, &unfolded).await;
             this.update(cx, |this, cx| {
                 // Still the same stop (not a new one, with other calls, since).
                 if let DebugState::Stopped(stop) = &mut this.state
@@ -491,7 +713,10 @@ impl Debugger {
                 {
                     stop.frame = frame;
                     stop.place = stop.frames[frame].place.clone();
-                    stop.locals = locals;
+                    stop.locals = variables.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
+                    stop.variables = variables;
+                    this.looks += 1;
+                    this.fields = fields;
                     let stop = stop.clone();
                     cx.emit(DebuggerEvent::Stopped(stop));
                     this.evaluate_watches(cx);
@@ -700,19 +925,24 @@ mod tests {
         )
         .unwrap();
         let program = dir.join("main");
-        let built = std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+        let built =
+            std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
         assert!(built.unwrap().success());
         // A log point on `total += i;`: prints each time, never stops.
         let debugger = cx.new(|_| Debugger::default());
         let log = crate::editor::Breakpoint { line: 4, condition: Some("log i is {i}".into()) };
-        debugger.update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![log])], Vec::new(), cx));
+        debugger.update(cx, |d, cx| {
+            d.start(Run::new(program.clone(), dir.clone()), vec![(source.clone(), vec![log])], Vec::new(), cx)
+        });
         assert!(wait_for(cx, &debugger, |d| d.state == DebugState::Idle), "stopped, or never ended");
         let output = debugger.read_with(cx, |d, _| d.output.clone());
         assert!(output.contains("i is 1") && output.contains("i is 4") && output.contains("total 10"), "{output}");
         // A count: stops the third time only (i is 3, total 1 + 2).
         let debugger = cx.new(|_| Debugger::default());
         let third = crate::editor::Breakpoint { line: 4, condition: Some("3".into()) };
-        debugger.update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![third])], Vec::new(), cx));
+        debugger.update(cx, |d, cx| {
+            d.start(Run::new(program.clone(), dir.clone()), vec![(source.clone(), vec![third])], Vec::new(), cx)
+        });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let locals = debugger.read_with(cx, |d, _| match &d.state {
             DebugState::Stopped(stop) => stop.locals.clone(),
@@ -721,9 +951,7 @@ mod tests {
         assert!(locals.iter().any(|(name, value)| name == "total" && value == "3"), "{locals:?}");
         // On from there: the count was reached, it stops every time after too (lldb's).
         debugger.update(cx, |d, cx| d.resume("continue", cx));
-        let again = |d: &Debugger| {
-            matches!(&d.state, DebugState::Stopped(s) if s.locals.iter().any(|(n, v)| n == "total" && v == "6"))
-        };
+        let again = |d: &Debugger| matches!(&d.state, DebugState::Stopped(s) if s.locals.iter().any(|(n, v)| n == "total" && v == "6"));
         assert!(wait_for(cx, &debugger, again), "from the 3rd time on");
         debugger.update(cx, |d, cx| d.stop(cx));
         std::fs::remove_dir_all(&dir).ok();
@@ -738,14 +966,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("main.cpp");
-        std::fs::write(&source, "#include <stdexcept>\nint main() {\n    throw std::runtime_error(\"no\");\n}\n").unwrap();
+        std::fs::write(&source, "#include <stdexcept>\nint main() {\n    throw std::runtime_error(\"no\");\n}\n")
+            .unwrap();
         let program = dir.join("main");
-        let built = std::process::Command::new("xcrun").args(["clang++", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+        let built = std::process::Command::new("xcrun")
+            .args(["clang++", "-g", "-O0", "-o"])
+            .arg(&program)
+            .arg(&source)
+            .status();
         assert!(built.unwrap().success());
         let debugger = cx.new(|_| Debugger::default());
         debugger.update(cx, |d, cx| {
             d.set_stop_on_errors(true, cx);
-            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), cx)
+            d.start(Run::new(program.clone(), dir.clone()), Vec::new(), Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let reason = debugger.read_with(cx, |d, _| match &d.state {
@@ -756,14 +989,15 @@ mod tests {
         debugger.update(cx, |d, cx| d.stop(cx));
         // A Rust panic.
         let source = dir.join("main.rs");
-        std::fs::write(&source, "fn main() {\n    let v: Vec<u8> = Vec::new();\n    println!(\"{}\", v[3]);\n}\n").unwrap();
+        std::fs::write(&source, "fn main() {\n    let v: Vec<u8> = Vec::new();\n    println!(\"{}\", v[3]);\n}\n")
+            .unwrap();
         let program = dir.join("panics");
         let built = std::process::Command::new("rustc").args(["-g", "-o"]).arg(&program).arg(&source).status();
         assert!(built.unwrap().success());
         let debugger = cx.new(|_| Debugger::default());
         debugger.update(cx, |d, cx| {
             d.set_stop_on_errors(true, cx);
-            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), cx)
+            d.start(Run::new(program.clone(), dir.clone()), Vec::new(), Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped at the panic");
         debugger.update(cx, |d, cx| d.stop(cx));
@@ -771,6 +1005,145 @@ mod tests {
     }
 
     /// Needs lldb-dap and clang (they come with Xcode):
+    #[test]
+    fn console_answers_are_the_value() {
+        assert_eq!(console_answer("(int) $0 = 74\n"), "74");
+        assert_eq!(console_answer("(point) $3 = (x = 4, y = 7)"), "(x = 4, y = 7)");
+        assert_eq!(console_answer("Process 42 stopped"), "Process 42 stopped");
+        assert_eq!(console_answer("(lldb) $x = 1"), "(lldb) $x = 1");
+    }
+
+    /// Unfolded variables: their fields under them, the unfolded ones inside too, a long
+    /// list cut short; folded again with what was unfolded inside.
+    #[test]
+    fn unfolded_variables_show_what_is_inside() {
+        let var = |name: &str, value: &str, reference| Variable { name: name.into(), value: value.into(), reference };
+        let top = vec![var("p", "{...}", 1), var("n", "3", 0)];
+        let mut fields = HashMap::new();
+        fields.insert(1, vec![var("x", "1", 0), var("inner", "{...}", 2)]);
+        fields.insert(2, vec![var("y", "2", 0)]);
+        let names = |rows: Vec<VariableRow>| rows.into_iter().map(|r| (r.depth, r.variable.name)).collect::<Vec<_>>();
+        assert_eq!(names(variable_rows(&top, &fields, &[])), [(0, "p".into()), (0, "n".into())]);
+        let unfolded = vec![vec!["p".to_string()], vec!["p".to_string(), "inner".to_string()]];
+        assert_eq!(
+            names(variable_rows(&top, &fields, &unfolded)),
+            [(0, "p".into()), (1, "x".into()), (1, "inner".into()), (2, "y".into()), (0, "n".into())]
+        );
+        assert_eq!(reference_at(&top, &fields, &unfolded[1]), Some(2));
+        assert_eq!(reference_at(&top, &fields, &["n".to_string()]), None, "nothing inside");
+        assert_eq!(reference_at(&top, &fields, &["gone".to_string()]), None);
+        // A long list: its first ones, then a line saying there are more.
+        fields.insert(1, (0..MOST_FIELDS + 1).map(|i| var(&format!("[{i}]"), "0", 0)).collect());
+        let rows = variable_rows(&top, &fields, &unfolded[..1]);
+        assert_eq!(rows.len(), 1 + MOST_FIELDS + 1 + 1);
+        assert_eq!(rows[MOST_FIELDS + 1].variable.name, "…");
+        // Folding: the inner ones with it.
+        let debugger_unfolded = {
+            let mut list = unfolded.clone();
+            let path = vec!["p".to_string()];
+            list.retain(|p| !p.starts_with(&path));
+            list
+        };
+        assert!(debugger_unfolded.is_empty());
+        // The panel lists one with a type for a value when there's something inside it.
+        let panel = panel_variables(None, &[var("v", "Vec<u8>", 4), var("t", "&str", 0), var("n", "3", 0)]);
+        assert_eq!(
+            panel.iter().map(|v| (v.name.as_str(), v.value.as_str())).collect::<Vec<_>>(),
+            [("v", ""), ("n", "3")]
+        );
+        let lines = vec![(0, "let n = v.len();".to_string())];
+        assert_eq!(panel_variables(Some(&lines), &[var("v", "x", 4), var("w", "y", 0)]).len(), 1);
+    }
+
+    /// `cargo test unfolds_a_structure_and_answers_the_console -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn unfolds_a_structure_and_answers_the_console(cx: &mut TestAppContext) {
+        let dir = crate::tools::test_dir("debug-unfold");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("main.c");
+        std::fs::write(
+            &source,
+            "struct point { int x; int y; };
+int main(void) {
+    struct point p = { 4, 7 };
+    int n = p.x;
+    n += p.y;
+    return n;
+}
+",
+        )
+        .unwrap();
+        let program = dir.join("main");
+        let built =
+            std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+        assert!(built.unwrap().success());
+        let debugger = cx.new(|_| Debugger::default());
+        // At `int n = p.x;` (line 4, from 0: 3).
+        let at = crate::editor::Breakpoint { line: 3, condition: None };
+        debugger.update(cx, |d, cx| {
+            d.start(Run::new(program.clone(), dir.clone()), vec![(source.clone(), vec![at])], Vec::new(), cx)
+        });
+        assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
+        let p = debugger.read_with(cx, |d, _| match &d.state {
+            DebugState::Stopped(stop) => stop.variables.iter().find(|v| v.name == "p").cloned(),
+            _ => None,
+        });
+        let p = p.expect("p is a local");
+        assert!(p.reference > 0, "{p:?}");
+        let x_is_4 = |d: &Debugger| {
+            let DebugState::Stopped(stop) = &d.state else { return false };
+            let Some(reference) = reference_at(&stop.variables, &d.fields, &["p".to_string()]) else { return false };
+            d.fields.get(&reference).is_some_and(|f| f.iter().any(|v| v.name == "x" && v.value == "4"))
+        };
+        debugger.update(cx, |d, cx| d.toggle_unfolded(vec!["p".into()], p.reference, cx));
+        assert!(wait_for(cx, &debugger, x_is_4), "its fields never came");
+        // A step on: still unfolded, its fields asked for again.
+        debugger.update(cx, |d, cx| d.resume("next", cx));
+        assert!(wait_for(cx, &debugger, |d| matches!(&d.state, DebugState::Stopped(s) if s.reason == "step")));
+        assert!(wait_for(cx, &debugger, x_is_4), "not unfolded after the step");
+        // The console: an expression worked out where it's paused.
+        debugger.update(cx, |d, cx| d.evaluate("p.x + p.y * 10", cx));
+        let answered = wait_for(cx, &debugger, |d| d.output.contains("› p.x + p.y * 10\n  74"));
+        assert!(answered, "{}", debugger.read_with(cx, |d, _| d.output.clone()));
+        debugger.update(cx, |d, cx| d.stop(cx));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The program gets its arguments and environment, in its folder.
+    /// `cargo test passes_arguments_and_environment -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn passes_arguments_and_environment(cx: &mut TestAppContext) {
+        let dir = crate::tools::test_dir("debug-args");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("run")).unwrap();
+        let source = dir.join("main.c");
+        std::fs::write(
+            &source,
+            "#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\nint main(int argc, char **argv) {\n    char cwd[1024];\n    getcwd(cwd, sizeof cwd);\n    printf(\"args %d %s|mode %s|in %s\\n\", argc, argv[1], getenv(\"NULL_MODE\"), cwd);\n    return 0;\n}\n",
+        )
+        .unwrap();
+        let program = dir.join("main");
+        let built =
+            std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+        assert!(built.unwrap().success());
+        let debugger = cx.new(|_| Debugger::default());
+        let run = Run {
+            program,
+            cwd: dir.join("run"),
+            args: vec!["two words".into()],
+            env: vec![("NULL_MODE".into(), "fast".into())],
+        };
+        debugger.update(cx, |d, cx| d.start(run, Vec::new(), Vec::new(), cx));
+        assert!(wait_for(cx, &debugger, |d| d.state == DebugState::Idle && d.output.contains("args ")), "never ran");
+        let output = debugger.read_with(cx, |d, _| d.output.clone());
+        assert!(output.contains("args 2 two words|mode fast|in "), "{output}");
+        assert!(output.lines().any(|l| l.trim_end().ends_with("/run")), "{output}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// `cargo test debugs_a_c_program -- --ignored`
     #[gpui::test]
     #[ignore]
@@ -797,7 +1170,7 @@ mod tests {
         // A breakpoint on `total += i;` (line 5, from 0: 4), only once i is 3.
         let at = crate::editor::Breakpoint { line: 4, condition: Some("i == 3".into()) };
         debugger.update(cx, |d, cx| {
-            d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![at])], Vec::new(), cx)
+            d.start(Run::new(program.clone(), dir.clone()), vec![(source.clone(), vec![at])], Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let stop = debugger.read_with(cx, |d, _| match &d.state {

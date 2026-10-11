@@ -17,9 +17,16 @@ const FOLDERS_UP: usize = 8;
 
 pub(super) enum Target {
     Url(String),
-    File { path: PathBuf, line: Option<u32>, column: Option<u32> },
+    File {
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
     /// A Markdown file's heading, by its anchor: found when followed.
-    Heading { path: PathBuf, anchor: String },
+    Heading {
+        path: PathBuf,
+        anchor: String,
+    },
 }
 
 /// Where `written` (as in the text) is, from the file in `dir`: there, or in a folder above.

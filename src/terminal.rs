@@ -232,8 +232,7 @@ fn command_offset(
     let history = grid.history_size() as i32;
     let top = -(grid.display_offset() as i32);
     // (Most rows are output: only one beginning as a command did is looked at closely.)
-    let starts: std::collections::HashSet<&str> =
-        commands.iter().filter_map(|c| c.split_whitespace().next()).collect();
+    let starts: std::collections::HashSet<&str> = commands.iter().filter_map(|c| c.split_whitespace().next()).collect();
     let is_command = |line: i32| {
         let text = row_text(grid, Line(line));
         let text = text.trim_end();
@@ -831,7 +830,9 @@ impl TerminalView {
     fn shell_folder(&self) -> PathBuf {
         // (The program in front first: a shell started in it, `poetry shell`, has its own.)
         let folder = self.running_group.and_then(crate::terminal_watch::folder_of);
-        if let Some(folder) = folder.or_else(|| self.shell_pid.and_then(crate::terminal_watch::folder_of)).filter(|f| f.is_dir()) {
+        if let Some(folder) =
+            folder.or_else(|| self.shell_pid.and_then(crate::terminal_watch::folder_of)).filter(|f| f.is_dir())
+        {
             return folder;
         }
         let shown = self.title.rsplit(':').next().map(str::trim).unwrap_or("");
@@ -1565,7 +1566,15 @@ impl Pending {
     /// can be a little wider or narrower, so each sits on its own cell instead of pushing the
     /// rest along), and looking the same. A space only has to be right after it (its colour
     /// and font don't show) and underlined the same (an underlined one shows its line).
-    fn takes(&self, c: char, line: i32, column: usize, font: &Font, color: Hsla, underline: Option<UnderlineStyle>) -> bool {
+    fn takes(
+        &self,
+        c: char,
+        line: i32,
+        column: usize,
+        font: &Font,
+        color: Hsla,
+        underline: Option<UnderlineStyle>,
+    ) -> bool {
         let next = self.line == line && self.column + self.cells == column && self.ascii && c.is_ascii();
         if c == ' ' {
             return next && self.underline == underline;
@@ -1908,7 +1917,8 @@ mod tests {
         assert!(!findable("ada@mac app %") && !findable("# ") && !findable("$"));
         let config = Config { scrolling_history: 100, ..Default::default() };
         let mut term = Term::new(config, &GridSize { columns: 30, lines: 4 }, alacritty_terminal::event::VoidListener);
-        let mut parser = alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        let mut parser =
+            alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
         // Three commands, each printing 5 lines, then the prompt again: 19 rows, 4 shown.
         let mut text = String::new();
         for name in ["one", "two", "three"] {
@@ -1920,7 +1930,8 @@ mod tests {
         text.push_str("ada@mac app % ");
         parser.advance(&mut term, text.as_bytes());
         let prompts: Vec<String> = ["one", "two", "three"].iter().map(|n| format!("ada@mac app % echo {n}")).collect();
-        let top_row = |term: &Term<_>| row_text(term.grid(), Line(-(term.grid().display_offset() as i32))).trim_end().to_string();
+        let top_row =
+            |term: &Term<_>| row_text(term.grid(), Line(-(term.grid().display_offset() as i32))).trim_end().to_string();
         let go = |term: &mut Term<_>, up| {
             let offset = term.grid().display_offset() as i32;
             let wanted = command_offset(term.grid(), &prompts, up);
@@ -1949,7 +1960,8 @@ mod tests {
     fn clearing_takes_the_scrollback_too() {
         let config = Config { scrolling_history: 100, ..Default::default() };
         let mut term = Term::new(config, &GridSize { columns: 20, lines: 5 }, alacritty_terminal::event::VoidListener);
-        let mut parser = alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        let mut parser =
+            alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
         let output: String = (0..10).map(|i| format!("line {i}\r\n")).collect();
         parser.advance(&mut term, format!("{output}$ ls -la").as_bytes());
         assert!(term.grid().history_size() > 0);

@@ -220,7 +220,9 @@ fn test_named(language: &str, node: Node, text: &str) -> Option<(String, usize)>
             // collects them; not one inside another function.
             let in_tests = ancestors(node).skip(1).filter(|n| n.kind() == "class_definition").all(|class| {
                 class.child_by_field_name("name").is_some_and(|n| node_text(n, text).starts_with("Test"))
-                    || class.child_by_field_name("superclasses").is_some_and(|b| node_text(b, text).contains("TestCase"))
+                    || class
+                        .child_by_field_name("superclasses")
+                        .is_some_and(|b| node_text(b, text).contains("TestCase"))
             });
             let nested = ancestors(node).skip(1).any(|n| n.kind() == "function_definition");
             if !node_text(name, text).starts_with("test") || !in_tests || nested {
@@ -419,7 +421,9 @@ pub fn find(language: &str, root: &Path, path: &Path, text: &str, tree: &Tree, b
                     let command = format!("{python} -m pytest {}", quote(&format!("{relative}::{id}")));
                     Some(TestRun { command, name })
                 }
-                None => Some(all(format!("{} -m pytest {}", crate::python_env::python_for(root, path), quote(&relative)))),
+                None => {
+                    Some(all(format!("{} -m pytest {}", crate::python_env::python_for(root, path), quote(&relative))))
+                }
             }
         }
         "JavaScript" | "TypeScript" | "TSX" => {
@@ -449,16 +453,39 @@ pub fn find(language: &str, root: &Path, path: &Path, text: &str, tree: &Tree, b
     }
 }
 
-fn rust(root: &Path, path: &Path, text: &str, tree: &Tree, byte: Option<usize>, file: &str) -> Option<TestRun> {
+/// A Rust test, to debug: its crate's folder, what picks its target for cargo (`--bin x`,
+/// `--test y`, or nothing), and its full name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RustTest {
+    pub krate: PathBuf,
+    pub target: Vec<String>,
+    /// "cart::tests::adds".
+    pub id: String,
+    pub name: String,
+}
+
+/// The Rust test the caret (`byte`) is in.
+pub fn rust_test_at(path: &Path, text: &str, tree: &Tree, byte: usize) -> Option<RustTest> {
+    let (krate, target, mut module) = rust_place(path)?;
+    let node = tree.root_node().descendant_for_byte_range(byte, byte)?;
+    let function = ancestors(node).find(|n| n.kind() == "function_item" && rust_is_test(*n, text))?;
+    let name = node_text(function.child_by_field_name("name")?, text).to_string();
+    module.extend(rust_modules(function, text));
+    module.push(name.clone());
+    Some(RustTest { krate, target, id: module.join("::"), name })
+}
+
+/// The crate a Rust file is in, the target it belongs to (as cargo's arguments), and its
+/// module path within it.
+fn rust_place(path: &Path) -> Option<(PathBuf, Vec<String>, Vec<String>)> {
     let krate = ancestor_with(path.parent()?, "Cargo.toml")?;
     let inside = path.strip_prefix(&krate).ok()?;
     let mut parts: Vec<String> = inside.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    // Which target the file belongs to, and its module path within it.
-    let mut target = String::new();
+    let mut target = Vec::new();
     let mut module: Vec<String> = Vec::new();
     match parts.first().map(String::as_str) {
         Some("src") if parts.len() == 3 && parts[1] == "bin" => {
-            target = format!(" --bin {}", parts[2].trim_end_matches(".rs"));
+            target = vec!["--bin".to_string(), parts[2].trim_end_matches(".rs").to_string()];
         }
         Some("src") => {
             parts.remove(0);
@@ -469,9 +496,18 @@ fn rust(root: &Path, path: &Path, text: &str, tree: &Tree, byte: Option<usize>, 
                 other => module.push(other.trim_end_matches(".rs").to_string()),
             }
         }
-        Some("tests") if parts.len() == 2 => target = format!(" --test {}", parts[1].trim_end_matches(".rs")),
+        Some("tests") if parts.len() == 2 => {
+            target = vec!["--test".to_string(), parts[1].trim_end_matches(".rs").to_string()];
+        }
         _ => return None,
     }
+    Some((krate, target, module))
+}
+
+fn rust(root: &Path, path: &Path, text: &str, tree: &Tree, byte: Option<usize>, file: &str) -> Option<TestRun> {
+    let (krate, target, mut module) = rust_place(path)?;
+    // Which target the file belongs to, and its module path within it.
+    let target: String = target.iter().map(|a| format!(" {a}")).collect();
     let manifest = in_dir(root, &krate, |d| format!(" --manifest-path {}", quote(&format!("{d}/Cargo.toml"))));
     match byte {
         Some(byte) => {
@@ -700,6 +736,14 @@ mod tests {
             run.command,
             "cargo test --manifest-path crates/core/Cargo.toml --test api -- --exact tests::adds_up"
         );
+        // To debug: the same test, as its parts.
+        let byte = text.find("assert").unwrap();
+        let test = rust_test_at(&root2.join("crates/core/tests/api.rs"), text, &tree("a.rs", text), byte).unwrap();
+        assert_eq!(test.krate, root2.join("crates/core"));
+        assert_eq!((test.target.join(" "), test.id.as_str()), ("--test api".to_string(), "tests::adds_up"));
+        let test = rust_test_at(&root.join("src/editor/conflicts.rs"), text, &tree("a.rs", text), byte).unwrap();
+        assert!(test.target.is_empty() && test.id == "editor::conflicts::tests::adds_up", "{test:?}");
+        assert_eq!(rust_test_at(&root.join("src/editor/conflicts.rs"), text, &tree("a.rs", text), 3), None);
     }
 
     /// A project's tests, found file by file, each with what runs it.

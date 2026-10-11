@@ -102,6 +102,8 @@ actions!(
         ToggleFocusMode,
         RunTask,
         RunTestAtCursor,
+        DebugTestAtCursor,
+        DebugAgain,
         RunTestsInFile,
         OpenPreviewToTheSide,
         OpenRecent,
@@ -113,6 +115,7 @@ actions!(
         StepInto,
         StepOut,
         AddWatch,
+        EvaluateInDebugger,
         PauseDebugging,
         NextProblem,
         ToggleIndentGuides,
@@ -196,6 +199,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("secondary-shift-b", RunTask, ctx),
         KeyBinding::new("alt-secondary-t", RunTestAtCursor, ctx),
+        KeyBinding::new("alt-shift-secondary-t", DebugTestAtCursor, ctx),
         KeyBinding::new("alt-secondary-o", OpenRecent, ctx),
         KeyBinding::new("secondary-shift-n", NewWindow, ctx),
         KeyBinding::new("f5", StartDebugging, ctx),
@@ -205,6 +209,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f11", StepInto, ctx),
         KeyBinding::new("shift-f11", StepOut, ctx),
         KeyBinding::new("enter", AddWatch, Some("DebugWatch")),
+        KeyBinding::new("enter", EvaluateInDebugger, Some("DebugConsole")),
         KeyBinding::new("enter", ConfirmTerminalName, Some("TerminalName")),
         KeyBinding::new("escape", CancelTerminalName, Some("TerminalName")),
         KeyBinding::new("f8", NextProblem, ctx),
@@ -384,6 +389,33 @@ fn built_program(messages: &str, expected: Option<&Path>) -> Option<PathBuf> {
     let wanted = expected.and_then(Path::file_name);
     let only = (programs.len() == 1).then(|| &programs[0]);
     programs.iter().find(|p| p.file_name() == wanted).or(only).cloned()
+}
+
+/// The test programs in cargo's messages (`cargo test --no-run`).
+fn test_programs(messages: &str) -> Vec<PathBuf> {
+    messages
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|m| m["reason"] == "compiler-artifact" && m["profile"]["test"] == true)
+        .filter_map(|m| m["executable"].as_str().map(PathBuf::from))
+        .collect()
+}
+
+/// Of the test `programs`, the one that has test `id` (each is asked for its list).
+fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathBuf> {
+    if programs.len() == 1 {
+        return programs.first().cloned();
+    }
+    programs
+        .iter()
+        .find(|program| {
+            std::process::Command::new(program)
+                .args(["--list", "--exact", id])
+                .current_dir(cwd)
+                .output()
+                .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().any(|l| l == format!("{id}: test")))
+        })
+        .cloned()
 }
 
 fn cargo_program(root: &Path) -> Option<PathBuf> {
@@ -689,7 +721,7 @@ pub struct Workspace {
     /// While paused, the panel shows the variables and the calls; this shows the output instead.
     debug_show_output: bool,
     /// The paused call's variables the code shows, with values worth showing.
-    debug_locals: Vec<(String, String)>,
+    debug_locals: Vec<crate::debugger::Variable>,
     /// Renames asked for and waiting their turn (see `queue_rename`), and whether one is
     /// under way.
     renames: std::collections::VecDeque<(PathBuf, PathBuf)>,
@@ -702,8 +734,12 @@ pub struct Workspace {
     terminal_rename: Option<TerminalRename>,
     /// Where an expression to watch is typed, under the variables while paused.
     debug_watch: Entity<crate::text_input::TextInput>,
+    /// The Debug panel's console line (while paused).
+    debug_console: Entity<crate::text_input::TextInput>,
     /// The program to debug, when the project doesn't say (no Cargo.toml): asked once.
     debug_program: Option<PathBuf>,
+    /// The test debugged last (⌥⇧⌘T): what Debug Again runs, until F5 debugs the program.
+    debugged_test: Option<crate::test_at::RustTest>,
     /// The projects for the list about to open.
     pending_projects: Vec<PathBuf>,
     /// The tasks for the list about to open.
@@ -959,12 +995,14 @@ impl Workspace {
             debug_show_output: false,
             debug_locals: Vec::new(),
             debug_watch: cx.new(|cx| crate::text_input::TextInput::new("Watch an expression", cx)),
+            debug_console: cx.new(|cx| crate::text_input::TextInput::new("An expression, or an lldb command", cx)),
             terminal_rename: None,
             reported: Vec::new(),
             renames: Default::default(),
             renaming: false,
             reported_by: String::new(),
             debug_program: None,
+            debugged_test: None,
             focus_mode: false,
             tab_menu: None,
             text_menu: None,
@@ -1475,7 +1513,11 @@ impl Workspace {
                             // (A file that isn't text: no lines to count.)
                             // (Only what reads as no text: a folder, an unreadable file count as empty.)
                             let Ok((after, encoding)) = crate::encoding::read(&path).or_else(|e| {
-                                if e.kind() == std::io::ErrorKind::InvalidData { Err(e) } else { Ok(Default::default()) }
+                                if e.kind() == std::io::ErrorKind::InvalidData {
+                                    Err(e)
+                                } else {
+                                    Ok(Default::default())
+                                }
                             }) else {
                                 let not = crate::palette::NOT_TEXT;
                                 return (path, status, not, not);
@@ -1676,7 +1718,13 @@ impl Workspace {
     }
 
     /// Opens `path` with `range` selected, remembering where the caret was.
-    pub(crate) fn go_to(&mut self, path: PathBuf, range: lsp_types::Range, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_to(
+        &mut self,
+        path: PathBuf,
+        range: lsp_types::Range,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let here = self.here(cx);
         if here.as_ref().is_some_and(|h| h.path == path) {
             self.remember_place(here);
@@ -4286,6 +4334,7 @@ impl Workspace {
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
+            (View, "Debug Test at Cursor".into(), Box::new(DebugTestAtCursor)),
             (View, "Toggle Markdown Preview".into(), Box::new(crate::editor::ToggleMarkdownPreview)),
             (View, "Open Markdown Preview to the Side".into(), Box::new(OpenPreviewToTheSide)),
             (View, "Run Tests in File".into(), Box::new(RunTestsInFile)),
@@ -5249,10 +5298,11 @@ impl Workspace {
                     let count = editor.update(cx, |editor, cx| {
                         let text = editor.buffer.to_string();
                         let rope = editor.buffer.rope().clone();
-                        let edits: Vec<_> = crate::project_search::replacements(&text, query, replacement, line.as_deref())
-                            .into_iter()
-                            .map(|(r, new)| (rope.byte_to_char(r.start)..rope.byte_to_char(r.end), new))
-                            .collect();
+                        let edits: Vec<_> =
+                            crate::project_search::replacements(&text, query, replacement, line.as_deref())
+                                .into_iter()
+                                .map(|(r, new)| (rope.byte_to_char(r.start)..rope.byte_to_char(r.end), new))
+                                .collect();
                         let count = edits.len();
                         editor.apply_char_edits(edits, cx);
                         count
@@ -5379,7 +5429,13 @@ impl Workspace {
 
     /// Runs `command` in the terminal for `which` tests: they show as running until what it
     /// prints says how they did.
-    fn run_tests(&mut self, command: String, which: Vec<(PathBuf, String)>, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_tests(
+        &mut self,
+        command: String,
+        which: Vec<(PathBuf, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for tab in &self.tabs {
             if tab.editor.read(cx).buffer.is_dirty() && tab.editor.read(cx).path().is_some() {
                 tab.editor.update(cx, |e, cx| e.save_to_disk(cx));
@@ -5473,7 +5529,13 @@ impl Workspace {
     fn render_tests(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>().clone();
         let quiet = |text: &str| {
-            div().px(px(18.)).pt(px(14.)).text_size(px(ui::T_MD)).text_color(theme.faint).child(text.to_string()).into_any_element()
+            div()
+                .px(px(18.))
+                .pt(px(14.))
+                .text_size(px(ui::T_MD))
+                .text_color(theme.faint)
+                .child(text.to_string())
+                .into_any_element()
         };
         let Some(files) = self.tests.clone() else { return quiet("Looking for tests…") };
         if files.is_empty() {
@@ -5633,7 +5695,14 @@ impl Workspace {
                                             .flex()
                                             .items_baseline()
                                             .gap(px(6.))
-                                            .child(div().flex_none().max_w_full().truncate().code_font(cx).child(own.to_string()))
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .max_w_full()
+                                                    .truncate()
+                                                    .code_font(cx)
+                                                    .child(own.to_string()),
+                                            )
                                             .when(!class.is_empty(), |d| {
                                                 d.child(
                                                     div()
@@ -5896,9 +5965,13 @@ impl Workspace {
             .pt(px(10.))
             .child(
                 ui::segmented(theme)
-                    .child(tab("files", "Files", !searching && !outlining && !testing).active(|s| s.opacity(0.7)).on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
-                    ))
+                    .child(
+                        tab("files", "Files", !searching && !outlining && !testing)
+                            .active(|s| s.opacity(0.7))
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
+                            ),
+                    )
                     .child(tab("outline", "Outline", outlining).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.show_outline(&ShowOutline, window, cx)),
                     ))
@@ -6172,9 +6245,15 @@ impl Workspace {
         }
         self.save_named_tabs(cx);
         self.debug_panel_open = true;
+        self.debugged_test = None;
         let root = self.tree.read(cx).root().to_path_buf();
+        // The project's own way, in .vscode/launch.json (its first, when it has several).
+        let file = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        if let Some(launch) = crate::launch::read(&root, file.as_deref()).into_iter().next() {
+            return self.debug_launch(root, launch, cx);
+        }
         if root.join("Cargo.toml").is_file() {
-            return self.build_and_debug(root, cx);
+            return self.build_and_debug(root, vec!["build".into()], None, cx);
         }
         match self.debug_program.clone().filter(|p| p.is_file()) {
             Some(program) => self.debug(program, cx),
@@ -6202,12 +6281,37 @@ impl Workspace {
         .detach();
     }
 
-    /// A Rust project: `cargo build`, then its program under the debugger.
-    fn build_and_debug(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+    /// A launch.json configuration: built by cargo first when it says so, else its program.
+    fn debug_launch(&mut self, root: PathBuf, launch: crate::launch::Launch, cx: &mut Context<Self>) {
+        if let Some(cargo) = launch.cargo.clone() {
+            return self.build_and_debug(root, cargo, Some(launch), cx);
+        }
+        let Some(program) = launch.program.clone().filter(|p| p.is_file()) else {
+            let missing = launch.program.as_ref().map_or("its program".into(), |p| p.display().to_string());
+            return self.debugger.update(cx, |d, cx| {
+                d.set_building(None, cx);
+                d.append_output(&format!("{}: {missing} isn't there (built yet?).\n", launch.name), cx);
+                d.stop(cx);
+            });
+        };
+        let run = crate::debugger::Run { program, cwd: launch.cwd, args: launch.args, env: launch.env };
+        self.debug_in(run, Vec::new(), cx);
+    }
+
+    /// A Rust project: `cargo <cargo_args>` (`build`), then its program under the debugger
+    /// (as `launch` says to run it, if from launch.json).
+    fn build_and_debug(
+        &mut self,
+        root: PathBuf,
+        cargo_args: Vec<String>,
+        launch: Option<crate::launch::Launch>,
+        cx: &mut Context<Self>,
+    ) {
         let program = cargo_program(&root);
+        let shown = format!("cargo {}\n", cargo_args.join(" "));
         self.debugger.update(cx, |d, cx| {
             d.set_building(program.clone(), cx);
-            d.append_output("cargo build\n", cx);
+            d.append_output(&shown, cx);
         });
         cx.spawn(async move |this, cx| {
             let cwd = root.clone();
@@ -6218,7 +6322,8 @@ impl Workspace {
                     // (Its messages say where each program went: a target folder set
                     // elsewhere, a workspace's.)
                     let built = std::process::Command::new(cargo)
-                        .args(["build", "--message-format=json-render-diagnostics"])
+                        .args(&cargo_args)
+                        .arg("--message-format=json-render-diagnostics")
                         .current_dir(&cwd)
                         .output();
                     // Rust's own formatters, so its strings and collections show their contents.
@@ -6226,11 +6331,18 @@ impl Workspace {
                 })
                 .await;
             let (built, formatters) = built;
-            // Where cargo says it put the program, else where it usually goes.
+            // Where cargo says it put the program (or the test program, built by `cargo test
+            // --no-run`), else where it usually goes.
             let program = built
                 .as_ref()
                 .ok()
-                .and_then(|output| built_program(&String::from_utf8_lossy(&output.stdout), program.as_deref()))
+                .and_then(|output| {
+                    let messages = String::from_utf8_lossy(&output.stdout);
+                    built_program(&messages, program.as_deref()).or_else(|| match &test_programs(&messages)[..] {
+                        [only] => Some(only.clone()),
+                        _ => None,
+                    })
+                })
                 .or(program);
             this.update(cx, |this, cx| {
                 let message = match (&built, &program) {
@@ -6247,8 +6359,84 @@ impl Workspace {
                         d.append_output(&message, cx);
                         d.stop(cx);
                     }),
-                    None => this.debug_with(program.expect("checked above"), formatters.into_iter().collect(), cx),
+                    None => {
+                        let program = program.expect("checked above");
+                        let run = match launch {
+                            Some(l) => crate::debugger::Run { program, cwd: l.cwd, args: l.args, env: l.env },
+                            None => crate::debugger::Run::new(program, root.clone()),
+                        };
+                        this.debug_in(run, formatters.into_iter().collect(), cx)
+                    }
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// ⌥⇧⌘T: the Rust test at the caret, built and run alone under the debugger.
+    fn debug_test(&mut self, _: &DebugTestAtCursor, _: &mut Window, cx: &mut Context<Self>) {
+        if self.debugger.read(cx).is_active() {
+            return self.show_notice("Already debugging: stop it first (⇧F5)".into(), cx);
+        }
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(test) = editor.update(cx, |e, _| e.rust_test_at_caret()) else {
+            return self.show_notice("No Rust test at the caret".into(), cx);
+        };
+        self.debug_rust_test(test, cx);
+    }
+
+    fn debug_rust_test(&mut self, test: crate::test_at::RustTest, cx: &mut Context<Self>) {
+        if self.debugger.read(cx).is_active() {
+            return;
+        }
+        self.debugged_test = Some(test.clone());
+        self.save_named_tabs(cx);
+        self.debug_panel_open = true;
+        self.debugger.update(cx, |d, cx| {
+            d.set_building(None, cx);
+            d.append_output(&format!("cargo test --no-run {}\n", test.target.join(" ")), cx);
+        });
+        cx.spawn(async move |this, cx| {
+            let krate = test.krate.clone();
+            let id = test.id.clone();
+            let target = test.target.clone();
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
+                    let built = std::process::Command::new(cargo)
+                        .args(["test", "--no-run", "--message-format=json-render-diagnostics"])
+                        .args(&target)
+                        .current_dir(&krate)
+                        .output();
+                    let program = built.as_ref().ok().filter(|o| o.status.success()).and_then(|output| {
+                        program_with_test(&test_programs(&String::from_utf8_lossy(&output.stdout)), &id, &krate)
+                    });
+                    (built, program, crate::debugger::rust_formatters())
+                })
+                .await;
+            let (built, program, formatters) = found;
+            this.update(cx, |this, cx| {
+                let message = match (&built, &program) {
+                    (Ok(output), _) if !output.status.success() => {
+                        Some(String::from_utf8_lossy(&output.stderr).into_owned() + "\nThe build failed.\n")
+                    }
+                    (Err(error), _) => Some(format!("Couldn't run cargo: {error}\n")),
+                    (_, None) => Some(format!("No test program has {}.\n", test.id)),
+                    _ => None,
+                };
+                if let Some(message) = message {
+                    return this.debugger.update(cx, |d, cx| {
+                        d.append_output(&message, cx);
+                        d.stop(cx);
+                    });
+                }
+                // Only it, its output as it comes, in the crate's folder (as cargo runs it).
+                let args = vec![test.id.clone(), "--exact".into(), "--nocapture".into(), "--test-threads=1".into()];
+                let program = program.expect("checked above");
+                let run = crate::debugger::Run { args, ..crate::debugger::Run::new(program, test.krate.clone()) };
+                this.debug_in(run, formatters.into_iter().collect(), cx);
             })
             .ok();
         })
@@ -6262,6 +6450,10 @@ impl Workspace {
 
     fn debug_with(&mut self, program: PathBuf, init_commands: Vec<String>, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
+        self.debug_in(crate::debugger::Run::new(program, root), init_commands, cx);
+    }
+
+    fn debug_in(&mut self, run: crate::debugger::Run, init_commands: Vec<String>, cx: &mut Context<Self>) {
         let mut breakpoints: Vec<(PathBuf, Vec<crate::editor::Breakpoint>)> = Vec::new();
         for tab in &self.tabs {
             let editor = tab.editor.read(cx);
@@ -6271,7 +6463,7 @@ impl Workspace {
                 breakpoints.push((path.to_path_buf(), editor.breakpoint_list()));
             }
         }
-        self.debugger.update(cx, |d, cx| d.start(program, root, breakpoints, init_commands, cx));
+        self.debugger.update(cx, |d, cx| d.start(run, breakpoints, init_commands, cx));
     }
 
     fn debugger_event(&mut self, event: &crate::debugger::DebuggerEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -6288,11 +6480,7 @@ impl Workspace {
         }
         // Unless the paused call's code is open, every variable with a value worth showing.
         self.debug_locals = match event {
-            DebuggerEvent::Stopped(stop) => stop
-                .locals
-                .iter()
-                .filter_map(|(name, value)| Some((name.clone(), crate::debugger::clean_value(value)?)))
-                .collect(),
+            DebuggerEvent::Stopped(stop) => crate::debugger::panel_variables(None, &stop.variables),
             _ => Vec::new(),
         };
         if let DebuggerEvent::Stopped(stop) = event
@@ -6319,7 +6507,7 @@ impl Workspace {
                             .iter()
                             .filter_map(|(n, v)| Some((n.clone(), crate::debugger::clean_value(v)?)))
                             .collect();
-                        shown = Some(crate::debugger::shown_locals(&lines, &stop.locals));
+                        shown = Some(crate::debugger::panel_variables(Some(&lines), &stop.variables));
                     });
                 }
             }
@@ -6386,7 +6574,10 @@ impl Workspace {
                 button("dbg-pause", "Pause", "Pause", Box::new(PauseDebugging)),
                 button("dbg-stop", "Stop", "Stop debugging", Box::new(StopDebugging)),
             ],
-            DebugState::Idle => vec![button("dbg-again", "Debug Again", "Start debugging", Box::new(StartDebugging))],
+            DebugState::Idle => {
+                let tip = if self.debugged_test.is_some() { "Debug the test again" } else { "Start debugging" };
+                vec![button("dbg-again", "Debug Again", tip, Box::new(DebugAgain))]
+            }
             _ => vec![button("dbg-stop", "Stop", "Stop debugging", Box::new(StopDebugging))],
         };
         let close = div()
@@ -6443,13 +6634,45 @@ impl Workspace {
         let body = match stopped.filter(|_| !showing_output) {
             // Paused: the call's variables, and the calls that led to it (a click looks at one).
             Some(stop) => {
-                let variables = self.debug_locals.iter().map(|(name, value)| {
+                // Each, and inside the ones unfolded (a click on one with something inside).
+                let rows = crate::debugger::variable_rows(&self.debug_locals, &debugger.fields, &debugger.unfolded);
+                let variables = rows.into_iter().enumerate().map(|(i, row)| {
+                    let reference = row.variable.reference;
+                    let value = if row.depth == 0 {
+                        row.variable.value.clone()
+                    } else {
+                        crate::debugger::clean_value(&row.variable.value).unwrap_or_default()
+                    };
+                    let turn = if row.unfolded { std::f32::consts::FRAC_PI_2 } else { 0. };
+                    let marker = div().flex_none().size(px(12.)).flex().items_center().justify_center().when(
+                        reference > 0,
+                        |d| {
+                            d.child(
+                                svg()
+                                    .path("icons/chevron-right.svg")
+                                    .size(px(10.))
+                                    .text_color(theme.faint)
+                                    .with_transformation(gpui::Transformation::rotate(gpui::radians(turn))),
+                            )
+                        },
+                    );
+                    let path = row.path;
                     div()
+                        .id(("dbg-var", i))
                         .flex()
-                        .gap(px(10.))
+                        .items_center()
+                        .gap(px(6.))
+                        .pl(px(row.depth as f32 * 14.))
                         .whitespace_nowrap()
-                        .child(div().text_color(theme.foreground).child(name.clone()))
-                        .child(div().min_w_0().truncate().text_color(theme.muted).child(value.clone()))
+                        .child(marker)
+                        .child(div().flex_none().text_color(theme.foreground).child(row.variable.name.clone()))
+                        .child(div().pl(px(4.)).min_w_0().truncate().text_color(theme.muted).child(value))
+                        .when(reference > 0, |d| {
+                            d.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                let path = path.clone();
+                                this.debugger.update(cx, |d, cx| d.toggle_unfolded(path, reference, cx));
+                            }))
+                        })
                 });
                 let watches: Vec<AnyElement> = debugger
                     .watches
@@ -6566,6 +6789,8 @@ impl Workspace {
             }
             None => {
                 let output = debugger.output.lines().map(|line| div().child(line.to_string()));
+                // While paused, a line to work out an expression (or give lldb a command) at.
+                let paused = matches!(debugger.state, DebugState::Stopped(_));
                 div()
                     .id("debug-output")
                     .flex_1()
@@ -6578,6 +6803,18 @@ impl Workspace {
                     .text_size(px(12.5))
                     .text_color(theme.muted)
                     .children(output)
+                    .when(paused, |d| {
+                        d.child(
+                            div()
+                                .key_context("DebugConsole")
+                                .mt(px(4.))
+                                .flex()
+                                .gap(px(6.))
+                                .text_color(theme.foreground)
+                                .child(div().flex_none().text_color(theme.caret).child("›"))
+                                .child(div().flex_1().min_w_0().child(self.debug_console.clone())),
+                        )
+                    })
             }
         };
         Some(
@@ -6778,10 +7015,8 @@ impl Workspace {
     fn add_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // In a Python project with its own environment: made the shell's, as activating does.
         let root = self.tree.read(cx).root().to_path_buf();
-        let activate = (dir.starts_with(&root))
-            .then(|| crate::python_env::find_for(&root, &dir))
-            .flatten()
-            .and_then(|env| {
+        let activate =
+            (dir.starts_with(&root)).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
                 let shell = std::env::var("SHELL")
                     .ok()
                     .filter(|s| !s.is_empty())
@@ -8139,11 +8374,17 @@ impl Workspace {
     /// What the text's menu offers: the clipboard; with a language server, what it knows of
     /// the name there; with AI, asking it to change the code; formatting.
     fn text_menu_items(&self, editor: &Entity<Editor>, cx: &App) -> Vec<TextMenuItem> {
-        use crate::editor::{Copy, Cut, FindReferences, FormatDocument, GoToDefinition, InlineAssist, Paste, RenameSymbol};
+        use crate::editor::{
+            Copy, Cut, FindReferences, FormatDocument, GoToDefinition, InlineAssist, Paste, RenameSymbol,
+        };
         let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group, at_click: false };
         let at_click = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group, at_click: true };
         let editor = editor.read(cx);
-        let mut items = vec![item("Cut", Box::new(Cut), false), item("Copy", Box::new(Copy), false), item("Paste", Box::new(Paste), false)];
+        let mut items = vec![
+            item("Cut", Box::new(Cut), false),
+            item("Copy", Box::new(Copy), false),
+            item("Paste", Box::new(Paste), false),
+        ];
         if editor.has_language_server(cx) {
             items.push(at_click("Go to Definition", Box::new(GoToDefinition), true));
             items.push(at_click("Find References", Box::new(FindReferences), false));
@@ -8249,9 +8490,9 @@ impl Workspace {
                         .child(label)
                         .children(keys.map(|k| div().text_color(theme.faint).child(k)))
                         .active(|s| s.opacity(0.7))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.run_text_menu_item(i, window, cx)
-                        })),
+                        .on_click(
+                            cx.listener(move |this, _: &ClickEvent, window, cx| this.run_text_menu_item(i, window, cx)),
+                        ),
                 )
         });
         Some(
@@ -9065,359 +9306,359 @@ impl Render for Workspace {
         // (Text, with lines to go to: not a picture, not a preview.)
         let can_go_to_line =
             self.active_editor().map(|e| e.read(cx)).is_some_and(|e| e.preview.is_none() && !e.reading);
-        let status =
-            div()
-                .h(px(28.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(16.))
-                .px(px(16.))
-                .border_t_1()
-                .border_color(theme.hairline)
-                .bg(theme.surface)
-                .text_size(px(12.))
-                .text_color(theme.muted)
-                .opacity(opacity)
-                .children(self.branch.clone().map(|branch| {
-                    // The branch (a click switches it), and how many files changed (a click lists them).
-                    let changed = self.git_status.len();
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(5.))
-                        .child(
-                            div()
-                                .id("branch")
-                                .flex()
-                                .items_center()
-                                .gap(px(5.))
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.foreground))
-                                .tooltip(ui::tip("Switch branch", Some(Box::new(SwitchBranch))))
-                                .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
-                                .child(branch)
-                                .active(|s| s.opacity(0.7))
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.switch_branch(&SwitchBranch, window, cx)
-                                })),
-                        )
-                        // Commits to push and to pull, when there are: a click does it.
-                        .children(self.sync.filter(|&(ahead, _)| ahead > 0).map(|(ahead, _)| {
-                            div()
-                                .id("to-push")
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.foreground))
-                                .tooltip(ui::tip(
-                                    if ahead == 1 {
-                                        "1 commit to push".to_string()
-                                    } else {
-                                        format!("{ahead} commits to push")
-                                    },
-                                    Some(Box::new(PushBranch)),
-                                ))
-                                .child(format!("↑{ahead}"))
-                                .active(|s| s.opacity(0.7))
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.push_branch(&PushBranch, window, cx)
-                                }))
-                        }))
-                        .children(self.sync.filter(|&(_, behind)| behind > 0).map(|(_, behind)| {
-                            div()
-                                .id("to-pull")
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.foreground))
-                                .tooltip(ui::tip(
-                                    if behind == 1 {
-                                        "1 commit to pull".to_string()
-                                    } else {
-                                        format!("{behind} commits to pull")
-                                    },
-                                    Some(Box::new(PullBranch)),
-                                ))
-                                .child(format!("↓{behind}"))
-                                .active(|s| s.opacity(0.7))
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.pull_branch(&PullBranch, window, cx)
-                                }))
-                        }))
-                        .when(changed > 0, |d| {
-                            d.child(
-                                div()
-                                    .id("changes")
-                                    .cursor_pointer()
-                                    .text_color(theme.git_modified)
-                                    .hover(|s| s.text_color(theme.foreground))
-                                    .tooltip(ui::tip("Review changes", Some(Box::new(ReviewChanges))))
-                                    .child(format!("· {changed}"))
-                                    .active(|s| s.opacity(0.7))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.review_changes(&ReviewChanges, window, cx)
-                                    })),
-                            )
-                        })
-                }))
-                // The file (a click shows it in the files), then where the caret is in it (a
-                // click on a name goes there).
-                .child({
-                    let file_path = self.active_path(cx);
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .flex()
-                        .items_center()
-                        .children(items.next().map(|place| {
-                            div()
-                                .id("status-place")
-                                .debug_selector(|| "status-place".into())
-                                // The file first: it keeps its room (it's cut short already).
-                                .flex_none()
-                                .truncate()
-                                .when(file_path.is_some(), |d| {
-                                    d.cursor_pointer().hover(|s| s.text_color(theme.foreground))
-                                })
-                                .child(place)
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    if let Some(path) = &file_path {
-                                        this.show_files(&ShowFiles, window, cx);
-                                        this.tree.update(cx, |tree, cx| tree.show_path(path, cx));
-                                    }
-                                }))
-                        }))
-                        .children(trail.iter().enumerate().map(|(i, (name, row))| {
-                            let row = *row;
-                            // Names give way when there's no room (the deepest last to).
-                            div()
-                                .flex_shrink()
-                                .min_w_0()
-                                .flex()
-                                .child(div().flex_none().px(px(5.)).text_color(theme.faint).child("›"))
-                                .child(
-                                    div()
-                                        .id(("status-trail", i))
-                                        .min_w_0()
-                                        .truncate()
-                                        .debug_selector(move || format!("status-trail {i}"))
-                                        .cursor_pointer()
-                                        .hover(|s| s.text_color(theme.foreground))
-                                        .child(name.clone())
-                                        .active(|s| s.opacity(0.7))
-                                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                            this.go_to_outline_row(row, window, cx)
-                                        })),
-                                )
-                        }))
-                })
-                .children(lsp_status)
-                .children(indent_label.map(|label| {
-                    div()
-                        .id("status-indent")
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(label)
-                        .active(|s| s.opacity(0.7))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.show_commands_for("indent with", window, cx)
-                        }))
-                }))
-                // Not UTF-8: which encoding it's kept in; a click offers UTF-8.
-                .children(encoding.map(|encoding| {
-                    div()
-                        .id("status-encoding")
-                        .flex_none()
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(encoding.label())
-                        .active(|s| s.opacity(0.7))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.show_commands_for("encoding", window, cx)
-                        }))
-                }))
-                .when(crlf, |bar| {
-                    bar.child(
+        let status = div()
+            .h(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .px(px(16.))
+            .border_t_1()
+            .border_color(theme.hairline)
+            .bg(theme.surface)
+            .text_size(px(12.))
+            .text_color(theme.muted)
+            .opacity(opacity)
+            .children(self.branch.clone().map(|branch| {
+                // The branch (a click switches it), and how many files changed (a click lists them).
+                let changed = self.git_status.len();
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(
                         div()
-                            .id("status-crlf")
-                            .flex_none()
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child("CRLF")
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.show_commands_for("line endings", window, cx)
-                            })),
-                    )
-                })
-                // The terminal hidden while something runs in it: what, and a click shows it.
-                .children(self.terminal_busy(cx).map(|(ix, name)| {
-                    div()
-                        .id("terminal-busy")
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(6.))
-                        .whitespace_nowrap()
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(div().size(px(5.)).rounded_full().bg(theme.caret.opacity(0.7)))
-                        .child(format!("{name} running"))
-                        .tooltip(ui::tip("Show the terminal", Some(Box::new(ToggleTerminal))))
-                        .active(|s| s.opacity(0.7))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.active_terminal = ix;
-                            this.toggle_terminal(&ToggleTerminal, window, cx);
-                        }))
-                }))
-                .children(self.ai_task.as_ref().map(|run| {
-                    // One line for a task: what it's at, then how many files to review.
-                    let text: String = match &run.state {
-                        TaskState::Starting => "Starting the task…".into(),
-                        TaskState::Running(Some(file)) => {
-                            let name =
-                                Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
-                            format!("Working on {name}…")
-                        }
-                        TaskState::Running(None) => format!("{}…", run.title.trim()),
-                        TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
-                        TaskState::Review(changes) => format!("Review {} files", changes.len()),
-                    };
-                    let reviewing = matches!(run.state, TaskState::Review(_));
-                    div()
-                        .id("ai-task")
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(6.))
-                        .whitespace_nowrap()
-                        .max_w(px(320.))
-                        .text_color(theme.foreground)
-                        .child(div().flex_none().text_color(theme.caret).child("✦"))
-                        .child(div().min_w_0().truncate().child(text))
-                        // While it works, only "Stop" stops it; once done, the line opens the review.
-                        .when(!reviewing, |d| {
-                            d.child(
-                                div()
-                                    .id("stop-ai-task")
-                                    .flex_none()
-                                    .cursor_pointer()
-                                    .text_color(theme.muted)
-                                    .hover(|s| s.text_color(theme.foreground))
-                                    .child("Stop")
-                                    .active(|s| s.opacity(0.7))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.stop_ai_task(&StopAiTask, window, cx)
-                                    })),
-                            )
-                        })
-                        .when(reviewing, |d| {
-                            d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
-                                |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
-                            ))
-                        })
-                }))
-                // AI's only lasting mark: a dot. Its name shows on hover; a click opens its settings.
-                .when(ai_provider != ProviderId::Off, |bar| {
-                    let dot = theme.caret.opacity(0.6);
-                    let lit = theme.caret;
-                    bar.child(
-                        div()
-                            .id("ai-status")
-                            .flex_none()
-                            .size(px(14.))
+                            .id("branch")
                             .flex()
                             .items_center()
-                            .justify_center()
+                            .gap(px(5.))
                             .cursor_pointer()
-                            .group("ai-status")
-                            .child(
-                                div().size(px(6.)).rounded_full().bg(dot).group_hover("ai-status", move |s| s.bg(lit)),
+                            .hover(|s| s.text_color(theme.foreground))
+                            .tooltip(ui::tip("Switch branch", Some(Box::new(SwitchBranch))))
+                            .child(svg().path("icons/branch.svg").size(px(13.)).text_color(theme.muted))
+                            .child(branch)
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.switch_branch(&SwitchBranch, window, cx)
+                            })),
+                    )
+                    // Commits to push and to pull, when there are: a click does it.
+                    .children(self.sync.filter(|&(ahead, _)| ahead > 0).map(|(ahead, _)| {
+                        div()
+                            .id("to-push")
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .tooltip(ui::tip(
+                                if ahead == 1 {
+                                    "1 commit to push".to_string()
+                                } else {
+                                    format!("{ahead} commits to push")
+                                },
+                                Some(Box::new(PushBranch)),
+                            ))
+                            .child(format!("↑{ahead}"))
+                            .active(|s| s.opacity(0.7))
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.push_branch(&PushBranch, window, cx)
+                                }),
                             )
-                            .tooltip(ui::tip(format!("AI · {}", ai_provider.label()), None))
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_settings_at(Some(Section::Ai), window, cx)
-                            })),
-                    )
-                })
-                // Merge conflicts left in the file: a click goes to the next.
-                .when(conflicts > 0, |bar| {
-                    bar.child(
+                    }))
+                    .children(self.sync.filter(|&(_, behind)| behind > 0).map(|(_, behind)| {
                         div()
-                            .id("conflicts")
-                            .flex_none()
-                            .whitespace_nowrap()
+                            .id("to-pull")
                             .cursor_pointer()
-                            .text_color(theme.error)
-                            .child(if conflicts == 1 {
-                                "1 conflict".to_string()
-                            } else {
-                                format!("{conflicts} conflicts")
-                            })
+                            .hover(|s| s.text_color(theme.foreground))
+                            .tooltip(ui::tip(
+                                if behind == 1 {
+                                    "1 commit to pull".to_string()
+                                } else {
+                                    format!("{behind} commits to pull")
+                                },
+                                Some(Box::new(PullBranch)),
+                            ))
+                            .child(format!("↓{behind}"))
                             .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                if let Some(editor) = this.active_editor().cloned() {
-                                    editor.update(cx, |e, cx| e.go_to_conflict(true, cx));
-                                    window.focus(&editor.focus_handle(cx));
-                                }
-                            })),
-                    )
-                })
-                .when(problems != (0, 0), |bar| {
-                    let (errors, warnings) = problems;
-                    let plural =
-                        |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
-                    bar.child(
-                        div()
-                            .id("problems")
-                            .flex()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .gap(px(10.))
-                            .cursor_pointer()
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.show_problems(&ShowProblems, window, cx)
-                            }))
-                            .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
-                            .when(warnings > 0, |d| {
-                                d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
-                            }),
-                    )
-                })
-                // Where the caret is: a click goes to another line (as ⌃G).
-                .children(items.map(|item| {
-                    div()
-                        .id("status-position")
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .when(can_go_to_line, |d| {
-                            d.cursor_pointer()
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.pull_branch(&PullBranch, window, cx)
+                                }),
+                            )
+                    }))
+                    .when(changed > 0, |d| {
+                        d.child(
+                            div()
+                                .id("changes")
+                                .cursor_pointer()
+                                .text_color(theme.git_modified)
                                 .hover(|s| s.text_color(theme.foreground))
-                                .tooltip(ui::tip("Go to line", Some(Box::new(GoToLine))))
+                                .tooltip(ui::tip("Review changes", Some(Box::new(ReviewChanges))))
+                                .child(format!("· {changed}"))
+                                .active(|s| s.opacity(0.7))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.go_to_line(&GoToLine, window, cx)
-                                }))
-                        })
-                        .child(item)
-                }))
-                // The file's language: a click puts it in another.
-                .children(language.map(|name| {
+                                    this.review_changes(&ReviewChanges, window, cx)
+                                })),
+                        )
+                    })
+            }))
+            // The file (a click shows it in the files), then where the caret is in it (a
+            // click on a name goes there).
+            .child({
+                let file_path = self.active_path(cx);
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .flex()
+                    .items_center()
+                    .children(items.next().map(|place| {
+                        div()
+                            .id("status-place")
+                            .debug_selector(|| "status-place".into())
+                            // The file first: it keeps its room (it's cut short already).
+                            .flex_none()
+                            .truncate()
+                            .when(file_path.is_some(), |d| d.cursor_pointer().hover(|s| s.text_color(theme.foreground)))
+                            .child(place)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                if let Some(path) = &file_path {
+                                    this.show_files(&ShowFiles, window, cx);
+                                    this.tree.update(cx, |tree, cx| tree.show_path(path, cx));
+                                }
+                            }))
+                    }))
+                    .children(trail.iter().enumerate().map(|(i, (name, row))| {
+                        let row = *row;
+                        // Names give way when there's no room (the deepest last to).
+                        div()
+                            .flex_shrink()
+                            .min_w_0()
+                            .flex()
+                            .child(div().flex_none().px(px(5.)).text_color(theme.faint).child("›"))
+                            .child(
+                                div()
+                                    .id(("status-trail", i))
+                                    .min_w_0()
+                                    .truncate()
+                                    .debug_selector(move || format!("status-trail {i}"))
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .child(name.clone())
+                                    .active(|s| s.opacity(0.7))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                        this.go_to_outline_row(row, window, cx)
+                                    })),
+                            )
+                    }))
+            })
+            .children(lsp_status)
+            .children(indent_label.map(|label| {
+                div()
+                    .id("status-indent")
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(label)
+                    .active(|s| s.opacity(0.7))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_commands_for("indent with", window, cx)
+                        }),
+                    )
+            }))
+            // Not UTF-8: which encoding it's kept in; a click offers UTF-8.
+            .children(encoding.map(|encoding| {
+                div()
+                    .id("status-encoding")
+                    .flex_none()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(encoding.label())
+                    .active(|s| s.opacity(0.7))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_commands_for("encoding", window, cx)),
+                    )
+            }))
+            .when(crlf, |bar| {
+                bar.child(
                     div()
-                        .id("status-language")
+                        .id("status-crlf")
+                        .flex_none()
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child("CRLF")
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_commands_for("line endings", window, cx)
+                        })),
+                )
+            })
+            // The terminal hidden while something runs in it: what, and a click shows it.
+            .children(self.terminal_busy(cx).map(|(ix, name)| {
+                div()
+                    .id("terminal-busy")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(div().size(px(5.)).rounded_full().bg(theme.caret.opacity(0.7)))
+                    .child(format!("{name} running"))
+                    .tooltip(ui::tip("Show the terminal", Some(Box::new(ToggleTerminal))))
+                    .active(|s| s.opacity(0.7))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.active_terminal = ix;
+                        this.toggle_terminal(&ToggleTerminal, window, cx);
+                    }))
+            }))
+            .children(self.ai_task.as_ref().map(|run| {
+                // One line for a task: what it's at, then how many files to review.
+                let text: String = match &run.state {
+                    TaskState::Starting => "Starting the task…".into(),
+                    TaskState::Running(Some(file)) => {
+                        let name =
+                            Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                        format!("Working on {name}…")
+                    }
+                    TaskState::Running(None) => format!("{}…", run.title.trim()),
+                    TaskState::Review(changes) if changes.len() == 1 => "Review 1 file".into(),
+                    TaskState::Review(changes) => format!("Review {} files", changes.len()),
+                };
+                let reviewing = matches!(run.state, TaskState::Review(_));
+                div()
+                    .id("ai-task")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .whitespace_nowrap()
+                    .max_w(px(320.))
+                    .text_color(theme.foreground)
+                    .child(div().flex_none().text_color(theme.caret).child("✦"))
+                    .child(div().min_w_0().truncate().child(text))
+                    // While it works, only "Stop" stops it; once done, the line opens the review.
+                    .when(!reviewing, |d| {
+                        d.child(
+                            div()
+                                .id("stop-ai-task")
+                                .flex_none()
+                                .cursor_pointer()
+                                .text_color(theme.muted)
+                                .hover(|s| s.text_color(theme.foreground))
+                                .child("Stop")
+                                .active(|s| s.opacity(0.7))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.stop_ai_task(&StopAiTask, window, cx)
+                                })),
+                        )
+                    })
+                    .when(reviewing, |d| {
+                        d.cursor_pointer().active(|s| s.opacity(0.7)).on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| this.review_ai_task(&ReviewAiTask, window, cx),
+                        ))
+                    })
+            }))
+            // AI's only lasting mark: a dot. Its name shows on hover; a click opens its settings.
+            .when(ai_provider != ProviderId::Off, |bar| {
+                let dot = theme.caret.opacity(0.6);
+                let lit = theme.caret;
+                bar.child(
+                    div()
+                        .id("ai-status")
+                        .flex_none()
+                        .size(px(14.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .group("ai-status")
+                        .child(div().size(px(6.)).rounded_full().bg(dot).group_hover("ai-status", move |s| s.bg(lit)))
+                        .tooltip(ui::tip(format!("AI · {}", ai_provider.label()), None))
+                        .active(|s| s.opacity(0.7))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_settings_at(Some(Section::Ai), window, cx)
+                        })),
+                )
+            })
+            // Merge conflicts left in the file: a click goes to the next.
+            .when(conflicts > 0, |bar| {
+                bar.child(
+                    div()
+                        .id("conflicts")
                         .flex_none()
                         .whitespace_nowrap()
                         .cursor_pointer()
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(name)
+                        .text_color(theme.error)
+                        .child(if conflicts == 1 { "1 conflict".to_string() } else { format!("{conflicts} conflicts") })
                         .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            if let Some(editor) = this.active_editor().cloned() {
+                                editor.update(cx, |e, cx| e.go_to_conflict(true, cx));
+                                window.focus(&editor.focus_handle(cx));
+                            }
+                        })),
+                )
+            })
+            .when(problems != (0, 0), |bar| {
+                let (errors, warnings) = problems;
+                let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+                bar.child(
+                    div()
+                        .id("problems")
+                        .flex()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .gap(px(10.))
+                        .cursor_pointer()
+                        .active(|s| s.opacity(0.7))
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_problems(&ShowProblems, window, cx)
+                            }),
+                        )
+                        .when(errors > 0, |d| d.child(div().text_color(theme.error).child(plural(errors, "error"))))
+                        .when(warnings > 0, |d| {
+                            d.child(div().text_color(theme.warning).child(plural(warnings, "warning")))
+                        }),
+                )
+            })
+            // Where the caret is: a click goes to another line (as ⌃G).
+            .children(items.map(|item| {
+                div()
+                    .id("status-position")
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .when(can_go_to_line, |d| {
+                        d.cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .tooltip(ui::tip("Go to line", Some(Box::new(GoToLine))))
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| this.go_to_line(&GoToLine, window, cx)),
+                            )
+                    })
+                    .child(item)
+            }))
+            // The file's language: a click puts it in another.
+            .children(language.map(|name| {
+                div()
+                    .id("status-language")
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(name)
+                    .active(|s| s.opacity(0.7))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.show_commands_for("language: ", window, cx)
-                        }))
-                }));
+                        }),
+                    )
+            }));
 
         div()
             .key_context("Workspace")
@@ -9547,9 +9788,7 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|_, _: &ToggleInlayHints, _, cx| settings::update(cx, |s| s.inlay_hints = !s.inlay_hints)),
             )
-            .on_action(
-                cx.listener(|_, _: &ToggleCodeLens, _, cx| settings::update(cx, |s| s.code_lens = !s.code_lens)),
-            )
+            .on_action(cx.listener(|_, _: &ToggleCodeLens, _, cx| settings::update(cx, |s| s.code_lens = !s.code_lens)))
             .on_action(cx.listener(|_, _: &ToggleBracketColours, _, cx| {
                 settings::update(cx, |s| s.bracket_colours = !s.bracket_colours)
             }))
@@ -9559,6 +9798,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))
+            .on_action(cx.listener(Self::debug_test))
+            .on_action(cx.listener(|this, _: &DebugAgain, window, cx| match this.debugged_test.clone() {
+                Some(test) => this.debug_rust_test(test, cx),
+                None => this.start_debugging(&StartDebugging, window, cx),
+            }))
             .on_action(cx.listener(Self::open_preview_to_the_side))
             .on_action(cx.listener(|this, _: &RunTestsInFile, window, cx| this.run_test(false, window, cx)))
             .on_action(cx.listener(Self::open_recent))
@@ -9569,7 +9813,8 @@ impl Render for Workspace {
                 // Where the program fails (a Rust panic, a thrown exception): stopped at.
                 let on = !this.debugger.read(cx).stop_on_errors;
                 this.debugger.update(cx, |d, cx| d.set_stop_on_errors(on, cx));
-                let notice = if on { "Debugging stops where the program fails" } else { "Debugging no longer stops on errors" };
+                let notice =
+                    if on { "Debugging stops where the program fails" } else { "Debugging no longer stops on errors" };
                 this.show_notice(notice.into(), cx);
             }))
             .on_action(cx.listener(|this, _: &StopDebugging, _, cx| {
@@ -9588,6 +9833,11 @@ impl Render for Workspace {
                 this.debugger.update(cx, |d, cx| d.add_watch(&expression, cx));
                 this.debug_watch.update(cx, |input, cx| input.set_text("", cx));
             }))
+            .on_action(cx.listener(|this, _: &EvaluateInDebugger, _, cx| {
+                let expression = this.debug_console.read(cx).text().to_string();
+                this.debugger.update(cx, |d, cx| d.evaluate(&expression, cx));
+                this.debug_console.update(cx, |input, cx| input.set_text("", cx));
+            }))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::next_terminal))
             .on_action(cx.listener(Self::split_terminal))
@@ -9600,7 +9850,9 @@ impl Render for Workspace {
                     settings::update(cx, |s| s.symbol_marks = !s.symbol_marks)
                 }),
             )
-            .on_action(cx.listener(|_, _: &ToggleAutoClose, _, cx| settings::update(cx, |s| s.auto_close = !s.auto_close)))
+            .on_action(
+                cx.listener(|_, _: &ToggleAutoClose, _, cx| settings::update(cx, |s| s.auto_close = !s.auto_close)),
+            )
             .on_action(cx.listener(|_, _: &ToggleStickyScroll, _, cx| {
                 settings::update(cx, |s| s.sticky_scroll = !s.sticky_scroll)
             }))
@@ -9805,6 +10057,79 @@ mod tests {
         assert_eq!(built_program(&messages, None), None, "several, none expected: not guessed");
         assert_eq!(built_program(&artifact("bin", Some("/t/debug/one")), None), Some(PathBuf::from("/t/debug/one")));
         assert_eq!(built_program(&artifact("lib", None), None), None, "no program");
+    }
+
+    /// The test programs cargo built (`cargo test --no-run`), and the one with a test.
+    #[test]
+    fn test_programs_are_found_in_cargo_s_messages() {
+        let artifact = |test: bool, exe: Option<&str>| {
+            serde_json::json!({ "reason": "compiler-artifact", "profile": { "test": test }, "executable": exe })
+                .to_string()
+        };
+        let messages =
+            [artifact(false, None), artifact(true, Some("/t/deps/app-1")), artifact(false, Some("/t/app"))].join("\n");
+        assert_eq!(test_programs(&messages), [PathBuf::from("/t/deps/app-1")]);
+        // One: it, without asking it.
+        let one = [PathBuf::from("/nowhere/app-1")];
+        assert_eq!(program_with_test(&one, "a::b", Path::new("/")), Some(one[0].clone()));
+        assert_eq!(program_with_test(&[], "a::b", Path::new("/")), None);
+    }
+
+    /// A test of a crate with two test programs: built, the right program found, run alone
+    /// under the debugger, stopped in it. `cargo test debugs_a_rust_test -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn debugs_a_rust_test(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("debug-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        // As Null opens a project: by its real path (the one cargo builds with).
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"twice\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let lib = "pub fn twice(n: i32) -> i32 {\n    n * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        let got = super::twice(21);\n        assert_eq!(got, 42);\n    }\n}\n";
+        std::fs::write(dir.join("src/lib.rs"), lib).unwrap();
+        std::fs::write(dir.join("tests/api.rs"), "#[test]\nfn other() {}\n").unwrap();
+        let built = std::process::Command::new("cargo")
+            .args(["test", "--no-run", "--offline", "--message-format=json-render-diagnostics"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let programs = test_programs(&String::from_utf8_lossy(&built.stdout));
+        assert_eq!(programs.len(), 2, "{programs:?}");
+        let program = program_with_test(&programs, "tests::doubles", &dir).expect("one has it");
+        assert!(program.file_name().unwrap().to_string_lossy().starts_with("twice-"), "{program:?}");
+        let debugger = cx.new(|_| crate::debugger::Debugger::default());
+        // At `assert_eq!(got, 42);` (line 10, from 0: 9).
+        let at = crate::editor::Breakpoint { line: 9, condition: None };
+        let args = vec!["tests::doubles".into(), "--exact".into(), "--nocapture".into(), "--test-threads=1".into()];
+        debugger.update(cx, |d, cx| {
+            let run = crate::debugger::Run { args, ..crate::debugger::Run::new(program, dir.clone()) };
+            d.start(run, vec![(dir.join("src/lib.rs"), vec![at])], Vec::new(), cx)
+        });
+        let mut stopped = None;
+        for _ in 0..600 {
+            cx.run_until_parked();
+            stopped = debugger.read_with(cx, |d, _| match &d.state {
+                crate::debugger::DebugState::Stopped(stop) => Some(stop.clone()),
+                _ => None,
+            });
+            if stopped.is_some() && stopped.as_ref().is_some_and(|s| !s.locals.is_empty()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let output = debugger.read_with(cx, |d, _| format!("{:?}\n{}", d.state, d.output));
+        let stop = stopped.unwrap_or_else(|| panic!("never stopped in the test: {output}"));
+        assert_eq!(stop.place.as_ref().map(|(_, line)| *line), Some(9));
+        assert!(stop.locals.iter().any(|(n, v)| n == "got" && v == "42"), "{:?}", stop.locals);
+        debugger.update(cx, |d, cx| d.stop(cx));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -10101,7 +10426,9 @@ mod tests {
         });
         let root = dir.clone();
         let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
-        for (name, command, kept) in [("a.txt", "wq", "changed\n"), ("b.txt", "q!", "saved\n"), ("c.txt", "x", "saved\n")] {
+        for (name, command, kept) in
+            [("a.txt", "wq", "changed\n"), ("b.txt", "q!", "saved\n"), ("c.txt", "x", "saved\n")]
+        {
             let file = dir.join(name);
             workspace.update_in(cx, |w, window, cx| w.open_file(file, window, cx));
             cx.run_until_parked();
@@ -10903,7 +11230,11 @@ mod tests {
         let now = cx.update(|_, cx| (cx.global::<Settings>().indent_size, cx.global::<Settings>().format_on_save));
         assert_eq!(now, (2, true));
         cx.update(|_, cx| settings::update(cx, |s| s.format_on_save = false));
-        assert_eq!(std::fs::read_to_string(crate::settings::vscode_file(&dir)).unwrap(), vscode, "VS Code's, untouched");
+        assert_eq!(
+            std::fs::read_to_string(crate::settings::vscode_file(&dir)).unwrap(),
+            vscode,
+            "VS Code's, untouched"
+        );
         let own = std::fs::read_to_string(crate::settings::project_file(&dir)).unwrap();
         assert!(own.contains("\"format_on_save\": false") && !own.contains("indent_size"), "{own}");
         // Read again (the watcher saw it): the same.
@@ -11426,7 +11757,8 @@ mod tests {
         assert!(std::fs::read_to_string(&log).unwrap().lines().last().unwrap().ends_with("/new.txt:4:2"));
         // A folder with a `:2` in its name isn't cut: only a place at the end is.
         std::fs::create_dir_all(dir.join("notes:2026")).unwrap();
-        let run = std::process::Command::new("sh").arg(&command).args(["notes:2026/todo.md"]).current_dir(&dir).status();
+        let run =
+            std::process::Command::new("sh").arg(&command).args(["notes:2026/todo.md"]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         assert!(dir.join("notes:2026/todo.md").exists() && !dir.join("notes").exists());
         // --wait: the other way of handing it over.

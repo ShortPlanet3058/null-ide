@@ -1359,7 +1359,9 @@ impl Palette {
             PaletteKind::Files if split_place(&self.query).1.is_some() => "↵ open there",
             PaletteKind::Files => "↵ open",
             // (Notices are copied, not gone to.)
-            PaletteKind::Locations if self.locations.first().is_some_and(|l| l.kind == LocationKind::Notice) => "↵ copy",
+            PaletteKind::Locations if self.locations.first().is_some_and(|l| l.kind == LocationKind::Notice) => {
+                "↵ copy"
+            }
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
             PaletteKind::Ex => "↵ run",

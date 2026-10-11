@@ -2,11 +2,6 @@
 #![allow(clippy::single_range_in_vec_init)]
 
 mod ai;
-mod crash;
-mod ollama;
-mod system_clipboard;
-#[cfg(debug_assertions)]
-mod qa;
 mod ai_agent;
 mod ai_task;
 mod assets;
@@ -15,6 +10,7 @@ mod buffer;
 mod clipboard_history;
 mod color_panel;
 mod colors;
+mod crash;
 mod dap;
 mod debugger;
 mod editor;
@@ -34,6 +30,7 @@ mod json_format;
 mod key_prompt;
 mod keymap;
 mod languages;
+mod launch;
 mod local_history;
 mod lsp;
 mod lsp_store;
@@ -43,6 +40,7 @@ mod markdown_links;
 mod markdown_view;
 mod menus;
 mod notebook;
+mod ollama;
 mod outline;
 mod palette;
 mod preview;
@@ -51,15 +49,18 @@ mod project_index;
 mod project_search;
 mod punctuation;
 mod python_env;
+#[cfg(debug_assertions)]
+mod qa;
 mod search;
-mod servers;
 mod server_log;
+mod servers;
 mod session;
 mod settings;
 mod settings_panel;
 mod snippets;
 mod spell;
 mod svg_image;
+mod system_clipboard;
 mod tasks;
 mod terminal;
 mod terminal_links;
@@ -95,7 +96,8 @@ struct Opening {
 /// `a.rs:42` or `a.rs:42:7`, as compilers write places: the path, and the line and column
 /// (from 1). Anything else: the path as it is.
 fn split_place(arg: &str) -> (&str, Option<(u32, u32)>) {
-    let number = |s: &str| (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u32>().ok()).flatten();
+    let number =
+        |s: &str| (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u32>().ok()).flatten();
     let mut parts = arg.rsplitn(3, ':');
     let (last, middle, first) = (parts.next(), parts.next(), parts.next());
     match (first, middle.and_then(number), last.and_then(number)) {
@@ -326,7 +328,13 @@ pub(crate) fn open_project_window(root: PathBuf, file: Option<PathBuf>, cx: &mut
 }
 
 /// `file` opened in `workspace`, at `place` (line and column, from 1) when given.
-fn open_at(workspace: &mut Workspace, file: PathBuf, place: Option<(u32, u32)>, window: &mut gpui::Window, cx: &mut gpui::Context<Workspace>) {
+fn open_at(
+    workspace: &mut Workspace,
+    file: PathBuf,
+    place: Option<(u32, u32)>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<Workspace>,
+) {
     match place {
         Some((line, column)) => {
             let at = lsp_types::Position::new(line.saturating_sub(1), column.saturating_sub(1));
@@ -421,15 +429,11 @@ pub(crate) fn quit_cancelled(cx: &mut gpui::App) {
 }
 
 pub(crate) fn quit_next(cx: &mut gpui::App) {
-    let waiting = cx
-        .windows()
-        .into_iter()
-        .filter_map(|w| w.downcast::<Workspace>())
-        .find(|handle| {
-            handle.read(cx).is_ok_and(|workspace| {
-                !workspace.quitting && (workspace.has_unsaved(cx) || workspace.commands_running(cx).is_some())
-            })
-        });
+    let waiting = cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()).find(|handle| {
+        handle.read(cx).is_ok_and(|workspace| {
+            !workspace.quitting && (workspace.has_unsaved(cx) || workspace.commands_running(cx).is_some())
+        })
+    });
     match waiting {
         Some(handle) => {
             handle

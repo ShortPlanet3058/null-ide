@@ -15,9 +15,9 @@ mod fold;
 mod ghost;
 mod hints;
 mod intel;
-pub mod lens;
 pub mod invisible;
 mod language_pick;
+pub mod lens;
 mod links;
 mod mac_keys;
 mod marks;
@@ -77,19 +77,19 @@ pub use fixes::QuickFix;
 pub use fold::{Fold, FoldAll, FoldLevel1, FoldLevel2, FoldLevel3, Unfold, UnfoldAll};
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
+pub use invisible::RemoveInvisibleCharacters;
 pub use language_pick::{SetLanguage, by_name as language_by_name, names as language_names};
 pub use meaning::SEMANTIC_TYPES;
 pub use numbers::{Decrement, Increment};
 pub use refactor::{
     FindReferences, FormatDocument, FormatSelection, InsertFootnote, InsertTableOfContents, RenameSymbol, apply_edits,
 };
-pub use invisible::RemoveInvisibleCharacters;
 pub use review::{KeepHunk, UndoHunk};
 pub use rewrap::Rewrap;
 pub use structure::{
-    CamelCase, DuplicateSelection, ExpandSelection, GoToMatchingBracket, JoinLines, KebabCase, LowerCase, NewlineAbove, NewlineBelow,
-    NextChange, PascalCase, PreviousChange, RemoveDuplicateLines, ReverseLines, ShrinkSelection, SnakeCase, SortLines,
-    SelectToBracket, TitleCase, TrimTrailingWhitespace, UpperCase,
+    CamelCase, DuplicateSelection, ExpandSelection, GoToMatchingBracket, JoinLines, KebabCase, LowerCase, NewlineAbove,
+    NewlineBelow, NextChange, PascalCase, PreviousChange, RemoveDuplicateLines, ReverseLines, SelectToBracket,
+    ShrinkSelection, SnakeCase, SortLines, TitleCase, TrimTrailingWhitespace, UpperCase,
 };
 
 use crate::buffer::Buffer;
@@ -302,7 +302,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-alt-up", AddCursorAbove, ctx),
         KeyBinding::new("secondary-alt-down", AddCursorBelow, ctx),
         // (⌥⇧I types ï on a Mac: ⌃⇧L there, beside ⌘⇧L.)
-        KeyBinding::new(if cfg!(target_os = "macos") { "ctrl-shift-l" } else { "alt-shift-i" }, AddCursorsToLineEnds, ctx),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") { "ctrl-shift-l" } else { "alt-shift-i" },
+            AddCursorsToLineEnds,
+            ctx,
+        ),
         KeyBinding::new("secondary-u", UndoCursor, ctx),
     ];
     if cfg!(target_os = "macos") {
@@ -2933,6 +2937,19 @@ impl Editor {
         crate::test_at::find(language, root, &path, &self.buffer.to_string(), &tree, byte)
     }
 
+    /// The Rust test the caret is in, to debug.
+    pub fn rust_test_at_caret(&mut self) -> Option<crate::test_at::RustTest> {
+        let path = self.path.clone()?;
+        if self.language()?.name != "Rust" {
+            return None;
+        }
+        let highlighter = self.highlighter.as_mut()?;
+        highlighter.sync(&self.buffer);
+        let tree = highlighter.tree()?.clone();
+        let byte = self.buffer.rope().char_to_byte(self.selection.head);
+        crate::test_at::rust_test_at(&path, &self.buffer.to_string(), &tree, byte)
+    }
+
     /// Saves the file as UTF-8 from now on: the text stays, its bytes change on the next save.
     pub fn use_utf8(&mut self, cx: &mut Context<Self>) {
         self.set_encoding(crate::encoding::Encoding::Utf8, cx);
@@ -4844,10 +4861,20 @@ impl Editor {
 
     /// A file that isn't text, as its bytes: sixteen to a row, the offset before them and
     /// the characters they'd be after. Read only.
-    fn render_hex(&self, bytes: std::sync::Arc<Vec<u8>>, preview: &crate::preview::Preview, cx: &Context<Self>) -> AnyElement {
+    fn render_hex(
+        &self,
+        bytes: std::sync::Arc<Vec<u8>>,
+        preview: &crate::preview::Preview,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = cx.global::<Theme>().clone();
         let code = cx.global::<Fonts>().code.clone();
-        let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let commands = crate::palette::shortcut(&crate::workspace::ShowCommands, cx).unwrap_or_else(|| "⌘K".into());
         let total = preview.summary();
         let cut = match preview {
@@ -5277,7 +5304,8 @@ mod tests {
         });
         let filler = "y".repeat(80) + "\n";
         let text = format!("foo a foo b foo\n{}", filler.repeat((1 << 20) / filler.len() + 1));
-        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(PathBuf::from("x.txt")), cx));
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some(PathBuf::from("x.txt")), cx));
         e.update(cx, |e, cx| {
             e.selection = Selection::caret(0);
             e.set_search(SearchQuery { text: "foo".into(), ..SearchQuery::default() }, cx);

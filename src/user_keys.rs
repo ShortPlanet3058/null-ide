@@ -33,8 +33,7 @@ pub(crate) fn types_something(keystrokes: &str) -> bool {
 }
 
 /// What to add to a key that types, to make it a shortcut.
-pub(crate) const ADD_TO_TYPING: &str =
-    if cfg!(target_os = "macos") { "add ⌘ or ⌃" } else { "add ⌘, ⌃ or ⌥" };
+pub(crate) const ADD_TO_TYPING: &str = if cfg!(target_os = "macos") { "add ⌘ or ⌃" } else { "add ⌘, ⌃ or ⌥" };
 
 /// A name as written, for comparing: letters and digits, in lower case.
 fn plain(name: &str) -> String {

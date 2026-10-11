@@ -180,7 +180,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cell = r##"{"cell_type":"markdown","metadata":{},"source":["# Hi"]}"##;
-        std::fs::write(dir.join("a.ipynb"), format!(r#"{{"cells":[{cell}],"metadata":{{}},"nbformat":4,"nbformat_minor":5}}"#)).unwrap();
+        std::fs::write(
+            dir.join("a.ipynb"),
+            format!(r#"{{"cells":[{cell}],"metadata":{{}},"nbformat":4,"nbformat_minor":5}}"#),
+        )
+        .unwrap();
         std::fs::write(dir.join("broken.ipynb"), "{ not json").unwrap();
         for (name, reading) in [("a.ipynb", true), ("broken.ipynb", false)] {
             let path = dir.join(name);

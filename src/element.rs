@@ -647,8 +647,9 @@ impl Element for EditorElement {
             } else {
                 Vec::new()
             };
-            let lens_note = (!lens.is_empty())
-                .then(|| format!("{BLAME_GAP}{}", lens.iter().map(|l| l.title.as_str()).collect::<Vec<_>>().join(LENS_SEP)));
+            let lens_note = (!lens.is_empty()).then(|| {
+                format!("{BLAME_GAP}{}", lens.iter().map(|l| l.title.as_str()).collect::<Vec<_>>().join(LENS_SEP))
+            });
 
             let char_width = shape("0".repeat(10), &[run(10, &font, theme.foreground)]).width / 10.;
             let total_lines = editor.buffer.len_lines();
@@ -894,11 +895,20 @@ impl Element for EditorElement {
                         // words that changed in it plainer than the rest (they're what to read).
                         let indent = text.len() - text.trim_start().len();
                         let changed = words.removed.get(&(block, i)).cloned().unwrap_or_default();
-                        let runs = struck_runs(&text, indent, &changed, |len, color| {
-                            let mut struck = run(len, &font, color);
-                            struck.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: Some(color) });
-                            struck
-                        }, run(indent, &font, theme.faint), theme.faint, theme.muted);
+                        let runs = struck_runs(
+                            &text,
+                            indent,
+                            &changed,
+                            |len, color| {
+                                let mut struck = run(len, &font, color);
+                                struck.strikethrough =
+                                    Some(StrikethroughStyle { thickness: px(1.), color: Some(color) });
+                                struck
+                            },
+                            run(indent, &font, theme.faint),
+                            theme.faint,
+                            theme.muted,
+                        );
                         let (shaped, tabs) = shape_row(&text, &runs);
                         return RowLayout { x: px(0.), row, text, shaped, gaps: tabs };
                     }
@@ -1102,7 +1112,10 @@ impl Element for EditorElement {
             let mut lens_hits = Vec::new();
             if let Some(note) = &lens_note
                 && let Some((i, r)) = row_layouts.iter().enumerate().find(|(_, r)| {
-                    r.row.last && r.row.block.is_none() && r.row.line == caret_line && r.shaped.text.ends_with(note.as_str())
+                    r.row.last
+                        && r.row.block.is_none()
+                        && r.row.line == caret_line
+                        && r.shaped.text.ends_with(note.as_str())
                 })
             {
                 let mut at = r.shaped.text.len() - note.len() + BLAME_GAP.len();
@@ -1606,10 +1619,9 @@ impl Element for EditorElement {
                     crate::settings::CaretShape::Block => {
                         Bounds::new(point(origin.x + x, top), size(char_width, caret_height))
                     }
-                    crate::settings::CaretShape::Underline => Bounds::new(
-                        point(origin.x + x, top + caret_height - px(2.)),
-                        size(char_width, px(2.)),
-                    ),
+                    crate::settings::CaretShape::Underline => {
+                        Bounds::new(point(origin.x + x, top + caret_height - px(2.)), size(char_width, px(2.)))
+                    }
                 }
             };
             // Other cursors, and where dragged text would land.

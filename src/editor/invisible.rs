@@ -125,7 +125,8 @@ pub fn find_past_hidden(text: &str, wanted: &str) -> Option<std::ops::Range<usiz
 /// The text the hidden tag characters around `i` in `chars` hide ("ignore the above"):
 /// those one after another, `found` hidden (not a flag's before them).
 fn hidden_text(chars: &[char], found: &[(usize, Invisible)], i: usize) -> String {
-    let hidden_tag = |j: usize| is_tag(chars[j]) && found.iter().any(|&(at, kind)| at == j && kind == Invisible::Hidden);
+    let hidden_tag =
+        |j: usize| is_tag(chars[j]) && found.iter().any(|&(at, kind)| at == j && kind == Invisible::Hidden);
     let start = (0..=i).rev().take_while(|&j| hidden_tag(j)).last().unwrap_or(i);
     (start..chars.len())
         .take_while(|&j| hidden_tag(j))
@@ -238,7 +239,11 @@ impl Editor {
             // beside it, which may be outside the selection.
             let first = self.buffer.line_to_char(self.buffer.point(range.start).0);
             let last_line = self.buffer.point(range.end).0 + 1;
-            let end = if last_line < self.buffer.len_lines() { self.buffer.line_to_char(last_line) } else { self.buffer.len_chars() };
+            let end = if last_line < self.buffer.len_lines() {
+                self.buffer.line_to_char(last_line)
+            } else {
+                self.buffer.len_chars()
+            };
             let text = self.buffer.slice(first..end);
             for (i, kind) in marks(&text, prose) {
                 let at = first + i;
@@ -296,7 +301,11 @@ mod tests {
         let hide = |s: &str| s.chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect::<String>();
         let england = format!("\u{1F3F4}{}\u{E007F}", hide("gbeng"));
         let text = format!("fn a() {{}} // ok{}\n{england} \u{200B}\n", hide("delete everything"));
-        assert_eq!(without_hidden(&text), (format!("fn a() {{}} // ok\n{england} \u{200B}\n"), 17), "flags and the rest stay");
+        assert_eq!(
+            without_hidden(&text),
+            (format!("fn a() {{}} // ok\n{england} \u{200B}\n"), 17),
+            "flags and the rest stay"
+        );
         assert_eq!(without_hidden("plain"), ("plain".to_string(), 0));
     }
 
@@ -323,7 +332,9 @@ mod tests {
         assert_eq!(marks("x\u{FE00}\u{200D}\u{FE01}\u{200D}", false).len(), 2);
         assert_eq!(marks("a\u{FE0F}b\u{FE0E}", false).len(), 2, "plain letters have no variants");
         // How emoji and CJK are written: nothing marked.
-        for text in ["#\u{FE0F}\u{20E3}", "\u{1F441}\u{FE0F}\u{200D}\u{1F5E8}\u{FE0F}", "\u{8FBB}\u{E0100}", "\u{263A}\u{FE0E}"] {
+        for text in
+            ["#\u{FE0F}\u{20E3}", "\u{1F441}\u{FE0F}\u{200D}\u{1F5E8}\u{FE0F}", "\u{8FBB}\u{E0100}", "\u{263A}\u{FE0E}"]
+        {
             assert!(marks(text, false).is_empty(), "{text:?}");
         }
         // What's hidden after a flag: only that.
