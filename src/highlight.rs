@@ -131,26 +131,6 @@ impl Highlighter {
         Some(Self { query, language, parser, tree: None, revision: 0, parsing: false })
     }
 
-    /// The first tree, if it can be made within `budget`: false when the file is too big
-    /// for that (nothing made; see `background_parse`).
-    pub fn try_first_sync(&mut self, buffer: &Buffer, budget: std::time::Duration) -> bool {
-        if self.tree.is_some() {
-            return true;
-        }
-        let started = std::time::Instant::now();
-        let mut over = |_: &tree_sitter::ParseState| started.elapsed() > budget;
-        let options = tree_sitter::ParseOptions::new().progress_callback(&mut over);
-        let rope = buffer.rope();
-        self.tree = self.parser.parse_with_options(&mut reader(rope), None, Some(options));
-        if self.tree.is_none() {
-            // (Stopped part way: it starts afresh next time.)
-            self.parser.reset();
-            return false;
-        }
-        self.revision = buffer.revision();
-        true
-    }
-
     /// The first tree of `buffer` as it is now, made by the returned job (off the main
     /// thread), with the revision it's of: given to `install`.
     pub fn background_parse(&self, buffer: &Buffer) -> impl FnOnce() -> Option<(Tree, u64)> + Send + 'static {

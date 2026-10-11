@@ -1094,20 +1094,19 @@ impl Editor {
         }));
     }
 
-    /// The file's syntax, first made: now for a file of an ordinary size (coloured from the
-    /// first drawing), else in the background (a big file shows as plain text for a moment,
-    /// then in colour), so opening it never waits long.
+    /// The file's syntax, first made: for a file of an ordinary size, when it's first drawn
+    /// (coloured from then; a tab restored out of sight costs nothing until it's shown),
+    /// else in the background (a big file shows as plain text for a moment, then in
+    /// colour), so opening it never waits long.
     fn start_colouring(&mut self, cx: &mut Context<Self>) {
-        /// Up to this size, made now: about 150 ms at most on this 2018 Mac.
-        const NOW_UP_TO: usize = 512 * 1024;
-        /// …and never longer than this, whatever the file (one slow to parse).
-        const BUDGET: Duration = Duration::from_millis(250);
+        /// Up to this size, made when first needed: about 150 ms at most on this 2018 Mac.
+        const WHEN_DRAWN_UP_TO: usize = 512 * 1024;
         self.parse_task = None;
         let Some(highlighter) = &mut self.highlighter else { return };
-        let _step = crate::trace::step(|| "  syntax tree started".into());
-        if self.buffer.rope().len_bytes() <= NOW_UP_TO && highlighter.try_first_sync(&self.buffer, BUDGET) {
+        if self.buffer.rope().len_bytes() <= WHEN_DRAWN_UP_TO {
             return;
         }
+        let _step = crate::trace::step(|| "  syntax tree started in the background".into());
         highlighter.parsing = true;
         let parse = highlighter.background_parse(&self.buffer);
         self.parse_task = Some(cx.spawn(async move |this, cx| {

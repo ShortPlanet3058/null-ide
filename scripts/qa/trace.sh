@@ -6,8 +6,9 @@
 #
 #   scripts/qa/trace.sh PROJECT [FILE] [SECONDS]
 #
-# FILE is a path in PROJECT, opened as `null FILE` would. The window comes to the front
-# while it runs.
+# FILE is a path in PROJECT, opened as `null FILE` would. NULL_TRACE_TABS="a.rs b.rs"
+# (paths in PROJECT) starts it with those tabs open, as a session left that way would.
+# The window comes to the front while it runs.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -32,6 +33,15 @@ mkdir -p "$home/.config/null" "$home/tmp" "$home/project"
 project="$home/project/$(basename "$(cd "$1" && pwd)")"
 rsync -a --exclude target/ --exclude node_modules/ "$(cd "$1" && pwd)/" "$project/"
 printf '{ "welcomed": true }\n' > "$home/.config/null/settings.json"
+session=""
+if [ -n "${NULL_TRACE_TABS:-}" ]; then
+    session="$home/session.json"
+    python3 -I - "$project" $NULL_TRACE_TABS > "$session" <<'PY'
+import json, sys
+project, tabs = sys.argv[1], sys.argv[2:]
+print(json.dumps({"tabs": [{"path": f"{project}/{t}"} for t in tabs], "active": 0}))
+PY
+fi
 open_arg="$project${2:+/$2}"
 
 real_home="$HOME"
@@ -47,7 +57,7 @@ env -i \
     HOME="$home" CFFIXED_USER_HOME="$home" \
     RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
     CARGO_TARGET_DIR="$home/target" CARGO_NET_OFFLINE=true \
-    NULL_DATA_DIR="$home/data" NULL_TRACE=1 \
+    NULL_DATA_DIR="$home/data" NULL_TRACE=1 ${session:+NULL_TRACE_SESSION="$session"} \
     "$bin" "$open_arg" > "$log" 2>&1 &
 pid=$!
 set +m

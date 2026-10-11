@@ -84,6 +84,12 @@ fn file_in(dir: &Path, root: &Path) -> PathBuf {
 impl Session {
     /// The project's last session, keeping only what still exists.
     pub fn load(root: &Path) -> Self {
+        // (Measuring: a session given, as scripts/qa/trace.sh does.)
+        if crate::trace::on()
+            && let Some(given) = std::env::var_os("NULL_TRACE_SESSION")
+        {
+            return Self::load_file(Path::new(&given));
+        }
         file_for(root).map(|f| Self::load_file(&f)).unwrap_or_default()
     }
 
