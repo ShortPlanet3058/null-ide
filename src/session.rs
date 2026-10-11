@@ -168,7 +168,8 @@ fn backup_files(root: &Path) -> Vec<(PathBuf, Option<u32>)> {
         .collect()
 }
 
-/// The lock a Null holds while it runs: `backups/running.<pid>.lock`.
+/// The lock a Null holds while it runs: `backups/running.<pid>.lock` (on Unix: flock).
+#[cfg(unix)]
 fn lock_file(pid: u32) -> Option<PathBuf> {
     Some(crate::tools::data_dir()?.join("backups").join(format!("running.{pid}.lock")))
 }
@@ -378,6 +379,7 @@ mod tests {
     /// A Null runs while it holds its lock: a process given a gone Null's number since
     /// doesn't keep that Null's backups from coming back.
     #[test]
+    #[cfg(unix)]
     fn a_running_null_is_told_by_its_lock() {
         hold_own_lock();
         assert!(running(std::process::id()));

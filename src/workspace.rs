@@ -10596,15 +10596,18 @@ mod tests {
         editor.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
         cx.simulate_keystrokes("cmd-z");
         editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "saved\nchanged\n", "⌘Z brings the changes back"));
-        // The saved file unreadable now: the changes stay, still unsaved.
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
-        workspace.update(cx, |w, cx| w.revert_to_saved(cx));
-        editor.read_with(cx, |e, _| {
-            assert_eq!(e.buffer.to_string(), "saved\nchanged\n");
-            assert!(e.buffer.is_dirty(), "not marked saved");
-        });
-        std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        // The saved file unreadable now (Unix's permissions): the changes stay, still unsaved.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
+            workspace.update(cx, |w, cx| w.revert_to_saved(cx));
+            editor.read_with(cx, |e, _| {
+                assert_eq!(e.buffer.to_string(), "saved\nchanged\n");
+                assert!(e.buffer.is_dirty(), "not marked saved");
+            });
+            std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
