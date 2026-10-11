@@ -151,6 +151,7 @@ actions!(
         ReplaceInProject,
         ShowFiles,
         ShowOutline,
+        ShowChanges,
         ImportVsCodeSettings,
         GoToOutlineMatch,
         ClearOutlineFilter,
@@ -389,6 +390,12 @@ struct TextMenuItem {
 
 /// The program `cargo build` makes for a project: its first `[[bin]]`, or the package
 /// named in Cargo.toml, in target/debug.
+/// Where AI's commit message goes: the commit list's field, or the Changes tab's.
+enum CommitTarget {
+    Palette(gpui::WeakEntity<crate::palette::Palette>),
+    Changes,
+}
+
 /// The program `cargo build --message-format=json` says it built: the one named as
 /// `expected` is (its file name), else the only one; None when it built none, or several
 /// and none of them is the one expected (which, isn't for Null to guess).
@@ -678,6 +685,9 @@ pub struct Workspace {
     sidebar_outline: bool,
     /// The sidebar shows the project's tests (see `crate::test_at::discover`).
     sidebar_tests: bool,
+    /// The sidebar shows the Changes tab (git).
+    sidebar_git: bool,
+    git_view: Entity<crate::git_view::GitView>,
     /// The project's own Python environment (`.venv`), if it has one.
     python_env: Option<PathBuf>,
     /// The open file's (its package's own, in a monorepo), and which file that was for.
@@ -870,6 +880,7 @@ impl Workspace {
         // This project's own settings, over yours, while its window is in front.
         crate::settings::use_project(&root, cx);
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
+        let git_view = cx.new(|cx| crate::git_view::GitView::new(root.clone(), cx));
         let lsp = cx.new(|_| LspStore::new(root.clone()));
         let ignore_rules = crate::project_index::ignore_rules(&root);
         let tree = cx.new(|cx| {
@@ -994,6 +1005,8 @@ impl Workspace {
             sidebar_search: Transition::new(false),
             sidebar_outline: false,
             sidebar_tests: false,
+            sidebar_git: false,
+            git_view,
             python_env: None,
             python_env_here: None,
             tests: None,
@@ -1108,6 +1121,8 @@ impl Workspace {
             async {}
         })
         .detach();
+        let git_events = cx.subscribe_in(&workspace.git_view, window, Self::git_view_event);
+        workspace._subscriptions.push(git_events);
         // Typed in the Outline's filter: the list shows what fits.
         let filter_changes =
             cx.subscribe(&workspace.outline_filter, |this, filter, _: &crate::text_input::TextInputEvent, cx| {
@@ -1537,6 +1552,10 @@ impl Workspace {
                 this.tree.update(cx, |tree, cx| tree.set_git_status(changed.clone(), cx));
                 this.git_status = changed;
                 this.sync = sync;
+                // (Read again only while it shows: each file's changes are compared.)
+                if this.sidebar_git {
+                    this.git_view.update(cx, |view, cx| view.refresh(cx));
+                }
                 cx.notify();
             })
             .ok();
@@ -2091,6 +2110,18 @@ impl Workspace {
     fn write_commit_message(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
         // Weak: once the list is closed, the message stops coming.
         let Some(palette) = self.palette.as_ref().map(|(p, _)| p.downgrade()) else { return };
+        self.write_commit_message_into(files, CommitTarget::Palette(palette), cx);
+    }
+
+    /// AI's commit message for `files`' changes, written into `target` as it comes.
+    fn write_commit_message_into(&mut self, files: Vec<PathBuf>, target: CommitTarget, cx: &mut Context<Self>) {
+        let git_view = self.git_view.downgrade();
+        let put = move |message: &str, cx: &mut App| -> bool {
+            match &target {
+                CommitTarget::Palette(palette) => palette.update(cx, |p, cx| p.set_query(message, cx)).is_ok(),
+                CommitTarget::Changes => git_view.update(cx, |v, cx| v.set_message(message, cx)).is_ok(),
+            }
+        };
         let settings = cx.global::<Settings>().ai.clone();
         let root = self.tree.read(cx).root().to_path_buf();
         // Nothing in the field meanwhile: ↵ there must never commit a placeholder.
@@ -2135,7 +2166,7 @@ impl Workspace {
                     crate::ai::AiEvent::Done => true,
                     crate::ai::AiEvent::Failed(error) => {
                         this.update(cx, |this, cx| {
-                            palette.update(cx, |p, cx| p.set_query("", cx)).ok();
+                            put("", cx);
                             this.show_notice(format!("Couldn't write the message: {error}"), cx);
                         })
                         .ok();
@@ -2143,7 +2174,7 @@ impl Workspace {
                     }
                 };
                 let shown = message.trim().to_string();
-                if palette.update(cx, |p, cx| p.set_query(&shown, cx)).is_err() || done {
+                if !cx.update(|cx| put(&shown, cx)).unwrap_or(false) || done {
                     // Written (or no longer wanted): not still said to be on its way.
                     this.update(cx, |this, cx| {
                         if this.notice.as_ref().is_some_and(|(n, _)| n == WRITING) {
@@ -3392,6 +3423,7 @@ impl Workspace {
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
+        self.git_view.update(cx, |view, cx| view.set_root(path.clone(), cx));
         // Language servers work per project: restart them for the new folder.
         let root = path.clone();
         self.lsp.update(cx, |lsp, _| {
@@ -4469,6 +4501,7 @@ impl Workspace {
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
             (App, "Import Settings from VS Code…".into(), Box::new(ImportVsCodeSettings)),
+            (File, "Show Changes (Git)".into(), Box::new(ShowChanges)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
@@ -5518,9 +5551,55 @@ impl Workspace {
         self.project_search.update(cx, |search, cx| search.refresh(cx));
     }
 
+    /// The Changes tab: what changed since the last commit, to commit; the branch.
+    fn show_changes(&mut self, _: &ShowChanges, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_git = true;
+        self.sidebar_outline = false;
+        self.sidebar_tests = false;
+        self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        self.leave_hidden_focus(window, cx);
+        self.git_view.update(cx, |view, cx| view.refresh(cx));
+        cx.notify();
+    }
+
+    fn git_view_event(
+        &mut self,
+        _: &Entity<crate::git_view::GitView>,
+        event: &crate::git_view::GitViewEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::git_view::GitViewEvent;
+        match event {
+            GitViewEvent::Open(path) => {
+                if !self.review_git_file(path, window, cx) {
+                    self.open_file(path.clone(), window, cx);
+                }
+            }
+            GitViewEvent::CommitAsked => {
+                // What's committed is what's on disk: the open files saved first.
+                self.save_named_tabs(cx);
+                self.git_view.update(cx, |view, cx| view.commit(cx));
+            }
+            GitViewEvent::Committed(result) => {
+                let notice = match result {
+                    Ok(id) => format!("Committed {id}."),
+                    Err(error) => format!("Couldn't commit: {error}"),
+                };
+                self.show_notice(notice, cx);
+                self.refresh_git(cx);
+            }
+            GitViewEvent::Draft(files) => self.write_commit_message_into(files.clone(), CommitTarget::Changes, cx),
+            GitViewEvent::Push => self.push_branch(&PushBranch, window, cx),
+            GitViewEvent::Pull => self.pull_branch(&PullBranch, window, cx),
+        }
+    }
+
     fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_outline = false;
         self.sidebar_tests = false;
+        self.sidebar_git = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
@@ -5543,6 +5622,7 @@ impl Workspace {
     fn open_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_outline = true;
         self.sidebar_tests = false;
+        self.sidebar_git = false;
         self.outline_followed = None;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
@@ -5625,6 +5705,7 @@ impl Workspace {
     fn show_tests(&mut self, _: &ShowTests, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_tests = true;
         self.sidebar_outline = false;
+        self.sidebar_git = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
@@ -6241,9 +6322,13 @@ impl Workspace {
         let searching = self.sidebar_search.on;
         let outlining = !searching && self.sidebar_outline;
         let testing = !searching && self.sidebar_tests;
+        let changes = !searching && self.sidebar_git;
         let tab = |id: &'static str, label: &'static str, on: bool| {
             ui::segment(on, theme)
                 .id(id)
+                // (Five side by side: room for their names.)
+                .px(px(4.))
+                .min_w_0()
                 .flex_1()
                 .flex()
                 .justify_center()
@@ -6257,7 +6342,7 @@ impl Workspace {
             .child(
                 ui::segmented(theme)
                     .child(
-                        tab("files", "Files", !searching && !outlining && !testing)
+                        tab("files", "Files", !searching && !outlining && !testing && !changes)
                             .active(|s| s.opacity(0.7))
                             .on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
@@ -6273,6 +6358,9 @@ impl Workspace {
                     ))
                     .child(tab("search", "Search", searching).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
+                    ))
+                    .child(tab("changes", "Changes", changes).active(|s| s.opacity(0.7)).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_changes(&ShowChanges, window, cx)),
                     )),
             )
             .into_any_element()
@@ -9258,6 +9346,8 @@ impl Render for Workspace {
         } else if self.sidebar_outline && sidebar_width > 0.5 {
             // (Read only while it shows.)
             div().flex_1().min_h_0().child(self.render_outline(cx))
+        } else if self.sidebar_git && sidebar_width > 0.5 {
+            div().flex_1().min_h_0().child(self.git_view.clone())
         } else if self.sidebar_tests && sidebar_width > 0.5 {
             div().flex_1().min_h_0().child(self.render_tests(cx))
         } else {
@@ -10127,6 +10217,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::debug_test))
             .on_action(cx.listener(Self::go_to_outline_match))
             .on_action(cx.listener(Self::import_vs_code_settings))
+            .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::clear_outline_filter))
             .on_action(cx.listener(|this, _: &DebugAgain, window, cx| match this.debugged_test.clone() {
                 Some(test) => this.debug_rust_test(test, cx),
@@ -12406,6 +12497,70 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).expect("a notebook");
         assert_eq!(saved["cells"][0]["source"][0], "print(\"bye\")");
         assert_eq!(saved["cells"][0]["outputs"][0]["text"][0], "hi\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Changes tab: a repository's changes, file by file and part by part; one part
+    /// left out of the commit stays a change, the rest committed with the message.
+    #[gpui::test]
+    fn changes_are_committed_in_part(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("changes-tab");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("a.txt"), "ONE\ntwo\nthree\nfour\nfive\nSIX\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "hello\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.show_changes(&ShowChanges, window, cx));
+        let view = workspace.read_with(cx, |w, _| w.git_view.clone());
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |v, _| v.files.len() == 2) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        view.update(cx, |v, cx| {
+            assert_eq!(v.files.len(), 2, "{:?}", v.files);
+            let a = v.files.iter().position(|f| f.path.ends_with("a.txt")).unwrap();
+            assert_eq!(v.files[a].parts.len(), 2);
+            assert_eq!((v.files[a].added, v.files[a].removed), (2, 2));
+            // The second change (SIX) left for later.
+            v.toggle_part(a, 1, cx);
+            v.summary.update(cx, |input, cx| input.set_text("Capitals at the start", cx));
+        });
+        workspace.update_in(cx, |w, window, cx| {
+            let view = w.git_view.clone();
+            w.git_view_event(&view, &crate::git_view::GitViewEvent::CommitAsked, window, cx)
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if String::from_utf8_lossy(&git(&["log", "--format=%s"]).stdout).contains("Capitals") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let committed = String::from_utf8_lossy(&git(&["show", "HEAD:a.txt"]).stdout).into_owned();
+        assert_eq!(committed, "ONE\ntwo\nthree\nfour\nfive\nsix\n", "only the first change");
+        assert_eq!(String::from_utf8_lossy(&git(&["show", "HEAD:new.txt"]).stdout), "hello\n");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "ONE\ntwo\nthree\nfour\nfive\nSIX\n");
+        assert!(view.read_with(cx, |v, cx| v.summary.read(cx).text().is_empty()), "the message cleared");
         std::fs::remove_dir_all(&dir).ok();
     }
 

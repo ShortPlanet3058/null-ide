@@ -112,6 +112,105 @@ pub fn commit(root: &Path, message: &str, left_out: &[PathBuf]) -> Result<String
     Ok(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default().trim().to_string())
 }
 
+/// Commits every change but those to `left_out` (kept as they are, uncommitted), and of
+/// the files in `partly` only part: each as its text there (the committed text with only
+/// some of its changes, see `partly`), the rest of its changes staying uncommitted.
+pub fn commit_parts(
+    root: &Path,
+    message: &str,
+    left_out: &[PathBuf],
+    partly: &[(PathBuf, String)],
+) -> Result<String, String> {
+    run(root, &["add", "-A", "--", "."])?;
+    if !left_out.is_empty() {
+        let paths: Vec<String> = left_out.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let mut args = vec!["reset", "-q", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        run(root, &args)?;
+    }
+    let top = PathBuf::from(run(root, &["rev-parse", "--show-toplevel"])?.trim());
+    for (path, text) in partly {
+        // The part committed, as a blob of its own; the file on disk stays as it is.
+        let id = run_with_input(&top, &["hash-object", "-w", "--stdin"], text.as_bytes())?;
+        let name = path.strip_prefix(&top).unwrap_or(path).to_string_lossy().into_owned();
+        let mode = run(&top, &["ls-files", "-s", "--", &name])
+            .ok()
+            .and_then(|line| line.split_whitespace().next().map(str::to_string))
+            .unwrap_or_else(|| "100644".into());
+        run(&top, &["update-index", "--add", "--cacheinfo", &format!("{mode},{},{name}", id.trim())])?;
+    }
+    run(root, &["commit", "-q", "-m", message])?;
+    Ok(git(root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default().trim().to_string())
+}
+
+/// git, given `input` to read.
+fn run_with_input(dir: &Path, args: &[&str], input: &[u8]) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = command(dir)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Couldn't run git: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input).map_err(|e| format!("Couldn't run git: {e}"))?;
+    }
+    let output = child.wait_with_output().map_err(|e| format!("Couldn't run git: {e}"))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+}
+
+/// `base` with only some of the changes that make it `current`: each change (as `diff`
+/// lists them, in order) whose `keep` is true taken, the others left as `base` has them.
+pub fn partly(base: &str, current: &str, keep: &[bool]) -> String {
+    use similar::DiffOp;
+    let (old, new) = (lines(base), lines(current));
+    let mut out = String::new();
+    let mut change = 0;
+    for op in line_ops(base, current) {
+        match op {
+            DiffOp::Equal { old_index, len, .. } => {
+                old[old_index..old_index + len].iter().for_each(|l| out.push_str(l))
+            }
+            DiffOp::Insert { old_index, new_index, new_len }
+            | DiffOp::Replace { old_index, new_index, new_len, .. } => {
+                let old_len = match op {
+                    DiffOp::Replace { old_len, .. } => old_len,
+                    _ => 0,
+                };
+                if keep.get(change).copied().unwrap_or(true) {
+                    new[new_index..new_index + new_len].iter().for_each(|l| out.push_str(l));
+                } else {
+                    old[old_index..old_index + old_len].iter().for_each(|l| out.push_str(l));
+                }
+                change += 1;
+            }
+            DiffOp::Delete { old_index, old_len, .. } => {
+                if !keep.get(change).copied().unwrap_or(true) {
+                    old[old_index..old_index + old_len].iter().for_each(|l| out.push_str(l));
+                }
+                change += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Lines added and removed from `base` to `current`.
+pub fn counts(base: &str, current: &str) -> (usize, usize) {
+    use similar::DiffOp;
+    line_ops(base, current).iter().fold((0, 0), |(added, removed), op| match *op {
+        DiffOp::Equal { .. } => (added, removed),
+        DiffOp::Insert { new_len, .. } => (added + new_len, removed),
+        DiffOp::Delete { old_len, .. } => (added, removed + old_len),
+        DiffOp::Replace { old_len, new_len, .. } => (added + new_len, removed + old_len),
+    })
+}
+
 /// Takes the last commit back: its changes stay, not committed, and its message comes
 /// back, to commit them again (with more, or reworded). Never a commit already pushed
 /// (others may have it), a merge, or the first commit.
@@ -670,6 +769,52 @@ mod tests {
         assert_eq!(committed_text(&dir.join("link/src/a.rs"), Default::default()).as_deref(), Some("committed\n"));
         assert_eq!(committed_text(&repo.join("src/new.rs"), Default::default()), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Some of a file's changes: the committed text with those only.
+    #[test]
+    fn part_of_a_file_s_changes() {
+        let base = "a\nb\nc\nd\n";
+        let current = "a\nB\nc\nd\ne\n";
+        assert_eq!(diff(base, current).len(), 2);
+        assert_eq!(partly(base, current, &[true, false]), "a\nB\nc\nd\n");
+        assert_eq!(partly(base, current, &[false, true]), "a\nb\nc\nd\ne\n");
+        assert_eq!(partly(base, current, &[true, true]), current);
+        assert_eq!(partly(base, current, &[false, false]), base);
+        // A line taken out, kept or not.
+        assert_eq!(partly("x\ny\nz\n", "x\nz\n", &[false]), "x\ny\nz\n");
+        assert_eq!(counts(base, current), (2, 1));
+    }
+
+    /// Committing a file partly: its part committed, the rest still a change; a file left
+    /// out stays out.
+    #[test]
+    fn committing_part_of_a_file() {
+        let repo = crate::tools::test_dir("git-parts");
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| git(&repo, args);
+        if run(&["init", "-q"]).is_none() {
+            return;
+        }
+        run(&["config", "user.name", "t"]).unwrap();
+        run(&["config", "user.email", "t@t"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "one\n").unwrap();
+        run(&["add", "."]).unwrap();
+        run(&["commit", "-q", "-m", "x"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "A\nb\nc\nd\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "two\n").unwrap();
+        let top = PathBuf::from(git(&repo, &["rev-parse", "--show-toplevel"]).unwrap().trim());
+        let part = partly("a\nb\nc\n", "A\nb\nc\nd\n", &[true, false]);
+        commit_parts(&repo, "part", &[top.join("b.txt")], &[(top.join("a.txt"), part)]).unwrap();
+        assert_eq!(run(&["show", "HEAD:a.txt"]).unwrap(), "A\nb\nc\n");
+        assert_eq!(run(&["show", "HEAD:b.txt"]).unwrap(), "one\n");
+        // On disk as it was; what's left still a change.
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "A\nb\nc\nd\n");
+        let left: Vec<_> = status(&repo).into_iter().map(|(p, _)| p).collect();
+        assert!(left.contains(&top.join("a.txt")) && left.contains(&top.join("b.txt")), "{left:?}");
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     /// A renamed file: the new name is new (taking it back trashes it, never deletes it),

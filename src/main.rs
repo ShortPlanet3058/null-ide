@@ -24,6 +24,7 @@ mod fonts;
 mod fs_ops;
 mod fuzzy;
 mod git;
+mod git_view;
 mod highlight;
 mod html_markdown;
 mod json_format;
