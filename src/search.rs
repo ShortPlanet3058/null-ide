@@ -17,7 +17,12 @@ impl SearchQuery {
     /// Whether it can match across lines: a pattern with `\n` in it (searched in the whole
     /// text, not line by line).
     pub fn spans_lines(&self) -> bool {
-        self.regex && self.text.contains("\\n")
+        // An `n` after an odd number of backslashes (`\\n` is a backslash and an n).
+        self.regex
+            && self
+                .text
+                .match_indices('n')
+                .any(|(at, _)| self.text[..at].bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1)
     }
 
     /// The query as a regex. Plain-text queries are escaped first.

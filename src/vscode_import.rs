@@ -150,7 +150,15 @@ pub fn in_null_words(written: &Map<String, Value>, here: &Here) -> Map<String, V
 /// What bringing `written` over changes: Null's settings after, and each one changed, in
 /// words ("Font size: 14").
 pub fn changes(settings: &Settings, written: &Map<String, Value>, here: &Here) -> (Settings, Vec<String>) {
-    let (after, _) = crate::settings::merged(settings, &in_null_words(written, here));
+    let theirs = in_null_words(written, here);
+    let (mut after, _) = crate::settings::merged(settings, &theirs);
+    // Hidden from Files: theirs added to yours (not instead of them).
+    after.hide = settings.hide.clone();
+    for path in theirs.get("hide").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        if !after.hide.iter().any(|h| h == path) {
+            after.hide.push(path.to_string());
+        }
+    }
     let (before_json, after_json) =
         (serde_json::to_value(settings).unwrap_or_default(), serde_json::to_value(&after).unwrap_or_default());
     let said = |value: &Value| match value {
@@ -252,5 +260,8 @@ mod tests {
         let odd: Map<String, Value> =
             serde_json::from_str(r#"{ "editor.fontSize": "big", "editor.tabSize": 8 }"#).unwrap();
         assert_eq!(changes(&Settings::default(), &odd, &here).0.indent_size, 8);
+        // Your own hidden ones stay, theirs added.
+        let mine = Settings { hide: vec!["*.log".into()], ..Settings::default() };
+        assert_eq!(changes(&mine, &written, &here).0.hide, ["*.log", "**/*.pyc"]);
     }
 }

@@ -1100,13 +1100,14 @@ impl Workspace {
         })
         .detach();
         // Typed in the Outline's filter: the list shows what fits.
-        let filter_changes = cx.observe(&workspace.outline_filter, |this, filter, cx| {
-            // Emptied (by ⌫ too): the list follows the caret again.
-            if filter.read(cx).text().is_empty() {
-                this.outline_followed = None;
-            }
-            cx.notify()
-        });
+        let filter_changes =
+            cx.subscribe(&workspace.outline_filter, |this, filter, _: &crate::text_input::TextInputEvent, cx| {
+                // Emptied (by ⌫ too): the list follows the caret again.
+                if filter.read(cx).text().is_empty() {
+                    this.outline_followed = None;
+                }
+                cx.notify()
+            });
         workspace._subscriptions.push(filter_changes);
         workspace._subscriptions.push(debugger_events);
         workspace._subscriptions.push(debugger_changes);
@@ -5496,7 +5497,10 @@ impl Workspace {
         };
         let here = crate::vscode_import::Here::of(cx);
         // Yours (a project's over them stays the project's).
-        let (_, changed) = crate::vscode_import::changes(&settings::own(cx), &written, &here);
+        let Some(own) = settings::own() else {
+            return self.show_notice("Your settings.json can't be read: put it right first".into(), cx);
+        };
+        let (_, changed) = crate::vscode_import::changes(&own, &written, &here);
         if changed.is_empty() {
             return self.show_notice(format!("Null has {editor}'s settings already"), cx);
         }
@@ -5513,8 +5517,13 @@ impl Workspace {
                 return;
             }
             this.update(cx, |this, cx| {
-                settings::update_own(cx, |s| *s = crate::vscode_import::changes(s, &written, &here).0);
-                this.show_notice(format!("{count} brought over from {editor}"), cx);
+                let saved = settings::update_own(cx, |s| *s = crate::vscode_import::changes(s, &written, &here).0);
+                let said = if saved {
+                    format!("{count} brought over from {editor}")
+                } else {
+                    "Your settings.json can't be read: nothing brought over".to_string()
+                };
+                this.show_notice(said, cx);
             })
             .ok();
         })
@@ -6507,8 +6516,10 @@ impl Workspace {
         }
         // Its program cargo's (in a target folder) or not there yet: built as a Rust
         // project's is, first. One built some other way runs as it is.
-        let cargo_s =
-            launch.program.as_ref().is_none_or(|p| !p.is_file() || p.components().any(|c| c.as_os_str() == "target"));
+        let cargo_s = launch.program.as_ref().is_none_or(|p| {
+            !p.is_file()
+                || p.strip_prefix(&root).is_ok_and(|inside| inside.components().any(|c| c.as_os_str() == "target"))
+        });
         if root.join("Cargo.toml").is_file() && cargo_s {
             return self.build_and_debug(root, vec!["build".into()], Some(launch), cx);
         }

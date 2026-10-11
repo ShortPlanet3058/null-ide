@@ -818,7 +818,9 @@ fn spanning_matches(text: &str, regex: &regex::Regex, most: usize) -> Vec<LineMa
         let line_start = starts[line];
         let line_text = text[line_start..].split('\n').next().unwrap_or("");
         let line_text = line_text.strip_suffix('\r').unwrap_or(line_text);
-        let on_line = m.start() - line_start..(m.end() - line_start).min(line_text.len()).max(m.start() - line_start);
+        // (Starting on a line's own break, `\r\n`'s `\n`: at its end.)
+        let from = (m.start() - line_start).min(line_text.len());
+        let on_line = from..(m.end() - line_start).min(line_text.len()).max(from);
         // (Ending just after a line break: at the end of that line, not the next one's start.)
         let end_line = line_of(m.end().saturating_sub(1)).max(line);
         let end = (end_line > line)
@@ -918,10 +920,13 @@ pub fn replacements(
     let mut out = Vec::new();
     // Across lines: in the whole text, each match kept to the line it starts on.
     if query.spans_lines() {
-        let line_of = |offset: usize| text[..offset].matches('\n').count();
+        // The line counted on as the matches go (not from the start for each).
+        let (mut line, mut counted) = (0, 0);
         for caps in regex.captures_iter(text) {
             let Some(m) = caps.get(0).filter(|m| !m.is_empty()) else { continue };
-            if only_lines.is_some_and(|only| !only.contains(&line_of(m.start()))) {
+            line += text[counted..m.start()].matches('\n').count();
+            counted = m.start();
+            if only_lines.is_some_and(|only| !only.contains(&line)) {
                 continue;
             }
             out.push((m.range(), crate::search::expand_cased(&caps, replacement)));
@@ -1211,6 +1216,13 @@ mod tests {
             [("{\n}", "{}"), ("{\r\n    x\r\n}", "{}")]
         );
         assert_eq!(replacements(text, &body, "{}", Some(&[2])).len(), 1);
+        // Starting on a Windows line's break: shown at that line's end (no crash).
+        let close = SearchQuery { text: r"\n\}".into(), regex: true, ..Default::default() };
+        let found = spanning_matches("a\r\n}\r\n", &close.build().unwrap(), 100);
+        assert_eq!((found[0].line, found[0].columns.clone()), (0, 1..1));
+        // A backslash and an n (`\\n`, as in "a\n" in a string) is a line's own text.
+        assert!(!SearchQuery { text: r#""[^"]*\\n"#.into(), regex: true, ..Default::default() }.spans_lines());
+        assert!(SearchQuery { text: r"\\\n".into(), regex: true, ..Default::default() }.spans_lines());
     }
 
     #[test]
