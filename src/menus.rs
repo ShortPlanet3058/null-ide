@@ -259,6 +259,7 @@ pub fn set(cx: &mut App) {
             name: "Debug".into(),
             items: vec![
                 MenuItem::action("Start or Continue", crate::workspace::StartDebugging),
+                MenuItem::action("Debug Test at Cursor", crate::workspace::DebugTestAtCursor),
                 MenuItem::action("Pause", crate::workspace::PauseDebugging),
                 MenuItem::action("Stop", crate::workspace::StopDebugging),
                 MenuItem::separator(),

@@ -2937,6 +2937,19 @@ impl Editor {
         crate::test_at::find(language, root, &path, &self.buffer.to_string(), &tree, byte)
     }
 
+    /// The Rust test the caret is in, to debug.
+    pub fn rust_test_at_caret(&mut self) -> Option<crate::test_at::RustTest> {
+        let path = self.path.clone()?;
+        if self.language()?.name != "Rust" {
+            return None;
+        }
+        let highlighter = self.highlighter.as_mut()?;
+        highlighter.sync(&self.buffer);
+        let tree = highlighter.tree()?.clone();
+        let byte = self.buffer.rope().char_to_byte(self.selection.head);
+        crate::test_at::rust_test_at(&path, &self.buffer.to_string(), &tree, byte)
+    }
+
     /// Saves the file as UTF-8 from now on: the text stays, its bytes change on the next save.
     pub fn use_utf8(&mut self, cx: &mut Context<Self>) {
         self.set_encoding(crate::encoding::Encoding::Utf8, cx);

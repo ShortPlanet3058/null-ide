@@ -342,11 +342,13 @@ impl Debugger {
         cx.notify();
     }
 
-    /// Runs `program` in `cwd` under the debugger, stopping at `breakpoints` (lines from 0).
+    /// Runs `program` in `cwd` (given `args`) under the debugger, stopping at `breakpoints`
+    /// (lines from 0).
     pub fn start(
         &mut self,
         program: PathBuf,
         cwd: PathBuf,
+        args: Vec<String>,
         breakpoints: Vec<(PathBuf, Vec<crate::editor::Breakpoint>)>,
         init_commands: Vec<String>,
         cx: &mut Context<Self>,
@@ -432,7 +434,7 @@ impl Debugger {
             let launch = adapter.request(
                 "launch",
                 json!({
-                    "program": program.display().to_string(), "cwd": cwd_text, "args": [], "stopOnEntry": false,
+                    "program": program.display().to_string(), "cwd": cwd_text, "args": args, "stopOnEntry": false,
                     "initCommands": init_commands,
                 }),
             );
@@ -915,7 +917,7 @@ mod tests {
         let debugger = cx.new(|_| Debugger::default());
         let log = crate::editor::Breakpoint { line: 4, condition: Some("log i is {i}".into()) };
         debugger.update(cx, |d, cx| {
-            d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![log])], Vec::new(), cx)
+            d.start(program.clone(), dir.clone(), Vec::new(), vec![(source.clone(), vec![log])], Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| d.state == DebugState::Idle), "stopped, or never ended");
         let output = debugger.read_with(cx, |d, _| d.output.clone());
@@ -924,7 +926,7 @@ mod tests {
         let debugger = cx.new(|_| Debugger::default());
         let third = crate::editor::Breakpoint { line: 4, condition: Some("3".into()) };
         debugger.update(cx, |d, cx| {
-            d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![third])], Vec::new(), cx)
+            d.start(program.clone(), dir.clone(), Vec::new(), vec![(source.clone(), vec![third])], Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let locals = debugger.read_with(cx, |d, _| match &d.state {
@@ -961,7 +963,7 @@ mod tests {
         let debugger = cx.new(|_| Debugger::default());
         debugger.update(cx, |d, cx| {
             d.set_stop_on_errors(true, cx);
-            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), cx)
+            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let reason = debugger.read_with(cx, |d, _| match &d.state {
@@ -980,7 +982,7 @@ mod tests {
         let debugger = cx.new(|_| Debugger::default());
         debugger.update(cx, |d, cx| {
             d.set_stop_on_errors(true, cx);
-            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), cx)
+            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped at the panic");
         debugger.update(cx, |d, cx| d.stop(cx));
@@ -1066,7 +1068,7 @@ int main(void) {
         // At `int n = p.x;` (line 4, from 0: 3).
         let at = crate::editor::Breakpoint { line: 3, condition: None };
         debugger.update(cx, |d, cx| {
-            d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![at])], Vec::new(), cx)
+            d.start(program.clone(), dir.clone(), Vec::new(), vec![(source.clone(), vec![at])], Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let p = debugger.read_with(cx, |d, _| match &d.state {
@@ -1120,7 +1122,7 @@ int main(void) {
         // A breakpoint on `total += i;` (line 5, from 0: 4), only once i is 3.
         let at = crate::editor::Breakpoint { line: 4, condition: Some("i == 3".into()) };
         debugger.update(cx, |d, cx| {
-            d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![at])], Vec::new(), cx)
+            d.start(program.clone(), dir.clone(), Vec::new(), vec![(source.clone(), vec![at])], Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let stop = debugger.read_with(cx, |d, _| match &d.state {

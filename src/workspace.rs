@@ -102,6 +102,8 @@ actions!(
         ToggleFocusMode,
         RunTask,
         RunTestAtCursor,
+        DebugTestAtCursor,
+        DebugAgain,
         RunTestsInFile,
         OpenPreviewToTheSide,
         OpenRecent,
@@ -197,6 +199,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("secondary-shift-b", RunTask, ctx),
         KeyBinding::new("alt-secondary-t", RunTestAtCursor, ctx),
+        KeyBinding::new("alt-shift-secondary-t", DebugTestAtCursor, ctx),
         KeyBinding::new("alt-secondary-o", OpenRecent, ctx),
         KeyBinding::new("secondary-shift-n", NewWindow, ctx),
         KeyBinding::new("f5", StartDebugging, ctx),
@@ -386,6 +389,33 @@ fn built_program(messages: &str, expected: Option<&Path>) -> Option<PathBuf> {
     let wanted = expected.and_then(Path::file_name);
     let only = (programs.len() == 1).then(|| &programs[0]);
     programs.iter().find(|p| p.file_name() == wanted).or(only).cloned()
+}
+
+/// The test programs in cargo's messages (`cargo test --no-run`).
+fn test_programs(messages: &str) -> Vec<PathBuf> {
+    messages
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|m| m["reason"] == "compiler-artifact" && m["profile"]["test"] == true)
+        .filter_map(|m| m["executable"].as_str().map(PathBuf::from))
+        .collect()
+}
+
+/// Of the test `programs`, the one that has test `id` (each is asked for its list).
+fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathBuf> {
+    if programs.len() == 1 {
+        return programs.first().cloned();
+    }
+    programs
+        .iter()
+        .find(|program| {
+            std::process::Command::new(program)
+                .args(["--list", "--exact", id])
+                .current_dir(cwd)
+                .output()
+                .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().any(|l| l == format!("{id}: test")))
+        })
+        .cloned()
 }
 
 fn cargo_program(root: &Path) -> Option<PathBuf> {
@@ -708,6 +738,8 @@ pub struct Workspace {
     debug_console: Entity<crate::text_input::TextInput>,
     /// The program to debug, when the project doesn't say (no Cargo.toml): asked once.
     debug_program: Option<PathBuf>,
+    /// The test debugged last (⌥⇧⌘T): what Debug Again runs, until F5 debugs the program.
+    debugged_test: Option<crate::test_at::RustTest>,
     /// The projects for the list about to open.
     pending_projects: Vec<PathBuf>,
     /// The tasks for the list about to open.
@@ -970,6 +1002,7 @@ impl Workspace {
             renaming: false,
             reported_by: String::new(),
             debug_program: None,
+            debugged_test: None,
             focus_mode: false,
             tab_menu: None,
             text_menu: None,
@@ -4301,6 +4334,7 @@ impl Workspace {
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
+            (View, "Debug Test at Cursor".into(), Box::new(DebugTestAtCursor)),
             (View, "Toggle Markdown Preview".into(), Box::new(crate::editor::ToggleMarkdownPreview)),
             (View, "Open Markdown Preview to the Side".into(), Box::new(OpenPreviewToTheSide)),
             (View, "Run Tests in File".into(), Box::new(RunTestsInFile)),
@@ -6211,6 +6245,7 @@ impl Workspace {
         }
         self.save_named_tabs(cx);
         self.debug_panel_open = true;
+        self.debugged_test = None;
         let root = self.tree.read(cx).root().to_path_buf();
         if root.join("Cargo.toml").is_file() {
             return self.build_and_debug(root, cx);
@@ -6294,6 +6329,74 @@ impl Workspace {
         .detach();
     }
 
+    /// ⌥⇧⌘T: the Rust test at the caret, built and run alone under the debugger.
+    fn debug_test(&mut self, _: &DebugTestAtCursor, _: &mut Window, cx: &mut Context<Self>) {
+        if self.debugger.read(cx).is_active() {
+            return self.show_notice("Already debugging: stop it first (⇧F5)".into(), cx);
+        }
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(test) = editor.update(cx, |e, _| e.rust_test_at_caret()) else {
+            return self.show_notice("No Rust test at the caret".into(), cx);
+        };
+        self.debug_rust_test(test, cx);
+    }
+
+    fn debug_rust_test(&mut self, test: crate::test_at::RustTest, cx: &mut Context<Self>) {
+        if self.debugger.read(cx).is_active() {
+            return;
+        }
+        self.debugged_test = Some(test.clone());
+        self.save_named_tabs(cx);
+        self.debug_panel_open = true;
+        self.debugger.update(cx, |d, cx| {
+            d.set_building(None, cx);
+            d.append_output(&format!("cargo test --no-run {}\n", test.target.join(" ")), cx);
+        });
+        cx.spawn(async move |this, cx| {
+            let krate = test.krate.clone();
+            let id = test.id.clone();
+            let target = test.target.clone();
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
+                    let built = std::process::Command::new(cargo)
+                        .args(["test", "--no-run", "--message-format=json-render-diagnostics"])
+                        .args(&target)
+                        .current_dir(&krate)
+                        .output();
+                    let program = built.as_ref().ok().filter(|o| o.status.success()).and_then(|output| {
+                        program_with_test(&test_programs(&String::from_utf8_lossy(&output.stdout)), &id, &krate)
+                    });
+                    (built, program, crate::debugger::rust_formatters())
+                })
+                .await;
+            let (built, program, formatters) = found;
+            this.update(cx, |this, cx| {
+                let message = match (&built, &program) {
+                    (Ok(output), _) if !output.status.success() => {
+                        Some(String::from_utf8_lossy(&output.stderr).into_owned() + "\nThe build failed.\n")
+                    }
+                    (Err(error), _) => Some(format!("Couldn't run cargo: {error}\n")),
+                    (_, None) => Some(format!("No test program has {}.\n", test.id)),
+                    _ => None,
+                };
+                if let Some(message) = message {
+                    return this.debugger.update(cx, |d, cx| {
+                        d.append_output(&message, cx);
+                        d.stop(cx);
+                    });
+                }
+                // Only it, its output as it comes, in the crate's folder (as cargo runs it).
+                let args = vec![test.id.clone(), "--exact".into(), "--nocapture".into(), "--test-threads=1".into()];
+                let program = program.expect("checked above");
+                this.debug_in(program, test.krate.clone(), args, formatters.into_iter().collect(), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Runs `program` under the debugger, with every breakpoint set in the open files.
     fn debug(&mut self, program: PathBuf, cx: &mut Context<Self>) {
         self.debug_with(program, Vec::new(), cx);
@@ -6301,6 +6404,17 @@ impl Workspace {
 
     fn debug_with(&mut self, program: PathBuf, init_commands: Vec<String>, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
+        self.debug_in(program, root, Vec::new(), init_commands, cx);
+    }
+
+    fn debug_in(
+        &mut self,
+        program: PathBuf,
+        cwd: PathBuf,
+        args: Vec<String>,
+        init_commands: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let mut breakpoints: Vec<(PathBuf, Vec<crate::editor::Breakpoint>)> = Vec::new();
         for tab in &self.tabs {
             let editor = tab.editor.read(cx);
@@ -6310,7 +6424,7 @@ impl Workspace {
                 breakpoints.push((path.to_path_buf(), editor.breakpoint_list()));
             }
         }
-        self.debugger.update(cx, |d, cx| d.start(program, root, breakpoints, init_commands, cx));
+        self.debugger.update(cx, |d, cx| d.start(program, cwd, args, breakpoints, init_commands, cx));
     }
 
     fn debugger_event(&mut self, event: &crate::debugger::DebuggerEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -6421,7 +6535,10 @@ impl Workspace {
                 button("dbg-pause", "Pause", "Pause", Box::new(PauseDebugging)),
                 button("dbg-stop", "Stop", "Stop debugging", Box::new(StopDebugging)),
             ],
-            DebugState::Idle => vec![button("dbg-again", "Debug Again", "Start debugging", Box::new(StartDebugging))],
+            DebugState::Idle => {
+                let tip = if self.debugged_test.is_some() { "Debug the test again" } else { "Start debugging" };
+                vec![button("dbg-again", "Debug Again", tip, Box::new(DebugAgain))]
+            }
             _ => vec![button("dbg-stop", "Stop", "Stop debugging", Box::new(StopDebugging))],
         };
         let close = div()
@@ -9642,6 +9759,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))
+            .on_action(cx.listener(Self::debug_test))
+            .on_action(cx.listener(|this, _: &DebugAgain, window, cx| match this.debugged_test.clone() {
+                Some(test) => this.debug_rust_test(test, cx),
+                None => this.start_debugging(&StartDebugging, window, cx),
+            }))
             .on_action(cx.listener(Self::open_preview_to_the_side))
             .on_action(cx.listener(|this, _: &RunTestsInFile, window, cx| this.run_test(false, window, cx)))
             .on_action(cx.listener(Self::open_recent))
@@ -9896,6 +10018,78 @@ mod tests {
         assert_eq!(built_program(&messages, None), None, "several, none expected: not guessed");
         assert_eq!(built_program(&artifact("bin", Some("/t/debug/one")), None), Some(PathBuf::from("/t/debug/one")));
         assert_eq!(built_program(&artifact("lib", None), None), None, "no program");
+    }
+
+    /// The test programs cargo built (`cargo test --no-run`), and the one with a test.
+    #[test]
+    fn test_programs_are_found_in_cargo_s_messages() {
+        let artifact = |test: bool, exe: Option<&str>| {
+            serde_json::json!({ "reason": "compiler-artifact", "profile": { "test": test }, "executable": exe })
+                .to_string()
+        };
+        let messages =
+            [artifact(false, None), artifact(true, Some("/t/deps/app-1")), artifact(false, Some("/t/app"))].join("\n");
+        assert_eq!(test_programs(&messages), [PathBuf::from("/t/deps/app-1")]);
+        // One: it, without asking it.
+        let one = [PathBuf::from("/nowhere/app-1")];
+        assert_eq!(program_with_test(&one, "a::b", Path::new("/")), Some(one[0].clone()));
+        assert_eq!(program_with_test(&[], "a::b", Path::new("/")), None);
+    }
+
+    /// A test of a crate with two test programs: built, the right program found, run alone
+    /// under the debugger, stopped in it. `cargo test debugs_a_rust_test -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn debugs_a_rust_test(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("debug-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        // As Null opens a project: by its real path (the one cargo builds with).
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"twice\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let lib = "pub fn twice(n: i32) -> i32 {\n    n * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        let got = super::twice(21);\n        assert_eq!(got, 42);\n    }\n}\n";
+        std::fs::write(dir.join("src/lib.rs"), lib).unwrap();
+        std::fs::write(dir.join("tests/api.rs"), "#[test]\nfn other() {}\n").unwrap();
+        let built = std::process::Command::new("cargo")
+            .args(["test", "--no-run", "--offline", "--message-format=json-render-diagnostics"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let programs = test_programs(&String::from_utf8_lossy(&built.stdout));
+        assert_eq!(programs.len(), 2, "{programs:?}");
+        let program = program_with_test(&programs, "tests::doubles", &dir).expect("one has it");
+        assert!(program.file_name().unwrap().to_string_lossy().starts_with("twice-"), "{program:?}");
+        let debugger = cx.new(|_| crate::debugger::Debugger::default());
+        // At `assert_eq!(got, 42);` (line 10, from 0: 9).
+        let at = crate::editor::Breakpoint { line: 9, condition: None };
+        let args = vec!["tests::doubles".into(), "--exact".into(), "--nocapture".into(), "--test-threads=1".into()];
+        debugger.update(cx, |d, cx| {
+            d.start(program, dir.clone(), args, vec![(dir.join("src/lib.rs"), vec![at])], Vec::new(), cx)
+        });
+        let mut stopped = None;
+        for _ in 0..600 {
+            cx.run_until_parked();
+            stopped = debugger.read_with(cx, |d, _| match &d.state {
+                crate::debugger::DebugState::Stopped(stop) => Some(stop.clone()),
+                _ => None,
+            });
+            if stopped.is_some() && stopped.as_ref().is_some_and(|s| !s.locals.is_empty()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let output = debugger.read_with(cx, |d, _| format!("{:?}\n{}", d.state, d.output));
+        let stop = stopped.unwrap_or_else(|| panic!("never stopped in the test: {output}"));
+        assert_eq!(stop.place.as_ref().map(|(_, line)| *line), Some(9));
+        assert!(stop.locals.iter().any(|(n, v)| n == "got" && v == "42"), "{:?}", stop.locals);
+        debugger.update(cx, |d, cx| d.stop(cx));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
