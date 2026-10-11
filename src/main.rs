@@ -38,6 +38,7 @@ mod markdown;
 mod markdown_html;
 mod markdown_links;
 mod markdown_view;
+mod math;
 mod menus;
 mod notebook;
 mod ollama;

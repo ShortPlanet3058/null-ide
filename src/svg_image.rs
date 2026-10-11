@@ -71,6 +71,26 @@ pub fn image(path: &std::path::Path) -> gpui::Img {
     }
 }
 
+/// Drawings made from text (a formula, a diagram) lately, by what they were made from.
+#[allow(clippy::type_complexity)]
+static MADE: LazyLock<std::sync::Mutex<Vec<(String, Option<Drawn>)>>> = LazyLock::new(Default::default);
+
+/// The SVG `make` gives, drawn (sharp on a Retina screen), remembered by `key` (what it's
+/// made from): made and drawn once, not each time the preview draws.
+pub fn made(key: &str, make: impl FnOnce() -> Option<String>) -> Option<Drawn> {
+    if let Some(found) = MADE.lock().ok().and_then(|made| made.iter().find(|(k, _)| k == key).map(|(_, d)| d.clone())) {
+        return found;
+    }
+    let drawn = make().and_then(|svg| draw(svg.as_bytes(), 2., None));
+    if let Ok(mut cache) = MADE.lock() {
+        if cache.len() >= 64 {
+            cache.remove(0);
+        }
+        cache.push((key.to_string(), drawn.clone()));
+    }
+    drawn
+}
+
 /// tiny-skia's pixels (red first, alpha multiplied in) in gpui's order: blue first, plain.
 fn bgra(pixmap: &tiny_skia::Pixmap) -> Option<image::RgbaImage> {
     let mut data = Vec::with_capacity(pixmap.pixels().len() * 4);
