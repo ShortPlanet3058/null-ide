@@ -584,11 +584,12 @@ impl Editor {
                     // the text after it being the one to compare typing with.
                     (None, Some(command)) => {
                         let request = this.update(cx, |_, cx| lsp.read(cx).execute_command(&path, command)).ok()?;
+                        // (Read before its answer: its edit may land first.)
+                        let before = this.read_with(cx, |this, _| this.buffer.revision()).ok()?;
                         let coming = request.await.ok()?.is_some_and(|edit| {
                             let own = this.read_with(cx, |this, _| this.path.clone()).ok().flatten();
                             crate::lsp::edits_by_file(edit).iter().any(|(p, e)| Some(p) == own.as_ref() && !e.is_empty())
                         });
-                        let before = this.read_with(cx, |this, _| this.buffer.revision()).ok()?;
                         if coming {
                             for _ in 0..50 {
                                 if this.read_with(cx, |this, _| this.buffer.revision()).ok()? != before {

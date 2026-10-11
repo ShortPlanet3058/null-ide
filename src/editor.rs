@@ -501,6 +501,9 @@ pub struct TwinSource {
     view: (usize, usize, usize),
     bookmarks: Vec<usize>,
     language: Option<language_pick::Kind>,
+    /// A notebook's JSON (see `Editor::notebook`), and the disk's fingerprint.
+    notebook: Option<String>,
+    on_disk: Option<Fingerprint>,
 }
 
 pub struct Scroll {
@@ -1113,6 +1116,16 @@ impl Editor {
         }
         self.on_disk = Some(fingerprint(&text));
         self.encoding = encoding;
+        // Changed on disk under unsaved edits (asked about below): a notebook stays one,
+        // whatever's on disk now (a half-written file, a merge's conflict).
+        if self.buffer.is_dirty() && !discard_edits && self.notebook.is_some() {
+            if crate::notebook::is_notebook(&text) {
+                self.notebook = Some(text);
+            }
+            self.disk_changed = true;
+            cx.emit(EditorEvent::ChangedOnDisk);
+            return;
+        }
         let text = self.shown_from_disk(text);
         if text == self.buffer.to_string() {
             self.disk_changed = false;
@@ -1162,6 +1175,10 @@ impl Editor {
     pub fn set_path(&mut self, path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) {
         self.missing = false;
         self.disk_changed = false;
+        // A notebook given another kind of name: its cells, written as they are (as text).
+        if !is_notebook_path(&path) {
+            self.notebook = None;
+        }
         self.release_lsp(cx);
         self.spans.clear();
         self.spans_for = None;
@@ -2748,6 +2765,9 @@ impl Editor {
         let mut editor = Self::new(buffer, Some(source.path), cx);
         editor.style = source.style;
         editor.encoding = source.encoding;
+        // (Before its git base: a notebook's is read as its cells.)
+        editor.notebook = source.notebook;
+        editor.on_disk = source.on_disk;
         editor.lsp_follower = true;
         editor.read_only = read_only;
         if let Some(lsp) = lsp {
@@ -2772,6 +2792,8 @@ impl Editor {
             view: self.view_state(),
             bookmarks: self.bookmarks.clone(),
             language: self.chosen_language,
+            notebook: self.notebook.clone(),
+            on_disk: self.on_disk,
         })
     }
 
@@ -3180,9 +3202,15 @@ impl Editor {
             std::fs::create_dir_all(parent).ok();
         }
         let text = self.buffer.to_string();
-        // A notebook: its cells written back into its JSON.
+        // A notebook: its cells written back into its JSON (never the cells' text as it).
         let text = match &self.notebook {
-            Some(json) => crate::notebook::with_cells(json, &text).unwrap_or(text),
+            Some(json) => match crate::notebook::with_cells(json, &text) {
+                Some(json) => json,
+                None => {
+                    cx.emit(EditorEvent::SaveFailed("Couldn't write the cells back into the notebook.".into()));
+                    return false;
+                }
+            },
             None => text,
         };
         let bytes = match crate::encoding::encode(&text, self.encoding) {

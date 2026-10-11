@@ -149,6 +149,11 @@ fn line_bytes(text: &str, lines: &Range<usize>) -> Range<usize> {
 impl Editor {
     /// Shows what changed since `before` as changes to keep or undo.
     pub fn start_review(&mut self, before: String, cx: &mut Context<Self>) {
+        // A notebook written in as its cells: compared with the other one's cells.
+        let before = match self.notebook {
+            Some(_) => crate::notebook::to_cells_text(&before).unwrap_or(before),
+            None => before,
+        };
         self.review = Some(Review { base: before, hunks: Vec::new(), revision: u64::MAX });
         self.refresh_review();
         if self.review.as_ref().is_some_and(|r| r.hunks.is_empty()) {

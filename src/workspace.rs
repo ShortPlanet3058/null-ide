@@ -3063,9 +3063,9 @@ impl Workspace {
                 EditorEvent::ReadFromDisk => {
                     // Its other copy has what's on disk too (reloaded itself, or given it now):
                     // the read isn't replayed on it as an edit (that doubled its end).
-                    let (text, saved, on_disk) = {
+                    let (text, saved, on_disk, notebook) = {
                         let e = editor.read(cx);
-                        (e.buffer.rope().clone(), !e.buffer.is_dirty(), e.on_disk)
+                        (e.buffer.rope().clone(), !e.buffer.is_dirty(), e.on_disk, e.notebook.clone())
                     };
                     for twin in this.twins_of(editor, cx) {
                         if *twin.read(cx).buffer.rope() != text {
@@ -3075,6 +3075,7 @@ impl Workspace {
                         if saved {
                             twin.update(cx, |t, _| {
                                 t.on_disk = on_disk;
+                                t.notebook = notebook.clone();
                                 t.disk_changed = false;
                             });
                         }
@@ -3098,9 +3099,9 @@ impl Workspace {
                     this.refresh_git_status(cx);
                     // Saving (and tidying) one copy saves the other: same text, same file.
                     this.sync_twins(editor, cx);
-                    let (text, on_disk) = {
+                    let (text, on_disk, notebook) = {
                         let e = editor.read(cx);
-                        (e.buffer.rope().clone(), e.on_disk)
+                        (e.buffer.rope().clone(), e.on_disk, e.notebook.clone())
                     };
                     for twin in this.twins_of(editor, cx) {
                         twin.update(cx, |twin, cx| {
@@ -3108,6 +3109,7 @@ impl Workspace {
                             if *twin.buffer.rope() == text {
                                 twin.buffer.mark_saved();
                                 twin.on_disk = on_disk;
+                                twin.notebook = notebook.clone();
                                 twin.disk_changed = false;
                             }
                             cx.notify();
@@ -5131,7 +5133,8 @@ impl Workspace {
     fn share_unsaved(&self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
         let editor = editor.read(cx);
         let Some(path) = editor.path().map(Path::to_path_buf) else { return };
-        let text = editor.buffer.is_dirty().then(|| editor.buffer.rope().clone());
+        // (A notebook's always: its cells are what's searched and replaced in, not its JSON.)
+        let text = (editor.buffer.is_dirty() || editor.notebook.is_some()).then(|| editor.buffer.rope().clone());
         let unsaved = &mut cx.default_global::<crate::project_search::UnsavedFiles>().0;
         match text {
             Some(text) => unsaved.insert(path, text),

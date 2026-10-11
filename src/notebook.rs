@@ -79,7 +79,16 @@ pub fn to_cells_text(json: &str) -> Option<String> {
             out.push('\n');
         }
     }
-    Some(out)
+    // Only when the cells come back as they are (a cell's own line that reads as a cell's
+    // start would split it): else the notebook stays its JSON, as text.
+    let back = cells_in(&out, comment);
+    let cells: Vec<Cell> = notebook["cells"]
+        .as_array()?
+        .iter()
+        .map(|c| (c["cell_type"].as_str().unwrap_or("code").to_string(), text_of(&c["source"]).trim_end().to_string()))
+        .collect();
+    let back: Vec<Cell> = back.into_iter().map(|(k, t)| (k, t.trim_end().to_string())).collect();
+    (back == cells).then_some(out)
 }
 
 /// The cells in `text` (as `to_cells_text` writes them, `comment` being the language's).
@@ -88,10 +97,9 @@ fn cells_in(text: &str, comment: &str) -> Vec<Cell> {
     let mut cells: Vec<(String, Vec<&str>)> = Vec::new();
     for line in text.split('\n') {
         let trimmed = line.trim_end();
-        if let Some(rest) = trimmed.strip_prefix(&marker) {
-            let rest = rest.trim();
-            let kind = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')).unwrap_or("code").trim();
-            let kind = if kind.is_empty() { "code" } else { kind };
+        // A cell's line: `# %%` alone, or with its kind (`# %% [markdown]`); `# %%timeit`
+        // is a cell's own text.
+        if let Some(kind) = trimmed.strip_prefix(&marker).and_then(marker_kind) {
             cells.push((kind.to_string(), Vec::new()));
             continue;
         }
@@ -125,6 +133,16 @@ fn cells_in(text: &str, comment: &str) -> Vec<Cell> {
         .collect()
 }
 
+/// What follows `# %%` on a cell's line: nothing (code), or `[kind]`; None when it's text.
+fn marker_kind(rest: &str) -> Option<&str> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some("code");
+    }
+    let kind = rest.strip_prefix('[')?.strip_suffix(']')?.trim();
+    (!kind.is_empty() && kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')).then_some(kind)
+}
+
 /// A cell's source as notebooks keep it: its lines, each with its line break but the last.
 fn source_value(text: &str) -> Value {
     let mut lines: Vec<Value> = text.split_inclusive('\n').map(|l| Value::String(l.to_string())).collect();
@@ -147,7 +165,9 @@ pub fn with_cells(json: &str, text: &str) -> Option<String> {
         (c["cell_type"].as_str().unwrap_or("code").to_string(), text_of(&c["source"]).trim_end().to_string())
     };
     let old_cells: Vec<Cell> = old.iter().map(as_cell).collect();
-    if old_cells == new {
+    let trimmed =
+        |cells: &[Cell]| -> Vec<Cell> { cells.iter().map(|(k, t)| (k.clone(), t.trim_end().to_string())).collect() };
+    if old_cells == trimmed(&new) {
         return Some(json.to_string());
     }
     // Which old cell each new one is: the same ones in order (the longest run of them),
@@ -492,6 +512,21 @@ mod tests {
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["cells"][1]["source"][0], "x = 40 + 2\n");
         assert_eq!(saved["cells"][1]["outputs"][0]["text"][0], "3\n", "what it printed, kept");
+        // Open on both sides: the other copy writes cells into the JSON too.
+        let twin_source = e.read_with(cx, |e, _| e.twin_source().unwrap());
+        let (twin, cx) = cx.add_window_view(|_, cx| crate::editor::Editor::twin(twin_source, None, cx));
+        twin.update(cx, |t, cx| {
+            let at = t.buffer.to_string().find("y = x").unwrap();
+            t.buffer.replace(at..at, "# twice\n");
+            assert!(t.save_to_disk(cx));
+        });
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).expect("still a notebook");
+        assert_eq!(saved["cells"][2]["source"][0], "# twice\n");
+        // Compared with the notebook as it was (File History, Compare with Saved): its cells.
+        twin.update(cx, |t, cx| {
+            t.start_review(NOTEBOOK.to_string(), cx);
+            assert!(t.in_review(), "the change to take back");
+        });
         // Changed elsewhere (Jupyter): read again as its cells.
         let elsewhere = NOTEBOOK.replace("y = x * 2", "y = x * 3");
         std::fs::write(&path, &elsewhere).unwrap();
@@ -539,6 +574,14 @@ mod tests {
         let words = with_cells(NOTEBOOK, &text.replace("# By month.", "# By month and year.")).unwrap();
         assert_eq!(cells(&words)[0]["source"], serde_json::json!(["# Sales\n", "\n", "By month and year."]));
         assert!(with_cells("{ not json", &text).is_none());
+        // A cell's own `# %%timeit` (a cell magic, commented) stays its text.
+        let timed = NOTEBOOK.replace("\"y = x * 2\"", "\"# %%timeit\\n\", \"y = x * 2\"");
+        let text = to_cells_text(&timed).unwrap();
+        assert!(text.contains("# %%\n# %%timeit\ny = x * 2"), "{text}");
+        assert_eq!(with_cells(&timed, &text).unwrap(), timed);
+        // A cell whose own line is a cell's start: can't be written as cells, stays JSON.
+        let split = NOTEBOOK.replace("\"y = x * 2\"", "\"a = 1\\n\", \"# %%\\n\", \"b = 2\"");
+        assert!(to_cells_text(&split).is_none());
     }
 
     #[test]
