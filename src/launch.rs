@@ -19,6 +19,13 @@ pub struct Launch {
     pub cargo: Option<Vec<String>>,
 }
 
+impl Launch {
+    /// Whether it debugs tests (`cargo test`), not the program.
+    pub fn runs_tests(&self) -> bool {
+        self.cargo.as_ref().and_then(|args| args.first()).is_some_and(|c| c == "test" || c == "bench")
+    }
+}
+
 /// The debuggers whose configurations Null can run (they all mean lldb or gdb on a native
 /// program).
 const NATIVE: &[&str] = &["lldb", "lldb-dap", "lldb-vscode", "cppdbg", "cppvsdbg", "codelldb"];
@@ -50,13 +57,25 @@ fn parse(text: &str, root: &Path, file: Option<&Path>) -> Vec<Launch> {
             // This Mac's own settings over the shared ones.
             let mut c = configuration.as_object()?.clone();
             if let Some(own) = configuration[platform].as_object() {
-                c.extend(own.clone());
+                for (key, value) in own {
+                    // An environment adds to the shared one; the rest replaces.
+                    match (c.get_mut(key), value) {
+                        (Some(Value::Object(shared)), Value::Object(more)) => shared.extend(more.clone()),
+                        _ => {
+                            c.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
             }
             let kind = c.get("type")?.as_str()?;
             if !NATIVE.contains(&kind) || c.get("request").and_then(Value::as_str) != Some("launch") {
                 return None;
             }
             let strings = |v: Option<&Value>| -> Option<Vec<String>> {
+                // CodeLLDB also takes them as one line.
+                if let Some(line) = v.and_then(Value::as_str) {
+                    return line.split_whitespace().map(fill).collect();
+                }
                 v.and_then(Value::as_array)
                     .map_or(Some(Vec::new()), |list| list.iter().map(|a| a.as_str().and_then(fill)).collect())
             };
@@ -78,9 +97,16 @@ fn parse(text: &str, root: &Path, file: Option<&Path>) -> Vec<Launch> {
                 Some(Value::Object(map)) => {
                     map.iter().filter_map(|(k, v)| Some((k.clone(), fill(v.as_str()?)?))).collect()
                 }
+                // `[{"name": "K", "value": "v"}]`, or lldb-dap's `["K=v"]`.
                 Some(Value::Array(list)) => list
                     .iter()
-                    .filter_map(|e| Some((e["name"].as_str()?.to_string(), fill(e["value"].as_str()?)?)))
+                    .filter_map(|e| match e.as_str() {
+                        Some(pair) => {
+                            let (k, v) = pair.split_once('=')?;
+                            Some((k.to_string(), fill(v)?))
+                        }
+                        None => Some((e["name"].as_str()?.to_string(), fill(e["value"].as_str()?)?)),
+                    })
                     .collect(),
                 _ => Vec::new(),
             };
@@ -123,10 +149,27 @@ mod tests {
                     "osx": { "program": "build/tool-mac" },
                 },
                 { "type": "lldb", "request": "launch", "name": "Asks", "program": "${input:which}" },
+                {
+                    "type": "lldb-dap", "request": "launch", "name": "Own", "program": "a",
+                    "args": "--fast  two", "env": ["A=1", "B=x=y"], "osx": { "env": ["C=2"] },
+                },
+                {
+                    "type": "lldb", "request": "launch", "name": "Tests",
+                    "cargo": { "args": ["test", "--no-run", "--lib"] }, "env": { "A": "1" }, "osx": { "env": { "B": "2" } },
+                },
             ],
         }"#;
         let launches = parse(text, root, None);
-        assert_eq!(launches.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Debug app", "C"]);
+        assert_eq!(launches.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Debug app", "C", "Own", "Tests"]);
+        assert_eq!(launches[2].args, ["--fast", "two"]);
+        // (An array replaces; a map adds to the shared one.)
+        let own_env = if cfg!(target_os = "macos") { vec![("C", "2")] } else { vec![("A", "1"), ("B", "x=y")] };
+        let pairs = |l: &Launch| l.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>();
+        let expect = |list: Vec<(&str, &str)>| list.into_iter().map(|(k, v)| (k.into(), v.into())).collect::<Vec<_>>();
+        assert_eq!(pairs(&launches[2]), expect(own_env));
+        let tests_env = if cfg!(target_os = "macos") { vec![("A", "1"), ("B", "2")] } else { vec![("A", "1")] };
+        assert_eq!(pairs(&launches[3]), expect(tests_env));
+        assert!(launches[3].runs_tests() && !launches[0].runs_tests());
         let app = &launches[0];
         assert_eq!(app.program, None);
         assert_eq!(app.cargo.as_deref(), Some(&["build".to_string(), "--bin=app".to_string()][..]));

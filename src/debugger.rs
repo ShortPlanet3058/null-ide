@@ -598,6 +598,8 @@ impl Debugger {
                 this.looks += 1;
                 this.fields = fields;
                 this.state = DebugState::Stopped(stop.clone());
+                // (Unfolded while this was being looked at: asked for now.)
+                this.fetch_missing(cx);
                 cx.emit(DebuggerEvent::Stopped(stop));
                 this.evaluate_watches(cx);
                 cx.notify();
@@ -613,13 +615,17 @@ impl Debugger {
         let Some(reference) = scopes["scopes"].get(0).and_then(|s| s["variablesReference"].as_i64()) else {
             return Vec::new();
         };
-        Self::variables_of(adapter, reference).await
+        Self::variables_of(adapter, reference, false).await
     }
 
-    /// What `reference` has inside: a scope's variables, a variable's fields or items (the
-    /// first ones of a long list).
-    async fn variables_of(adapter: &DebugAdapter, reference: i64) -> Vec<Variable> {
-        let asked = json!({ "variablesReference": reference, "start": 0, "count": MOST_FIELDS + 1 });
+    /// What `reference` has inside: a scope's variables (all), a variable's fields or items
+    /// (`part`: the first ones of a long list).
+    async fn variables_of(adapter: &DebugAdapter, reference: i64, part: bool) -> Vec<Variable> {
+        let mut asked = json!({ "variablesReference": reference });
+        if part {
+            asked["start"] = json!(0);
+            asked["count"] = json!(MOST_FIELDS + 1);
+        }
         let Ok(variables) = adapter.request("variables", asked).await else { return Vec::new() };
         variables_in(&variables)
     }
@@ -634,7 +640,7 @@ impl Debugger {
         for path in paths {
             let Some(reference) = reference_at(top, &fields, &path) else { continue };
             if let std::collections::hash_map::Entry::Vacant(entry) = fields.entry(reference) {
-                entry.insert(Self::variables_of(adapter, reference).await);
+                entry.insert(Self::variables_of(adapter, reference, true).await);
             }
         }
         fields
@@ -642,34 +648,52 @@ impl Debugger {
 
     /// Unfolds the variable at `path` (names from the call's own), whose reference is
     /// `reference` at this stop, or folds it (and what's unfolded inside it) back.
-    pub fn toggle_unfolded(&mut self, path: Vec<String>, reference: i64, cx: &mut Context<Self>) {
+    pub fn toggle_unfolded(&mut self, path: Vec<String>, cx: &mut Context<Self>) {
         if self.unfolded.contains(&path) {
             self.unfolded.retain(|p| !p.starts_with(&path));
             return cx.notify();
         }
         self.unfolded.push(path);
+        self.fetch_missing(cx);
         cx.notify();
-        let Some(adapter) = self.adapter.clone() else { return };
-        if reference <= 0 || self.fields.contains_key(&reference) {
-            return;
-        }
+    }
+
+    /// Asks for what the unfolded variables have inside, where it isn't here yet (an inner
+    /// one once its outer one's fields come).
+    fn fetch_missing(&mut self, cx: &mut Context<Self>) {
+        let (Some(adapter), DebugState::Stopped(stop)) = (self.adapter.clone(), &self.state) else { return };
+        let mut missing: Vec<i64> = self
+            .unfolded
+            .iter()
+            .filter_map(|path| reference_at(&stop.variables, &self.fields, path))
+            .filter(|reference| !self.fields.contains_key(reference))
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
         let looks = self.looks;
-        cx.spawn(async move |this, cx| {
-            let inside = Self::variables_of(&adapter, reference).await;
-            this.update(cx, |this, cx| {
-                // Still the same stop: its references are the ones asked about.
-                if this.looks == looks {
-                    this.fields.insert(reference, inside);
-                    cx.notify();
-                }
+        for reference in missing {
+            // (Asked once: nothing inside until it comes.)
+            self.fields.insert(reference, Vec::new());
+            let adapter = adapter.clone();
+            cx.spawn(async move |this, cx| {
+                let inside = Self::variables_of(&adapter, reference, true).await;
+                this.update(cx, |this, cx| {
+                    // Still the same stop: its references are the ones asked about.
+                    if this.looks == looks {
+                        this.fields.insert(reference, inside);
+                        this.fetch_missing(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        }
     }
 
     /// Works out `expression` where the program is paused, as typed in the console: it
-    /// and its value go in the output.
+    /// and its value go in the output together, once the answer comes (if this run still
+    /// goes on).
     pub fn evaluate(&mut self, expression: &str, cx: &mut Context<Self>) {
         let expression = expression.trim().to_string();
         if expression.is_empty() {
@@ -679,7 +703,6 @@ impl Debugger {
             return self.append_output(&format!("› {expression}\n  (only while paused)\n"), cx);
         };
         let frame = stop.frames.get(stop.frame).map(|f| f.id);
-        self.append_output(&format!("› {expression}\n"), cx);
         cx.spawn(async move |this, cx| {
             let mut asked = json!({ "expression": expression, "context": "repl" });
             if let Some(frame) = frame {
@@ -690,8 +713,12 @@ impl Debugger {
                 Err(error) => why_not(&error),
             };
             this.update(cx, |this, cx| {
+                if !this.adapter.as_ref().is_some_and(|a| Arc::ptr_eq(a, &adapter)) {
+                    return;
+                }
                 let said: String = said.lines().map(|l| format!("  {l}\n")).collect();
-                this.append_output(if said.is_empty() { "  (done)\n" } else { &said }, cx);
+                let said = if said.is_empty() { "  (done)\n".to_string() } else { said };
+                this.append_output(&format!("› {expression}\n{said}"), cx);
             })
             .ok();
         })
@@ -718,6 +745,7 @@ impl Debugger {
                     this.looks += 1;
                     this.fields = fields;
                     let stop = stop.clone();
+                    this.fetch_missing(cx);
                     cx.emit(DebuggerEvent::Stopped(stop));
                     this.evaluate_watches(cx);
                     cx.notify();
@@ -1097,7 +1125,8 @@ int main(void) {
             let Some(reference) = reference_at(&stop.variables, &d.fields, &["p".to_string()]) else { return false };
             d.fields.get(&reference).is_some_and(|f| f.iter().any(|v| v.name == "x" && v.value == "4"))
         };
-        debugger.update(cx, |d, cx| d.toggle_unfolded(vec!["p".into()], p.reference, cx));
+        assert!(p.reference > 0);
+        debugger.update(cx, |d, cx| d.toggle_unfolded(vec!["p".into()], cx));
         assert!(wait_for(cx, &debugger, x_is_4), "its fields never came");
         // A step on: still unfolded, its fields asked for again.
         debugger.update(cx, |d, cx| d.resume("next", cx));
