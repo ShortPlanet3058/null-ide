@@ -1729,9 +1729,20 @@ impl Editor {
 
     /// Selects a match found by project search and highlights the query's other matches.
     pub fn reveal_match(&mut self, line: usize, columns: Range<usize>, query: SearchQuery, cx: &mut Context<Self>) {
+        self.reveal_range((line, columns.start), (line, columns.end), query, cx);
+    }
+
+    /// Selects from `start` to `end` (line, char column each), as a match found elsewhere.
+    pub fn reveal_range(
+        &mut self,
+        (line, column): (usize, usize),
+        (end_line, end_column): (usize, usize),
+        query: SearchQuery,
+        cx: &mut Context<Self>,
+    ) {
         self.show_text_for_place();
-        let start = self.buffer.offset(line, columns.start);
-        let end = self.buffer.offset(line, columns.end);
+        let start = self.buffer.offset(line, column);
+        let end = self.buffer.offset(end_line, end_column);
         self.single_cursor();
         self.selection = Selection { anchor: start, head: end };
         self.set_search(query, cx);

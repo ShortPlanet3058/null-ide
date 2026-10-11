@@ -926,8 +926,8 @@ impl Workspace {
                 }
             }),
             cx.subscribe_in(&project_search, window, |this, _, event, window, cx| match event {
-                ProjectSearchEvent::Open { path, line, columns, query, keep_focus } => {
-                    let (line, columns, query) = (*line, columns.clone(), query.clone());
+                ProjectSearchEvent::Open { path, line, columns, end, query, keep_focus } => {
+                    let (line, columns, end, query) = (*line, columns.clone(), *end, query.clone());
                     // It becomes the latest search: ⌘G and ⌘F in any file go on with it.
                     crate::find_bar::remember_search(&query.text, cx);
                     if this.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf)).as_ref()
@@ -938,7 +938,11 @@ impl Workspace {
                     }
                     this.open_file(path.clone(), window, cx);
                     if let Some(editor) = this.active_editor() {
-                        editor.update(cx, |editor, cx| editor.reveal_match(line, columns, query, cx));
+                        editor.update(cx, |editor, cx| match end {
+                            // Across lines: all of it selected.
+                            Some(end) => editor.reveal_range((line, columns.start), end, query, cx),
+                            None => editor.reveal_match(line, columns, query, cx),
+                        });
                     }
                     if *keep_focus {
                         let search = this.project_search.focus_handle(cx);

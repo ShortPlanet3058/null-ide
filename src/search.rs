@@ -14,6 +14,12 @@ pub struct SearchQuery {
 }
 
 impl SearchQuery {
+    /// Whether it can match across lines: a pattern with `\n` in it (searched in the whole
+    /// text, not line by line).
+    pub fn spans_lines(&self) -> bool {
+        self.regex && self.text.contains("\\n")
+    }
+
     /// The query as a regex. Plain-text queries are escaped first.
     pub fn build(&self) -> Result<Regex, regex::Error> {
         let mut pattern = if self.regex { self.text.clone() } else { regex::escape(&self.text) };

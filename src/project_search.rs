@@ -60,6 +60,8 @@ pub struct LineMatch {
     pub line: usize,
     /// Char columns of the first match on the line.
     pub columns: Range<usize>,
+    /// Where the first match ends, when on a later line (line, char column).
+    pub end: Option<(usize, usize)>,
     preview: SharedString,
     /// Byte ranges in `preview` to highlight.
     highlights: Vec<Range<usize>>,
@@ -93,7 +95,15 @@ enum Status {
 pub enum ProjectSearchEvent {
     /// `keep_focus`: opened from the keyboard, so the search keeps the focus to go on
     /// to the next result.
-    Open { path: PathBuf, line: usize, columns: Range<usize>, query: SearchQuery, keep_focus: bool },
+    /// `end`: where the match ends, when on a later line.
+    Open {
+        path: PathBuf,
+        line: usize,
+        columns: Range<usize>,
+        end: Option<(usize, usize)>,
+        query: SearchQuery,
+        keep_focus: bool,
+    },
     /// Replace the matches in these files (only on the given line, when there is one).
     Replace { query: SearchQuery, replacement: String, targets: Vec<(PathBuf, Option<Vec<usize>>)> },
 }
@@ -497,6 +507,7 @@ impl ProjectSearch {
             path: file.path.clone(),
             line: m.line,
             columns: m.columns.clone(),
+            end: m.end,
             query: self.query.clone(),
             keep_focus,
         });
@@ -755,16 +766,21 @@ fn search_files(
             continue;
         }
         let mut matches = Vec::new();
-        for (line, line_text) in text.lines().enumerate() {
-            let found: Vec<Range<usize>> =
-                regex.find_iter(line_text).filter(|m| !m.is_empty()).map(|m| m.range()).collect();
-            let Some(first) = found.first() else { continue };
-            let columns = line_text[..first.start].chars().count()..line_text[..first.end].chars().count();
-            let (preview, highlights) = preview(line_text, &found);
-            matches.push(LineMatch { line, columns, preview, highlights });
-            total += 1;
-            if total >= MAX_MATCHES {
-                break;
+        if query.spans_lines() {
+            matches = spanning_matches(&text, &regex, MAX_MATCHES - total);
+            total += matches.len();
+        } else {
+            for (line, line_text) in text.lines().enumerate() {
+                let found: Vec<Range<usize>> =
+                    regex.find_iter(line_text).filter(|m| !m.is_empty()).map(|m| m.range()).collect();
+                let Some(first) = found.first() else { continue };
+                let columns = line_text[..first.start].chars().count()..line_text[..first.end].chars().count();
+                let (preview, highlights) = preview(line_text, &found);
+                matches.push(LineMatch { line, columns, end: None, preview, highlights });
+                total += 1;
+                if total >= MAX_MATCHES {
+                    break;
+                }
             }
         }
         if !matches.is_empty() {
@@ -784,6 +800,50 @@ fn search_files(
         report(Found::Files(batch));
     }
     report(Found::Done { truncated: false });
+}
+
+/// A line's matches (of a pattern across lines): the line, their ranges on it, and where its
+/// first one ends.
+type StartingHere = (usize, Vec<Range<usize>>, Option<(usize, usize)>);
+
+/// The matches of a pattern that can cross lines, in the whole `text`: listed by the line
+/// each starts on (at most `most` lines), each shown on it as far as it goes there.
+fn spanning_matches(text: &str, regex: &regex::Regex, most: usize) -> Vec<LineMatch> {
+    let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    let line_of = |offset: usize| starts.partition_point(|&s| s <= offset) - 1;
+    // Each line's matches: their ranges on it, and where its first one ends.
+    let mut lines: Vec<StartingHere> = Vec::new();
+    for m in regex.find_iter(text).filter(|m| !m.is_empty()) {
+        let line = line_of(m.start());
+        let line_start = starts[line];
+        let line_text = text[line_start..].split('\n').next().unwrap_or("");
+        let line_text = line_text.strip_suffix('\r').unwrap_or(line_text);
+        let on_line = m.start() - line_start..(m.end() - line_start).min(line_text.len()).max(m.start() - line_start);
+        // (Ending just after a line break: at the end of that line, not the next one's start.)
+        let end_line = line_of(m.end().saturating_sub(1)).max(line);
+        let end = (end_line > line)
+            .then(|| (end_line, text[starts[end_line]..m.end()].trim_end_matches(['\n', '\r']).chars().count()));
+        match lines.last_mut() {
+            Some((l, ranges, _)) if *l == line => ranges.push(on_line),
+            _ => {
+                if lines.len() >= most {
+                    break;
+                }
+                lines.push((line, vec![on_line], end));
+            }
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(line, ranges, end)| {
+            let line_text = text[starts[line]..].split('\n').next().unwrap_or("");
+            let line_text = line_text.strip_suffix('\r').unwrap_or(line_text);
+            let first = &ranges[0];
+            let columns = line_text[..first.start].chars().count()..line_text[..first.end].chars().count();
+            let (preview, highlights) = preview(line_text, &ranges);
+            LineMatch { line, columns, end, preview, highlights }
+        })
+        .collect()
 }
 
 /// Which files to search, from what's written in the files field: names and patterns
@@ -856,6 +916,18 @@ pub fn replacements(
 ) -> Vec<(Range<usize>, String)> {
     let Ok(regex) = query.build() else { return Vec::new() };
     let mut out = Vec::new();
+    // Across lines: in the whole text, each match kept to the line it starts on.
+    if query.spans_lines() {
+        let line_of = |offset: usize| text[..offset].matches('\n').count();
+        for caps in regex.captures_iter(text) {
+            let Some(m) = caps.get(0).filter(|m| !m.is_empty()) else { continue };
+            if only_lines.is_some_and(|only| !only.contains(&line_of(m.start()))) {
+                continue;
+            }
+            out.push((m.range(), crate::search::expand_cased(&caps, replacement)));
+        }
+        return out;
+    }
     let mut line_start = 0;
     for (n, piece) in text.split_inclusive('\n').enumerate() {
         // The line as `str::lines` gives it to the search: without its break.
@@ -1116,6 +1188,31 @@ impl Render for ProjectSearch {
 mod tests {
     use super::*;
 
+    /// A pattern with `\n` matches across lines: listed by the line each starts on, its end
+    /// where it ends; replaced whole (only those starting on the lines asked, if any).
+    #[test]
+    fn patterns_across_lines() {
+        let text = "fn a() {\n}\nfn b() {\r\n    x\r\n}\n";
+        let query = SearchQuery { text: r"\{\r?\n\}".into(), regex: true, ..Default::default() };
+        assert!(query.spans_lines());
+        assert!(!SearchQuery { text: r"\s+$".into(), regex: true, ..Default::default() }.spans_lines());
+        let regex = query.build().unwrap();
+        let found = spanning_matches(text, &regex, 100);
+        assert_eq!(found.len(), 1, "only the empty body");
+        assert_eq!((found[0].line, found[0].columns.clone(), found[0].end), (0, 7..8, Some((1, 1))));
+        // A Windows file's lines, and several matches.
+        let body = SearchQuery { text: r"\{\r?\n[^}]*\}".into(), regex: true, ..Default::default() };
+        let found = spanning_matches(text, &body.build().unwrap(), 100);
+        assert_eq!(found.iter().map(|m| (m.line, m.end)).collect::<Vec<_>>(), [(0, Some((1, 1))), (2, Some((4, 1)))]);
+        assert_eq!(spanning_matches(text, &body.build().unwrap(), 1).len(), 1, "at most as many as asked");
+        let replaced = replacements(text, &body, "{}", None);
+        assert_eq!(
+            replaced.iter().map(|(r, n)| (&text[r.clone()], n.as_str())).collect::<Vec<_>>(),
+            [("{\n}", "{}"), ("{\r\n    x\r\n}", "{}")]
+        );
+        assert_eq!(replacements(text, &body, "{}", Some(&[2])).len(), 1);
+    }
+
     #[test]
     fn replacements_fill_in_groups_and_can_keep_to_one_line() {
         let text = "let a = old(1);\nlet b = old(2);\n";
@@ -1201,7 +1298,7 @@ mod tests {
             cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });
         let (search, cx) = cx.add_window_view(|_, cx| ProjectSearch::new(PathBuf::from("/p"), cx));
-        let m = LineMatch { line: 1, columns: 0..1, preview: "x".into(), highlights: vec![] };
+        let m = LineMatch { line: 1, columns: 0..1, end: None, preview: "x".into(), highlights: vec![] };
         let file = FileResult { path: PathBuf::from("a"), relative: "a".into(), matches: vec![m], dismissed: false };
         let query = |text: &str, regex: bool| SearchQuery { text: text.into(), regex, ..Default::default() };
         search.update(cx, |s, cx| {
@@ -1229,7 +1326,7 @@ mod tests {
     #[gpui::test]
     fn results_taken_off_the_list(cx: &mut gpui::TestAppContext) {
         let search = cx.new(|cx| ProjectSearch::new(PathBuf::from("/p"), cx));
-        let m = |line| LineMatch { line, columns: 0..1, preview: "x".into(), highlights: vec![] };
+        let m = |line| LineMatch { line, columns: 0..1, end: None, preview: "x".into(), highlights: vec![] };
         let file = |name: &str, lines: Vec<usize>| FileResult {
             path: PathBuf::from(name),
             relative: name.into(),
@@ -1265,7 +1362,7 @@ mod tests {
     #[gpui::test]
     fn arrows_step_through_matches_skipping_file_names(cx: &mut gpui::TestAppContext) {
         let search = cx.new(|cx| ProjectSearch::new(PathBuf::from("/p"), cx));
-        let m = |line| LineMatch { line, columns: 0..1, preview: "x".into(), highlights: vec![] };
+        let m = |line| LineMatch { line, columns: 0..1, end: None, preview: "x".into(), highlights: vec![] };
         let file = |name: &str, lines: Vec<usize>| FileResult {
             path: PathBuf::from(name),
             relative: name.into(),
