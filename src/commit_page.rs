@@ -22,8 +22,12 @@ pub enum CommitPageEvent {
     Close,
     /// Something done (or not), to say.
     Said(String),
+    /// About to change the repository: the open files saved first, so git sees them.
+    WillChange,
     /// The repository changed (a revert, a cherry-pick, a checkout).
     Changed,
+    /// It changed, with conflicts in these files.
+    Conflicts(Vec<PathBuf>),
 }
 
 impl EventEmitter<CommitPageEvent> for CommitPage {}
@@ -88,11 +92,13 @@ impl CommitPage {
         let (root, id, parent) = (self.root.clone(), self.commit.id.clone(), self.commit.parents.first().cloned());
         self.loading = Some(cx.spawn(async move |this, cx| {
             let path = file.path.clone();
+            // (A renamed file was elsewhere before.)
+            let was = file.old_path.clone().unwrap_or_else(|| path.clone());
             let (after, before) = cx
                 .background_executor()
                 .spawn(async move {
                     let after = git::text_at(&root, &id, &path).unwrap_or_default();
-                    let before = parent.and_then(|p| git::text_at(&root, &p, &path)).unwrap_or_default();
+                    let before = parent.and_then(|p| git::text_at(&root, &p, &was)).unwrap_or_default();
                     (after, before)
                 })
                 .await;
@@ -102,7 +108,7 @@ impl CommitPage {
                     let mut editor = Editor::new(crate::buffer::Buffer::from_text(&after), None, cx);
                     let kind = crate::editor::language_by_path(std::path::Path::new(&file.path));
                     editor.choose_language(kind, cx);
-                    editor.read_only = true;
+                    editor.view_only = true;
                     editor.start_review(before, cx);
                     editor
                 });
@@ -122,40 +128,90 @@ impl CommitPage {
     fn act(
         &mut self,
         done: &'static str,
-        action: fn(&std::path::Path, &str) -> Result<(), String>,
+        action: fn(&std::path::Path, &str) -> Result<Vec<PathBuf>, String>,
         cx: &mut Context<Self>,
     ) {
+        cx.emit(CommitPageEvent::WillChange);
         let (root, id, short) = (self.root.clone(), self.commit.id.clone(), self.commit.short.clone());
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { action(&root, &id) }).await;
-            this.update(cx, |_, cx| {
-                let said = match result {
-                    Ok(()) => format!("{done} {short}."),
-                    Err(error) => error,
-                };
-                cx.emit(CommitPageEvent::Said(said));
-                cx.emit(CommitPageEvent::Changed);
+            this.update(cx, |_, cx| match result {
+                Ok(conflicts) if conflicts.is_empty() => {
+                    cx.emit(CommitPageEvent::Said(format!("{done} {short}.")));
+                    cx.emit(CommitPageEvent::Changed);
+                }
+                Ok(conflicts) => {
+                    let n = conflicts.len();
+                    let files = if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+                    cx.emit(CommitPageEvent::Said(format!("Conflicts in {files}: ⌘. resolves each.")));
+                    cx.emit(CommitPageEvent::Changed);
+                    cx.emit(CommitPageEvent::Conflicts(conflicts));
+                }
+                Err(error) => cx.emit(CommitPageEvent::Said(error)),
             })
             .ok();
         })
         .detach();
     }
 
-    fn check_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let short = self.commit.short.clone();
-        let answer = window.prompt(
-            PromptLevel::Info,
-            &format!("Check out {short}?"),
-            Some("The files go back to how they were then, on no branch (to look, or to start a branch from there). Switch to a branch to come back."),
-            &["Check Out", "Cancel"],
-            cx,
-        );
+    /// Asks first (its title, what it does, its button), then runs `action` on this
+    /// commit, saying `done`.
+    fn ask_then(
+        &mut self,
+        (title, detail, button): (String, &'static str, &'static str),
+        done: &'static str,
+        action: fn(&std::path::Path, &str) -> Result<Vec<PathBuf>, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = window.prompt(PromptLevel::Info, &title, Some(detail), &[button, "Cancel"], cx);
         cx.spawn(async move |this, cx| {
             if answer.await == Ok(0) {
-                this.update(cx, |this, cx| this.act("Checked out", git::check_out, cx)).ok();
+                this.update(cx, |this, cx| this.act(done, action, cx)).ok();
             }
         })
         .detach();
+    }
+
+    fn check_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let short = self.commit.short.clone();
+        self.ask_then(
+            (format!("Check out {short}?"), "The files go back to how they were then, on no branch (to look, or to start a branch from there). Switch to a branch to come back.", "Check Out"),
+            "Checked out",
+            |root, id| git::check_out(root, id).map(|()| Vec::new()),
+            window,
+            cx,
+        );
+    }
+
+    fn revert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let short = self.commit.short.clone();
+        self.ask_then(
+            (
+                format!("Revert {short}?"),
+                "A new commit takes its changes back (Undo Last Commit takes that back in turn).",
+                "Revert",
+            ),
+            "Took back",
+            git::revert_commit,
+            window,
+            cx,
+        );
+    }
+
+    fn cherry_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let short = self.commit.short.clone();
+        self.ask_then(
+            (
+                format!("Cherry-pick {short} onto this branch?"),
+                "Its changes are made again here, as a new commit.",
+                "Cherry-Pick",
+            ),
+            "Made again here:",
+            git::cherry_pick,
+            window,
+            cx,
+        );
     }
 }
 
@@ -200,7 +256,13 @@ impl Render for CommitPage {
                     .flex()
                     .items_start()
                     .gap(px(12.))
-                    .child(div().flex_1().text_size(px(ui::T_XL)).font_weight(gpui::FontWeight::SEMIBOLD).child(commit.subject.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(ui::T_XL))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(commit.subject.clone()),
+                    )
                     .child(
                         div()
                             .id("close-commit")
@@ -234,15 +296,18 @@ impl Render for CommitPage {
                     .mt(px(6.))
                     .flex()
                     .gap(px(8.))
-                    .child(button("commit-checkout", "Check Out").on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.check_out(window, cx)),
-                    ))
-                    .child(button("commit-revert", "Revert").on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.act("Took back", git::revert_commit, cx)),
-                    ))
-                    .child(button("commit-pick", "Cherry-Pick").on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.act("Made again here:", git::cherry_pick, cx)),
-                    ))
+                    .child(
+                        button("commit-checkout", "Check Out")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.check_out(window, cx))),
+                    )
+                    .child(
+                        button("commit-revert", "Revert")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.revert(window, cx))),
+                    )
+                    .child(
+                        button("commit-pick", "Cherry-Pick")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.cherry_pick(window, cx))),
+                    )
                     .child(
                         div()
                             .id("commit-copy")
@@ -288,7 +353,9 @@ impl Render for CommitPage {
                         .gap(px(4.))
                         .code_font(cx)
                         .text_size(px(ui::T_XS))
-                        .when(file.added > 0, |d| d.child(div().text_color(theme.git_added).child(format!("+{}", file.added))))
+                        .when(file.added > 0, |d| {
+                            d.child(div().text_color(theme.git_added).child(format!("+{}", file.added)))
+                        })
                         .when(file.removed > 0, |d| {
                             d.child(div().text_color(theme.git_deleted).child(format!("−{}", file.removed)))
                         }),

@@ -176,9 +176,12 @@ pub enum GitViewEvent {
     /// A branch to start here, and switch to.
     NewBranch(String),
     /// A branch to merge in, or rebase onto.
-    Join { branch: String, rebase: bool },
-    /// The changes set aside at this place, to bring back.
-    BringBack(usize),
+    Join {
+        branch: String,
+        rebase: bool,
+    },
+    /// Changes set aside, to bring back.
+    BringBack(git::SetAside),
     /// The changes since the last commit, to set aside.
     SetAside,
     /// Something done (or not), to say.
@@ -200,11 +203,17 @@ pub struct GitView {
     pub ahead_behind: Option<(usize, usize)>,
     pub summary: Entity<TextInput>,
     pub body: Entity<TextInput>,
-    committing: bool,
+    pub committing: bool,
+    /// A message being written by AI: Commit waits for it.
+    pub drafting: bool,
+    /// Moved on when a draft should stop (committed, or another asked for).
+    pub draft_generation: u64,
     reading: Option<Task<()>>,
     pub tab: Tab,
     pub history: Vec<git::LogCommit>,
     graph: Vec<GraphRow>,
+    /// Where the branches, tags and HEAD were when the history was read.
+    history_refs: String,
     pub filter: Entity<TextInput>,
     /// The commit shown, in the history.
     pub shown: Option<String>,
@@ -307,10 +316,13 @@ impl GitView {
             summary,
             body,
             committing: false,
+            drafting: false,
+            draft_generation: 0,
             reading: None,
             tab: Tab::Changes,
             history: Vec::new(),
             graph: Vec::new(),
+            history_refs: String::new(),
             filter,
             shown: None,
             history_task: None,
@@ -333,6 +345,17 @@ impl GitView {
         self.root = root;
         self.files.clear();
         self.repository = None;
+        self.history.clear();
+        self.graph.clear();
+        self.history_refs.clear();
+        self.shown = None;
+        self.branches = Branches::default();
+        self.picked = None;
+        self.renaming = None;
+        // Another repository's GitHub: read again (what was asked of the last one dropped).
+        let (list, closed) = (self.github.list, self.github.closed);
+        self.github = GitHub { list, closed, ..GitHub::default() };
+        self.github_task = None;
         self.refresh(cx);
     }
 
@@ -343,22 +366,32 @@ impl GitView {
             Tab::History => self.refresh_history(cx),
             Tab::Branches => self.refresh_branches(cx),
             // (GitHub's asked only when the tab's shown or refreshed: not on every change here.)
-            Tab::GitHub => {
-                if self.github.account.is_none() {
-                    self.refresh_github(cx);
-                }
-            }
+            Tab::GitHub => self.refresh_github_if_stale(cx),
         }
     }
 
     /// The repository's history read again (in the background), with its graph.
     pub fn refresh_history(&mut self, cx: &mut Context<Self>) {
         const MOST: usize = 500;
-        let root = self.root.clone();
+        let (root, was) = (self.root.clone(), self.history_refs.clone());
         self.history_task = Some(cx.spawn(async move |this, cx| {
-            let history = cx.background_executor().spawn(async move { git::log(&root, MOST) }).await;
+            // Read again only when a branch, tag or HEAD has moved (this runs as files change).
+            let read = cx
+                .background_executor()
+                .spawn(async move {
+                    let refs = git::refs_signature(&root);
+                    if refs == was {
+                        return None;
+                    }
+                    let history = git::log(&root, MOST);
+                    let graph = graph(&history);
+                    Some((refs, history, graph))
+                })
+                .await;
+            let Some((refs, history, graph)) = read else { return };
             this.update(cx, |this, cx| {
-                this.graph = graph(&history);
+                this.history_refs = refs;
+                this.graph = graph;
                 this.history = history;
                 cx.notify();
             })
@@ -388,11 +421,25 @@ impl GitView {
                     if let Some(was) = before.iter().find(|f| f.path == file.path) {
                         file.kept = was.kept;
                         file.unfolded = was.unfolded;
-                        // Its parts as they were chosen, where they're the same lines.
+                        // Its parts as they were chosen: the same lines, else the same change
+                        // moved (its first line the same, and only one like it).
+                        let mut taken = vec![false; was.parts.len()];
                         for part in &mut file.parts {
-                            if let Some(old) = was.parts.iter().find(|p| p.lines == part.lines) {
-                                part.kept = old.kept;
+                            let same = was.parts.iter().position(|p| p.lines == part.lines);
+                            let moved = || {
+                                let like: Vec<usize> = (0..was.parts.len())
+                                    .filter(|&i| !taken[i] && was.parts[i].label == part.label)
+                                    .collect();
+                                (like.len() == 1).then(|| like[0])
+                            };
+                            if let Some(i) = same.filter(|&i| !taken[i]).or_else(moved) {
+                                taken[i] = true;
+                                part.kept = was.parts[i].kept;
                             }
+                        }
+                        // In as its parts now say (none ticked: left out; a new change: in).
+                        if !file.parts.is_empty() {
+                            file.kept = file.parts.iter().any(|p| p.kept);
                         }
                     }
                 }
@@ -424,7 +471,7 @@ impl GitView {
     }
 
     fn can_commit(&self, cx: &App) -> bool {
-        !self.committing && self.kept_count() > 0 && !self.summary.read(cx).text().trim().is_empty()
+        !self.committing && !self.drafting && self.kept_count() > 0 && !self.summary.read(cx).text().trim().is_empty()
     }
 
     fn ask_commit(&mut self, _: &CommitChanges, _: &mut Window, cx: &mut Context<Self>) {
@@ -439,31 +486,53 @@ impl GitView {
         if !self.can_commit(cx) {
             return;
         }
+        if let Some(file) = self.files.iter().find(|f| f.status == FileStatus::Conflicted) {
+            let name = file.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            cx.emit(GitViewEvent::Committed(Err(format!("{name} still has conflicts: settle them first."))));
+            return;
+        }
         self.committing = true;
+        // A message being written by AI stops here.
+        self.draft_generation += 1;
         cx.notify();
         let message = self.message(cx);
         let root = self.root.clone();
+        let kept: Vec<PathBuf> = self.files.iter().filter(|f| f.kept).map(|f| f.path.clone()).collect();
         let left_out: Vec<PathBuf> = self.files.iter().filter(|f| !f.kept).map(|f| f.path.clone()).collect();
-        let partly: Vec<(PathBuf, Vec<bool>)> = self
+        // Each part chosen with its lines, as listed: the file saved since must still have
+        // those changes, or the choices would land on others.
+        type Chosen = Vec<(Range<usize>, bool)>;
+        let partly: Vec<(PathBuf, Chosen)> = self
             .files
             .iter()
             .filter(|f| f.partly())
-            .map(|f| (f.path.clone(), f.parts.iter().map(|p| p.kept).collect()))
+            .map(|f| (f.path.clone(), f.parts.iter().map(|p| (p.lines.clone(), p.kept)).collect()))
             .collect();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let partly: Vec<(PathBuf, String)> = partly
-                        .into_iter()
-                        .map(|(path, keep)| {
-                            let encoding = crate::encoding::read(&path).map(|(_, e)| e).unwrap_or_default();
-                            let base = git::committed_text(&path, encoding).unwrap_or_default();
-                            let current = crate::encoding::read(&path).map(|(t, _)| t).unwrap_or_default();
-                            (path, git::partly(&base, &current, &keep))
-                        })
-                        .collect();
-                    git::commit_parts(&root, &message, &left_out, &partly)
+                    let mut texts = Vec::new();
+                    for (path, chosen) in partly {
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        let (current, encoding) =
+                            crate::encoding::read(&path).map_err(|e| format!("Couldn't read {name}: {e}"))?;
+                        let base = git::committed_text(&path, encoding).unwrap_or_default();
+                        let hunks: Vec<Range<usize>> =
+                            git::diff(&base, &current).into_iter().map(|h| h.lines).collect();
+                        if hunks.len() != chosen.len() || hunks.iter().zip(&chosen).any(|(h, (lines, _))| h != lines) {
+                            return Err(format!(
+                                "{name} changed since its changes were listed: look at them again, then commit."
+                            ));
+                        }
+                        let keep: Vec<bool> = chosen.iter().map(|(_, kept)| *kept).collect();
+                        let text = git::partly(&base, &current, &keep);
+                        // In the file's own encoding (its BOM too), as `git add` would see it.
+                        let bytes = crate::encoding::encode(&text, encoding)
+                            .map_err(|c| format!("{name}: {c} can't be written in its encoding."))?;
+                        texts.push((path, bytes));
+                    }
+                    git::commit_parts(&root, &message, &kept, &left_out, &texts)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -484,10 +553,9 @@ impl GitView {
     fn toggle_file(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(file) = self.files.get_mut(ix) {
             file.kept = !file.kept;
-            // Back in: all of it.
-            if file.kept {
-                file.parts.iter_mut().for_each(|p| p.kept = true);
-            }
+            // All of it in, or all of it out.
+            let kept = file.kept;
+            file.parts.iter_mut().for_each(|p| p.kept = kept);
             cx.notify();
         }
     }
@@ -566,12 +634,21 @@ impl GitView {
                         };
                         for edge in &row.edges {
                             match *edge {
-                                Edge::Through { lane, colour } => line(gpui::point(x(lane), top), gpui::point(x(lane), bottom), colour),
-                                Edge::In { from, colour } => line(gpui::point(x(from), top), gpui::point(x(row.lane), mid), colour),
-                                Edge::Out { to, colour } => line(gpui::point(x(row.lane), mid), gpui::point(x(to), bottom), colour),
+                                Edge::Through { lane, colour } => {
+                                    line(gpui::point(x(lane), top), gpui::point(x(lane), bottom), colour)
+                                }
+                                Edge::In { from, colour } => {
+                                    line(gpui::point(x(from), top), gpui::point(x(row.lane), mid), colour)
+                                }
+                                Edge::Out { to, colour } => {
+                                    line(gpui::point(x(row.lane), mid), gpui::point(x(to), bottom), colour)
+                                }
                             }
                         }
-                        let dot = gpui::Bounds::centered_at(gpui::point(x(row.lane), mid), gpui::size(gpui::px(8.), gpui::px(8.)));
+                        let dot = gpui::Bounds::centered_at(
+                            gpui::point(x(row.lane), mid),
+                            gpui::size(gpui::px(8.), gpui::px(8.)),
+                        );
                         window.paint_quad(gpui::quad(
                             dot,
                             gpui::px(4.),
@@ -892,7 +969,7 @@ impl GitView {
                         format!("Lines {}–{}", part.lines.start + 1, part.lines.end)
                     };
                     div()
-                        .id(("git-part", ix * 1000 + p))
+                        .id(gpui::SharedString::from(format!("git-part-{ix}-{p}")))
                         .flex()
                         .items_center()
                         .gap(px(8.))
@@ -1030,12 +1107,7 @@ mod tests {
         assert!(rows[1].edges.contains(&Edge::Through { lane: 0, colour: 0 }));
         assert_eq!(rows[1].colour, 1, "the branch keeps its colour");
         // Both lanes wait for a1: they join there.
-        assert_eq!(
-            rows[4].edges,
-            [Edge::In { from: 0, colour: 0 }, Edge::In { from: 1, colour: 1 }],
-            "{:?}",
-            rows[4]
-        );
+        assert_eq!(rows[4].edges, [Edge::In { from: 0, colour: 0 }, Edge::In { from: 1, colour: 1 }], "{:?}", rows[4]);
         assert_eq!(rows[4].width, 2);
     }
 }

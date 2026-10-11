@@ -1818,11 +1818,18 @@ impl Element for EditorElement {
                 None
             };
 
-            // Blocks drawn over the text (a review's threads) are placed from the layout:
-            // with none yet, they wait for this one, so another frame draws them.
-            if editor.layout.is_none() && editor.has_overlay_blocks() {
+            // Blocks drawn over the text (a review's threads, a note) are placed from the
+            // layout and sized to its width: the first one, or a new width, measures them
+            // again and another frame draws them.
+            if editor.has_overlay_blocks() && editor.blocks_width != Some(text_bounds.size.width) {
+                editor.blocks_width = Some(text_bounds.size.width);
                 let this = cx.entity();
-                window.on_next_frame(move |_, cx| this.update(cx, |_, cx| cx.notify()));
+                window.on_next_frame(move |_, cx| {
+                    this.update(cx, |editor, cx| {
+                        editor.reflow_blocks();
+                        cx.notify();
+                    })
+                });
             }
             editor.layout = Some(Layout {
                 text_origin: origin,
