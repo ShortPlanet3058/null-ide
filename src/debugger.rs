@@ -252,6 +252,22 @@ pub fn rust_formatters() -> Option<String> {
     script.is_file().then(|| format!("command script import \"{}\"", script.display()))
 }
 
+/// What to run under the debugger: the program, where, with what.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    pub program: PathBuf,
+    pub cwd: PathBuf,
+    pub args: Vec<String>,
+    /// Added to its environment.
+    pub env: Vec<(String, String)>,
+}
+
+impl Run {
+    pub fn new(program: PathBuf, cwd: PathBuf) -> Self {
+        Self { program, cwd, args: Vec::new(), env: Vec::new() }
+    }
+}
+
 /// How many calls of the stack are asked for.
 const FRAMES: usize = 40;
 
@@ -342,17 +358,15 @@ impl Debugger {
         cx.notify();
     }
 
-    /// Runs `program` in `cwd` (given `args`) under the debugger, stopping at `breakpoints`
-    /// (lines from 0).
+    /// Runs the program under the debugger, stopping at `breakpoints` (lines from 0).
     pub fn start(
         &mut self,
-        program: PathBuf,
-        cwd: PathBuf,
-        args: Vec<String>,
+        run: Run,
         breakpoints: Vec<(PathBuf, Vec<crate::editor::Breakpoint>)>,
         init_commands: Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        let Run { program, cwd, args, env } = run;
         if self.state != DebugState::Building {
             self.output.clear();
         }
@@ -435,6 +449,7 @@ impl Debugger {
                 "launch",
                 json!({
                     "program": program.display().to_string(), "cwd": cwd_text, "args": args, "stopOnEntry": false,
+                    "env": env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
                     "initCommands": init_commands,
                 }),
             );
@@ -917,7 +932,7 @@ mod tests {
         let debugger = cx.new(|_| Debugger::default());
         let log = crate::editor::Breakpoint { line: 4, condition: Some("log i is {i}".into()) };
         debugger.update(cx, |d, cx| {
-            d.start(program.clone(), dir.clone(), Vec::new(), vec![(source.clone(), vec![log])], Vec::new(), cx)
+            d.start(Run::new(program.clone(), dir.clone()), vec![(source.clone(), vec![log])], Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| d.state == DebugState::Idle), "stopped, or never ended");
         let output = debugger.read_with(cx, |d, _| d.output.clone());
@@ -926,7 +941,7 @@ mod tests {
         let debugger = cx.new(|_| Debugger::default());
         let third = crate::editor::Breakpoint { line: 4, condition: Some("3".into()) };
         debugger.update(cx, |d, cx| {
-            d.start(program.clone(), dir.clone(), Vec::new(), vec![(source.clone(), vec![third])], Vec::new(), cx)
+            d.start(Run::new(program.clone(), dir.clone()), vec![(source.clone(), vec![third])], Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let locals = debugger.read_with(cx, |d, _| match &d.state {
@@ -963,7 +978,7 @@ mod tests {
         let debugger = cx.new(|_| Debugger::default());
         debugger.update(cx, |d, cx| {
             d.set_stop_on_errors(true, cx);
-            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), Vec::new(), cx)
+            d.start(Run::new(program.clone(), dir.clone()), Vec::new(), Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let reason = debugger.read_with(cx, |d, _| match &d.state {
@@ -982,7 +997,7 @@ mod tests {
         let debugger = cx.new(|_| Debugger::default());
         debugger.update(cx, |d, cx| {
             d.set_stop_on_errors(true, cx);
-            d.start(program.clone(), dir.clone(), Vec::new(), Vec::new(), Vec::new(), cx)
+            d.start(Run::new(program.clone(), dir.clone()), Vec::new(), Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped at the panic");
         debugger.update(cx, |d, cx| d.stop(cx));
@@ -1068,7 +1083,7 @@ int main(void) {
         // At `int n = p.x;` (line 4, from 0: 3).
         let at = crate::editor::Breakpoint { line: 3, condition: None };
         debugger.update(cx, |d, cx| {
-            d.start(program.clone(), dir.clone(), Vec::new(), vec![(source.clone(), vec![at])], Vec::new(), cx)
+            d.start(Run::new(program.clone(), dir.clone()), vec![(source.clone(), vec![at])], Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let p = debugger.read_with(cx, |d, _| match &d.state {
@@ -1093,6 +1108,39 @@ int main(void) {
         let answered = wait_for(cx, &debugger, |d| d.output.contains("› p.x + p.y * 10\n  74"));
         assert!(answered, "{}", debugger.read_with(cx, |d, _| d.output.clone()));
         debugger.update(cx, |d, cx| d.stop(cx));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The program gets its arguments and environment, in its folder.
+    /// `cargo test passes_arguments_and_environment -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn passes_arguments_and_environment(cx: &mut TestAppContext) {
+        let dir = crate::tools::test_dir("debug-args");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("run")).unwrap();
+        let source = dir.join("main.c");
+        std::fs::write(
+            &source,
+            "#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\nint main(int argc, char **argv) {\n    char cwd[1024];\n    getcwd(cwd, sizeof cwd);\n    printf(\"args %d %s|mode %s|in %s\\n\", argc, argv[1], getenv(\"NULL_MODE\"), cwd);\n    return 0;\n}\n",
+        )
+        .unwrap();
+        let program = dir.join("main");
+        let built =
+            std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+        assert!(built.unwrap().success());
+        let debugger = cx.new(|_| Debugger::default());
+        let run = Run {
+            program,
+            cwd: dir.join("run"),
+            args: vec!["two words".into()],
+            env: vec![("NULL_MODE".into(), "fast".into())],
+        };
+        debugger.update(cx, |d, cx| d.start(run, Vec::new(), Vec::new(), cx));
+        assert!(wait_for(cx, &debugger, |d| d.state == DebugState::Idle && d.output.contains("args ")), "never ran");
+        let output = debugger.read_with(cx, |d, _| d.output.clone());
+        assert!(output.contains("args 2 two words|mode fast|in "), "{output}");
+        assert!(output.lines().any(|l| l.trim_end().ends_with("/run")), "{output}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1122,7 +1170,7 @@ int main(void) {
         // A breakpoint on `total += i;` (line 5, from 0: 4), only once i is 3.
         let at = crate::editor::Breakpoint { line: 4, condition: Some("i == 3".into()) };
         debugger.update(cx, |d, cx| {
-            d.start(program.clone(), dir.clone(), Vec::new(), vec![(source.clone(), vec![at])], Vec::new(), cx)
+            d.start(Run::new(program.clone(), dir.clone()), vec![(source.clone(), vec![at])], Vec::new(), cx)
         });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let stop = debugger.read_with(cx, |d, _| match &d.state {

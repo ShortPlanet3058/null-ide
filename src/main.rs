@@ -30,6 +30,7 @@ mod json_format;
 mod key_prompt;
 mod keymap;
 mod languages;
+mod launch;
 mod local_history;
 mod lsp;
 mod lsp_store;

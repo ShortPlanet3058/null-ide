@@ -6247,8 +6247,13 @@ impl Workspace {
         self.debug_panel_open = true;
         self.debugged_test = None;
         let root = self.tree.read(cx).root().to_path_buf();
+        // The project's own way, in .vscode/launch.json (its first, when it has several).
+        let file = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        if let Some(launch) = crate::launch::read(&root, file.as_deref()).into_iter().next() {
+            return self.debug_launch(root, launch, cx);
+        }
         if root.join("Cargo.toml").is_file() {
-            return self.build_and_debug(root, cx);
+            return self.build_and_debug(root, vec!["build".into()], None, cx);
         }
         match self.debug_program.clone().filter(|p| p.is_file()) {
             Some(program) => self.debug(program, cx),
@@ -6276,12 +6281,37 @@ impl Workspace {
         .detach();
     }
 
-    /// A Rust project: `cargo build`, then its program under the debugger.
-    fn build_and_debug(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+    /// A launch.json configuration: built by cargo first when it says so, else its program.
+    fn debug_launch(&mut self, root: PathBuf, launch: crate::launch::Launch, cx: &mut Context<Self>) {
+        if let Some(cargo) = launch.cargo.clone() {
+            return self.build_and_debug(root, cargo, Some(launch), cx);
+        }
+        let Some(program) = launch.program.clone().filter(|p| p.is_file()) else {
+            let missing = launch.program.as_ref().map_or("its program".into(), |p| p.display().to_string());
+            return self.debugger.update(cx, |d, cx| {
+                d.set_building(None, cx);
+                d.append_output(&format!("{}: {missing} isn't there (built yet?).\n", launch.name), cx);
+                d.stop(cx);
+            });
+        };
+        let run = crate::debugger::Run { program, cwd: launch.cwd, args: launch.args, env: launch.env };
+        self.debug_in(run, Vec::new(), cx);
+    }
+
+    /// A Rust project: `cargo <cargo_args>` (`build`), then its program under the debugger
+    /// (as `launch` says to run it, if from launch.json).
+    fn build_and_debug(
+        &mut self,
+        root: PathBuf,
+        cargo_args: Vec<String>,
+        launch: Option<crate::launch::Launch>,
+        cx: &mut Context<Self>,
+    ) {
         let program = cargo_program(&root);
+        let shown = format!("cargo {}\n", cargo_args.join(" "));
         self.debugger.update(cx, |d, cx| {
             d.set_building(program.clone(), cx);
-            d.append_output("cargo build\n", cx);
+            d.append_output(&shown, cx);
         });
         cx.spawn(async move |this, cx| {
             let cwd = root.clone();
@@ -6292,7 +6322,8 @@ impl Workspace {
                     // (Its messages say where each program went: a target folder set
                     // elsewhere, a workspace's.)
                     let built = std::process::Command::new(cargo)
-                        .args(["build", "--message-format=json-render-diagnostics"])
+                        .args(&cargo_args)
+                        .arg("--message-format=json-render-diagnostics")
                         .current_dir(&cwd)
                         .output();
                     // Rust's own formatters, so its strings and collections show their contents.
@@ -6300,11 +6331,18 @@ impl Workspace {
                 })
                 .await;
             let (built, formatters) = built;
-            // Where cargo says it put the program, else where it usually goes.
+            // Where cargo says it put the program (or the test program, built by `cargo test
+            // --no-run`), else where it usually goes.
             let program = built
                 .as_ref()
                 .ok()
-                .and_then(|output| built_program(&String::from_utf8_lossy(&output.stdout), program.as_deref()))
+                .and_then(|output| {
+                    let messages = String::from_utf8_lossy(&output.stdout);
+                    built_program(&messages, program.as_deref()).or_else(|| match &test_programs(&messages)[..] {
+                        [only] => Some(only.clone()),
+                        _ => None,
+                    })
+                })
                 .or(program);
             this.update(cx, |this, cx| {
                 let message = match (&built, &program) {
@@ -6321,7 +6359,14 @@ impl Workspace {
                         d.append_output(&message, cx);
                         d.stop(cx);
                     }),
-                    None => this.debug_with(program.expect("checked above"), formatters.into_iter().collect(), cx),
+                    None => {
+                        let program = program.expect("checked above");
+                        let run = match launch {
+                            Some(l) => crate::debugger::Run { program, cwd: l.cwd, args: l.args, env: l.env },
+                            None => crate::debugger::Run::new(program, root.clone()),
+                        };
+                        this.debug_in(run, formatters.into_iter().collect(), cx)
+                    }
                 }
             })
             .ok();
@@ -6390,7 +6435,8 @@ impl Workspace {
                 // Only it, its output as it comes, in the crate's folder (as cargo runs it).
                 let args = vec![test.id.clone(), "--exact".into(), "--nocapture".into(), "--test-threads=1".into()];
                 let program = program.expect("checked above");
-                this.debug_in(program, test.krate.clone(), args, formatters.into_iter().collect(), cx);
+                let run = crate::debugger::Run { args, ..crate::debugger::Run::new(program, test.krate.clone()) };
+                this.debug_in(run, formatters.into_iter().collect(), cx);
             })
             .ok();
         })
@@ -6404,17 +6450,10 @@ impl Workspace {
 
     fn debug_with(&mut self, program: PathBuf, init_commands: Vec<String>, cx: &mut Context<Self>) {
         let root = self.tree.read(cx).root().to_path_buf();
-        self.debug_in(program, root, Vec::new(), init_commands, cx);
+        self.debug_in(crate::debugger::Run::new(program, root), init_commands, cx);
     }
 
-    fn debug_in(
-        &mut self,
-        program: PathBuf,
-        cwd: PathBuf,
-        args: Vec<String>,
-        init_commands: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
+    fn debug_in(&mut self, run: crate::debugger::Run, init_commands: Vec<String>, cx: &mut Context<Self>) {
         let mut breakpoints: Vec<(PathBuf, Vec<crate::editor::Breakpoint>)> = Vec::new();
         for tab in &self.tabs {
             let editor = tab.editor.read(cx);
@@ -6424,7 +6463,7 @@ impl Workspace {
                 breakpoints.push((path.to_path_buf(), editor.breakpoint_list()));
             }
         }
-        self.debugger.update(cx, |d, cx| d.start(program, cwd, args, breakpoints, init_commands, cx));
+        self.debugger.update(cx, |d, cx| d.start(run, breakpoints, init_commands, cx));
     }
 
     fn debugger_event(&mut self, event: &crate::debugger::DebuggerEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -10070,7 +10109,8 @@ mod tests {
         let at = crate::editor::Breakpoint { line: 9, condition: None };
         let args = vec!["tests::doubles".into(), "--exact".into(), "--nocapture".into(), "--test-threads=1".into()];
         debugger.update(cx, |d, cx| {
-            d.start(program, dir.clone(), args, vec![(dir.join("src/lib.rs"), vec![at])], Vec::new(), cx)
+            let run = crate::debugger::Run { args, ..crate::debugger::Run::new(program, dir.clone()) };
+            d.start(run, vec![(dir.join("src/lib.rs"), vec![at])], Vec::new(), cx)
         });
         let mut stopped = None;
         for _ in 0..600 {

@@ -73,7 +73,7 @@ fn quoted(word: &str) -> String {
 /// a variable of the environment; each value put in by `put` (quoted for the shell, or as
 /// it is). None when it uses one Null can't fill (`${input:…}`, or a file when none is
 /// open).
-fn filled(text: &str, root: &Path, file: Option<&Path>, put: fn(&str) -> String) -> Option<String> {
+pub(crate) fn filled(text: &str, root: &Path, file: Option<&Path>, put: fn(&str) -> String) -> Option<String> {
     let mut out = String::new();
     let mut rest = text;
     while let Some(at) = rest.find("${") {
