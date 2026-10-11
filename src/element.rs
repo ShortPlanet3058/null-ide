@@ -793,7 +793,7 @@ impl Element for EditorElement {
                 p.x >= bounds.left() && p.x < text_bounds.left() && p.y >= bounds.top() && p.y < bounds.bottom()
             });
             let foldable: std::collections::HashSet<usize> =
-                if over_gutter { editor.foldable().iter().map(|r| r.start).collect() } else { Default::default() };
+                if over_gutter { editor.fold_starts_for_gutter() } else { Default::default() };
 
             // Errors and warnings get a wavy underline and color their line number.
             // Hints and notes only show in the hover card, to keep the code calm; code the
