@@ -4611,6 +4611,8 @@ impl Workspace {
                 (Go, "Find References".into(), Box::new(crate::editor::FindReferences)),
                 (Go, "Show Callers".into(), Box::new(crate::editor::ShowCallers)),
                 (Go, "Show Callees (What This Calls)".into(), Box::new(crate::editor::ShowCallees)),
+                (Go, "Show Supertypes (What This Type Extends)".into(), Box::new(crate::editor::ShowSupertypes)),
+                (Go, "Show Subtypes (Types Extending This)".into(), Box::new(crate::editor::ShowSubtypes)),
                 (Go, "Go to Implementation".into(), Box::new(crate::editor::GoToImplementation)),
                 (Go, "Go to Type Definition".into(), Box::new(crate::editor::GoToTypeDefinition)),
                 (Go, "Show Problems".into(), Box::new(ShowProblems)),

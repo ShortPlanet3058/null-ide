@@ -190,6 +190,8 @@ actions!(
         GoToImplementation,
         ShowCallers,
         ShowCallees,
+        ShowSupertypes,
+        ShowSubtypes,
         SkipOccurrence,
         ShowInfo,
         ShowCompletions,
@@ -4536,6 +4538,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::use_selection_for_find))
             .on_action(cx.listener(Self::show_callers))
             .on_action(cx.listener(Self::show_callees))
+            .on_action(cx.listener(|this, _: &ShowSupertypes, _, cx| this.show_types_around(true, cx)))
+            .on_action(cx.listener(|this, _: &ShowSubtypes, _, cx| this.show_types_around(false, cx)))
             .on_action(cx.listener(Self::join_lines))
             .on_action(cx.listener(Self::rewrap))
             .on_action(cx.listener(Self::delete_to_line_end))
