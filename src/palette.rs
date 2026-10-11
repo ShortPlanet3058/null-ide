@@ -11,10 +11,11 @@ use crate::settings::Settings;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{Theme, ThemeName};
 use crate::ui;
+use crate::ui::px;
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     HighlightStyle, KeyBinding, KeyContext, MouseMoveEvent, ScrollHandle, SharedString, StyledText, Subscription,
-    Window, actions, div, prelude::*, px, relative,
+    Window, actions, div, prelude::*, relative,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -525,7 +526,7 @@ impl Palette {
         {
             self.selected = 1;
         }
-        self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        self.scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
         self.preview(cx);
         cx.notify();
     }
@@ -1313,7 +1314,7 @@ impl Palette {
                 // or a twitch of the trackpad.
                 let anchor = *this.pointer_anchor.get_or_insert(event.position);
                 let moved = (event.position.x - anchor.x).abs() + (event.position.y - anchor.y).abs();
-                if moved > px(4.) && this.selected != ix {
+                if moved > gpui::px(4.) && this.selected != ix {
                     this.selected = ix;
                     cx.notify();
                 }

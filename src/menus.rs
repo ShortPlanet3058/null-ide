@@ -237,7 +237,11 @@ pub fn set(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Bigger Text", IncreaseFontSize),
                 MenuItem::action("Smaller Text", DecreaseFontSize),
-                MenuItem::action("Actual Size", ResetFontSize),
+                MenuItem::action("Actual Text Size", ResetFontSize),
+                MenuItem::separator(),
+                MenuItem::action("Bigger Interface", crate::workspace::ZoomIn),
+                MenuItem::action("Smaller Interface", crate::workspace::ZoomOut),
+                MenuItem::action("Actual Interface Size", crate::workspace::ResetZoom),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu {
                     name: "Theme".into(),

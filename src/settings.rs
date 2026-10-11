@@ -7,6 +7,10 @@ use std::path::PathBuf;
 pub const DEFAULT_FONT_SIZE: f32 = 14.;
 pub const MIN_FONT_SIZE: f32 = 9.;
 pub const MAX_FONT_SIZE: f32 = 32.;
+/// How small and big the interface goes, and by how much a step.
+pub const MIN_ZOOM: f32 = 0.7;
+pub const MAX_ZOOM: f32 = 2.;
+pub const ZOOM_STEP: f32 = 0.1;
 
 /// What a language may set for itself, and that a toggle flips for it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -404,6 +408,9 @@ pub struct Settings {
     /// Font family for menus, tabs and the palette. Instrument Sans ships with Null.
     pub ui_font: String,
     pub font_size: f32,
+    /// How big the interface is (menus, tabs, panels; not the text being written): 1 is
+    /// 100%, from 0.7 to 2.
+    pub ui_zoom: f32,
     /// Room between lines of code.
     pub line_spacing: LineSpacing,
     /// Where the line numbers show.
@@ -508,6 +515,7 @@ impl Default for Settings {
             code_font: DEFAULT_CODE_FONT.into(),
             ui_font: DEFAULT_UI_FONT.into(),
             font_size: DEFAULT_FONT_SIZE,
+            ui_zoom: 1.,
             line_spacing: LineSpacing::Normal,
             line_numbers: LineNumbers::Shown,
             whitespace: ShowWhitespace::Selection,

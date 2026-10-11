@@ -4,7 +4,37 @@
 //! Colour rule: `faint` is for decoration only; any text meant to be read uses `muted`.
 
 use crate::theme::{Syntax, Theme, ThemeName};
-use gpui::{AnyElement, AppContext as _, Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px};
+use gpui::{AnyElement, AppContext as _, Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div};
+
+/// The size of the interface's lengths (a rem) at 100%: View > Zoom changes the window's.
+pub const BASE_REM: f32 = 16.;
+
+/// How big the interface is now (1: 100%).
+pub fn zoom(cx: &gpui::App) -> f32 {
+    use crate::settings::{MAX_ZOOM, MIN_ZOOM, Settings};
+    cx.try_global::<Settings>().map_or(1., |s| s.ui_zoom).clamp(MIN_ZOOM, MAX_ZOOM)
+}
+
+/// `points` at 100%, in real pixels at the interface's zoom: for sizes worked out beside the
+/// window's own (a panel's width taken from the window's).
+pub fn zoomed(points: f32, cx: &gpui::App) -> f32 {
+    points * zoom(cx)
+}
+
+/// Sizes the window's interface lengths (`px` below) for the zoom: each window, as it draws.
+pub fn apply_zoom(window: &mut gpui::Window, cx: &gpui::App) {
+    let rem = gpui::px(BASE_REM * zoom(cx));
+    if window.rem_size() != rem {
+        window.set_rem_size(rem);
+    }
+}
+
+/// A length of the interface, as it is at 100%: it grows and shrinks with the interface's
+/// zoom (the window's rem size). The text being written (editor, terminal) has its own
+/// size, in real pixels (`gpui::px`).
+pub fn px(points: f32) -> gpui::Rems {
+    gpui::rems(points / BASE_REM)
+}
 
 // Corner radii: a row inside a panel is rounded by the panel's radius minus its padding.
 /// Key caps, tiny buttons.

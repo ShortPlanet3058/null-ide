@@ -16,11 +16,12 @@ use crate::settings_panel::{Section, SettingsPanel, SettingsPanelEvent, Shortcut
 use crate::terminal::{Shell, TerminalEvent, TerminalView};
 use crate::theme::{Theme, ThemeName};
 use crate::ui;
+use crate::ui::px;
 use crate::welcome::{Welcome, WelcomeEvent};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable, KeyBinding,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, ScrollStrategy,
-    SharedString, Subscription, Task, UniformListScrollHandle, Window, WindowControlArea, actions, div, prelude::*, px,
+    SharedString, Subscription, Task, UniformListScrollHandle, Window, WindowControlArea, actions, div, prelude::*,
     relative, svg, uniform_list,
 };
 use std::collections::HashSet;
@@ -132,6 +133,9 @@ actions!(
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
         CompactLineSpacing,
         NormalLineSpacing,
         RelaxedLineSpacing,
@@ -251,6 +255,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-+", IncreaseFontSize, ctx),
         KeyBinding::new("secondary--", DecreaseFontSize, ctx),
         KeyBinding::new("secondary-0", ResetFontSize, ctx),
+        KeyBinding::new("alt-secondary-=", ZoomIn, ctx),
+        KeyBinding::new("alt-secondary-+", ZoomIn, ctx),
+        KeyBinding::new("alt-secondary--", ZoomOut, ctx),
+        KeyBinding::new("alt-secondary-0", ResetZoom, ctx),
         KeyBinding::new("secondary-1", GoToTab(1), ctx),
         KeyBinding::new("secondary-2", GoToTab(2), ctx),
         KeyBinding::new("secondary-3", GoToTab(3), ctx),
@@ -4421,7 +4429,10 @@ impl Workspace {
             (Appearance, "Normal Line Spacing".into(), Box::new(NormalLineSpacing)),
             (Appearance, "Relaxed Line Spacing".into(), Box::new(RelaxedLineSpacing)),
             (Appearance, "Smaller Text".into(), Box::new(DecreaseFontSize)),
-            (Appearance, "Actual Size".into(), Box::new(ResetFontSize)),
+            (Appearance, "Actual Text Size".into(), Box::new(ResetFontSize)),
+            (Appearance, "Bigger Interface".into(), Box::new(ZoomIn)),
+            (Appearance, "Smaller Interface".into(), Box::new(ZoomOut)),
+            (Appearance, "Actual Interface Size".into(), Box::new(ResetZoom)),
             (
                 Edit,
                 toggle(settings.autocomplete_for(language), "Turn Off Autocomplete", "Turn On Autocomplete"),
@@ -4998,7 +5009,7 @@ impl Workspace {
         }
         for tab in &self.tabs {
             tab.editor.update(cx, |editor, cx| {
-                editor.set_text_size(px(settings.font_size), settings.line_spacing.factor(), cx);
+                editor.set_text_size(gpui::px(settings.font_size), settings.line_spacing.factor(), cx);
                 // Wrapping on or off moves everything: keep the caret in view.
                 editor.autoscroll = true;
                 cx.notify();
@@ -7085,7 +7096,7 @@ impl Workspace {
         Some(
             div()
                 .flex_none()
-                .h(px(TERMINAL_HEIGHT * 0.8))
+                .h(gpui::px(TERMINAL_HEIGHT * 0.8))
                 .flex()
                 .flex_col()
                 .border_t_1()
@@ -7715,7 +7726,7 @@ impl Workspace {
         Some(
             div()
                 .flex_none()
-                .h(px(height))
+                .h(gpui::px(height))
                 .overflow_hidden()
                 .border_t_1()
                 .border_color(theme.hairline)
@@ -7739,7 +7750,7 @@ impl Workspace {
                             }
                         })),
                 )
-                .child(div().h(px(full)).flex().flex_col().child(header).child(match self.shown_pair() {
+                .child(div().h(gpui::px(full)).flex().flex_col().child(header).child(match self.shown_pair() {
                     // Two side by side, a click in one making it the current.
                     Some((left, right)) => {
                         let pane = |terminal: Entity<TerminalView>| {
@@ -7774,6 +7785,17 @@ impl Workspace {
     fn toggle_autocomplete(&mut self, _: &ToggleAutocomplete, _: &mut Window, cx: &mut Context<Self>) {
         let language = self.active_language(cx);
         settings::update(cx, |s| s.flip(settings::PerLanguage::Autocomplete, language));
+    }
+
+    /// ⌥⌘+ / ⌥⌘−: the interface a step bigger or smaller (the text being written keeps its
+    /// size: ⌘+ / ⌘− for that); ⌥⌘0 back to 100%.
+    fn zoom_by(&mut self, steps: f32, cx: &mut Context<Self>) {
+        use settings::{MAX_ZOOM, MIN_ZOOM, ZOOM_STEP};
+        let now = ui::zoom(cx);
+        let next = if steps == 0. { 1. } else { ((now + steps * ZOOM_STEP) * 10.).round() / 10. };
+        let next = next.clamp(MIN_ZOOM, MAX_ZOOM);
+        settings::update(cx, |s| s.ui_zoom = next);
+        self.show_notice(format!("Interface at {:.0}%", next * 100.), cx);
     }
 
     fn increase_font_size(&mut self, _: &IncreaseFontSize, _: &mut Window, cx: &mut Context<Self>) {
@@ -8762,7 +8784,7 @@ impl Workspace {
         });
         Some(
             gpui::deferred(
-                gpui::anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(
+                gpui::anchored().position(menu.position).snap_to_window_with_margin(gpui::px(8.)).child(
                     div()
                         .occlude()
                         .min_w(px(220.))
@@ -8814,7 +8836,7 @@ impl Workspace {
         });
         Some(
             gpui::deferred(
-                gpui::anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(
+                gpui::anchored().position(menu.position).snap_to_window_with_margin(gpui::px(8.)).child(
                     div()
                         .occlude()
                         .min_w(px(220.))
@@ -9179,6 +9201,7 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ui::apply_zoom(window, cx);
         self.show_test_marks(cx);
         // The files open in tabs, for a search of those only.
         let open: Vec<PathBuf> =
@@ -9194,7 +9217,8 @@ impl Render for Workspace {
             window.request_animation_frame();
         }
         let opacity = DIMMED + (1. - DIMMED) * chrome;
-        let full_width = SIDEBAR_WIDTH + (SEARCH_SIDEBAR_WIDTH - SIDEBAR_WIDTH) * searching;
+        // (In real pixels at the zoom: worked out beside the window's width.)
+        let full_width = ui::zoomed(SIDEBAR_WIDTH + (SEARCH_SIDEBAR_WIDTH - SIDEBAR_WIDTH) * searching, cx);
         // Focus mode hides the sidebar without changing the setting.
         let sidebar_width = if self.focus_mode { 0. } else { full_width * sidebar };
         let switch = self.render_sidebar_switch(cx);
@@ -9359,7 +9383,7 @@ impl Render for Workspace {
                 .size_full()
                 .flex()
                 .justify_center()
-                .child(div().h_full().w_full().max_w(px(column)).pt(px(24.)).child(pane(self, side, cx)))
+                .child(div().h_full().w_full().max_w(gpui::px(column)).pt(px(24.)).child(pane(self, side, cx)))
         } else if let Some(tabs_below) = tabs_below {
             // One above the other: the lower side's tabs in a row over it.
             let top = div().h(relative(self.split_ratio)).w_full().flex_none().child(pane(self, 0, cx));
@@ -9539,7 +9563,8 @@ impl Render for Workspace {
             .flex_none()
             .flex()
             .items_center()
-            .pl(px(TITLEBAR_INSET))
+            // (The window's own buttons: the system's size, not the interface's.)
+            .pl(gpui::px(TITLEBAR_INSET))
             .pr(px(12.))
             .border_b_1()
             .border_color(theme.hairline)
@@ -9551,7 +9576,7 @@ impl Render for Workspace {
                 Some(right) => {
                     let main = f32::from(window.viewport_size().width) - sidebar_width;
                     let left_width = (sidebar_width + main * self.split_ratio - TITLEBAR_INSET).max(80.);
-                    bar.child(div().flex_none().w(px(left_width)).pr(px(8.)).child(tabs_left))
+                    bar.child(div().flex_none().w(gpui::px(left_width)).pr(px(8.)).child(tabs_left))
                         .child(div().flex_1().min_w_0().pl(px(8.)).child(right))
                 }
                 None => bar.child(tabs_left),
@@ -9559,13 +9584,13 @@ impl Render for Workspace {
 
         let sidebar_panel = div()
             .flex_none()
-            .w(px(sidebar_width))
+            .w(gpui::px(sidebar_width))
             .h_full()
             .overflow_hidden()
             .bg(theme.surface)
             .when(sidebar_width > 0.5, |panel| panel.border_r_1().border_color(theme.hairline))
             .opacity(opacity)
-            .child(div().w(px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
+            .child(div().w(gpui::px(full_width)).h_full().flex().flex_col().child(switch).child(sidebar_content));
 
         let mut items = status_items.into_iter().map(|item| spaced(&item));
         // (Text, with lines to go to: not a picture, not a preview.)
@@ -10173,6 +10198,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1., cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(-1., cx)))
+            .on_action(cx.listener(|this, _: &ResetZoom, _, cx| this.zoom_by(0., cx)))
             .on_action(
                 cx.listener(|_, _: &UseNullTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Null))),
             )
@@ -12245,6 +12273,48 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// ⌥⌘+ / ⌥⌘− / ⌥⌘0: the interface bigger, smaller, back to 100%, within its bounds;
+    /// the text being written keeps its size.
+    #[gpui::test]
+    fn the_interface_zooms(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("zoom");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.txt"), window, cx);
+            window.focus(&w.focus_handle(cx));
+        });
+        cx.run_until_parked();
+        let state = |cx: &mut gpui::VisualTestContext| {
+            let rem = cx.update(|window, _| window.rem_size());
+            let line = workspace.read_with(cx, |w, cx| w.active_editor().unwrap().read(cx).line_height());
+            (rem, line)
+        };
+        let (rem, line) = state(cx);
+        assert_eq!(rem, gpui::px(16.));
+        cx.simulate_keystrokes("alt-cmd-= alt-cmd-=");
+        cx.run_until_parked();
+        assert_eq!(state(cx), (gpui::px(16. * 1.2), line), "the interface, not the text");
+        cx.simulate_keystrokes("alt-cmd-0");
+        cx.run_until_parked();
+        assert_eq!(state(cx).0, gpui::px(16.));
+        for _ in 0..10 {
+            cx.simulate_keystrokes("alt-cmd--");
+        }
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| cx.global::<Settings>().ui_zoom), crate::settings::MIN_ZOOM);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Line spacing from the settings reaches the open files.
     #[gpui::test]
     fn line_spacing_applies_to_open_files(cx: &mut gpui::TestAppContext) {
@@ -12263,10 +12333,10 @@ mod tests {
         let height = |cx: &mut gpui::VisualTestContext| {
             workspace.read_with(cx, |w, cx| w.active_editor().unwrap().read(cx).line_height())
         };
-        assert_eq!(height(cx), px(24.));
+        assert_eq!(height(cx), gpui::px(24.));
         cx.update(|_, cx| settings::update(cx, |s| s.line_spacing = crate::settings::LineSpacing::Relaxed));
         cx.run_until_parked();
-        assert_eq!(height(cx), px(28.));
+        assert_eq!(height(cx), gpui::px(28.));
         // From ⌘K: "spacing", then → for the next one (round to Compact after Relaxed).
         cx.update(|_, cx| crate::keymap::register(crate::keymap::Keymap::Null, cx));
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
@@ -12282,7 +12352,7 @@ mod tests {
         cx.simulate_keystrokes("right");
         cx.run_until_parked();
         assert_eq!(spacing(cx), crate::settings::LineSpacing::Normal);
-        assert_eq!(height(cx), px(24.));
+        assert_eq!(height(cx), gpui::px(24.));
         std::fs::remove_dir_all(&dir).ok();
     }
 

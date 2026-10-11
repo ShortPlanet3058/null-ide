@@ -4,9 +4,8 @@ use crate::ai::{self, ProviderId};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui;
-use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, Window, actions, div, prelude::*, px,
-};
+use crate::ui::px;
+use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, Window, actions, div, prelude::*};
 
 actions!(key_prompt, [SaveKey, CancelKey]);
 
