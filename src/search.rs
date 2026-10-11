@@ -4,7 +4,8 @@ use std::ops::Range;
 /// More matches than this aren't highlighted; the count shows "10000+".
 pub const MAX_MATCHES: usize = 10_000;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SearchQuery {
     pub text: String,
     pub case_sensitive: bool,

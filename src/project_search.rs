@@ -129,6 +129,9 @@ pub struct ProjectSearch {
     /// Results taken off the list (a file's line, or the whole file), for this query: they
     /// stay off when it runs again (after replacing).
     dismissed: (SearchQuery, std::collections::HashSet<(PathBuf, Option<usize>)>),
+    /// Searches used lately (a result opened, or replaced), most recent first: shown while
+    /// the field is empty, to search again.
+    pub history: Vec<SearchQuery>,
     _subscription: Subscription,
     _replace_subscription: Subscription,
     _files_subscription: Subscription,
@@ -164,6 +167,7 @@ impl ProjectSearch {
             files_input,
             show_replace: false,
             dismissed: Default::default(),
+            history: Vec::new(),
             compiled: None,
             _subscription: subscription,
             _replace_subscription: replace_subscription,
@@ -197,6 +201,18 @@ impl ProjectSearch {
         self.search(cx);
     }
 
+    /// The search now, used (a result opened, or replaced): first among the recent ones.
+    fn remember(&mut self) {
+        const KEPT: usize = 10;
+        let query = self.query.clone();
+        if query.text.trim().is_empty() {
+            return;
+        }
+        self.history.retain(|q| q != &query);
+        self.history.insert(0, query);
+        self.history.truncate(KEPT);
+    }
+
     fn replacement(&self, cx: &App) -> String {
         self.replace_input.read(cx).text().to_string()
     }
@@ -207,6 +223,7 @@ impl ProjectSearch {
             return;
         }
         let targets = self.results.iter().flat_map(replace_targets).collect();
+        self.remember();
         cx.emit(ProjectSearchEvent::Replace { query: self.query.clone(), replacement: self.replacement(cx), targets });
     }
 
@@ -228,6 +245,7 @@ impl ProjectSearch {
     /// The button on a file's row: its matches, in that file only.
     fn replace_file(&mut self, file: usize, cx: &mut Context<Self>) {
         let targets = replace_targets(&self.results[file]);
+        self.remember();
         cx.emit(ProjectSearchEvent::Replace { query: self.query.clone(), replacement: self.replacement(cx), targets });
     }
 
@@ -268,6 +286,7 @@ impl ProjectSearch {
     }
 
     fn replace_line(&mut self, file: usize, line_match: usize, cx: &mut Context<Self>) {
+        self.remember();
         let file = &self.results[file];
         let line = file.matches[line_match].line;
         cx.emit(ProjectSearchEvent::Replace {
@@ -431,7 +450,47 @@ impl ProjectSearch {
         cx.notify();
     }
 
+    /// The searches used lately, while the field is empty: a click searches again.
+    fn render_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.global::<Theme>().clone();
+        let rows =
+            self.history.iter().enumerate().map(|(ix, query)| {
+                let query = query.clone();
+                // What it searched with, after it: Aa, W, .*
+                let how: Vec<&str> = [(query.case_sensitive, "Aa"), (query.whole_word, "W"), (query.regex, ".*")]
+                    .into_iter()
+                    .filter_map(|(on, mark)| on.then_some(mark))
+                    .collect();
+                div()
+                    .id(("search-history", ix))
+                    .mx(px(6.))
+                    .h(px(ui::ROW))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(ui::R_ROW))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.hairline))
+                    .text_size(px(ui::T_MD))
+                    .text_color(theme.muted)
+                    .child(div().min_w_0().truncate().code_font(cx).child(query.text.clone()))
+                    .children((!how.is_empty()).then(|| {
+                        div().flex_none().text_size(px(ui::T_SM)).text_color(theme.faint).child(how.join(" "))
+                    }))
+                    .on_click(
+                        cx.listener(move |this, _: &ClickEvent, window, cx| this.search_for(query.clone(), window, cx)),
+                    )
+            });
+        div()
+            .flex()
+            .flex_col()
+            .child(div().px(px(16.)).pb(px(4.)).text_size(px(ui::T_SM)).text_color(theme.faint).child("Recent"))
+            .children(rows)
+    }
+
     fn open(&mut self, file: usize, line_match: usize, keep_focus: bool, cx: &mut Context<Self>) {
+        self.remember();
         let file = &self.results[file];
         let m = &file.matches[line_match];
         cx.emit(ProjectSearchEvent::Open {
@@ -1033,6 +1092,9 @@ impl Render for ProjectSearch {
                     .text_color(if invalid { theme.error } else { theme.muted })
                     .child(status),
             )
+            .when(self.input.read(cx).text().is_empty() && !self.history.is_empty(), |panel| {
+                panel.child(self.render_history(cx))
+            })
             .child(
                 uniform_list(
                     "project-search-results",
@@ -1129,6 +1191,41 @@ mod tests {
 
     /// A match taken off the list isn't replaced: its file goes line by line; a file taken
     /// off goes whole.
+    /// A search used (a result opened) is remembered first, once, with how it searched;
+    /// ten at most. A recent one clicked searches again, its choices too.
+    #[gpui::test]
+    fn searches_used_are_remembered(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (search, cx) = cx.add_window_view(|_, cx| ProjectSearch::new(PathBuf::from("/p"), cx));
+        let m = LineMatch { line: 1, columns: 0..1, preview: "x".into(), highlights: vec![] };
+        let file = FileResult { path: PathBuf::from("a"), relative: "a".into(), matches: vec![m], dismissed: false };
+        let query = |text: &str, regex: bool| SearchQuery { text: text.into(), regex, ..Default::default() };
+        search.update(cx, |s, cx| {
+            s.set_results(vec![file], Status::Idle, cx);
+            for (text, regex) in [("old", false), ("fn \\w+", true), ("old", false)] {
+                s.query = query(text, regex);
+                s.open(0, 0, false, cx);
+            }
+            assert_eq!(s.history, [query("old", false), query("fn \\w+", true)]);
+            for i in 0..20 {
+                s.query = query(&format!("q{i}"), false);
+                s.remember();
+            }
+            assert_eq!(s.history.len(), 10);
+            assert_eq!(s.history[0].text, "q19");
+            s.history = vec![query("fn \\w+", true)];
+        });
+        search.update_in(cx, |s, window, cx| s.search_for(s.history[0].clone(), window, cx));
+        search.read_with(cx, |s, cx| {
+            assert_eq!(s.input.read(cx).text(), "fn \\w+");
+            assert!(s.regex);
+        });
+    }
+
     #[gpui::test]
     fn results_taken_off_the_list(cx: &mut gpui::TestAppContext) {
         let search = cx.new(|cx| ProjectSearch::new(PathBuf::from("/p"), cx));

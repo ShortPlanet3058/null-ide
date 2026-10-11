@@ -1207,6 +1207,7 @@ impl Workspace {
             tabs,
             expanded: self.tree.read(cx).expanded_folders(),
             recent_files: self.recent_files.iter().take(20).cloned().collect(),
+            searches: self.project_search.read(cx).history.clone(),
             terminal_open: self.terminal_open.on,
             window: self.window_state,
         }
@@ -1281,6 +1282,8 @@ impl Workspace {
         if let Some(active) = session.active.and_then(|i| session.tabs.get(i)) {
             self.open_file(active.path.clone(), window, cx);
         }
+        let searches = session.searches.clone();
+        self.project_search.update(cx, |search, _| search.history = searches);
         // Opening the tabs moved each to the front of the recent files: put the saved order back.
         for path in session.recent_files.iter().rev() {
             self.recent_files.retain(|p| p != path);

@@ -23,6 +23,8 @@ pub struct Session {
     pub expanded: Vec<PathBuf>,
     /// Files opened lately, most recent first, for ⌘P.
     pub recent_files: Vec<PathBuf>,
+    /// Searches in the project lately, most recent first.
+    pub searches: Vec<crate::search::SearchQuery>,
     pub terminal_open: bool,
     pub window: Option<WindowState>,
 }
