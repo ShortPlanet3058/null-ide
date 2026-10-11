@@ -585,7 +585,9 @@ pub struct Editor {
     markdown: Option<(u64, Rc<Vec<(usize, crate::markdown_view::Block)>>)>,
     /// The source line the preview last scrolled to, following the other side.
     followed_line: Option<usize>,
-    reading_scroll: gpui::ScrollHandle,
+    /// The preview was scrolled by hand: its source beside it follows (once).
+    preview_scrolled: bool,
+    pub(crate) reading_scroll: gpui::ScrollHandle,
     /// The merge conflicts in the text, and the revision they were found at.
     conflicts: std::cell::RefCell<(u64, std::rc::Rc<[Conflict]>)>,
     /// The buffer revision and byte range `spans` cover.
@@ -880,6 +882,7 @@ impl Editor {
             svg_task: None,
             markdown: None,
             followed_line: None,
+            preview_scrolled: false,
             reading_scroll: gpui::ScrollHandle::new(),
             conflicts: std::cell::RefCell::new((u64::MAX, std::rc::Rc::from([]))),
             problems_cache: Default::default(),
@@ -4637,6 +4640,28 @@ impl Editor {
         cx.notify();
     }
 
+    /// In the preview, scrolled by hand since last asked: the source line of the block at
+    /// its top (taken as followed already, so the source following it back stays put).
+    pub fn take_preview_scroll(&mut self) -> Option<usize> {
+        if !std::mem::take(&mut self.preview_scrolled) || !self.reading {
+            return None;
+        }
+        let (_, blocks) = self.markdown.as_ref()?;
+        let line =
+            if self.reading_scroll.offset().y >= px(0.) { 0 } else { blocks.get(self.reading_scroll.top_item())?.0 };
+        self.followed_line = Some(line);
+        Some(line)
+    }
+
+    /// Scrolls so `line` is the first one on screen (a preview beside it was scrolled).
+    pub fn show_line_at_top(&mut self, line: usize, cx: &mut Context<Self>) {
+        if self.top_line() == line {
+            return;
+        }
+        self.scroll.target_y = self.wrap.first_row(line) as f32 * f32::from(self.line_height());
+        cx.notify();
+    }
+
     /// In the preview: to the heading whose anchor is `anchor` (a `#section` link).
     fn scroll_preview_to(&mut self, anchor: &str, cx: &mut Context<Self>) {
         let Some((_, blocks)) = &self.markdown else { return };
@@ -4817,6 +4842,11 @@ impl Editor {
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.reading_scroll)
+                    .debug_selector(|| "markdown-preview".into())
+                    .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+                        this.preview_scrolled = true;
+                        cx.notify();
+                    }))
                     .flex()
                     .flex_col()
                     .gap(px(14.))

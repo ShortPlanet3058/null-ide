@@ -146,6 +146,9 @@ actions!(
         ReplaceInProject,
         ShowFiles,
         ShowOutline,
+        ImportVsCodeSettings,
+        GoToOutlineMatch,
+        ClearOutlineFilter,
         ShowTests,
         ToggleAutocomplete,
         ToggleTerminal,
@@ -210,6 +213,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-f11", StepOut, ctx),
         KeyBinding::new("enter", AddWatch, Some("DebugWatch")),
         KeyBinding::new("enter", EvaluateInDebugger, Some("DebugConsole")),
+        KeyBinding::new("enter", GoToOutlineMatch, Some("OutlineFilter")),
+        KeyBinding::new("escape", ClearOutlineFilter, Some("OutlineFilter")),
         KeyBinding::new("enter", ConfirmTerminalName, Some("TerminalName")),
         KeyBinding::new("escape", CancelTerminalName, Some("TerminalName")),
         KeyBinding::new("f8", NextProblem, ctx),
@@ -383,7 +388,9 @@ fn built_program(messages: &str, expected: Option<&Path>) -> Option<PathBuf> {
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter(|m| m["reason"] == "compiler-artifact")
-        .filter(|m| m["target"]["kind"].as_array().is_some_and(|kinds| kinds.iter().any(|k| k == "bin")))
+        .filter(|m| {
+            m["target"]["kind"].as_array().is_some_and(|kinds| kinds.iter().any(|k| k == "bin" || k == "example"))
+        })
         .filter_map(|m| m["executable"].as_str().map(PathBuf::from))
         .collect();
     let wanted = expected.and_then(Path::file_name);
@@ -391,31 +398,70 @@ fn built_program(messages: &str, expected: Option<&Path>) -> Option<PathBuf> {
     programs.iter().find(|p| p.file_name() == wanted).or(only).cloned()
 }
 
-/// The test programs in cargo's messages (`cargo test --no-run`).
-fn test_programs(messages: &str) -> Vec<PathBuf> {
+/// The test programs in cargo's messages (`cargo test --no-run`); with `of_src`, only the
+/// library's and programs' own (a test in `src/` is in one of those, not in `tests/`,
+/// `benches/` or an example, which may not even list their tests: `harness = false`).
+fn test_programs(messages: &str, of_src: bool) -> Vec<PathBuf> {
+    let elsewhere = |m: &serde_json::Value| {
+        m["target"]["kind"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|k| k == "test" || k == "bench" || k == "example"))
+    };
     messages
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter(|m| m["reason"] == "compiler-artifact" && m["profile"]["test"] == true)
+        .filter(|m| !of_src || !elsewhere(m))
         .filter_map(|m| m["executable"].as_str().map(PathBuf::from))
         .collect()
 }
 
-/// Of the test `programs`, the one that has test `id` (each is asked for its list).
+/// Of the test `programs`, the one that has test `id` (each is asked for its list, and
+/// given 10 seconds to answer).
 fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathBuf> {
     if programs.len() == 1 {
         return programs.first().cloned();
     }
-    programs
-        .iter()
-        .find(|program| {
-            std::process::Command::new(program)
-                .args(["--list", "--exact", id])
-                .current_dir(cwd)
-                .output()
-                .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().any(|l| l == format!("{id}: test")))
-        })
-        .cloned()
+    programs.iter().find(|program| lists_test(program, id, cwd)).cloned()
+}
+
+fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
+    use std::io::Read;
+    use std::process::Stdio;
+    let Ok(mut child) = std::process::Command::new(program)
+        .args(["--list", "--exact", id])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    // Read as it comes (a long list would fill the pipe and wait).
+    let mut out = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(out) = out.as_mut() {
+            out.read_to_string(&mut text).ok();
+        }
+        text
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            _ => {
+                child.kill().ok();
+                child.wait().ok();
+                return false;
+            }
+        }
+    }
+    reader.join().unwrap_or_default().lines().any(|l| l == format!("{id}: test"))
 }
 
 fn cargo_program(root: &Path) -> Option<PathBuf> {
@@ -640,6 +686,8 @@ pub struct Workspace {
     outline_scroll: UniformListScrollHandle,
     /// The item the caret was in when last drawn: the list follows it to another.
     outline_followed: Option<(gpui::EntityId, usize)>,
+    /// The Outline view's filter line.
+    outline_filter: Entity<crate::text_input::TextInput>,
     tabs: Vec<Tab>,
     /// The tab with the keyboard: the one shown on the side being worked in.
     active: Option<usize>,
@@ -740,6 +788,11 @@ pub struct Workspace {
     debug_program: Option<PathBuf>,
     /// The test debugged last (⌥⇧⌘T): what Debug Again runs, until F5 debugs the program.
     debugged_test: Option<crate::test_at::RustTest>,
+    /// In tests: the VS Code settings file there is (never yours).
+    #[cfg(test)]
+    vs_code_settings_file: Option<(&'static str, PathBuf)>,
+    /// Counts the builds started for debugging: only the latest one's program is run.
+    debug_builds: u64,
     /// The projects for the list about to open.
     pending_projects: Vec<PathBuf>,
     /// The tasks for the list about to open.
@@ -935,6 +988,7 @@ impl Workspace {
             outline_later: None,
             outline_scroll: UniformListScrollHandle::new(),
             outline_followed: None,
+            outline_filter: cx.new(|cx| crate::text_input::TextInput::new("Filter", cx)),
             tabs: Vec::new(),
             shown: [None, None],
             split_ratio: 0.5,
@@ -1003,6 +1057,9 @@ impl Workspace {
             reported_by: String::new(),
             debug_program: None,
             debugged_test: None,
+            debug_builds: 0,
+            #[cfg(test)]
+            vs_code_settings_file: None,
             focus_mode: false,
             tab_menu: None,
             text_menu: None,
@@ -1032,6 +1089,9 @@ impl Workspace {
             async {}
         })
         .detach();
+        // Typed in the Outline's filter: the list shows what fits.
+        let filter_changes = cx.observe(&workspace.outline_filter, |_, _, cx| cx.notify());
+        workspace._subscriptions.push(filter_changes);
         workspace._subscriptions.push(debugger_events);
         workspace._subscriptions.push(debugger_changes);
         // A key while a tab's or the text's menu is open: it closes, as menus do, and does
@@ -2783,10 +2843,20 @@ impl Workspace {
     }
 
     /// A Markdown preview beside its source follows it: the block at the source's top
-    /// is at the preview's.
+    /// is at the preview's. Scrolled by hand, the preview leads: the source follows it.
     fn sync_preview(&mut self, source: &Entity<Editor>, cx: &mut Context<Self>) {
         // (A Markdown file's lines are its preview's; a notebook's JSON lines aren't.)
-        if source.read(cx).reading || !source.read(cx).is_markdown() {
+        if !source.read(cx).is_markdown() {
+            return;
+        }
+        if source.read(cx).reading {
+            let preview = source;
+            let Some(line) = preview.update(cx, |p, _| p.take_preview_scroll()) else { return };
+            for twin in self.twins_of(preview, cx) {
+                if !twin.read(cx).reading {
+                    twin.update(cx, |source, cx| source.show_line_at_top(line, cx));
+                }
+            }
             return;
         }
         let line = source.read(cx).top_line();
@@ -3298,6 +3368,9 @@ impl Workspace {
         self.tests = None;
         self.tests_task = None;
         self.results_waiting.clear();
+        // What was debugged there isn't Debug Again here.
+        self.debugged_test = None;
+        self.debug_program = None;
         self.test_status.clear();
         self.tests_running = None;
         self.refresh_git(cx);
@@ -4331,6 +4404,7 @@ impl Workspace {
                 Box::new(ToggleAutocomplete),
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
+            (App, "Import Settings from VS Code…".into(), Box::new(ImportVsCodeSettings)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
@@ -5368,6 +5442,69 @@ impl Workspace {
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
+        // Typing then narrows it (Esc goes back to the text).
+        window.focus(&self.outline_filter.focus_handle(cx));
+        cx.notify();
+    }
+
+    /// Your settings from VS Code (the one used last, of VS Code, Insiders, VSCodium and
+    /// Cursor): what Null has too, said first, brought over when you say so.
+    fn import_vs_code_settings(&mut self, _: &ImportVsCodeSettings, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        let found = self.vs_code_settings_file.clone();
+        #[cfg(not(test))]
+        let found = crate::vscode_import::latest();
+        let Some((editor, path)) = found else {
+            return self.show_notice("No VS Code settings found on this Mac".into(), cx);
+        };
+        let Ok(written) = crate::settings::read_project(&path) else {
+            return self.show_notice(format!("{editor}'s settings couldn't be read"), cx);
+        };
+        let (after, changed) = crate::vscode_import::changes(cx.global::<Settings>(), &written);
+        if changed.is_empty() {
+            return self.show_notice(format!("Null has {editor}'s settings already"), cx);
+        }
+        let count = if changed.len() == 1 { "1 setting".to_string() } else { format!("{} settings", changed.len()) };
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &format!("Bring over {count} from {editor}?"),
+            Some(&changed.join("\n")),
+            &["Bring Over", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                settings::update(cx, |s| *s = after);
+                this.show_notice(format!("{count} brought over from {editor}"), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// ⏎ in the Outline's filter: to the first item that fits.
+    fn go_to_outline_match(&mut self, _: &GoToOutlineMatch, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(items) = self.outline_items(&editor, 1_000_000, cx) else { return };
+        let query = self.outline_filter.read(cx).text().to_string();
+        if let Some(&(ix, _)) = crate::outline::filtered(&items, &query).iter().find(|(_, fits)| *fits) {
+            self.go_to_outline_row(items[ix].row, window, cx);
+        }
+    }
+
+    /// Esc in the Outline's filter: emptied, or (already empty) back to the text.
+    fn clear_outline_filter(&mut self, _: &ClearOutlineFilter, window: &mut Window, cx: &mut Context<Self>) {
+        if self.outline_filter.read(cx).text().is_empty() {
+            if let Some(editor) = self.active_editor() {
+                window.focus(&editor.focus_handle(cx));
+            }
+        } else {
+            self.outline_filter.update(cx, |input, cx| input.set_text("", cx));
+            self.outline_followed = None;
+        }
         cx.notify();
     }
 
@@ -5805,21 +5942,51 @@ impl Workspace {
         if items.is_empty() {
             return quiet(format!("No functions or types in {name}"));
         }
+        let query = self.outline_filter.read(cx).text().to_string();
+        let shown = crate::outline::filtered(&items, &query);
         let current = crate::outline::current(&items, row);
-        // The caret went into another: the list brings it into view.
+        // The caret went into another: the list brings it into view (unless filtered).
         if let Some(ix) = current
+            && query.trim().is_empty()
             && self.outline_followed != Some((id, ix))
         {
             self.outline_followed = Some((id, ix));
             self.outline_scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
+        let filter = div()
+            .key_context("OutlineFilter")
+            .flex_none()
+            .mx(px(18.))
+            .mt(px(10.))
+            .mb(px(2.))
+            .text_size(px(ui::T_MD))
+            .text_color(theme.foreground)
+            .child(self.outline_filter.clone());
+        let list = if shown.is_empty() {
+            quiet(format!("Nothing in {name} called that"))
+        } else {
+            self.outline_list(items, shown, current, cx)
+        };
+        div().size_full().flex().flex_col().child(filter).child(div().flex_1().min_h_0().child(list)).into_any_element()
+    }
+
+    /// The outline's rows: `shown` (indexes into `items`, and whether each fits the filter;
+    /// those only around one that does are faint).
+    fn outline_list(
+        &mut self,
+        items: std::rc::Rc<Vec<crate::outline::Item>>,
+        shown: Vec<(usize, bool)>,
+        current: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         uniform_list(
             "outline",
-            items.len(),
+            shown.len(),
             cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
                 let theme = cx.global::<Theme>().clone();
                 range
-                    .map(|ix| {
+                    .map(|at| {
+                        let (ix, fits) = shown[at];
                         let item = &items[ix];
                         let here = current == Some(ix);
                         let heading = item.kind.starts_with('#');
@@ -5837,7 +6004,13 @@ impl Workspace {
                             .rounded(px(ui::R_ROW))
                             .cursor_pointer()
                             .text_size(px(ui::T_MD))
-                            .text_color(if here { theme.foreground } else { theme.muted })
+                            .text_color(if here {
+                                theme.foreground
+                            } else if fits {
+                                theme.muted
+                            } else {
+                                theme.faint
+                            })
                             .when(here, |r| r.bg(theme.hairline))
                             .when(!here, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
                             // Code by its name in the code's font, the word defining it beside it;
@@ -6249,7 +6422,9 @@ impl Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         // The project's own way, in .vscode/launch.json (its first, when it has several).
         let file = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
-        if let Some(launch) = crate::launch::read(&root, file.as_deref()).into_iter().next() {
+        let launches = crate::launch::read(&root, file.as_deref());
+        // (One running the program over one running its tests, as F5 means.)
+        if let Some(launch) = launches.into_iter().min_by_key(crate::launch::Launch::runs_tests) {
             return self.debug_launch(root, launch, cx);
         }
         if root.join("Cargo.toml").is_file() {
@@ -6281,10 +6456,14 @@ impl Workspace {
         .detach();
     }
 
-    /// A launch.json configuration: built by cargo first when it says so, else its program.
+    /// A launch.json configuration: built first by cargo (with its "cargo" args, or as a
+    /// Rust project's program is, which its `preLaunchTask` would do), then its program.
     fn debug_launch(&mut self, root: PathBuf, launch: crate::launch::Launch, cx: &mut Context<Self>) {
         if let Some(cargo) = launch.cargo.clone() {
             return self.build_and_debug(root, cargo, Some(launch), cx);
+        }
+        if root.join("Cargo.toml").is_file() {
+            return self.build_and_debug(root, vec!["build".into()], Some(launch), cx);
         }
         let Some(program) = launch.program.clone().filter(|p| p.is_file()) else {
             let missing = launch.program.as_ref().map_or("its program".into(), |p| p.display().to_string());
@@ -6298,6 +6477,18 @@ impl Workspace {
         self.debug_in(run, Vec::new(), cx);
     }
 
+    /// Starts a build for debugging: what's built after it (when Stop and Debug Again
+    /// started another) won't run.
+    fn next_debug_build(&mut self) -> u64 {
+        self.debug_builds += 1;
+        self.debug_builds
+    }
+
+    /// Whether build `build` is still the one the debugger waits for.
+    fn awaited_build(&self, build: u64, cx: &App) -> bool {
+        self.debug_builds == build && self.debugger.read(cx).state == crate::debugger::DebugState::Building
+    }
+
     /// A Rust project: `cargo <cargo_args>` (`build`), then its program under the debugger
     /// (as `launch` says to run it, if from launch.json).
     fn build_and_debug(
@@ -6307,10 +6498,15 @@ impl Workspace {
         launch: Option<crate::launch::Launch>,
         cx: &mut Context<Self>,
     ) {
-        let program = cargo_program(&root);
+        // launch.json's own program, else what cargo says it built (where it usually goes,
+        // for a project's own `cargo build`).
+        let named = launch.as_ref().and_then(|l| l.program.clone());
+        let usual = if launch.is_none() { cargo_program(&root) } else { None };
+        let tests = matches!(cargo_args.first().map(String::as_str), Some("test" | "bench"));
+        let build = self.next_debug_build();
         let shown = format!("cargo {}\n", cargo_args.join(" "));
         self.debugger.update(cx, |d, cx| {
-            d.set_building(program.clone(), cx);
+            d.set_building(named.clone().or(usual.clone()), cx);
             d.append_output(&shown, cx);
         });
         cx.spawn(async move |this, cx| {
@@ -6331,25 +6527,29 @@ impl Workspace {
                 })
                 .await;
             let (built, formatters) = built;
-            // Where cargo says it put the program (or the test program, built by `cargo test
-            // --no-run`), else where it usually goes.
-            let program = built
-                .as_ref()
-                .ok()
-                .and_then(|output| {
-                    let messages = String::from_utf8_lossy(&output.stdout);
-                    built_program(&messages, program.as_deref()).or_else(|| match &test_programs(&messages)[..] {
+            let program = named.or_else(|| {
+                let messages = String::from_utf8_lossy(&built.as_ref().ok()?.stdout).into_owned();
+                if tests {
+                    // `cargo test --no-run`: its one test program (a plain program is built
+                    // beside it for the tests to run, but isn't what's debugged).
+                    match &test_programs(&messages, false)[..] {
                         [only] => Some(only.clone()),
                         _ => None,
-                    })
-                })
-                .or(program);
+                    }
+                } else {
+                    built_program(&messages, usual.as_deref()).or(usual)
+                }
+            });
             this.update(cx, |this, cx| {
+                if !this.awaited_build(build, cx) {
+                    return;
+                }
                 let message = match (&built, &program) {
                     (Ok(output), _) if !output.status.success() => {
                         Some(String::from_utf8_lossy(&output.stderr).into_owned() + "\nThe build failed.\n")
                     }
                     (Err(error), _) => Some(format!("Couldn't run cargo: {error}\n")),
+                    (_, None) if tests => Some("Couldn't tell which test program to debug: name one target.\n".into()),
                     (_, None) => Some("Couldn't tell which program this project builds.\n".into()),
                     (_, Some(p)) if !p.is_file() => Some(format!("{} wasn't built.\n", p.display())),
                     _ => None,
@@ -6393,6 +6593,7 @@ impl Workspace {
         self.debugged_test = Some(test.clone());
         self.save_named_tabs(cx);
         self.debug_panel_open = true;
+        let build = self.next_debug_build();
         self.debugger.update(cx, |d, cx| {
             d.set_building(None, cx);
             d.append_output(&format!("cargo test --no-run {}\n", test.target.join(" ")), cx);
@@ -6411,13 +6612,17 @@ impl Workspace {
                         .current_dir(&krate)
                         .output();
                     let program = built.as_ref().ok().filter(|o| o.status.success()).and_then(|output| {
-                        program_with_test(&test_programs(&String::from_utf8_lossy(&output.stdout)), &id, &krate)
+                        let messages = String::from_utf8_lossy(&output.stdout);
+                        program_with_test(&test_programs(&messages, target.is_empty()), &id, &krate)
                     });
                     (built, program, crate::debugger::rust_formatters())
                 })
                 .await;
             let (built, program, formatters) = found;
             this.update(cx, |this, cx| {
+                if !this.awaited_build(build, cx) {
+                    return;
+                }
                 let message = match (&built, &program) {
                     (Ok(output), _) if !output.status.success() => {
                         Some(String::from_utf8_lossy(&output.stderr).into_owned() + "\nThe build failed.\n")
@@ -6432,8 +6637,10 @@ impl Workspace {
                         d.stop(cx);
                     });
                 }
-                // Only it, its output as it comes, in the crate's folder (as cargo runs it).
-                let args = vec![test.id.clone(), "--exact".into(), "--nocapture".into(), "--test-threads=1".into()];
+                // Only it (an ignored one too: asked for by name), its output as it comes,
+                // in the crate's folder (as cargo runs it).
+                let args = ["--exact", "--include-ignored", "--nocapture", "--test-threads=1"];
+                let args = std::iter::once(test.id.clone()).chain(args.map(String::from)).collect();
                 let program = program.expect("checked above");
                 let run = crate::debugger::Run { args, ..crate::debugger::Run::new(program, test.krate.clone()) };
                 this.debug_in(run, formatters.into_iter().collect(), cx);
@@ -6670,7 +6877,7 @@ impl Workspace {
                         .when(reference > 0, |d| {
                             d.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 let path = path.clone();
-                                this.debugger.update(cx, |d, cx| d.toggle_unfolded(path, reference, cx));
+                                this.debugger.update(cx, |d, cx| d.toggle_unfolded(path, cx));
                             }))
                         })
                 });
@@ -9799,6 +10006,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))
             .on_action(cx.listener(Self::debug_test))
+            .on_action(cx.listener(Self::go_to_outline_match))
+            .on_action(cx.listener(Self::import_vs_code_settings))
+            .on_action(cx.listener(Self::clear_outline_filter))
             .on_action(cx.listener(|this, _: &DebugAgain, window, cx| match this.debugged_test.clone() {
                 Some(test) => this.debug_rust_test(test, cx),
                 None => this.start_debugging(&StartDebugging, window, cx),
@@ -10068,7 +10278,15 @@ mod tests {
         };
         let messages =
             [artifact(false, None), artifact(true, Some("/t/deps/app-1")), artifact(false, Some("/t/app"))].join("\n");
-        assert_eq!(test_programs(&messages), [PathBuf::from("/t/deps/app-1")]);
+        assert_eq!(test_programs(&messages, false), [PathBuf::from("/t/deps/app-1")]);
+        // A test in src/: not in tests/'s programs (which may not list their tests).
+        let in_tests = serde_json::json!({
+            "reason": "compiler-artifact", "profile": { "test": true },
+            "target": { "kind": ["test"] }, "executable": "/t/deps/api-2",
+        });
+        let messages = format!("{messages}\n{in_tests}");
+        assert_eq!(test_programs(&messages, false).len(), 2);
+        assert_eq!(test_programs(&messages, true), [PathBuf::from("/t/deps/app-1")]);
         // One: it, without asking it.
         let one = [PathBuf::from("/nowhere/app-1")];
         assert_eq!(program_with_test(&one, "a::b", Path::new("/")), Some(one[0].clone()));
@@ -10100,8 +10318,9 @@ mod tests {
             .output()
             .unwrap();
         assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
-        let programs = test_programs(&String::from_utf8_lossy(&built.stdout));
+        let programs = test_programs(&String::from_utf8_lossy(&built.stdout), false);
         assert_eq!(programs.len(), 2, "{programs:?}");
+        assert!(lists_test(&programs[0], "tests::doubles", &dir) != lists_test(&programs[1], "tests::doubles", &dir));
         let program = program_with_test(&programs, "tests::doubles", &dir).expect("one has it");
         assert!(program.file_name().unwrap().to_string_lossy().starts_with("twice-"), "{program:?}");
         let debugger = cx.new(|_| crate::debugger::Debugger::default());
@@ -12776,6 +12995,135 @@ mod tests {
         assert!(!marked(&file, cx), "a warning isn't an error");
         report(None, cx);
         assert!(!marked(&dir.join("src"), cx));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// VS Code's settings: what changes said, brought over only when asked to.
+    #[gpui::test]
+    fn vs_code_settings_are_brought_over_when_asked(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("vscode-import");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        std::fs::write(&file, "{ // mine\n \"editor.fontSize\": 15, \"editor.cursorStyle\": \"underline\", }").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.vs_code_settings_file = Some(("VS Code", file.clone()));
+            w.import_vs_code_settings(&ImportVsCodeSettings, window, cx);
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(cx.global::<Settings>().font_size, Settings::default().font_size));
+        workspace.update_in(cx, |w, window, cx| w.import_vs_code_settings(&ImportVsCodeSettings, window, cx));
+        cx.simulate_prompt_answer("Bring Over");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let s = cx.global::<Settings>();
+            assert_eq!((s.font_size, s.caret), (15., crate::settings::CaretShape::Underline));
+        });
+        // Again: nothing to ask about.
+        workspace.update_in(cx, |w, window, cx| w.import_vs_code_settings(&ImportVsCodeSettings, window, cx));
+        assert!(!cx.has_pending_prompt());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Outline's filter: shown with Show Outline, ⏎ goes to the first that fits, Esc
+    /// empties it, then goes back to the text.
+    #[gpui::test]
+    fn the_outline_filters(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("outline-filter");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shop.py"),
+            "class Shop:\n    def open(self):\n        pass\n\n    def close(self):\n        pass\n",
+        )
+        .unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("shop.py"), window, cx);
+            w.show_outline(&ShowOutline, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |w, window, cx| {
+            assert!(w.outline_filter.focus_handle(cx).is_focused(window), "typing goes to the filter");
+            w.outline_filter.update(cx, |input, cx| input.set_text("cls", cx));
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(GoToOutlineMatch);
+        cx.run_until_parked();
+        workspace.update_in(cx, |w, window, cx| {
+            let editor = w.active_editor().unwrap().clone();
+            assert_eq!(editor.read(cx).caret_point().0, 4, "at close");
+            // Esc: emptied first, then back to the text.
+            window.focus(&w.outline_filter.focus_handle(cx));
+            w.clear_outline_filter(&ClearOutlineFilter, window, cx);
+            assert!(w.outline_filter.read(cx).text().is_empty());
+            assert!(w.outline_filter.focus_handle(cx).is_focused(window));
+            w.clear_outline_filter(&ClearOutlineFilter, window, cx);
+            assert!(editor.focus_handle(cx).is_focused(window));
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A preview scrolled by hand: its source beside it follows, the block at the
+    /// preview's top at the source's; the source's own following doesn't move it back.
+    #[gpui::test]
+    fn the_source_follows_its_preview(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("preview-leads");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text: String = (0..120).map(|i| format!("## Part {i}\n\nWords about part {i}.\n\n")).collect();
+        std::fs::write(dir.join("guide.md"), &text).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("guide.md"), window, cx);
+            w.open_preview_to_the_side(&OpenPreviewToTheSide, window, cx);
+        });
+        cx.run_until_parked();
+        let (source, preview) = workspace.read_with(cx, |w, cx| {
+            let reading = |t: &&Tab| t.editor.read(cx).reading;
+            let preview = w.tabs.iter().find(reading).expect("a preview").editor.clone();
+            let source = w.tabs.iter().find(|t| !reading(t)).expect("the source").editor.clone();
+            (source, preview)
+        });
+        assert_eq!(source.read_with(cx, |e, _| e.top_line()), 0);
+        let at = cx.debug_bounds("markdown-preview").expect("the preview drawn").center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Lines(gpui::point(0., -10.)),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let top = source.read_with(cx, |e, _| e.top_line());
+        assert!(top > 0, "the source didn't follow");
+        // At the start of the block shown at the preview's top: a heading or its words.
+        assert!(top % 4 == 0 || top % 4 == 2, "{top}");
+        let offset = preview.read_with(cx, |p, _| p.reading_scroll.offset().y);
+        cx.run_until_parked();
+        assert_eq!(preview.read_with(cx, |p, _| p.reading_scroll.offset().y), offset, "the preview stays put");
         std::fs::remove_dir_all(&dir).ok();
     }
 

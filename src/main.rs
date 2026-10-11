@@ -71,6 +71,7 @@ mod theme;
 mod tools;
 mod ui;
 mod user_keys;
+mod vscode_import;
 mod welcome;
 mod word_blocks;
 mod workspace;

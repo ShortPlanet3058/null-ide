@@ -149,6 +149,8 @@ pub struct Welcome {
     step_since: Instant,
     /// The API key typed for the provider picked, saved on the way out.
     key: Entity<TextInput>,
+    /// The editor whose settings are on this Mac (VS Code, Cursor…), to start from.
+    vs_code: Option<(&'static str, std::path::PathBuf)>,
     _ticker: Task<()>,
 }
 
@@ -175,7 +177,10 @@ impl Welcome {
                 }
             }
         });
+        // (Never yours in tests.)
+        let vs_code = if cfg!(test) { None } else { crate::vscode_import::latest() };
         Self {
+            vs_code,
             focus_handle: cx.focus_handle(),
             stage: Stage::Hello,
             hello: 0,
@@ -405,6 +410,25 @@ impl Welcome {
                             cx.listener(|this, _: &ClickEvent, window, cx| this.next(&WelcomeNext, window, cx)),
                         ),
                     )
+                    // Someone coming from VS Code: their settings first, then the steps (which
+                    // show them, to change).
+                    .children(self.vs_code.clone().map(|(editor, path)| {
+                        div()
+                            .id("from-vs-code")
+                            .text_size(px(ui::T_MD))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme.foreground))
+                            .child(format!("Start with my {editor} settings"))
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                if let Ok(written) = crate::settings::read_project(&path) {
+                                    let (after, _) = crate::vscode_import::changes(cx.global::<Settings>(), &written);
+                                    settings::update(cx, |s| *s = after);
+                                }
+                                this.next(&WelcomeNext, window, cx);
+                            }))
+                    }))
                     .child(
                         div()
                             .id("skip")
