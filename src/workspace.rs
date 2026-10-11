@@ -3981,7 +3981,7 @@ impl Workspace {
                 kind: crate::palette::LocationKind::Notice,
             })
             .collect();
-        self.open_locations("Recent notices · ↵ copies one".into(), locations, window, cx);
+        self.open_locations("Recent notices".into(), locations, window, cx);
     }
 
     /// Null's name and version, where it comes from.
