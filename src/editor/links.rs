@@ -95,7 +95,10 @@ impl Editor {
             && let Some(path) = self.path.clone()
         {
             let heading = heading_line(&self.buffer.to_string(), &anchor)?;
-            return Some((start + columns.start..start + columns.end, Target::File { path, line: Some(heading + 1), column: None }));
+            return Some((
+                start + columns.start..start + columns.end,
+                Target::File { path, line: Some(heading + 1), column: None },
+            ));
         }
         // A click lands on the nearest gap between letters: past a link's last letter too.
         let (columns, link) = link_at(&row, column).or_else(|| link_at(&row, column.checked_sub(1)?))?;

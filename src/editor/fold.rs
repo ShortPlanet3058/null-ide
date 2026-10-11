@@ -108,7 +108,12 @@ impl Editor {
             return around;
         };
         highlighter.sync(&self.buffer);
-        highlighter.blocks_around(line)
+        let mut blocks = highlighter.blocks_around(line);
+        // In Markdown, sections: a long paragraph isn't a block to keep in sight.
+        if self.is_markdown() {
+            blocks.retain(|b| self.buffer.line_text(b.start).starts_with('#'));
+        }
+        blocks
     }
 
     /// The regions that can fold, worked out again only after edits.
