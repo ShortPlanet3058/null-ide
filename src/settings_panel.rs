@@ -872,6 +872,14 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Organize imports on save",
+                Some("Sorts the imports and takes out the unused ones, as the language server does, when saving"),
+                Self::toggle("organize-on-save", s.organize_imports_on_save, &theme, cx, |s| {
+                    s.organize_imports_on_save = !s.organize_imports_on_save
+                }),
+                &theme,
+            ),
+            Self::row(
                 "Keep unsaved changes when quitting",
                 Some("Quitting doesn't ask: what isn't saved comes back, still unsaved, next time"),
                 Self::toggle("keep-unsaved", s.keep_unsaved, &theme, cx, |s| s.keep_unsaved = !s.keep_unsaved),

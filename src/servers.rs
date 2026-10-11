@@ -52,7 +52,8 @@ pub const SERVERS: &[Server] = &[
         extensions: &["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"],
         program: "typescript-language-server",
         args: &["--stdio"],
-        install: Install::Npm(&["typescript-language-server", "typescript"]),
+        // (TypeScript 5: 7 is a native program without the tsserver this server runs.)
+        install: Install::Npm(&["typescript-language-server", "typescript@5"]),
     },
     Server {
         name: "clangd",

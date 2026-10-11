@@ -211,6 +211,20 @@ pub struct LspStore {
 
 impl EventEmitter<LspEvent> for LspStore {}
 
+/// For TypeScript's server in a project without TypeScript of its own (`node_modules`): the
+/// TypeScript installed beside the server (as Null installs them), which it can't find by
+/// itself.
+fn typescript_for(program: &Path, root: &Path) -> Option<String> {
+    if root.ancestors().any(|dir| dir.join("node_modules/typescript/lib/tsserver.js").is_file()) {
+        return None;
+    }
+    // `…/node_modules/.bin/typescript-language-server` → `…/node_modules/typescript-language-server/lib/cli.mjs`.
+    let real = std::fs::canonicalize(program).ok()?;
+    let modules = real.ancestors().find(|dir| dir.file_name().is_some_and(|n| n == "node_modules"))?;
+    let tsserver = modules.join("typescript/lib/tsserver.js");
+    tsserver.is_file().then(|| tsserver.display().to_string())
+}
+
 impl LspStore {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -376,6 +390,24 @@ impl LspStore {
     }
 
     /// Whether a language server answers for this file now.
+    /// Organize Imports as a server's own command, for one that has no code action for it
+    /// (pyright's, basedpyright's): None for the others.
+    pub fn organize_command(&self, path: &Path) -> Option<lsp_types::Command> {
+        let name = config_for(path)?.name;
+        let command = match name {
+            "pyright" => "pyright.organizeimports",
+            "basedpyright" => "basedpyright.organizeimports",
+            _ => return None,
+        };
+        self.server_for(path)?;
+        let uri = uri_for(path)?;
+        Some(lsp_types::Command {
+            title: "Organize Imports".into(),
+            command: command.into(),
+            arguments: Some(vec![serde_json::Value::String(uri.as_str().to_string())]),
+        })
+    }
+
     pub fn serves(&self, path: &Path) -> bool {
         self.server_for(path).is_some()
     }
@@ -537,6 +569,10 @@ impl LspStore {
                 }),
                 ..Default::default()
             },
+            initialization_options: (config.name == "typescript-language-server")
+                .then(|| typescript_for(&program, &root))
+                .flatten()
+                .map(|tsserver| serde_json::json!({ "tsserver": { "path": tsserver } })),
             ..Default::default()
         };
         let initialize = server.request::<Initialize>(params);
@@ -1256,6 +1292,8 @@ impl LspStore {
             })
         });
         async move {
+            // (Its edits come as workspace/applyEdit, made as they come: an answer carrying
+            // the edit too, as pyright's does, isn't made a second time.)
             match request {
                 Some(request) => request.await.map(|_| ()),
                 None => Err("No language server for this file.".into()),
@@ -1397,6 +1435,31 @@ mod tests {
         assert_eq!(store.read_with(cx, |s, _| s.servers.len()), 2);
         store.update(cx, |s, _| s.shutdown());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// TypeScript's server is told the TypeScript beside it, unless the project has its own.
+    #[test]
+    #[cfg(unix)]
+    fn typescript_s_server_is_told_its_typescript() {
+        let dir = crate::tools::test_dir("lsp-tsserver");
+        let _ = std::fs::remove_dir_all(&dir);
+        let modules = dir.join("servers/node_modules");
+        std::fs::create_dir_all(modules.join(".bin")).unwrap();
+        std::fs::create_dir_all(modules.join("typescript-language-server/lib")).unwrap();
+        std::fs::create_dir_all(modules.join("typescript/lib")).unwrap();
+        std::fs::write(modules.join("typescript-language-server/lib/cli.mjs"), "").unwrap();
+        std::fs::write(modules.join("typescript/lib/tsserver.js"), "").unwrap();
+        let program = modules.join(".bin/typescript-language-server");
+        std::os::unix::fs::symlink("../typescript-language-server/lib/cli.mjs", &program).unwrap();
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let found = typescript_for(&program, &project).unwrap();
+        assert!(found.ends_with("node_modules/typescript/lib/tsserver.js"), "{found}");
+        // Its own: the server finds that one.
+        std::fs::create_dir_all(project.join("node_modules/typescript/lib")).unwrap();
+        std::fs::write(project.join("node_modules/typescript/lib/tsserver.js"), "").unwrap();
+        assert_eq!(typescript_for(&program, &project.join("src")), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Python's server is told each folder's Python: a package's own environment, else the

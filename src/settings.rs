@@ -17,6 +17,7 @@ pub const ZOOM_STEP: f32 = 0.1;
 pub enum PerLanguage {
     WordWrap,
     FormatOnSave,
+    OrganizeImportsOnSave,
     Autocomplete,
 }
 
@@ -31,6 +32,8 @@ pub struct LanguageSettings {
     pub indent_with_tabs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format_on_save: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organize_imports_on_save: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format_on_paste: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +136,14 @@ pub(crate) fn in_null_words(written: &JsonMap) -> JsonMap {
             if let Some(Value::Bool(on)) = from.get(theirs) {
                 out.insert(ours.into(), Value::Bool(*on));
             }
+        }
+        // `"editor.codeActionsOnSave": { "source.organizeImports": "explicit" }` (or true,
+        // or "always"; "never" or false is off).
+        if let Some(Value::Object(actions)) = from.get("editor.codeActionsOnSave")
+            && let Some(how) = actions.iter().find(|(k, _)| k.starts_with("source.organizeImports")).map(|(_, v)| v)
+        {
+            let on = matches!(how, Value::Bool(true)) || matches!(how.as_str(), Some("explicit" | "always"));
+            out.insert("organize_imports_on_save".into(), Value::Bool(on));
         }
         if let Some(Value::String(wrap)) = from.get("editor.wordWrap") {
             out.insert("word_wrap".into(), Value::Bool(wrap != "off"));
@@ -435,6 +446,8 @@ pub struct Settings {
     pub ligatures: bool,
     /// Format the file with its language server when saving with ⌘S.
     pub format_on_save: bool,
+    /// Organize the file's imports (its language server's way) when saving with ⌘S.
+    pub organize_imports_on_save: bool,
     /// Pasted code formatted by the language server (where it formats parts of a file).
     pub format_on_paste: bool,
     /// A file clicked once in the files opens in a passing tab, which the next one replaces
@@ -528,6 +541,7 @@ impl Default for Settings {
             indent_with_tabs: false,
             ligatures: true,
             format_on_save: false,
+            organize_imports_on_save: false,
             format_on_paste: false,
             preview_tabs: true,
             bracket_colours: false,
@@ -686,6 +700,7 @@ impl Settings {
                 match which {
                     PerLanguage::WordWrap => set.word_wrap.as_mut(),
                     PerLanguage::FormatOnSave => set.format_on_save.as_mut(),
+                    PerLanguage::OrganizeImportsOnSave => set.organize_imports_on_save.as_mut(),
                     PerLanguage::Autocomplete => set.autocomplete.as_mut(),
                 }
             });
@@ -694,6 +709,7 @@ impl Settings {
             None => match which {
                 PerLanguage::WordWrap => &mut self.word_wrap,
                 PerLanguage::FormatOnSave => &mut self.format_on_save,
+                PerLanguage::OrganizeImportsOnSave => &mut self.organize_imports_on_save,
                 PerLanguage::Autocomplete => &mut self.autocomplete,
             },
         };
@@ -702,6 +718,10 @@ impl Settings {
 
     pub fn format_on_save_for(&self, language: &str) -> bool {
         self.language(language).and_then(|s| s.format_on_save).unwrap_or(self.format_on_save)
+    }
+
+    pub fn organize_imports_on_save_for(&self, language: &str) -> bool {
+        self.language(language).and_then(|s| s.organize_imports_on_save).unwrap_or(self.organize_imports_on_save)
     }
 
     pub fn format_on_paste_for(&self, language: &str) -> bool {
@@ -1369,6 +1389,23 @@ mod tests {
         assert!(theirs.contains("// ours") && theirs.contains("\"indent_size\": 3"), "{theirs}");
         assert!(theirs.contains("\"go\"") && !theirs.contains("python"), "{theirs}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// VS Code's `editor.codeActionsOnSave` for organizing imports, however it's written.
+    #[test]
+    fn organizing_imports_on_save_from_vs_code() {
+        let read = |json: &str| {
+            let written: JsonMap = serde_json::from_str(json).unwrap();
+            in_null_words(&written).get("organize_imports_on_save").cloned()
+        };
+        let on = Some(serde_json::Value::Bool(true));
+        let off = Some(serde_json::Value::Bool(false));
+        assert_eq!(read(r#"{ "editor.codeActionsOnSave": { "source.organizeImports": "explicit" } }"#), on);
+        assert_eq!(read(r#"{ "editor.codeActionsOnSave": { "source.organizeImports.ruff": true } }"#), on);
+        assert_eq!(read(r#"{ "editor.codeActionsOnSave": { "source.organizeImports": "never" } }"#), off);
+        assert_eq!(read(r#"{ "editor.codeActionsOnSave": { "source.fixAll": "explicit" } }"#), None);
+        let python = read(r#"{ "[python]": { "editor.codeActionsOnSave": { "source.organizeImports": "always" } } }"#);
+        assert_eq!(python, None, "a language's own goes under languages");
     }
 
     /// A project's .vscode/settings.json, as far as Null has the same settings: its

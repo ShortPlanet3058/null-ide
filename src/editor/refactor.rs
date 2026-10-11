@@ -519,12 +519,91 @@ impl Editor {
     fn save_formatted(&mut self, close: bool, cx: &mut Context<Self>) {
         // (A save as it is that never happened, asked about and cancelled: this one isn't.)
         self.saving_as_is = false;
+        let served = self.lsp.is_some() && self.path.is_some();
+        if served && cx.global::<Settings>().organize_imports_on_save_for(self.language_name()) {
+            self.organize_then_save(close, cx);
+        } else {
+            self.format_or_save(close, cx);
+        }
+    }
+
+    /// Formats then saves when that's switched on, else saves.
+    fn format_or_save(&mut self, close: bool, cx: &mut Context<Self>) {
         if cx.global::<Settings>().format_on_save_for(self.language_name()) && self.lsp.is_some() && self.path.is_some()
         {
             self.format_then(true, close, cx);
         } else {
             self.save_then(close, cx);
         }
+    }
+
+    /// Organizes the imports (the language server's way: sorted, the unused ones gone),
+    /// then formats and saves as ⌘S does. A server with nothing to do, one too slow, or text
+    /// typed meanwhile: saved as it is.
+    fn organize_then_save(&mut self, close: bool, cx: &mut Context<Self>) {
+        let (Some(lsp), Some(path)) = (self.lsp.clone(), self.path.clone()) else {
+            return self.format_or_save(close, cx);
+        };
+        let last = self.buffer.len_lines().saturating_sub(1);
+        let end = Position::new(last as u32, self.buffer.line_text(last).encode_utf16().count() as u32);
+        let whole = lsp_types::Range::new(Position::new(0, 0), end);
+        let only = Some(vec![lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS]);
+        let actions = lsp.read(cx).code_actions_of(&path, whole, Vec::new(), only);
+        let revision = self.buffer.revision();
+        self.format_task = Some(cx.spawn(async move |this, cx| {
+            let timeout = cx.background_executor().timer(FORMAT_TIMEOUT);
+            let work = async {
+                // No action for it: the server's own command, when it has one (pyright).
+                let action = match crate::workspace::organize_action(actions.await) {
+                    Some(action) => action,
+                    None => lsp_types::CodeActionOrCommand::Command(
+                        this.update(cx, |_, cx| lsp.read(cx).organize_command(&path)).ok()??,
+                    ),
+                };
+                // Its edit: given, worked out on asking, or what its command answers with.
+                let (edit, command) = match action {
+                    lsp_types::CodeActionOrCommand::Command(command) => (None, Some(command)),
+                    lsp_types::CodeActionOrCommand::CodeAction(action) => {
+                        let action = if action.edit.is_none() && action.data.is_some() {
+                            let request =
+                                this.update(cx, |_, cx| lsp.read(cx).resolve_code_action(&path, action)).ok()?;
+                            request.await.ok()?
+                        } else {
+                            action
+                        };
+                        (action.edit, action.command)
+                    }
+                };
+                match (edit, command) {
+                    (Some(edit), _) => Some(edit),
+                    // A command's edit comes as the server's workspace/applyEdit, made in the
+                    // text before its answer: nothing more to make here.
+                    (None, Some(command)) => {
+                        let request = this.update(cx, |_, cx| lsp.read(cx).execute_command(&path, command)).ok()?;
+                        request.await.ok()?;
+                        None
+                    }
+                    (None, None) => None,
+                }
+            };
+            let edit = futures::select_biased! {
+                edit = futures::FutureExt::fuse(work) => edit,
+                _ = futures::FutureExt::fuse(timeout) => None,
+            };
+            this.update(cx, |this, cx| {
+                let typed = this.buffer.revision() != revision;
+                let mine = edit
+                    .map(crate::lsp::edits_by_file)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|(p, _)| this.path.as_ref().is_some_and(|own| own == p));
+                if let Some((_, edits)) = mine.filter(|(_, e)| !e.is_empty() && !typed) {
+                    this.apply_lsp_edits(&edits, cx);
+                }
+                this.format_or_save(close && !typed, cx);
+            })
+            .ok();
+        }));
     }
 }
 

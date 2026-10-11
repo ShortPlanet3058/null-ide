@@ -92,6 +92,7 @@ actions!(
         ToggleAi,
         ShowProblems,
         ToggleFormatOnSave,
+        ToggleOrganizeImportsOnSave,
         AutoSaveOff,
         ToggleLineBlame,
         ToggleSpellCheck,
@@ -2264,9 +2265,13 @@ impl Workspace {
         let request = self.lsp.read(cx).code_actions_of(&path, range, Vec::new(), only);
         cx.spawn(async move |this, cx| {
             let actions = request.await;
-            this.update(cx, |this, cx| match organize_action(actions) {
-                Some(action) => this.run_fix(path, action, cx),
-                None => this.show_notice("The language server has no imports to organize here.".into(), cx),
+            this.update(cx, |this, cx| {
+                // No action for it: the server's own command, when it has one (pyright).
+                let command = || this.lsp.read(cx).organize_command(&path).map(lsp_types::CodeActionOrCommand::Command);
+                match organize_action(actions).or_else(command) {
+                    Some(action) => this.run_fix(path, action, cx),
+                    None => this.show_notice("The language server has no imports to organize here.".into(), cx),
+                }
             })
             .ok();
         })
@@ -4593,6 +4598,15 @@ impl Workspace {
                     Edit,
                     toggle(settings.format_on_save_for(language), "Stop Formatting on Save", "Format on Save"),
                     Box::new(ToggleFormatOnSave),
+                ),
+                (
+                    Edit,
+                    toggle(
+                        settings.organize_imports_on_save_for(language),
+                        "Stop Organizing Imports on Save",
+                        "Organize Imports on Save",
+                    ),
+                    Box::new(ToggleOrganizeImportsOnSave),
                 ),
                 (
                     File,
@@ -7947,8 +7961,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> (usize, usize, Vec<String>) {
         let mut by_file: Vec<(PathBuf, Vec<lsp_types::TextEdit>)> = Vec::new();
-        let mut add = |uri: &lsp_types::Uri, edits: Vec<lsp_types::TextEdit>| {
-            let Some(path) = crate::lsp::path_for(uri) else { return };
+        for (path, edits) in crate::lsp::edits_by_file(edit) {
             let path = match moved {
                 Some((from, to)) => moved_path(&path, from, to).unwrap_or(path),
                 None => path,
@@ -7957,31 +7970,6 @@ impl Workspace {
                 Some((_, list)) => list.extend(edits),
                 None => by_file.push((path, edits)),
             }
-        };
-        for (uri, edits) in edit.changes.unwrap_or_default() {
-            add(&uri, edits);
-        }
-        let operations = match edit.document_changes {
-            Some(lsp_types::DocumentChanges::Edits(edits)) => edits,
-            Some(lsp_types::DocumentChanges::Operations(ops)) => ops
-                .into_iter()
-                .filter_map(|op| match op {
-                    lsp_types::DocumentChangeOperation::Edit(edit) => Some(edit),
-                    lsp_types::DocumentChangeOperation::Op(_) => None,
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-        for change in operations {
-            let edits = change
-                .edits
-                .into_iter()
-                .map(|e| match e {
-                    lsp_types::OneOf::Left(edit) => edit,
-                    lsp_types::OneOf::Right(annotated) => annotated.text_edit,
-                })
-                .collect();
-            add(&change.text_document.uri, edits);
         }
         let places: usize = by_file.iter().map(|(_, e)| e.len()).sum();
         let files = by_file.len();
@@ -8975,7 +8963,7 @@ fn reading_time(words: usize) -> Option<String> {
 
 /// Of the actions a server offers for organizing imports, the one to run: its own
 /// `source.organizeImports` (some servers send others too, or a command alone).
-fn organize_action(actions: Vec<lsp_types::CodeActionOrCommand>) -> Option<lsp_types::CodeActionOrCommand> {
+pub(crate) fn organize_action(actions: Vec<lsp_types::CodeActionOrCommand>) -> Option<lsp_types::CodeActionOrCommand> {
     use lsp_types::{CodeActionKind, CodeActionOrCommand};
     let organizes = |a: &CodeActionOrCommand| match a {
         CodeActionOrCommand::CodeAction(action) => {
@@ -10064,6 +10052,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleFormatOnSave, _, cx| {
                 let language = this.active_language(cx);
                 settings::update(cx, |s| s.flip(settings::PerLanguage::FormatOnSave, language))
+            }))
+            .on_action(cx.listener(|this, _: &ToggleOrganizeImportsOnSave, _, cx| {
+                let language = this.active_language(cx);
+                settings::update(cx, |s| s.flip(settings::PerLanguage::OrganizeImportsOnSave, language))
             }))
             .on_action(cx.listener(|this, _: &AutoSaveOff, _, cx| {
                 this.auto_saves.clear();
@@ -12271,6 +12263,74 @@ mod tests {
         });
         assert!(project.join("docs/shot.png").is_file());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Organize Imports on Save with real servers: pyright (no action for it: its own
+    /// command, its edit coming as workspace/applyEdit) and typescript-language-server (an
+    /// action with its edit), each file saved organized. Needs them on the PATH (tests don't
+    /// look in Null's own folder):
+    /// `PATH="$HOME/Library/Application Support/Null/servers/node_modules/.bin:$PATH"
+    /// cargo test imports_are_organized_on_save -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn imports_are_organized_on_save(cx: &mut gpui::TestAppContext) {
+        let root = crate::tools::test_dir("organize-on-save");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        // (TypeScript wants a project.)
+        std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(root.join("m.ts"), "export const a = 1;\nexport const b = 2;\n").unwrap();
+        let cases = [
+            ("x.py", "import sys\nimport os\n\nprint(os.name, sys.argv)\n", "import os\nimport sys\n"),
+            ("y.ts", "import { b, a } from \"./m\";\nconsole.log(a, b);\n", "import { a, b } from \"./m\";"),
+        ];
+        for (file, text, _) in cases {
+            std::fs::write(root.join(file), text).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Settings { organize_imports_on_save: true, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let dir = root.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(dir, window, cx));
+        for (file, _, organized) in cases {
+            let path = root.join(file);
+            workspace.update_in(cx, |w, window, cx| w.open_file(path.clone(), window, cx));
+            let ready = |cx: &mut gpui::VisualTestContext| {
+                workspace.read_with(cx, |w, cx| {
+                    matches!(w.lsp.read(cx).readiness(&path), Some(crate::lsp_store::Readiness::Ready { .. }))
+                })
+            };
+            for _ in 0..600 {
+                cx.run_until_parked();
+                if ready(cx) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let state = workspace.read_with(cx, |w, cx| format!("{:?}", w.lsp.read(cx).readiness(&path)));
+            assert!(ready(cx), "{file}: the server never got ready: {state}");
+            // (A moment for it to read the file.)
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            cx.run_until_parked();
+            let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
+            editor.update(cx, |e, cx| e.save_from_keyboard(cx));
+            let mut saved = String::new();
+            for _ in 0..200 {
+                cx.run_until_parked();
+                saved = std::fs::read_to_string(&path).unwrap();
+                if saved.starts_with(organized) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert!(saved.starts_with(organized), "{file}: saved as {saved:?}");
+            assert!(editor.read_with(cx, |e, _| !e.buffer.is_dirty()), "{file}: saved");
+        }
+        workspace.update(cx, |w, cx| w.lsp.update(cx, |s, _| s.shutdown()));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// ⌥⌘+ / ⌥⌘− / ⌥⌘0: the interface bigger, smaller, back to 100%, within its bounds;

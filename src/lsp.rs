@@ -336,6 +336,45 @@ pub fn path_for(uri: &lsp_types::Uri) -> Option<PathBuf> {
     url::Url::parse(uri.as_str()).ok()?.to_file_path().ok()
 }
 
+/// A server's edit, file by file: its `changes` and its `documentChanges` (the text edits
+/// of those; making, renaming or deleting files aren't text edits).
+pub fn edits_by_file(edit: lsp_types::WorkspaceEdit) -> Vec<(PathBuf, Vec<lsp_types::TextEdit>)> {
+    let mut by_file: Vec<(PathBuf, Vec<lsp_types::TextEdit>)> = Vec::new();
+    let mut add = |uri: &lsp_types::Uri, edits: Vec<lsp_types::TextEdit>| {
+        let Some(path) = path_for(uri) else { return };
+        match by_file.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, list)) => list.extend(edits),
+            None => by_file.push((path, edits)),
+        }
+    };
+    for (uri, edits) in edit.changes.unwrap_or_default() {
+        add(&uri, edits);
+    }
+    let operations = match edit.document_changes {
+        Some(lsp_types::DocumentChanges::Edits(edits)) => edits,
+        Some(lsp_types::DocumentChanges::Operations(ops)) => ops
+            .into_iter()
+            .filter_map(|op| match op {
+                lsp_types::DocumentChangeOperation::Edit(edit) => Some(edit),
+                lsp_types::DocumentChangeOperation::Op(_) => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    for change in operations {
+        let edits = change
+            .edits
+            .into_iter()
+            .map(|e| match e {
+                lsp_types::OneOf::Left(edit) => edit,
+                lsp_types::OneOf::Right(annotated) => annotated.text_edit,
+            })
+            .collect();
+        add(&change.text_document.uri, edits);
+    }
+    by_file
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
