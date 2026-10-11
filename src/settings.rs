@@ -97,7 +97,7 @@ pub fn vscode_file(root: &std::path::Path) -> PathBuf {
 
 /// A project's settings as written (comments allowed): none when there's no such file; Err
 /// when there is one that can't be read as an object.
-fn read_project(path: &std::path::Path) -> Result<JsonMap, ()> {
+pub(crate) fn read_project(path: &std::path::Path) -> Result<JsonMap, ()> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return if path.exists() { Err(()) } else { Ok(JsonMap::new()) };
     };
@@ -110,8 +110,12 @@ fn read_project(path: &std::path::Path) -> Result<JsonMap, ()> {
 /// A project's `.vscode/settings.json`, in Null's words: the editing settings projects
 /// share that way (indentation, formatting, wrapping), for each language too.
 fn vscode_settings(root: &std::path::Path) -> JsonMap {
+    in_null_words(&read_project(&vscode_file(root)).unwrap_or_default())
+}
+
+/// VS Code's editing settings (`written`, as in a settings.json), as Null's.
+pub(crate) fn in_null_words(written: &JsonMap) -> JsonMap {
     use serde_json::Value;
-    let written = read_project(&vscode_file(root)).unwrap_or_default();
     // The settings a language can have of its own, as VS Code names them.
     let editing = |from: &JsonMap| {
         let mut out = JsonMap::new();
@@ -131,7 +135,7 @@ fn vscode_settings(root: &std::path::Path) -> JsonMap {
         }
         out
     };
-    let mut out = editing(&written);
+    let mut out = editing(written);
     // `"files.exclude": { "**/*.pyc": true }`: the ones set, hidden.
     if let Some(Value::Object(exclude)) = written.get("files.exclude") {
         let hidden: Vec<Value> = exclude
@@ -147,7 +151,7 @@ fn vscode_settings(root: &std::path::Path) -> JsonMap {
         out.insert("bracket_colours".into(), Value::Bool(*on));
     }
     let mut languages = JsonMap::new();
-    for (key, value) in &written {
+    for (key, value) in written {
         // "[python]", or several at once: "[javascript][typescript]".
         let (Some(ids), Some(set)) = (key.strip_prefix('[').and_then(|k| k.strip_suffix(']')), value.as_object())
         else {
@@ -218,7 +222,7 @@ fn layered(mut under: JsonMap, over: &JsonMap) -> JsonMap {
 /// `user` with `project` over it: each setting it gives wins (one that can't be read is
 /// left out); a map of them (`languages`, `keys`) gains its entries instead. With what
 /// was under them.
-fn merged(user: &Settings, project: &JsonMap) -> (Settings, JsonMap) {
+pub(crate) fn merged(user: &Settings, project: &JsonMap) -> (Settings, JsonMap) {
     use serde_json::Value;
     let mut value = serde_json::to_value(user).unwrap_or_default();
     let mut shadowed = JsonMap::new();

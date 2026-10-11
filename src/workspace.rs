@@ -146,6 +146,7 @@ actions!(
         ReplaceInProject,
         ShowFiles,
         ShowOutline,
+        ImportVsCodeSettings,
         GoToOutlineMatch,
         ClearOutlineFilter,
         ShowTests,
@@ -787,6 +788,9 @@ pub struct Workspace {
     debug_program: Option<PathBuf>,
     /// The test debugged last (⌥⇧⌘T): what Debug Again runs, until F5 debugs the program.
     debugged_test: Option<crate::test_at::RustTest>,
+    /// In tests: the VS Code settings file there is (never yours).
+    #[cfg(test)]
+    vs_code_settings_file: Option<(&'static str, PathBuf)>,
     /// Counts the builds started for debugging: only the latest one's program is run.
     debug_builds: u64,
     /// The projects for the list about to open.
@@ -1054,6 +1058,8 @@ impl Workspace {
             debug_program: None,
             debugged_test: None,
             debug_builds: 0,
+            #[cfg(test)]
+            vs_code_settings_file: None,
             focus_mode: false,
             tab_menu: None,
             text_menu: None,
@@ -4398,6 +4404,7 @@ impl Workspace {
                 Box::new(ToggleAutocomplete),
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
+            (App, "Import Settings from VS Code…".into(), Box::new(ImportVsCodeSettings)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
@@ -5438,6 +5445,44 @@ impl Workspace {
         // Typing then narrows it (Esc goes back to the text).
         window.focus(&self.outline_filter.focus_handle(cx));
         cx.notify();
+    }
+
+    /// Your settings from VS Code (the one used last, of VS Code, Insiders, VSCodium and
+    /// Cursor): what Null has too, said first, brought over when you say so.
+    fn import_vs_code_settings(&mut self, _: &ImportVsCodeSettings, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        let found = self.vs_code_settings_file.clone();
+        #[cfg(not(test))]
+        let found = crate::vscode_import::latest();
+        let Some((editor, path)) = found else {
+            return self.show_notice("No VS Code settings found on this Mac".into(), cx);
+        };
+        let Ok(written) = crate::settings::read_project(&path) else {
+            return self.show_notice(format!("{editor}'s settings couldn't be read"), cx);
+        };
+        let (after, changed) = crate::vscode_import::changes(cx.global::<Settings>(), &written);
+        if changed.is_empty() {
+            return self.show_notice(format!("Null has {editor}'s settings already"), cx);
+        }
+        let count = if changed.len() == 1 { "1 setting".to_string() } else { format!("{} settings", changed.len()) };
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &format!("Bring over {count} from {editor}?"),
+            Some(&changed.join("\n")),
+            &["Bring Over", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                settings::update(cx, |s| *s = after);
+                this.show_notice(format!("{count} brought over from {editor}"), cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// ⏎ in the Outline's filter: to the first item that fits.
@@ -9962,6 +10007,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))
             .on_action(cx.listener(Self::debug_test))
             .on_action(cx.listener(Self::go_to_outline_match))
+            .on_action(cx.listener(Self::import_vs_code_settings))
             .on_action(cx.listener(Self::clear_outline_filter))
             .on_action(cx.listener(|this, _: &DebugAgain, window, cx| match this.debugged_test.clone() {
                 Some(test) => this.debug_rust_test(test, cx),
@@ -12949,6 +12995,43 @@ mod tests {
         assert!(!marked(&file, cx), "a warning isn't an error");
         report(None, cx);
         assert!(!marked(&dir.join("src"), cx));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// VS Code's settings: what changes said, brought over only when asked to.
+    #[gpui::test]
+    fn vs_code_settings_are_brought_over_when_asked(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("vscode-import");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        std::fs::write(&file, "{ // mine\n \"editor.fontSize\": 15, \"editor.cursorStyle\": \"underline\", }").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.vs_code_settings_file = Some(("VS Code", file.clone()));
+            w.import_vs_code_settings(&ImportVsCodeSettings, window, cx);
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(cx.global::<Settings>().font_size, Settings::default().font_size));
+        workspace.update_in(cx, |w, window, cx| w.import_vs_code_settings(&ImportVsCodeSettings, window, cx));
+        cx.simulate_prompt_answer("Bring Over");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let s = cx.global::<Settings>();
+            assert_eq!((s.font_size, s.caret), (15., crate::settings::CaretShape::Underline));
+        });
+        // Again: nothing to ask about.
+        workspace.update_in(cx, |w, window, cx| w.import_vs_code_settings(&ImportVsCodeSettings, window, cx));
+        assert!(!cx.has_pending_prompt());
         std::fs::remove_dir_all(&dir).ok();
     }
 
