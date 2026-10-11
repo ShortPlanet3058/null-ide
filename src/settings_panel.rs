@@ -8,9 +8,10 @@ use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{Theme, ThemeName};
 use crate::ui;
+use crate::ui::px;
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
-    SharedString, Subscription, Window, actions, div, prelude::*, px,
+    SharedString, Subscription, Window, actions, div, prelude::*,
 };
 
 actions!(settings_panel, [CloseSettings]);
@@ -477,6 +478,37 @@ impl SettingsPanel {
                     cx.listener(|_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.font_size = DEFAULT_FONT_SIZE)),
                 ))
             });
+        // The interface's size (menus, tabs, panels), as its keys change it.
+        let zoom = crate::ui::zoom(cx);
+        let interface_size = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                Self::button("interface-smaller", "−", &theme)
+                    .active(|s| s.opacity(0.7))
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::ZoomOut), cx)),
+            )
+            .child(
+                div()
+                    .w(px(44.))
+                    .text_center()
+                    .text_size(px(13.))
+                    .text_color(theme.foreground)
+                    .child(format!("{:.0}%", zoom * 100.)),
+            )
+            .child(
+                Self::button("interface-bigger", "+", &theme)
+                    .active(|s| s.opacity(0.7))
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::ZoomIn), cx)),
+            )
+            .when((zoom - 1.).abs() > 0.001, |d| {
+                d.child(
+                    Self::button("interface-actual", "Reset", &theme)
+                        .active(|s| s.opacity(0.7))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::ResetZoom), cx)),
+                )
+            });
         let installed = |name: &str| name == ".SystemUIFont" || self.installed_fonts.iter().any(|f| f == name);
         let mut code_fonts: Vec<(String, String)> = crate::fonts::CODE_FONTS
             .iter()
@@ -526,6 +558,18 @@ impl SettingsPanel {
                     cx,
                 )),
                 size,
+                &theme,
+            ),
+            Self::row(
+                "Interface size",
+                Some(
+                    format!(
+                        "Menus, tabs and panels, not the code. {}",
+                        keys_line("Also", &[&crate::workspace::ZoomIn, &crate::workspace::ZoomOut], cx)
+                    )
+                    .trim_end(),
+                ),
+                interface_size,
                 &theme,
             ),
             Self::row(
@@ -825,6 +869,14 @@ impl SettingsPanel {
                     key(&crate::editor::FormatDocument, cx)
                 )),
                 Self::toggle("format-on-save", s.format_on_save, &theme, cx, |s| s.format_on_save = !s.format_on_save),
+                &theme,
+            ),
+            Self::row(
+                "Organize imports on save",
+                Some("Sorts the imports and takes out the unused ones, as the language server does, when saving"),
+                Self::toggle("organize-on-save", s.organize_imports_on_save, &theme, cx, |s| {
+                    s.organize_imports_on_save = !s.organize_imports_on_save
+                }),
                 &theme,
             ),
             Self::row(

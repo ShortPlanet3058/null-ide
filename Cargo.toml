@@ -56,6 +56,13 @@ ureq = { version = "3", features = ["json"] }
 # The date and time for snippets ($CURRENT_YEAR…). Already built for a dependency.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 url = "2"
+# Markdown's preview: formulas laid out as TeX does (RaTeX, KaTeX's fonts inside) and
+# Mermaid diagrams, drawn as SVG (by resvg, already here).
+ratex-parser = "0.1.14"
+ratex-layout = "0.1.14"
+ratex-types = "0.1.14"
+ratex-svg = { version = "0.1.14", features = ["embed-fonts"] }
+mermaid-rs-renderer = { version = "0.3.1", default-features = false }
 
 # The Mac's own spell checker and color panel. Already built for GPUI: only the parts used are named.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -2,10 +2,11 @@ use crate::fs_ops;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
 use crate::ui;
+use crate::ui::px;
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, KeyContext,
     MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy, SharedString, Subscription, Transformation,
-    UniformListScrollHandle, Window, actions, anchored, deferred, div, prelude::*, px, radians, svg, uniform_list,
+    UniformListScrollHandle, Window, actions, anchored, deferred, div, prelude::*, radians, svg, uniform_list,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1682,7 +1683,7 @@ impl FileTree {
         });
         Some(
             deferred(
-                anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(
+                anchored().position(menu.position).snap_to_window_with_margin(gpui::px(8.)).child(
                     div()
                         .occlude()
                         .min_w(px(220.))

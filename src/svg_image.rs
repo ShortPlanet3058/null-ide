@@ -71,6 +71,81 @@ pub fn image(path: &std::path::Path) -> gpui::Img {
     }
 }
 
+/// A drawing made from text: drawn, not drawable, or still being drawn.
+pub enum Made {
+    Ready(Drawn),
+    Failed,
+    Waiting,
+}
+
+/// Making an SVG to draw (in the background).
+pub type Job = Box<dyn FnOnce() -> Option<String> + Send>;
+
+/// Drawings made from text (a formula, a diagram), the ones used last at the end; those
+/// asked for and not drawn yet; and pictures let go, for their window to free.
+#[derive(Default)]
+struct MadeCache {
+    done: Vec<(String, Option<Drawn>)>,
+    waiting: Vec<(String, Job)>,
+    asked: std::collections::HashSet<String>,
+    let_go: Vec<Arc<RenderImage>>,
+}
+
+static MADE: LazyLock<std::sync::Mutex<MadeCache>> = LazyLock::new(Default::default);
+
+/// How many drawings made from text are kept.
+const MADE_KEPT: usize = 256;
+
+/// The drawing of the SVG `make` gives, remembered by `key` (what it's made from): made and
+/// drawn once, in the background (see `take_waiting`), not as the preview draws.
+pub fn made(key: &str, make: impl FnOnce() -> Option<String> + Send + 'static) -> Made {
+    let Ok(mut cache) = MADE.lock() else { return Made::Failed };
+    if let Some(at) = cache.done.iter().position(|(k, _)| k == key) {
+        // Used: last to go.
+        let entry = cache.done.remove(at);
+        let made = match &entry.1 {
+            Some(drawn) => Made::Ready(drawn.clone()),
+            None => Made::Failed,
+        };
+        cache.done.push(entry);
+        return made;
+    }
+    if cache.asked.insert(key.to_string()) {
+        cache.waiting.push((key.to_string(), Box::new(make)));
+    }
+    Made::Waiting
+}
+
+/// The drawings asked for, to make in the background, each then given to `finish`.
+pub fn take_waiting() -> Vec<(String, Job)> {
+    MADE.lock().map(|mut cache| std::mem::take(&mut cache.waiting)).unwrap_or_default()
+}
+
+/// Makes and draws `job` (sharp on a Retina screen); a panic in it is a drawing that
+/// failed, not a crash.
+pub fn make(job: Job) -> Option<Drawn> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job().and_then(|svg| draw(svg.as_bytes(), 2., None))))
+        .ok()
+        .flatten()
+}
+
+/// The drawing for `key`, made: kept, the one used longest ago let go past the limit.
+pub fn finish(key: String, drawn: Option<Drawn>) {
+    let Ok(mut cache) = MADE.lock() else { return };
+    cache.asked.remove(&key);
+    cache.done.push((key, drawn));
+    while cache.done.len() > MADE_KEPT {
+        if let (_, Some((image, _))) = cache.done.remove(0) {
+            cache.let_go.push(image);
+        }
+    }
+}
+
+/// Pictures no longer kept, for the window to free on the GPU.
+pub fn take_let_go() -> Vec<Arc<RenderImage>> {
+    MADE.lock().map(|mut cache| std::mem::take(&mut cache.let_go)).unwrap_or_default()
+}
+
 /// tiny-skia's pixels (red first, alpha multiplied in) in gpui's order: blue first, plain.
 fn bgra(pixmap: &tiny_skia::Pixmap) -> Option<image::RgbaImage> {
     let mut data = Vec::with_capacity(pixmap.pixels().len() * 4);

@@ -329,6 +329,38 @@ fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
             i += 1;
             continue;
         }
+        // A formula on lines of its own: `$$ … $$`, as a ```math block (when it closes:
+        // a `$$` left open is text).
+        let closes_later = || lines[i + 1..].iter().any(|l| l.trim_end().ends_with("$$"));
+        if let Some(rest) = trimmed.strip_prefix("$$")
+            && (rest.trim_end().strip_suffix("$$").is_some() || closes_later())
+        {
+            let mut formula = Vec::new();
+            match rest.trim_end().strip_suffix("$$") {
+                // `$$ x $$`, on one line.
+                Some(inside) => {
+                    formula.push(inside);
+                    i += 1;
+                }
+                None => {
+                    formula.push(rest);
+                    i += 1;
+                    while i < lines.len() {
+                        let l = lines[i].trim_end();
+                        i += 1;
+                        match l.strip_suffix("$$") {
+                            Some(last) => {
+                                formula.push(last);
+                                break;
+                            }
+                            None => formula.push(l),
+                        }
+                    }
+                }
+            }
+            blocks.push(code_block("math".into(), formula.join("\n").trim().to_string()));
+            continue;
+        }
         if let Some(fence) = fence_of(trimmed) {
             let language = trimmed[fence.len()..].split_whitespace().next().unwrap_or("").to_string();
             let mut code = Vec::new();
@@ -936,6 +968,37 @@ pub fn inlines(text: &str) -> Vec<Inline> {
                 i += 1;
                 continue;
             }
+            // A formula in the line (`$$x$$` too): as its characters, in italics.
+            '$' if chars.get(i + 1) == Some(&'$') && chars.get(i + 2).is_some_and(|n| *n != '$') => {
+                let rest = &chars[i + 2..];
+                let end = rest.windows(2).position(|w| w == ['$', '$']).filter(|&p| p > 0 && !rest[..p].contains(&'`'));
+                if let Some(end) = end {
+                    let latex: String = rest[..end].iter().collect();
+                    flush(&mut plain, &mut out);
+                    out.push(Inline::Emphasis(vec![Inline::Text(crate::math::as_text(&latex))]));
+                    i += 2 + end + 2;
+                    continue;
+                }
+            }
+            // A formula in the line (`$x^2$`): as the characters it reads as, in italics.
+            // Not money: nothing spaced inside its dollars, no digit just after the second;
+            // never into a code span.
+            '$' if chars.get(i + 1).is_some_and(|n| *n != ' ' && *n != '$') => {
+                let end = chars[i + 1..]
+                    .iter()
+                    .position(|&c| c == '$' || c == '`')
+                    .map(|p| i + 1 + p)
+                    .filter(|&e| chars[e] == '$');
+                if let Some(end) = end.filter(|&e| {
+                    chars[e - 1] != ' ' && chars[e - 1] != '\\' && !chars.get(e + 1).is_some_and(|c| c.is_ascii_digit())
+                }) {
+                    let latex: String = chars[i + 1..end].iter().collect();
+                    flush(&mut plain, &mut out);
+                    out.push(Inline::Emphasis(vec![Inline::Text(crate::math::as_text(&latex))]));
+                    i = end + 1;
+                    continue;
+                }
+            }
             '`' => {
                 let run = chars[i..].iter().take_while(|&&c| c == '`').count();
                 let fence: String = "`".repeat(run);
@@ -1458,6 +1521,39 @@ fn render_block(block: &Block, style: &Style, counter: &mut usize, color: gpui::
             }
             div().child(rich(text, style, id, color, FontWeight::NORMAL)).into_any_element()
         }
+        // A formula, drawn as TeX lays it out; a Mermaid diagram, drawn. As code when they
+        // don't read as such.
+        Block::Code { language, text, .. } if language == "math" || language == "mermaid" => {
+            use crate::svg_image::Made;
+            let theme = &style.theme;
+            let made = if language == "math" {
+                let key = format!("math {:?} {text}", theme.foreground);
+                let (text, colour) = (text.clone(), theme.foreground);
+                crate::svg_image::made(&key, move || crate::math::formula_svg(&text, colour, 19.))
+            } else {
+                let key = format!("mermaid {:?} {:?} {} {text}", theme.foreground, theme.raised, style.ui_font);
+                let (text, theme, font) = (text.clone(), theme.clone(), style.ui_font.to_string());
+                crate::svg_image::made(&key, move || crate::math::diagram_svg(&text, &theme, &font))
+            };
+            match made {
+                // Being drawn: its room, for a moment.
+                Made::Waiting => div().h(px(28.)).into_any_element(),
+                Made::Ready((image, (width, height))) => div()
+                    .id((if language == "math" { "math" } else { "diagram" }, id))
+                    .w_full()
+                    .flex()
+                    .when(language == "math", |d| d.justify_center())
+                    .overflow_x_scroll()
+                    .child(gpui::img(gpui::ImageSource::Render(image)).flex_none().w(px(width)).h(px(height)))
+                    .into_any_element(),
+                Made::Failed => render_block(
+                    &Block::Code { language: String::new(), text: text.clone(), colours: Vec::new() },
+                    style,
+                    counter,
+                    color,
+                ),
+            }
+        }
         // What a notebook's cell printed: quieter than code, beside a faint line.
         Block::Code { language, text, .. } if language == "output" => div()
             .id(("output", id))
@@ -1805,6 +1901,31 @@ mod tests {
 
     /// `> [!NOTE]` and the other GitHub callouts: their kind and what follows; any other
     /// quote stays a quote.
+    /// Formulas: on lines of their own (`$$`), as a math block; in a line (`$…$`), as the
+    /// characters they read as, in italics. Money isn't a formula.
+    #[test]
+    fn formulas() {
+        let blocks = parse(
+            "$$\nE = mc^2\n$$\n\n$$ a + b $$\n\nThe area is $\\pi r^2$ here.\n\nIt costs $5 and $10.\n\n$$ left open\n\nThen $$x^2$$, and $a `b$`.\n",
+        );
+        assert!(matches!(&blocks[0], Block::Code { language, text, .. } if language == "math" && text == "E = mc^2"));
+        assert!(matches!(&blocks[1], Block::Code { language, text, .. } if language == "math" && text == "a + b"));
+        let Block::Paragraph(line) = &blocks[2] else { panic!("{:?}", blocks[2]) };
+        assert!(
+            matches!(&line[1], Inline::Emphasis(inner) if matches!(&inner[0], Inline::Text(t) if t == "π r²")),
+            "{line:?}"
+        );
+        let Block::Paragraph(money) = &blocks[3] else { panic!() };
+        assert_eq!(money, &vec![Inline::Text("It costs $5 and $10.".into())]);
+        assert!(matches!(&blocks[4], Block::Paragraph(_)), "a $$ left open is text: {:?}", blocks[4]);
+        let Block::Paragraph(last) = &blocks[5] else { panic!("{:?}", blocks[5]) };
+        assert!(
+            matches!(&last[1], Inline::Emphasis(inner) if matches!(&inner[0], Inline::Text(t) if t == "x²")),
+            "{last:?}"
+        );
+        assert!(last.iter().any(|i| matches!(i, Inline::Code(c) if c == "b$")), "the code span stays: {last:?}");
+    }
+
     #[test]
     fn callouts_are_told_from_quotes() {
         let blocks =

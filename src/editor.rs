@@ -584,6 +584,9 @@ pub struct Editor {
     #[allow(clippy::type_complexity)]
     pub(crate) markdown: Option<(u64, Rc<Vec<(usize, crate::markdown_view::Block)>>)>,
     /// The source line the preview last scrolled to, following the other side.
+    /// A notebook (`.ipynb`) written in as its cells' text: its JSON as last read from disk
+    /// or written, which the cells go back into on saving (see `crate::notebook`).
+    pub(crate) notebook: Option<String>,
     followed_line: Option<usize>,
     /// The preview was scrolled by hand: its source beside it follows (once).
     preview_scrolled: bool,
@@ -813,6 +816,11 @@ fn disk_stamp(path: &Path) -> Option<DiskStamp> {
     Some((meta.len(), meta.modified().ok()?))
 }
 
+/// Whether `path` is a Jupyter notebook's, by its name.
+fn is_notebook_path(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
+}
+
 pub fn fingerprint(text: &str) -> Fingerprint {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
@@ -881,6 +889,7 @@ impl Editor {
             svg_image: None,
             svg_task: None,
             markdown: None,
+            notebook: None,
             followed_line: None,
             preview_scrolled: false,
             reading_scroll: gpui::ScrollHandle::new(),
@@ -1018,7 +1027,20 @@ impl Editor {
             return editor;
         }
         let (text, encoding) = read.unwrap_or_default();
-        let mut editor = Self::new(Buffer::from_text(&text), Some(path), cx);
+        // A notebook: its cells as text to write in.
+        let cells = is_notebook_path(&path).then(|| crate::notebook::to_cells_text(&text)).flatten();
+        let mut editor = Self::new(Buffer::from_text(cells.as_deref().unwrap_or(&text)), Some(path), cx);
+        if cells.is_some() {
+            editor.notebook = Some(text.clone());
+            // In its kernel's language (Python's colours, not JSON's).
+            let named = crate::notebook::language(&text).and_then(|name| {
+                let names = language_names();
+                names.into_iter().find(|n| n.eq_ignore_ascii_case(&name))
+            });
+            if let Some(kind) = named.and_then(language_by_name) {
+                editor.choose_language(Some(kind), cx);
+            }
+        }
         editor.on_disk = Some(fingerprint(&text));
         editor.disk_stamp = disk_stamp(&editor.path.clone().unwrap_or_default());
         editor.read_only = is_read_only(&editor.path.clone().unwrap_or_default());
@@ -1043,7 +1065,10 @@ impl Editor {
     /// False when it couldn't be read: the text stays as it was.
     pub fn revert_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
         self.reload(true, cx);
-        self.on_disk == Some(fingerprint(&self.buffer.to_string()))
+        match &self.notebook {
+            Some(json) => crate::notebook::to_cells_text(json).is_some_and(|cells| cells == self.buffer.to_string()),
+            None => self.on_disk == Some(fingerprint(&self.buffer.to_string())),
+        }
     }
 
     fn reload(&mut self, discard_edits: bool, cx: &mut Context<Self>) {
@@ -1088,6 +1113,7 @@ impl Editor {
         }
         self.on_disk = Some(fingerprint(&text));
         self.encoding = encoding;
+        let text = self.shown_from_disk(text);
         if text == self.buffer.to_string() {
             self.disk_changed = false;
             return;
@@ -1107,6 +1133,19 @@ impl Editor {
         self.text_changed(cx);
         cx.emit(EditorEvent::ReadFromDisk);
         cx.notify();
+    }
+
+    /// What's shown of the file's text as read from disk: a notebook's cells as text to
+    /// write in (its JSON kept, to write them back into); anything else as it is.
+    fn shown_from_disk(&mut self, text: String) -> String {
+        if self.is_notebook()
+            && let Some(cells) = crate::notebook::to_cells_text(&text)
+        {
+            self.notebook = Some(text);
+            return cells;
+        }
+        self.notebook = None;
+        text
     }
 
     /// Notes whether the file is gone from disk; true when it is.
@@ -3027,6 +3066,7 @@ impl Editor {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.last_edit = None;
+        let text = self.shown_from_disk(text);
         if text != self.buffer.to_string() {
             let (line, column) = self.caret_point();
             self.buffer.replace(0..self.buffer.len_chars(), &text);
@@ -3140,6 +3180,11 @@ impl Editor {
             std::fs::create_dir_all(parent).ok();
         }
         let text = self.buffer.to_string();
+        // A notebook: its cells written back into its JSON.
+        let text = match &self.notebook {
+            Some(json) => crate::notebook::with_cells(json, &text).unwrap_or(text),
+            None => text,
+        };
         let bytes = match crate::encoding::encode(&text, self.encoding) {
             Ok(bytes) => bytes,
             Err(c) => {
@@ -3154,6 +3199,9 @@ impl Editor {
         match crate::fs_ops::write_file(path, &bytes) {
             Ok(()) => {
                 self.on_disk = Some(fingerprint(&text));
+                if self.notebook.is_some() {
+                    self.notebook = Some(text.clone());
+                }
                 self.disk_stamp = disk_stamp(path);
                 self.read_only = is_read_only(path);
                 self.missing = false;
@@ -4308,7 +4356,9 @@ impl Render for Editor {
             window.drop_image(image).ok();
         }
         if self.reading {
-            return self.render_reading(cx);
+            let shown = self.render_reading(cx);
+            self.draw_what_was_asked(window, cx);
+            return shown;
         }
         // The find bar sits beside the text, not inside the "Editor" key context,
         // so typing in it never triggers editor shortcuts.
@@ -4715,7 +4765,7 @@ impl Editor {
 
     /// A Jupyter notebook (`.ipynb`): its JSON read as cells in the preview.
     pub fn is_notebook(&self) -> bool {
-        self.path.as_ref().and_then(|p| p.extension()).is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
+        self.path.as_deref().is_some_and(is_notebook_path)
     }
 
     /// An SVG file: drawn by its name, whatever language it's shown in.
@@ -4802,15 +4852,36 @@ impl Editor {
             .into_any_element()
     }
 
+    /// The formulas and diagrams the preview asked for: drawn in the background, shown when
+    /// they are; those no longer kept, let go of on the GPU.
+    fn draw_what_was_asked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for image in crate::svg_image::take_let_go() {
+            window.drop_image(image).ok();
+        }
+        for (key, job) in crate::svg_image::take_waiting() {
+            cx.spawn(async move |this, cx| {
+                let drawn = cx.background_executor().spawn(async move { crate::svg_image::make(job) }).await;
+                crate::svg_image::finish(key, drawn);
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
+    }
+
     fn render_reading(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let revision = self.buffer.revision();
         let blocks = match &self.markdown {
             Some((r, blocks)) if *r == revision => blocks.clone(),
             _ => {
                 let text = self.buffer.to_string();
-                // A notebook: its cells as Markdown (or a line saying it isn't one).
+                // A notebook: its cells as Markdown (or a line saying it isn't one), as
+                // written in so far.
                 let text = if self.is_notebook() {
-                    crate::notebook::to_markdown(&text)
+                    let json = match &self.notebook {
+                        Some(json) => crate::notebook::with_cells(json, &text).unwrap_or(text),
+                        None => text,
+                    };
+                    crate::notebook::to_markdown(&json)
                         .unwrap_or_else(|| "*This file doesn't read as a notebook.*".to_string())
                 } else {
                     text

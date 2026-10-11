@@ -4,9 +4,10 @@ use crate::search::{MAX_MATCHES, SearchQuery};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
 use crate::ui;
+use crate::ui::px;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString, Subscription,
-    Transformation, WeakEntity, Window, actions, div, prelude::*, px, radians, svg,
+    Transformation, WeakEntity, Window, actions, div, prelude::*, radians, svg,
 };
 
 actions!(

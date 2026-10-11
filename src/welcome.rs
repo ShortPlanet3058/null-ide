@@ -9,9 +9,10 @@ use crate::settings::{self, Settings};
 use crate::text_input::TextInput;
 use crate::theme::{Syntax, Theme, ThemeName};
 use crate::ui;
+use crate::ui::px;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
-    SharedString, StyledText, Task, Window, WindowControlArea, actions, div, prelude::*, px,
+    SharedString, StyledText, Task, Window, WindowControlArea, actions, div, prelude::*,
 };
 use std::time::{Duration, Instant};
 
@@ -333,8 +334,8 @@ impl Welcome {
             .border_1()
             .border_color(theme.hairline)
             .font_family(font)
-            .text_size(px(settings.font_size))
-            .line_height(px(settings.font_size * 1.6))
+            .text_size(gpui::px(settings.font_size))
+            .line_height(gpui::px(settings.font_size * 1.6))
             .children(lines.iter().map(|pieces| {
                 div().flex().children(pieces.iter().map(|(text, syntax)| {
                     div().text_color(theme.syntax(*syntax)).whitespace_nowrap().child(text.replace(' ', "\u{a0}"))

@@ -3,11 +3,12 @@ use crate::search::SearchQuery;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
 use crate::ui;
+use crate::ui::px;
 use futures::StreamExt;
 use gpui::{
     App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyBinding,
     ScrollStrategy, SharedString, StyledText, Subscription, Task, UniformListScrollHandle, Window, actions, div,
-    prelude::*, px, uniform_list,
+    prelude::*, uniform_list,
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -589,7 +590,10 @@ impl ProjectSearch {
                     );
                     let old = HighlightStyle {
                         color: Some(theme.faint),
-                        strikethrough: Some(gpui::StrikethroughStyle { thickness: px(1.), color: Some(theme.faint) }),
+                        strikethrough: Some(gpui::StrikethroughStyle {
+                            thickness: gpui::px(1.),
+                            color: Some(theme.faint),
+                        }),
                         ..Default::default()
                     };
                     let new = HighlightStyle {

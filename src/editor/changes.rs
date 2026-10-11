@@ -29,6 +29,11 @@ impl Editor {
         self.git_base_task = Some(cx.spawn(async move |this, cx| {
             let base = cx.background_executor().spawn(async move { git::committed_text(&path, encoding) }).await;
             this.update(cx, |this, cx| {
+                // A notebook written in as its cells: the committed one as its cells too.
+                let base = match base {
+                    Some(json) if this.notebook.is_some() => crate::notebook::to_cells_text(&json).or(Some(json)),
+                    base => base,
+                };
                 this.git_base = base.map(Arc::from);
                 this.refresh_git_hunks(Duration::ZERO, cx);
             })
