@@ -36,6 +36,8 @@ enum ServerState {
     Starting {
         server: Arc<LanguageServer>,
         queued: Queued,
+        /// Which start this is (see `starts`).
+        start: u64,
     },
     Running {
         server: Arc<LanguageServer>,
@@ -188,6 +190,9 @@ pub struct LspStore {
     servers: HashMap<ServerKey, ServerState>,
     /// The folder each folder's Python files are served from, worked out once.
     python_roots: std::cell::RefCell<HashMap<PathBuf, PathBuf>>,
+    /// Servers started so far: a start's answer only counts for that start (a server
+    /// restarted meanwhile is another).
+    starts: u64,
     /// Open files and their text, to hand to a server installed after they were opened.
     documents: HashMap<PathBuf, Rope>,
     diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
@@ -212,6 +217,7 @@ impl LspStore {
             root,
             servers: HashMap::new(),
             python_roots: Default::default(),
+            starts: 0,
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
             diagnostics_version: 0,
@@ -268,7 +274,10 @@ impl LspStore {
     pub fn readiness(&self, path: &Path) -> Option<Readiness> {
         let config = config_for(path)?;
         let key = self.key_for(config, path);
-        let state = self.servers.get(&key).or_else(|| self.servers.get(&self.project_key(config)));
+        // (Installing is noted for the project's: it shows for a package's files too.)
+        let project = self.servers.get(&self.project_key(config));
+        let installing = project.filter(|s| matches!(s, ServerState::Installing | ServerState::InstallFailed(_)));
+        let state = installing.or_else(|| self.servers.get(&key)).or(project);
         Some(match state {
             None | Some(ServerState::Starting { .. }) => Readiness::Starting,
             Some(ServerState::Missing) => Readiness::Missing { server: config },
@@ -531,10 +540,15 @@ impl LspStore {
             ..Default::default()
         };
         let initialize = server.request::<Initialize>(params);
+        self.starts += 1;
+        let start = self.starts;
         self._tasks.push(cx.spawn(async move |this, cx| {
             let result = initialize.await;
             this.update(cx, |this, _| {
-                let Some(ServerState::Starting { server, queued }) = this.servers.remove(&key) else { return };
+                if !matches!(this.servers.get(&key), Some(ServerState::Starting { start: s, .. }) if *s == start) {
+                    return;
+                }
+                let Some(ServerState::Starting { server, queued, .. }) = this.servers.remove(&key) else { return };
                 match result {
                     Ok(result) => {
                         server.set_capabilities(&result.capabilities);
@@ -553,7 +567,7 @@ impl LspStore {
             })
             .ok();
         }));
-        ServerState::Starting { server, queued: Vec::new() }
+        ServerState::Starting { server, queued: Vec::new(), start }
     }
 
     fn handle_message(
@@ -997,8 +1011,17 @@ impl LspStore {
     /// The servers that care about renaming `path`: its language's, or for a folder,
     /// every one running (a folder can hold a module).
     fn servers_for_rename(&self, path: &Path) -> Vec<Arc<LanguageServer>> {
-        if let Some(server) = self.server_for(path) {
-            return vec![server];
+        // Every one of its kind (Python's, one per package): code elsewhere may name it.
+        if let Some(config) = config_for(path).filter(|_| self.server_for(path).is_some()) {
+            return self
+                .servers
+                .iter()
+                .filter(|((name, _), _)| *name == config.name)
+                .filter_map(|(_, state)| match state {
+                    ServerState::Running { server } => Some(server.clone()),
+                    _ => None,
+                })
+                .collect();
         }
         if path.is_file() {
             return Vec::new();
@@ -1260,6 +1283,19 @@ impl LspStore {
     /// Every problem the servers have reported, by file.
     pub fn all_diagnostics(&self) -> impl Iterator<Item = (&PathBuf, &Diagnostic)> {
         self.diagnostics.iter().flat_map(|(path, list)| list.iter().map(move |d| (path, d)))
+    }
+
+    /// After a change that can make or remove an environment: if any folder's Python files
+    /// would now go to another server (a package's environment made, or gone), Python's
+    /// servers start again.
+    pub fn python_folders_changed(&mut self, cx: &mut Context<Self>) {
+        let moved = self.python_roots.borrow().iter().any(|(folder, served)| {
+            crate::python_env::owner_for(&self.root, folder).map_or_else(|| self.root.clone(), |(owner, _)| owner)
+                != *served
+        });
+        if moved {
+            self.restart_python(cx);
+        }
     }
 
     /// Stops every server politely.

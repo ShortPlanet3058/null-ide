@@ -400,7 +400,7 @@ impl Editor {
         let asked = &prompt.lines;
         let before: Vec<String> = (0..asked.start).map(|l| self.buffer.line_text(l)).collect();
         let after: Vec<String> = (asked.end..self.buffer.len_lines()).map(|l| self.buffer.line_text(l)).collect();
-        text = without_context(&text, &before, &after);
+        text = without_context(&text, &before, &after, asked.len());
         if prompt.original.ends_with('\n') && !text.ends_with('\n') {
             text.push('\n');
         }
@@ -933,8 +933,11 @@ impl Editor {
 /// `answer` without the lines at its start that repeat the end of `before` (the file above
 /// the part asked about), and those at its end that repeat the start of `after`: something
 /// of the answer stays.
-fn without_context(answer: &str, before: &[String], after: &[String]) -> String {
+fn without_context(answer: &str, before: &[String], after: &[String], asked: usize) -> String {
     let lines: Vec<&str> = answer.lines().collect();
+    if lines.is_empty() {
+        return answer.to_string();
+    }
     let same = |a: &str, b: &str| a.trim_end() == b.trim_end();
     let most = lines.len().saturating_sub(1);
     let head = (1..=most.min(before.len()))
@@ -946,7 +949,10 @@ fn without_context(answer: &str, before: &[String], after: &[String]) -> String 
         .rev()
         .find(|&m| lines[lines.len() - m..].iter().zip(&after[..m]).all(|(a, b)| same(a, b)))
         .unwrap_or(0);
-    if head == 0 && tail == 0 {
+    // Only when it's surely what's around: more than one line of it, with the answer at
+    // least as long as the part asked about besides (`x += 1` above and below a line
+    // asked about isn't taken for them).
+    if head + tail < 2 || lines.len() < asked + head + tail {
         return answer.to_string();
     }
     let mut kept = lines[head..lines.len() - tail].join("\n");
@@ -969,14 +975,19 @@ mod tests {
         let after = lines("    let unused = 3;\n}\n\nfn helper() -> i32 {\n    42\n}");
         let answer = "fn main() {\n    let first = 5;\n    let second = 2;\n    println!(\"{}\", first + second);\n    let unused = 3;\n}\n\nfn helper() -> i32 {\n    42\n}\n";
         assert_eq!(
-            without_context(answer, &before, &after),
+            without_context(answer, &before, &after, 3),
             "    let first = 5;\n    let second = 2;\n    println!(\"{}\", first + second);\n"
         );
         // Just the part: as it is.
         let part = "    let first = 5;\n";
-        assert_eq!(without_context(part, &before, &after), part);
+        assert_eq!(without_context(part, &before, &after, 1), part);
         // An answer that is only the lines around: one line of it stays (not nothing).
-        assert_eq!(without_context("fn main() {\n", &before, &after), "fn main() {\n");
+        assert_eq!(without_context("fn main() {\n", &before, &after, 1), "fn main() {\n");
+        // Nothing: nothing (not a crash).
+        assert_eq!(without_context("", &before, &after, 1), "");
+        // A line like the ones around, written by the change itself: kept.
+        let around = lines("x += 1");
+        assert_eq!(without_context("# bump\nx += 1", &around, &around, 1), "# bump\nx += 1");
     }
     use crate::buffer::Buffer;
     use gpui::{EntityInputHandler as _, TestAppContext, VisualTestContext};

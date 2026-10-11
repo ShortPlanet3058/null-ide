@@ -209,7 +209,9 @@ fn shape_suggestion(completion: &str, suffix: &str, block: bool) -> Vec<String> 
     // A line closing a block (`}`) is the same only as indented the same: one closing a
     // block the suggestion opened isn't the caret's block's end.
     let closes = |l: &str| l.trim_start().starts_with(['}', ')', ']']) && l.trim().len() <= 2;
-    let same = |a: &str, b: &str| if closes(b) { a.trim_end() == b } else { a.trim() == b.trim() };
+    // (Indentation by width: a tab as four spaces.)
+    let indented = |l: &str| l.trim_end().replace('\t', "    ");
+    let same = |a: &str, b: &str| if closes(b) { indented(a) == indented(b) } else { a.trim() == b.trim() };
     // The next line closing a block: a suggestion that writes it again has run on past the
     // caret's block (a small model goes on into new code).
     let closer = following.first().copied().filter(|l| closes(l));
@@ -225,7 +227,7 @@ fn shape_suggestion(completion: &str, suffix: &str, block: bool) -> Vec<String> 
     };
     let mut lines: Vec<String> = Vec::new();
     for (i, line) in all.iter().enumerate() {
-        if i > 0 && (repeats_from(i) || closer.is_some_and(|c| line.trim_end() == c)) {
+        if i > 0 && (repeats_from(i) || closer.is_some_and(|c| same(line, c))) {
             break;
         }
         lines.push(line.trim_end().to_string());

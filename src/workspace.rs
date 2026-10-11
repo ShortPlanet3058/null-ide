@@ -5332,6 +5332,9 @@ impl Workspace {
         if now != self.python_env {
             self.python_env = now;
             self.lsp.update(cx, |lsp, cx| lsp.restart_python(cx));
+        } else {
+            // A package's own (a monorepo's): its files go to a server of their own, or back.
+            self.lsp.update(cx, |lsp, cx| lsp.python_folders_changed(cx));
         }
     }
 

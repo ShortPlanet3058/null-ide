@@ -10,20 +10,26 @@ use std::time::{Duration, Instant};
 /// The `ollama serve` Null started, to stop when it quits.
 static STARTED: Mutex<Option<Child>> = Mutex::new(None);
 
+/// When starting it last failed (it stopped at once): not tried again for a minute, so
+/// requests don't each wait for one that won't come.
+static FAILED_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
 /// How long a starting Ollama is waited for.
 const START_WAIT: Duration = Duration::from_secs(8);
 
 /// The address Ollama would listen on for `base` (`http://127.0.0.1:11434/v1`), when it's
 /// this computer's: another computer's isn't Null's to start.
+/// (`localhost` as 127.0.0.1, where Ollama listens: the Mac also names it ::1.)
 fn local_address(base: &str) -> Option<(String, SocketAddr)> {
     let url = url::Url::parse(base).ok()?;
-    let host = url.host_str()?;
-    if !matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
-        return None;
-    }
     let port = url.port_or_known_default()?;
-    let address = (host.trim_matches(['[', ']']), port).to_socket_addrs().ok()?.next()?;
-    Some((format!("{}:{port}", host.trim_matches(['[', ']'])), address))
+    let host = match url.host_str()? {
+        "127.0.0.1" | "localhost" => "127.0.0.1".to_string(),
+        "::1" | "[::1]" => "[::1]".to_string(),
+        _ => return None,
+    };
+    let address = format!("{host}:{port}").to_socket_addrs().ok()?.next()?;
+    Some((format!("{host}:{port}"), address))
 }
 
 fn answers(address: &SocketAddr) -> bool {
@@ -40,9 +46,15 @@ pub fn ensure_running(base: &str) {
     }
     let Some((host, address)) = local_address(base) else { return };
     if !answers(&address) {
-        start(&host, &address);
+        let failed_lately = FAILED_AT.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|at| at.elapsed() < RETRY);
+        if !failed_lately {
+            start(&host, &address);
+        }
     }
 }
+
+/// How long after a start that failed it isn't tried again.
+const RETRY: Duration = Duration::from_secs(60);
 
 /// Runs `ollama serve` on `host` (if it's installed and not started already), and waits for
 /// it at `address`.
@@ -67,16 +79,36 @@ fn start(host: &str, address: &SocketAddr) {
     drop(started);
     let since = Instant::now();
     while since.elapsed() < START_WAIT && !answers(address) {
+        // Stopped already (it couldn't start): no use waiting.
+        let mut started = STARTED.lock().unwrap_or_else(|e| e.into_inner());
+        if started.as_mut().is_none_or(|child| child.try_wait().is_ok_and(|done| done.is_some())) {
+            started.take();
+            *FAILED_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            return;
+        }
+        drop(started);
         std::thread::sleep(Duration::from_millis(150));
     }
 }
 
 /// Null quitting: the Ollama it started stops too.
+/// (Asked to stop first, so it stops the model it runs too; killed if it doesn't.)
 pub fn stop() {
-    if let Some(mut child) = STARTED.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        child.kill().ok();
-        child.wait().ok();
+    let Some(mut child) = STARTED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: a signal to the process Null started, still its child.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        let since = Instant::now();
+        while since.elapsed() < Duration::from_secs(2) {
+            if child.try_wait().is_ok_and(|done| done.is_some()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
+    child.kill().ok();
+    child.wait().ok();
 }
 
 #[cfg(test)]
@@ -87,7 +119,9 @@ mod tests {
     fn only_this_computer_s_ollama_is_started() {
         let (host, address) = local_address("http://127.0.0.1:11434/v1").unwrap();
         assert_eq!((host.as_str(), address.port()), ("127.0.0.1:11434", 11434));
-        assert!(local_address("http://localhost:11434").is_some());
+        // localhost: where Ollama listens, not the ::1 the Mac may give first.
+        assert_eq!(local_address("http://localhost:11434").unwrap().0, "127.0.0.1:11434");
+        assert_eq!(local_address("http://[::1]:11434").unwrap().0, "[::1]:11434");
         assert!(local_address("http://192.168.1.20:11434/v1").is_none(), "another computer's");
         assert!(local_address("https://api.example.com/v1").is_none());
         assert!(local_address("not a url").is_none());

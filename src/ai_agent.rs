@@ -297,15 +297,26 @@ fn calls_in_text(content: &str) -> Option<Result<Vec<Value>, String>> {
     let known: Vec<&str> = tools().iter().map(|(name, _, _)| *name).collect();
     let mut calls = Vec::new();
     for (i, item) in written.iter().enumerate() {
+        // A call is a name and its arguments, nothing else (`{"name": "my-app", "version":
+        // ...}` is a package.json, not a call).
+        let object = item.as_object()?;
+        let arguments = item.get("arguments").or_else(|| item.get("parameters"))?;
+        if object.keys().any(|k| !matches!(k.as_str(), "name" | "arguments" | "parameters")) {
+            return None;
+        }
         let name = item["name"].as_str()?;
         if !known.contains(&name) {
             return Some(Err(name.to_string()));
         }
-        let arguments = item.get("arguments").or_else(|| item.get("parameters")).cloned().unwrap_or(json!({}));
+        // (Already a JSON string: as it is, not written again.)
+        let arguments = match arguments {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
         calls.push(json!({
             "id": format!("written_{i}"),
             "type": "function",
-            "function": { "name": name, "arguments": arguments.to_string() },
+            "function": { "name": name, "arguments": arguments },
         }));
     }
     (!calls.is_empty()).then_some(Ok(calls))
@@ -392,6 +403,13 @@ mod tests {
         // One after another, a line each.
         let two = "{\"name\": \"list_files\", \"arguments\": {}}\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\"}}";
         assert_eq!(calls_in_text(two).unwrap().unwrap().len(), 2);
+        // A JSON answer that isn't a call: an answer.
+        assert_eq!(calls_in_text("{\"name\": \"my-app\", \"version\": \"1.0.0\"}"), None);
+        // Arguments written as a string: read once.
+        let string = "{\"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"a.rs\\\"}\"}";
+        let call = &calls_in_text(string).unwrap().unwrap()[0];
+        let arguments: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["path"], "a.rs");
     }
 
     /// A stand-in for an OpenAI-style server: answers each request with the next reply,
@@ -538,7 +556,14 @@ mod tests {
             "// ok\n\n(Null left out 5 characters that hide text from people: not part of the task.)"
         );
         // Changed as it was read: found past what's hidden, which goes with it.
-        assert_eq!(run("edit_file", json!({ "path": "src/c.rs", "old_text": "// ok\n", "new_text": "// fine\n" }), &mut |_| {}), "Done.");
+        assert_eq!(
+            run(
+                "edit_file",
+                json!({ "path": "src/c.rs", "old_text": "// ok\n", "new_text": "// fine\n" }),
+                &mut |_| {}
+            ),
+            "Done."
+        );
         assert_eq!(std::fs::read_to_string(root.join("src/c.rs")).unwrap(), "// fine\n");
         std::fs::remove_dir_all(&root).ok();
     }
