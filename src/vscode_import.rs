@@ -30,10 +30,44 @@ pub fn latest() -> Option<(&'static str, PathBuf)> {
         .map(|(_, name, path)| (name, path))
 }
 
+/// What's on this computer that bringing settings over goes by: the fonts there are, and
+/// whether VS Code has Vim's keys (VSCodeVim) installed.
+pub struct Here {
+    pub fonts: Vec<String>,
+    pub vim: bool,
+}
+
+impl Here {
+    pub fn of(cx: &gpui::App) -> Self {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let vim = !cfg!(test)
+            && home.is_some_and(|home| {
+                [".vscode", ".vscode-insiders", ".vscode-oss", ".cursor"].iter().any(|dir| {
+                    std::fs::read_dir(home.join(dir).join("extensions")).is_ok_and(|entries| {
+                        entries.flatten().any(|e| e.file_name().to_string_lossy().starts_with("vscodevim.vim-"))
+                    })
+                })
+            });
+        Self { fonts: cx.text_system().all_font_names(), vim }
+    }
+}
+
 /// VS Code's settings (`written`) in Null's words: the editing ones a project can have
 /// too, and those only you have (the font, the caret, saving…).
-pub fn in_null_words(written: &Map<String, Value>) -> Map<String, Value> {
+pub fn in_null_words(written: &Map<String, Value>, here: &Here) -> Map<String, Value> {
     let mut out = crate::settings::in_null_words(written);
+    // Hidden from Files: yours, as `hide` (`files_exclude` is a project's own list).
+    if let Some(hidden) = out.remove("files_exclude") {
+        out.insert("hide".into(), hidden);
+    }
+    // Languages Null has (VS Code's `git-commit`, `makefile`… aren't settings here).
+    let names = crate::editor::language_names();
+    if let Some(Value::Object(languages)) = out.get_mut("languages") {
+        languages.retain(|name, _| names.iter().any(|n| n.eq_ignore_ascii_case(name)));
+        if languages.is_empty() {
+            out.remove("languages");
+        }
+    }
     let mut set = |key: &str, value: Value| {
         out.insert(key.to_string(), value);
     };
@@ -42,12 +76,12 @@ pub fn in_null_words(written: &Map<String, Value>) -> Map<String, Value> {
     if let Some(size) = written.get("editor.fontSize").and_then(Value::as_f64).filter(|s| (6.0..=72.0).contains(s)) {
         set("font_size", Value::from(size));
     }
-    // Its first family: "'JetBrains Mono', Menlo, monospace" is JetBrains Mono.
-    if let Some(family) = text("editor.fontFamily")
-        .and_then(|f| f.split(',').next())
-        .map(|f| f.trim().trim_matches(['\'', '"']).to_string())
-        .filter(|f| !f.is_empty() && f != "monospace")
-    {
+    // Its first family there is: "Consolas, 'JetBrains Mono', monospace" is JetBrains
+    // Mono on a Mac without Consolas.
+    let there = |family: &str| crate::fonts::BUNDLED.contains(&family) || here.fonts.iter().any(|f| f == family);
+    if let Some(family) = text("editor.fontFamily").and_then(|families| {
+        families.split(',').map(|f| f.trim().trim_matches(['\'', '"']).to_string()).find(|f| there(f))
+    }) {
         set("code_font", Value::from(family));
     }
     for (theirs, ours) in [
@@ -91,7 +125,8 @@ pub fn in_null_words(written: &Map<String, Value>) -> Map<String, Value> {
         set("line_guide", Value::from(!rulers.is_empty()));
     }
     if let Some(hints) = text("editor.inlayHints.enabled") {
-        set("inlay_hints", Value::from(hints != "off"));
+        // ("offUnlessPressed": off until a key is held, as Null's are.)
+        set("inlay_hints", Value::from(matches!(hints, "on" | "onUnlessPressed")));
     }
     if let Some(closing) = text("editor.autoClosingBrackets") {
         set("auto_close", Value::from(closing != "never"));
@@ -105,8 +140,8 @@ pub fn in_null_words(written: &Map<String, Value>) -> Map<String, Value> {
     if let Some(saving) = saving {
         set("auto_save", Value::from(saving));
     }
-    // Vim's keys, for someone who had them there (VSCodeVim's settings).
-    if written.keys().any(|k| k.starts_with("vim.")) {
+    // Vim's keys, for someone who has them there (VSCodeVim installed and set up).
+    if here.vim && written.keys().any(|k| k.starts_with("vim.")) {
         set("keymap", Value::from("vim"));
     }
     out
@@ -114,8 +149,8 @@ pub fn in_null_words(written: &Map<String, Value>) -> Map<String, Value> {
 
 /// What bringing `written` over changes: Null's settings after, and each one changed, in
 /// words ("Font size: 14").
-pub fn changes(settings: &Settings, written: &Map<String, Value>) -> (Settings, Vec<String>) {
-    let (after, _) = crate::settings::merged(settings, &in_null_words(written));
+pub fn changes(settings: &Settings, written: &Map<String, Value>, here: &Here) -> (Settings, Vec<String>) {
+    let (after, _) = crate::settings::merged(settings, &in_null_words(written, here));
     let (before_json, after_json) =
         (serde_json::to_value(settings).unwrap_or_default(), serde_json::to_value(&after).unwrap_or_default());
     let said = |value: &Value| match value {
@@ -157,7 +192,7 @@ pub fn changes(settings: &Settings, written: &Map<String, Value>) -> (Settings, 
             "auto_close" => "Close brackets",
             "auto_save" => "Auto save",
             "preview_tabs" => "Preview tabs",
-            "files_exclude" => "Hidden from Files",
+            "hide" => "Hidden from Files",
             "languages" => "Settings by language",
             "keymap" => "Keys",
             other => other,
@@ -175,16 +210,25 @@ mod tests {
     fn your_vs_code_settings_in_null_s_words() {
         let written: Map<String, Value> = serde_json::from_str(
             r#"{
-                "editor.fontSize": 17, "editor.fontFamily": "'JetBrains Mono', Menlo, monospace",
+                "editor.fontSize": 17, "editor.fontFamily": "Consolas, 'JetBrains Mono', Menlo, monospace",
                 "editor.fontLigatures": true, "editor.tabSize": 2, "editor.cursorStyle": "block",
                 "editor.cursorBlinking": "solid", "editor.renderWhitespace": "boundary",
                 "files.autoSave": "onFocusChange", "editor.rulers": [100],
                 "[python]": { "editor.tabSize": 4 }, "workbench.colorTheme": "One Dark Pro",
-                "vim.useSystemClipboard": true
+                "vim.useSystemClipboard": true, "editor.inlayHints.enabled": "offUnlessPressed",
+                "files.exclude": { "**/*.pyc": true }, "[git-commit]": { "editor.wordWrap": "on" }
             }"#,
         )
         .unwrap();
-        let null = in_null_words(&written);
+        // A Mac without Consolas, with VSCodeVim.
+        let here = Here { fonts: vec!["Menlo".into()], vim: true };
+        let null = in_null_words(&written, &here);
+        assert_eq!(null["inlay_hints"], false);
+        assert_eq!(null["hide"], serde_json::json!(["**/*.pyc"]), "yours, not a project's list");
+        assert!(!null.contains_key("files_exclude"));
+        assert!(null["languages"].as_object().unwrap().keys().all(|k| k.eq_ignore_ascii_case("python")), "{null:?}");
+        // VSCodeVim's settings left behind (it's gone): the keys stay.
+        assert!(!in_null_words(&written, &Here { fonts: Vec::new(), vim: false }).contains_key("keymap"));
         assert_eq!(null["font_size"], 17.0);
         assert_eq!(null["code_font"], "JetBrains Mono");
         assert_eq!(
@@ -193,7 +237,7 @@ mod tests {
         );
         assert!(!null.contains_key("whitespace"), "boundary: none of Null's");
         assert_eq!((&null["line_guide"], &null["keymap"]), (&true.into(), &"vim".into()));
-        let (after, changed) = changes(&Settings::default(), &written);
+        let (after, changed) = changes(&Settings::default(), &written, &here);
         assert_eq!(after.font_size, 17.);
         assert_eq!(after.indent_size, 2);
         assert_eq!(after.caret, crate::settings::CaretShape::Block);
@@ -202,11 +246,11 @@ mod tests {
         assert!(changed.contains(&"Code font: JetBrains Mono".to_string()), "{changed:?}");
         assert!(changed.contains(&"Auto save: when leaving".to_string()), "{changed:?}");
         // Brought over again: nothing more changes.
-        let (_, again) = changes(&after, &written);
+        let (_, again) = changes(&after, &written, &here);
         assert!(again.is_empty(), "{again:?}");
         // A value Null can't read is left out, not the rest.
         let odd: Map<String, Value> =
             serde_json::from_str(r#"{ "editor.fontSize": "big", "editor.tabSize": 8 }"#).unwrap();
-        assert_eq!(changes(&Settings::default(), &odd).0.indent_size, 8);
+        assert_eq!(changes(&Settings::default(), &odd, &here).0.indent_size, 8);
     }
 }
