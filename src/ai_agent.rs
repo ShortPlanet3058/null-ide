@@ -235,8 +235,26 @@ fn openai_loop(
             return Err(crate::ai::error_message(status, &text));
         }
         let reply: Value = serde_json::from_str(&text).map_err(|e| format!("An answer Null couldn't read: {e}"))?;
-        let message = reply["choices"][0]["message"].clone();
-        let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
+        let mut message = reply["choices"][0]["message"].clone();
+        let mut calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
+        // A small model writes its call as text (`{"name": "read_file", ...}`) instead of
+        // making it: one of Null's tools is taken as called; one it made up says why
+        // nothing happens.
+        if calls.is_empty() {
+            match calls_in_text(message["content"].as_str().unwrap_or_default()) {
+                Some(Ok(written)) => {
+                    calls = written;
+                    message = json!({ "role": "assistant", "content": Value::Null, "tool_calls": calls });
+                }
+                Some(Err(made_up)) => {
+                    return Err(format!(
+                        "{model} wrote a call to a tool it made up ({made_up}) instead of using Null's: tasks \
+                         need a model that can use tools (on Ollama: qwen2.5-coder:7b, or llama3.1)"
+                    ));
+                }
+                None => {}
+            }
+        }
         // Stopped while it answered: what it asked to do isn't done.
         if stop.load(Ordering::Relaxed) && !calls.is_empty() {
             return Err("Stopped.".into());
@@ -261,6 +279,36 @@ fn openai_loop(
         }
     }
     Err(format!("Stopped after {MAX_STEPS} steps: the task may be only partly done."))
+}
+
+/// The tool calls a model wrote as its answer's text (in a code fence or not): Null's
+/// tools, as calls to run; else the name of the one it made up. None when it's no call.
+fn calls_in_text(content: &str) -> Option<Result<Vec<Value>, String>> {
+    let text = crate::ai::strip_code_fence(content);
+    // One call, a list of them, or one after another (a line each).
+    let mut written = Vec::new();
+    for value in serde_json::Deserializer::from_str(text.trim()).into_iter::<Value>() {
+        match value.ok()? {
+            Value::Array(items) => written.extend(items),
+            object @ Value::Object(_) => written.push(object),
+            _ => return None,
+        }
+    }
+    let known: Vec<&str> = tools().iter().map(|(name, _, _)| *name).collect();
+    let mut calls = Vec::new();
+    for (i, item) in written.iter().enumerate() {
+        let name = item["name"].as_str()?;
+        if !known.contains(&name) {
+            return Some(Err(name.to_string()));
+        }
+        let arguments = item.get("arguments").or_else(|| item.get("parameters")).cloned().unwrap_or(json!({}));
+        calls.push(json!({
+            "id": format!("written_{i}"),
+            "type": "function",
+            "function": { "name": name, "arguments": arguments.to_string() },
+        }));
+    }
+    (!calls.is_empty()).then_some(Ok(calls))
 }
 
 /// Claude's tool use, through the Messages API.
@@ -328,6 +376,23 @@ fn claude_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call written as text: one of Null's tools is run; a made-up one is named; prose
+    /// is an answer.
+    #[test]
+    fn calls_written_as_text() {
+        let written = "```json\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"app.rs\"}}\n```";
+        let calls = calls_in_text(written).unwrap().unwrap();
+        assert_eq!(calls[0]["function"]["name"], "read_file");
+        let arguments: Value = serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["path"], "app.rs");
+        let made_up = "{\"name\": \"add_doc_comment\", \"arguments\": {}}";
+        assert_eq!(calls_in_text(made_up), Some(Err("add_doc_comment".into())));
+        assert_eq!(calls_in_text("I added a doc comment to helper."), None);
+        // One after another, a line each.
+        let two = "{\"name\": \"list_files\", \"arguments\": {}}\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\"}}";
+        assert_eq!(calls_in_text(two).unwrap().unwrap().len(), 2);
+    }
 
     /// A stand-in for an OpenAI-style server: answers each request with the next reply,
     /// and hands back the requests' bodies.
