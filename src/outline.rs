@@ -81,6 +81,32 @@ pub fn trail_items(items: &[Item], row: usize) -> Vec<&Item> {
     trail
 }
 
+/// The items to show for `query`: those whose names have its letters in order (as ⌘P
+/// matches), each with the ones it sits inside, so where it is still shows. Each as its
+/// index and whether it matched (or is only there around one that did).
+pub fn filtered(items: &[Item], query: &str) -> Vec<(usize, bool)> {
+    let folded = crate::fuzzy::folded(query);
+    if folded.is_empty() {
+        return (0..items.len()).map(|ix| (ix, true)).collect();
+    }
+    let mut shown = vec![None; items.len()];
+    for (ix, item) in items.iter().enumerate() {
+        if !crate::fuzzy::fits(&item.name, &folded) {
+            continue;
+        }
+        shown[ix] = Some(true);
+        // Its parents: the nearest shallower one above, and so on out.
+        let mut depth = item.depth;
+        for (up, parent) in items[..ix].iter().enumerate().rev() {
+            if parent.depth < depth {
+                shown[up].get_or_insert(false);
+                depth = parent.depth;
+            }
+        }
+    }
+    shown.into_iter().enumerate().filter_map(|(ix, s)| Some((ix, s?))).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +137,17 @@ mod tests {
         // A class's own lines between its methods don't end it.
         let python = "class A:\n    x = 1\n    def f(self):\n        pass\n";
         assert_eq!(short(&outline(Path::new("a.py"), python)), [("A", 0, 0), ("f", 2, 1)]);
+    }
+
+    #[test]
+    fn filtered_with_what_they_sit_in() {
+        let python = "class Shop:\n    def open(self):\n        pass\n\n    def close(self):\n        pass\n\ndef main():\n    pass\n";
+        let items = outline(Path::new("shop.py"), python);
+        assert_eq!(filtered(&items, "cls"), [(0, false), (2, true)], "close, in Shop");
+        assert_eq!(filtered(&items, "MAIN"), [(3, true)]);
+        assert_eq!(filtered(&items, "o"), [(0, true), (1, true), (2, true)]);
+        assert_eq!(filtered(&items, " ").len(), 4, "nothing typed: all");
+        assert!(filtered(&items, "zz").is_empty());
     }
 
     #[test]

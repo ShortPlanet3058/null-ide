@@ -146,6 +146,8 @@ actions!(
         ReplaceInProject,
         ShowFiles,
         ShowOutline,
+        GoToOutlineMatch,
+        ClearOutlineFilter,
         ShowTests,
         ToggleAutocomplete,
         ToggleTerminal,
@@ -210,6 +212,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-f11", StepOut, ctx),
         KeyBinding::new("enter", AddWatch, Some("DebugWatch")),
         KeyBinding::new("enter", EvaluateInDebugger, Some("DebugConsole")),
+        KeyBinding::new("enter", GoToOutlineMatch, Some("OutlineFilter")),
+        KeyBinding::new("escape", ClearOutlineFilter, Some("OutlineFilter")),
         KeyBinding::new("enter", ConfirmTerminalName, Some("TerminalName")),
         KeyBinding::new("escape", CancelTerminalName, Some("TerminalName")),
         KeyBinding::new("f8", NextProblem, ctx),
@@ -681,6 +685,8 @@ pub struct Workspace {
     outline_scroll: UniformListScrollHandle,
     /// The item the caret was in when last drawn: the list follows it to another.
     outline_followed: Option<(gpui::EntityId, usize)>,
+    /// The Outline view's filter line.
+    outline_filter: Entity<crate::text_input::TextInput>,
     tabs: Vec<Tab>,
     /// The tab with the keyboard: the one shown on the side being worked in.
     active: Option<usize>,
@@ -978,6 +984,7 @@ impl Workspace {
             outline_later: None,
             outline_scroll: UniformListScrollHandle::new(),
             outline_followed: None,
+            outline_filter: cx.new(|cx| crate::text_input::TextInput::new("Filter", cx)),
             tabs: Vec::new(),
             shown: [None, None],
             split_ratio: 0.5,
@@ -1076,6 +1083,9 @@ impl Workspace {
             async {}
         })
         .detach();
+        // Typed in the Outline's filter: the list shows what fits.
+        let filter_changes = cx.observe(&workspace.outline_filter, |_, _, cx| cx.notify());
+        workspace._subscriptions.push(filter_changes);
         workspace._subscriptions.push(debugger_events);
         workspace._subscriptions.push(debugger_changes);
         // A key while a tab's or the text's menu is open: it closes, as menus do, and does
@@ -5425,6 +5435,31 @@ impl Workspace {
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
+        // Typing then narrows it (Esc goes back to the text).
+        window.focus(&self.outline_filter.focus_handle(cx));
+        cx.notify();
+    }
+
+    /// ⏎ in the Outline's filter: to the first item that fits.
+    fn go_to_outline_match(&mut self, _: &GoToOutlineMatch, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(items) = self.outline_items(&editor, 1_000_000, cx) else { return };
+        let query = self.outline_filter.read(cx).text().to_string();
+        if let Some(&(ix, _)) = crate::outline::filtered(&items, &query).iter().find(|(_, fits)| *fits) {
+            self.go_to_outline_row(items[ix].row, window, cx);
+        }
+    }
+
+    /// Esc in the Outline's filter: emptied, or (already empty) back to the text.
+    fn clear_outline_filter(&mut self, _: &ClearOutlineFilter, window: &mut Window, cx: &mut Context<Self>) {
+        if self.outline_filter.read(cx).text().is_empty() {
+            if let Some(editor) = self.active_editor() {
+                window.focus(&editor.focus_handle(cx));
+            }
+        } else {
+            self.outline_filter.update(cx, |input, cx| input.set_text("", cx));
+            self.outline_followed = None;
+        }
         cx.notify();
     }
 
@@ -5862,21 +5897,51 @@ impl Workspace {
         if items.is_empty() {
             return quiet(format!("No functions or types in {name}"));
         }
+        let query = self.outline_filter.read(cx).text().to_string();
+        let shown = crate::outline::filtered(&items, &query);
         let current = crate::outline::current(&items, row);
-        // The caret went into another: the list brings it into view.
+        // The caret went into another: the list brings it into view (unless filtered).
         if let Some(ix) = current
+            && query.trim().is_empty()
             && self.outline_followed != Some((id, ix))
         {
             self.outline_followed = Some((id, ix));
             self.outline_scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
+        let filter = div()
+            .key_context("OutlineFilter")
+            .flex_none()
+            .mx(px(18.))
+            .mt(px(10.))
+            .mb(px(2.))
+            .text_size(px(ui::T_MD))
+            .text_color(theme.foreground)
+            .child(self.outline_filter.clone());
+        let list = if shown.is_empty() {
+            quiet(format!("Nothing in {name} called that"))
+        } else {
+            self.outline_list(items, shown, current, cx)
+        };
+        div().size_full().flex().flex_col().child(filter).child(div().flex_1().min_h_0().child(list)).into_any_element()
+    }
+
+    /// The outline's rows: `shown` (indexes into `items`, and whether each fits the filter;
+    /// those only around one that does are faint).
+    fn outline_list(
+        &mut self,
+        items: std::rc::Rc<Vec<crate::outline::Item>>,
+        shown: Vec<(usize, bool)>,
+        current: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         uniform_list(
             "outline",
-            items.len(),
+            shown.len(),
             cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
                 let theme = cx.global::<Theme>().clone();
                 range
-                    .map(|ix| {
+                    .map(|at| {
+                        let (ix, fits) = shown[at];
                         let item = &items[ix];
                         let here = current == Some(ix);
                         let heading = item.kind.starts_with('#');
@@ -5894,7 +5959,13 @@ impl Workspace {
                             .rounded(px(ui::R_ROW))
                             .cursor_pointer()
                             .text_size(px(ui::T_MD))
-                            .text_color(if here { theme.foreground } else { theme.muted })
+                            .text_color(if here {
+                                theme.foreground
+                            } else if fits {
+                                theme.muted
+                            } else {
+                                theme.faint
+                            })
                             .when(here, |r| r.bg(theme.hairline))
                             .when(!here, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
                             // Code by its name in the code's font, the word defining it beside it;
@@ -9890,6 +9961,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))
             .on_action(cx.listener(Self::debug_test))
+            .on_action(cx.listener(Self::go_to_outline_match))
+            .on_action(cx.listener(Self::clear_outline_filter))
             .on_action(cx.listener(|this, _: &DebugAgain, window, cx| match this.debugged_test.clone() {
                 Some(test) => this.debug_rust_test(test, cx),
                 None => this.start_debugging(&StartDebugging, window, cx),
@@ -12876,6 +12949,52 @@ mod tests {
         assert!(!marked(&file, cx), "a warning isn't an error");
         report(None, cx);
         assert!(!marked(&dir.join("src"), cx));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Outline's filter: shown with Show Outline, ⏎ goes to the first that fits, Esc
+    /// empties it, then goes back to the text.
+    #[gpui::test]
+    fn the_outline_filters(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("outline-filter");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shop.py"),
+            "class Shop:\n    def open(self):\n        pass\n\n    def close(self):\n        pass\n",
+        )
+        .unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("shop.py"), window, cx);
+            w.show_outline(&ShowOutline, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |w, window, cx| {
+            assert!(w.outline_filter.focus_handle(cx).is_focused(window), "typing goes to the filter");
+            w.outline_filter.update(cx, |input, cx| input.set_text("cls", cx));
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(GoToOutlineMatch);
+        cx.run_until_parked();
+        workspace.update_in(cx, |w, window, cx| {
+            let editor = w.active_editor().unwrap().clone();
+            assert_eq!(editor.read(cx).caret_point().0, 4, "at close");
+            // Esc: emptied first, then back to the text.
+            window.focus(&w.outline_filter.focus_handle(cx));
+            w.clear_outline_filter(&ClearOutlineFilter, window, cx);
+            assert!(w.outline_filter.read(cx).text().is_empty());
+            assert!(w.outline_filter.focus_handle(cx).is_focused(window));
+            w.clear_outline_filter(&ClearOutlineFilter, window, cx);
+            assert!(editor.focus_handle(cx).is_focused(window));
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 
