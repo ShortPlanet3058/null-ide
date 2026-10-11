@@ -81,12 +81,61 @@ use menus::Quit;
 use std::path::{Path, PathBuf};
 use workspace::Workspace;
 
+/// What Null was started with: the project, a file in it (at a line, `a.rs:42:7`), and
+/// whether the one who started it waits for that file's tab to close (`--wait`, as git's
+/// editor).
+struct Opening {
+    root: PathBuf,
+    file: Option<PathBuf>,
+    place: Option<(u32, u32)>,
+    wait: bool,
+}
+
+/// `a.rs:42` or `a.rs:42:7`, as compilers write places: the path, and the line and column
+/// (from 1). Anything else: the path as it is.
+fn split_place(arg: &str) -> (&str, Option<(u32, u32)>) {
+    let number = |s: &str| (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u32>().ok()).flatten();
+    let mut parts = arg.rsplitn(3, ':');
+    let (last, middle, first) = (parts.next(), parts.next(), parts.next());
+    match (first, middle.and_then(number), last.and_then(number)) {
+        (Some(path), Some(line), Some(column)) if !path.is_empty() => (path, Some((line, column))),
+        _ => match arg.rsplit_once(':') {
+            Some((path, line)) if !path.is_empty() => match number(line) {
+                Some(line) => (path, Some((line, 1))),
+                None => (arg, None),
+            },
+            _ => (arg, None),
+        },
+    }
+}
+
+fn resolve_args() -> Opening {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let wait = args.first().is_some_and(|a| a == "--wait");
+    if wait {
+        args.remove(0);
+    }
+    let (root, file) = resolve_path(args.first().cloned());
+    // A file named with its place (`a.rs:42`) when there's no file by that whole name.
+    let (file, place) = match file {
+        Some(file) if !file.exists() => {
+            let name = file.to_string_lossy().into_owned();
+            match split_place(&name) {
+                (path, Some(place)) if std::path::Path::new(path).exists() => (Some(PathBuf::from(path)), Some(place)),
+                _ => (Some(file), None),
+            }
+        }
+        file => (file, None),
+    };
+    Opening { root, file, place, wait }
+}
+
 /// `null` opens the current folder, `null <folder>` opens that folder, and
 /// `null <file>` opens the file inside the current folder (or its own folder
 /// when it lives elsewhere).
-fn resolve_args() -> (PathBuf, Option<PathBuf>) {
+fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
     let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
-    let Some(arg) = std::env::args().nth(1) else {
+    let Some(arg) = arg else {
         // Opened from the Finder (or the Dock), there's no folder to go by: the last project.
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let from_finder = cwd == Path::new("/") || Some(&cwd) == home.as_ref();
@@ -153,7 +202,7 @@ fn window_bounds(saved: Option<session::WindowState>, cx: &App) -> WindowBounds 
 }
 
 fn main() {
-    let (root, file) = resolve_args();
+    let Opening { root, file, place, wait } = resolve_args();
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
     // or by the `null` command while Null runs: opened in the window.
@@ -214,7 +263,11 @@ fn main() {
 
         // Nothing else is open yet: the window opens now (a deferred open would wait for
         // an update that never comes, and Null would start with no window).
-        open_project_window_now(root, file, cx);
+        if wait {
+            open_waiting_window(root, file, place, cx);
+        } else {
+            open_project_window_now(root, file, place, cx);
+        }
         #[cfg(debug_assertions)]
         qa::run(cx);
         // (Looked at by `qa` while someone works in another app: not brought to the front
@@ -249,16 +302,56 @@ pub(crate) fn window_on(
 pub(crate) fn open_project_window(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::App) {
     // Once the window asking (if any) is done updating: until then it can't be read, so
     // its own project wouldn't be found open.
-    cx.defer(move |cx| open_project_window_now(root, file, cx));
+    cx.defer(move |cx| open_project_window_now(root, file, None, cx));
 }
 
-fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::App) {
+/// `file` opened in `workspace`, at `place` (line and column, from 1) when given.
+fn open_at(workspace: &mut Workspace, file: PathBuf, place: Option<(u32, u32)>, window: &mut gpui::Window, cx: &mut gpui::Context<Workspace>) {
+    match place {
+        Some((line, column)) => {
+            let at = lsp_types::Position::new(line.saturating_sub(1), column.saturating_sub(1));
+            workspace.go_to(file, lsp_types::Range::new(at, at), window, cx);
+        }
+        None => workspace.open_file(file, window, cx),
+    }
+}
+
+/// `null --wait <file>` (git's editor): a window with that file alone, nothing of the
+/// project's session read or written; closing its tab (or the window) quits, and the one
+/// waiting goes on.
+fn open_waiting_window(root: PathBuf, file: Option<PathBuf>, place: Option<(u32, u32)>, cx: &mut gpui::App) {
+    let options = WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            title: Some("Null".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(16.), px(13.))),
+        }),
+        window_min_size: Some(size(px(480.), px(320.))),
+        ..Default::default()
+    };
+    let opened = cx.open_window(options, |window, cx| {
+        cx.new(|cx| {
+            let mut workspace = Workspace::new(root, window, cx);
+            window.focus(&workspace.focus_handle(cx));
+            if let Some(file) = file {
+                workspace.waiting_for = Some(file.clone());
+                open_at(&mut workspace, file, place, window, cx);
+            }
+            workspace
+        })
+    });
+    if opened.is_err() {
+        cx.quit();
+    }
+}
+
+fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(u32, u32)>, cx: &mut gpui::App) {
     if let Some(handle) = window_on(&root, None, cx) {
         handle
             .update(cx, |workspace, window, cx| {
                 window.activate_window();
                 if let Some(file) = file {
-                    workspace.open_file(file, window, cx);
+                    open_at(workspace, file, place, window, cx);
                 }
             })
             .ok();
@@ -281,7 +374,7 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::
             window.focus(&workspace.focus_handle(cx));
             workspace.restore_session(session, window, cx);
             if let Some(file) = file {
-                workspace.open_file(file, window, cx);
+                open_at(&mut workspace, file, place, window, cx);
             }
             if !cx.global::<settings::Settings>().welcomed {
                 workspace.show_welcome(window, cx);
@@ -333,6 +426,15 @@ pub(crate) fn quit_next(cx: &mut gpui::App) {
 #[cfg(test)]
 mod url_tests {
     use super::*;
+
+    #[test]
+    fn places_after_a_file_s_name() {
+        assert_eq!(split_place("src/a.rs:42:7"), ("src/a.rs", Some((42, 7))));
+        assert_eq!(split_place("a.rs:42"), ("a.rs", Some((42, 1))));
+        assert_eq!(split_place("a.rs"), ("a.rs", None));
+        assert_eq!(split_place("C:x"), ("C:x", None));
+        assert_eq!(split_place("notes:draft.md"), ("notes:draft.md", None));
+    }
 
     #[test]
     fn urls_from_the_finder_become_paths() {

@@ -7,6 +7,8 @@
 # `shot NAME` steps take more pictures on the way, as NAME.png beside OUT.png.
 # NULL_QA_SETTINGS='"keymap": "vim", "word_wrap": true' adds settings to its own.
 # NULL_QA_FAKE_AI=1 gives it an AI: a stand-in on this Mac (fake_ai.py) with set answers.
+# NULL_QA_FILE=app.rs:4:2 opens that file (at that place) instead of the project, as
+# `null app.rs:4:2` does; NULL_QA_WAIT=1 starts it with --wait (as git's editor).
 #
 # It keeps to itself: a home of its own (settings, sessions, history, its shell's
 # history), only the environment it needs (no API keys, logs or shell setup of yours;
@@ -111,7 +113,7 @@ env -i \
     RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
     CARGO_TARGET_DIR="$home/target" CARGO_NET_OFFLINE=true \
     NULL_DATA_DIR="$home/data" NULL_QA="$steps" NULL_QA_FRONT="${NULL_QA_FRONT:-1}" NULL_QA_ACK="$home/ack" \
-    "$bin" "$project" > "$log" 2>&1 &
+    "$bin" ${NULL_QA_WAIT:+--wait} "$project${NULL_QA_FILE:+/$NULL_QA_FILE}" > "$log" 2>&1 &
 pid=$!
 set +m
 

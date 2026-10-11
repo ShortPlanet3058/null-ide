@@ -718,6 +718,9 @@ pub struct Workspace {
     pub quitting: bool,
     /// Unsaved work was just kept for next time: the backup stays.
     keeping_unsaved: bool,
+    /// Opened by `null --wait <file>` (git's editor): that file's tab closing quits, and
+    /// nothing of the project's session or backups is written.
+    pub waiting_for: Option<PathBuf>,
     /// Quitting (or closing the window) though a command runs in a terminal: said yes to.
     stopping_commands: bool,
     /// Writing unsaved work to its backup, once typing pauses.
@@ -933,6 +936,7 @@ impl Workspace {
             backup_task: None,
             quitting: false,
             keeping_unsaved: false,
+            waiting_for: None,
             stopping_commands: false,
             view_before_preview: None,
             ai_task: None,
@@ -1090,6 +1094,9 @@ impl Workspace {
     }
 
     fn save_session(&self, cx: &App) {
+        if self.waiting_for.is_some() {
+            return;
+        }
         self.session(cx).save(self.tree.read(cx).root());
     }
 
@@ -1660,7 +1667,7 @@ impl Workspace {
     }
 
     /// Opens `path` with `range` selected, remembering where the caret was.
-    fn go_to(&mut self, path: PathBuf, range: lsp_types::Range, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_to(&mut self, path: PathBuf, range: lsp_types::Range, window: &mut Window, cx: &mut Context<Self>) {
         let here = self.here(cx);
         if here.as_ref().is_some_and(|h| h.path == path) {
             self.remember_place(here);
@@ -3121,11 +3128,16 @@ impl Workspace {
         let Ok(exe) = std::env::current_exe() else { return };
         // From the app, `open -a` hands paths to the running Null; from a build, run it directly.
         let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf);
-        let launch = match &bundle {
-            Some(app) => format!("open -a \"{}\" \"$p\"", app.display()),
-            None => format!("\"{}\" \"$p\" &", exe.display()),
+        // (`--wait`: until the file's tab closes, as git's editor. The app gets a Null of its
+        // own for it; `open` can't hand a running one a line, so the app gets the file alone.)
+        let (launch, waiting) = match &bundle {
+            Some(app) => (
+                format!("open -a \"{}\" \"$f\"", app.display()),
+                format!("open -W -n -a \"{}\" --args --wait \"$p\"", app.display()),
+            ),
+            None => (format!("\"{}\" \"$p\" &", exe.display()), format!("\"{}\" --wait \"$p\"", exe.display())),
         };
-        let script = shell_script(&launch);
+        let script = shell_script(&launch, &waiting);
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         let system = PathBuf::from("/usr/local/bin");
         let writable = |dir: &Path| {
@@ -3268,6 +3280,11 @@ impl Workspace {
         }
         // (Mid-⌃Tab: the walk ends here, where it was.)
         self.settle_switch();
+        // The file `null --wait` was for, closed: done, the one waiting goes on.
+        let path = self.tabs[ix].editor.read(cx).path().map(Path::to_path_buf);
+        if self.waiting_for.is_some() && self.waiting_for == path {
+            cx.defer(|cx| cx.quit());
+        }
         self.schedule_session_save(cx);
         let tab = self.tabs.remove(ix);
         // A menu open on it (or on any text): gone with it.
@@ -3529,7 +3546,10 @@ impl Workspace {
         }
         // Quitting, closing the window, opening another project: unsaved work is kept for
         // next time rather than asked about (closing a tab still asks).
-        if cx.global::<Settings>().keep_unsaved && !matches!(action, CloseAction::CloseTabs(_)) {
+        if cx.global::<Settings>().keep_unsaved
+            && !matches!(action, CloseAction::CloseTabs(_))
+            && self.waiting_for.is_none()
+        {
             let root = self.tree.read(cx).root().to_path_buf();
             crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
             self.keeping_unsaved = true;
@@ -3686,6 +3706,10 @@ impl Workspace {
     }
 
     fn write_backups(&mut self, cx: &mut Context<Self>) {
+        // (A `--wait` window keeps nothing for the project: it's git's message, not its work.)
+        if self.waiting_for.is_some() {
+            return;
+        }
         let root = self.tree.read(cx).root().to_path_buf();
         let unsaved = self.unsaved_files(cx);
         cx.background_executor()
@@ -3696,7 +3720,7 @@ impl Workspace {
     /// Null quitting without asking (logging out, the Mac restarting): unsaved work is
     /// kept now, not a moment later, so it comes back next time.
     fn write_backups_now(&mut self, cx: &mut Context<Self>) {
-        if self.quitting {
+        if self.quitting || self.waiting_for.is_some() {
             return;
         }
         let root = self.tree.read(cx).root().to_path_buf();
@@ -8464,16 +8488,21 @@ fn shorten_path(path: &str, max: usize) -> String {
     format!("…/{kept}")
 }
 
-/// The `null` command: each path made absolute (created when missing, as editors do),
-/// then handed to Null with `launch`, which reads it as `$p`.
-fn shell_script(launch: &str) -> String {
+/// The `null` command: each path made absolute (created when missing, as editors do; a
+/// place after it, `a.rs:42`, isn't part of its name), then handed to Null with `launch`
+/// (or `waiting`, after `--wait`), which reads it as `$p` (`$f` without its place).
+fn shell_script(launch: &str, waiting: &str) -> String {
     format!(
-        "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`.\n\
+        "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`, `null a.rs:42`.\n\
+         # `null --wait <file>` returns once its tab is closed (git's editor: GIT_EDITOR=\"null --wait\").\n\
+         wait=\n\
+         [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
          for p in \"$@\"; do\n\
          \tcase \"$p\" in /*) ;; *) p=\"$PWD/$p\" ;; esac\n\
-         \t[ -e \"$p\" ] || : > \"$p\"\n\
-         \t{launch}\n\
+         \tf=\"${{p%%:[0-9]*}}\"\n\
+         \t[ -e \"$p\" ] || [ -e \"$f\" ] || : > \"$f\"\n\
+         \tif [ -n \"$wait\" ]; then {waiting}; else {launch}; fi\n\
          done\n"
     )
 }
@@ -11319,7 +11348,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("log");
         // A stand-in for Null that writes down what it was given.
-        let script = shell_script(&format!("echo \"$p\" >> \"{}\"", log.display()));
+        let script = shell_script(
+            &format!("echo \"$p\" >> \"{}\"", log.display()),
+            &format!("echo \"wait $p\" >> \"{}\"", log.display()),
+        );
         let command = dir.join("null");
         std::fs::write(&command, script).unwrap();
         let run = std::process::Command::new("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
@@ -11329,6 +11361,16 @@ mod tests {
         assert!(given.lines().next().unwrap().ends_with("/new.txt"), "{given}");
         assert!(dir.join("new.txt").exists());
         assert_eq!(given.lines().count(), 2);
+        // A place after the name: handed over, but no file named with it.
+        let run = std::process::Command::new("sh").arg(&command).args(["new.txt:4:2"]).current_dir(&dir).status();
+        assert!(run.unwrap().success());
+        assert!(!dir.join("new.txt:4:2").exists());
+        assert!(std::fs::read_to_string(&log).unwrap().lines().last().unwrap().ends_with("/new.txt:4:2"));
+        // --wait: the other way of handing it over.
+        let run = std::process::Command::new("sh").arg(&command).args(["--wait", "MSG"]).current_dir(&dir).status();
+        assert!(run.unwrap().success());
+        let last = std::fs::read_to_string(&log).unwrap().lines().last().unwrap().to_string();
+        assert!(last.starts_with("wait ") && last.ends_with("/MSG"), "{last}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
