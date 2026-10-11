@@ -36,6 +36,8 @@ enum ServerState {
     Starting {
         server: Arc<LanguageServer>,
         queued: Queued,
+        /// Which start this is (see `starts`).
+        start: u64,
     },
     Running {
         server: Arc<LanguageServer>,
@@ -179,9 +181,18 @@ pub struct ExpandedMacro {
 }
 
 /// The language servers for one project, and what they've reported.
+/// A server running: its name, and the folder it's for (the project's; for Python's, a
+/// package with an environment of its own gets one of its own).
+type ServerKey = (&'static str, PathBuf);
+
 pub struct LspStore {
     root: PathBuf,
-    servers: HashMap<&'static str, ServerState>,
+    servers: HashMap<ServerKey, ServerState>,
+    /// The folder each folder's Python files are served from, worked out once.
+    python_roots: std::cell::RefCell<HashMap<PathBuf, PathBuf>>,
+    /// Servers started so far: a start's answer only counts for that start (a server
+    /// restarted meanwhile is another).
+    starts: u64,
     /// Open files and their text, to hand to a server installed after they were opened.
     documents: HashMap<PathBuf, Rope>,
     diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
@@ -205,6 +216,8 @@ impl LspStore {
         Self {
             root,
             servers: HashMap::new(),
+            python_roots: Default::default(),
+            starts: 0,
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
             diagnostics_version: 0,
@@ -232,9 +245,40 @@ impl LspStore {
         config_for(path).map(|c| c.label)
     }
 
+    /// The server `path` goes to: its name and the folder it's for. A Python file in a
+    /// package with an environment of its own (a monorepo's) goes to a server for that
+    /// package, which reads that environment; anything else, to the project's.
+    /// (Not one server with a folder per package: pyright checks a file in every folder
+    /// holding it, with each folder's Python, and the project's answer wins.)
+    fn key_for(&self, config: &'static ServerConfig, path: &Path) -> ServerKey {
+        if !crate::lsp::is_python_server(config.name) {
+            return (config.name, self.root.clone());
+        }
+        let folder = path.parent().unwrap_or(path).to_path_buf();
+        let root = self
+            .python_roots
+            .borrow_mut()
+            .entry(folder.clone())
+            .or_insert_with(|| {
+                crate::python_env::owner_for(&self.root, &folder).map_or(self.root.clone(), |(owner, _)| owner)
+            })
+            .clone();
+        (config.name, root)
+    }
+
+    /// The project's server of that name (where installing is noted).
+    fn project_key(&self, config: &'static ServerConfig) -> ServerKey {
+        (config.name, self.root.clone())
+    }
+
     pub fn readiness(&self, path: &Path) -> Option<Readiness> {
         let config = config_for(path)?;
-        Some(match self.servers.get(config.name) {
+        let key = self.key_for(config, path);
+        // (Installing is noted for the project's: it shows for a package's files too.)
+        let project = self.servers.get(&self.project_key(config));
+        let installing = project.filter(|s| matches!(s, ServerState::Installing | ServerState::InstallFailed(_)));
+        let state = installing.or_else(|| self.servers.get(&key)).or(project);
+        Some(match state {
             None | Some(ServerState::Starting { .. }) => Readiness::Starting,
             Some(ServerState::Missing) => Readiness::Missing { server: config },
             Some(ServerState::Installing) => Readiness::Installing { server: config },
@@ -256,11 +300,11 @@ impl LspStore {
 
     /// Whether a server is being installed, or why its last install failed.
     pub fn install_state(&self, name: &str) -> Option<Result<(), &str>> {
-        match self.servers.get(name)? {
+        self.servers.iter().filter(|((n, _), _)| *n == name).find_map(|(_, state)| match state {
             ServerState::Installing => Some(Ok(())),
-            ServerState::InstallFailed(message) => Some(Err(message)),
+            ServerState::InstallFailed(message) => Some(Err(message.as_str())),
             _ => None,
-        }
+        })
     }
 
     /// Installs the server for `path` in the background, then starts it for every open
@@ -272,10 +316,15 @@ impl LspStore {
     }
 
     pub fn install_server(&mut self, config: &'static ServerConfig, cx: &mut Context<Self>) {
-        if matches!(self.servers.get(config.name), Some(ServerState::Installing | ServerState::Running { .. })) {
+        if self
+            .servers
+            .iter()
+            .any(|((n, _), s)| *n == config.name && matches!(s, ServerState::Installing | ServerState::Running { .. }))
+        {
             return;
         }
-        self.servers.insert(config.name, ServerState::Installing);
+        let key = self.project_key(config);
+        self.servers.insert(key.clone(), ServerState::Installing);
         cx.notify();
         self._tasks.push(cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { crate::servers::install(config) }).await;
@@ -283,7 +332,8 @@ impl LspStore {
                 cx.emit(LspEvent::Installed(result.clone().map(|()| config.name)));
                 match result {
                     Ok(()) => {
-                        this.servers.remove(config.name);
+                        // (Each folder's server starts again: "missing" was noted for each.)
+                        this.servers.retain(|(n, _), _| *n != config.name);
                         let open: Vec<(PathBuf, Rope)> = this
                             .documents
                             .iter()
@@ -295,7 +345,7 @@ impl LspStore {
                         }
                     }
                     Err(message) => {
-                        this.servers.insert(config.name, ServerState::InstallFailed(message));
+                        this.servers.insert(key, ServerState::InstallFailed(message));
                     }
                 }
                 cx.emit(LspEvent::DiagnosticsChanged);
@@ -313,11 +363,12 @@ impl LspStore {
     /// server has initialized, `f` is queued.
     fn with_server(&mut self, path: &Path, f: impl FnOnce(&LanguageServer) + 'static, cx: &mut Context<Self>) {
         let Some(config) = config_for(path) else { return };
-        if !self.servers.contains_key(config.name) {
-            let state = self.start(config, cx);
-            self.servers.insert(config.name, state);
+        let key = self.key_for(config, path);
+        if !self.servers.contains_key(&key) {
+            let state = self.start(config, key.1.clone(), cx);
+            self.servers.insert(key.clone(), state);
         }
-        match self.servers.get_mut(config.name) {
+        match self.servers.get_mut(&key) {
             Some(ServerState::Running { server }) => f(server),
             Some(ServerState::Starting { queued, .. }) => queued.push(Box::new(f)),
             _ => {}
@@ -330,16 +381,18 @@ impl LspStore {
     }
 
     fn server_for(&self, path: &Path) -> Option<Arc<LanguageServer>> {
-        match self.servers.get(config_for(path)?.name)? {
+        let config = config_for(path)?;
+        match self.servers.get(&self.key_for(config, path))? {
             ServerState::Running { server } => Some(server.clone()),
             _ => None,
         }
     }
 
-    fn start(&mut self, config: &'static ServerConfig, cx: &mut Context<Self>) -> ServerState {
+    /// Starts `config`'s server for the folder `root` (see `key_for`).
+    fn start(&mut self, config: &'static ServerConfig, root: PathBuf, cx: &mut Context<Self>) -> ServerState {
         let Some(program) = crate::servers::find(config) else { return ServerState::Missing };
         crate::server_log::append(config.name, &format!("starting {}", program.display()));
-        let (server, mut messages) = match LanguageServer::spawn_named(&program, config.args, &self.root, config.name) {
+        let (server, mut messages) = match LanguageServer::spawn_named(&program, config.args, &root, config.name) {
             Ok(started) => started,
             Err(err) => {
                 eprintln!("null: couldn't start {}: {err}", config.name);
@@ -349,18 +402,18 @@ impl LspStore {
         };
         let server = Arc::new(server);
 
+        let key: ServerKey = (config.name, root.clone());
+        let for_messages = key.clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
             while let Some(message) = messages.next().await {
-                if this.update(cx, |this, cx| this.handle_message(config, message, cx)).is_err() {
+                if this.update(cx, |this, cx| this.handle_message(config, &for_messages, message, cx)).is_err() {
                     break;
                 }
             }
         }));
 
-        let root_uri = uri_for(&self.root);
-        // Python's is told the project's Python (see the answer to workspace/configuration).
-        // (Not each package's as a folder of its own: pyright opens a file in every folder
-        // holding it, so a package's files would be checked twice, with two Pythons.)
+        let root_uri = uri_for(&root);
+        // Python's is told its folder's Python (see the answer to workspace/configuration).
         let python = crate::lsp::is_python_server(config.name);
         #[allow(deprecated)] // root_uri is deprecated in favour of workspace folders, but some servers still read it
         let params = InitializeParams {
@@ -369,7 +422,7 @@ impl LspStore {
             workspace_folders: root_uri.map(|uri| {
                 vec![WorkspaceFolder {
                     uri,
-                    name: self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    name: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 }]
             }),
             capabilities: ClientCapabilities {
@@ -487,10 +540,15 @@ impl LspStore {
             ..Default::default()
         };
         let initialize = server.request::<Initialize>(params);
+        self.starts += 1;
+        let start = self.starts;
         self._tasks.push(cx.spawn(async move |this, cx| {
             let result = initialize.await;
             this.update(cx, |this, _| {
-                let Some(ServerState::Starting { server, queued }) = this.servers.remove(config.name) else { return };
+                if !matches!(this.servers.get(&key), Some(ServerState::Starting { start: s, .. }) if *s == start) {
+                    return;
+                }
+                let Some(ServerState::Starting { server, queued, .. }) = this.servers.remove(&key) else { return };
                 match result {
                     Ok(result) => {
                         server.set_capabilities(&result.capabilities);
@@ -498,21 +556,27 @@ impl LspStore {
                         for f in queued {
                             f(&server);
                         }
-                        this.servers.insert(config.name, ServerState::Running { server });
+                        this.servers.insert(key, ServerState::Running { server });
                     }
                     Err(err) => {
                         eprintln!("null: {} failed to start: {err}", config.name);
                         crate::server_log::append(config.name, &format!("failed to start: {err}"));
-                        this.servers.insert(config.name, ServerState::Unavailable);
+                        this.servers.insert(key, ServerState::Unavailable);
                     }
                 }
             })
             .ok();
         }));
-        ServerState::Starting { server, queued: Vec::new() }
+        ServerState::Starting { server, queued: Vec::new(), start }
     }
 
-    fn handle_message(&mut self, config: &'static ServerConfig, message: ServerMessage, cx: &mut Context<Self>) {
+    fn handle_message(
+        &mut self,
+        config: &'static ServerConfig,
+        key: &ServerKey,
+        message: ServerMessage,
+        cx: &mut Context<Self>,
+    ) {
         match message {
             ServerMessage::Notification { method, params } => match method.as_str() {
                 // What it says (rust-analyzer: "failed to load workspace…"): into the log.
@@ -583,7 +647,7 @@ impl LspStore {
                     }
                     _ => Value::Null,
                 };
-                if let Some(server) = match self.servers.get(config.name) {
+                if let Some(server) = match self.servers.get(key) {
                     Some(ServerState::Running { server } | ServerState::Starting { server, .. }) => Some(server),
                     _ => None,
                 } {
@@ -599,7 +663,8 @@ impl LspStore {
     fn configuration(&self, server: &str, item: &Value) -> Value {
         let python = crate::lsp::is_python_server(server) && item["section"].as_str() == Some("python");
         let scope = item["scopeUri"].as_str().and_then(|uri| uri.parse().ok()).and_then(|uri| path_for(&uri));
-        let env = python.then(|| crate::python_env::find_for(&self.root, scope.as_deref().unwrap_or(&self.root))).flatten();
+        let env =
+            python.then(|| crate::python_env::find_for(&self.root, scope.as_deref().unwrap_or(&self.root))).flatten();
         match env {
             // (A path that isn't text, on Linux: not given.)
             Some(env) => match crate::python_env::interpreter(&env).to_str() {
@@ -939,17 +1004,24 @@ impl LspStore {
         path: &Path,
         lens: lsp_types::CodeLens,
     ) -> impl Future<Output = Option<lsp_types::CodeLens>> + use<> {
-        let request = self
-            .server_for(path)
-            .map(|server| server.request::<lsp_types::request::CodeLensResolve>(lens));
+        let request = self.server_for(path).map(|server| server.request::<lsp_types::request::CodeLensResolve>(lens));
         async move { request?.await.ok() }
     }
 
     /// The servers that care about renaming `path`: its language's, or for a folder,
     /// every one running (a folder can hold a module).
     fn servers_for_rename(&self, path: &Path) -> Vec<Arc<LanguageServer>> {
-        if let Some(server) = self.server_for(path) {
-            return vec![server];
+        // Every one of its kind (Python's, one per package): code elsewhere may name it.
+        if let Some(config) = config_for(path).filter(|_| self.server_for(path).is_some()) {
+            return self
+                .servers
+                .iter()
+                .filter(|((name, _), _)| *name == config.name)
+                .filter_map(|(_, state)| match state {
+                    ServerState::Running { server } => Some(server.clone()),
+                    _ => None,
+                })
+                .collect();
         }
         if path.is_file() {
             return Vec::new();
@@ -1213,17 +1285,38 @@ impl LspStore {
         self.diagnostics.iter().flat_map(|(path, list)| list.iter().map(move |d| (path, d)))
     }
 
+    /// After a change that can make or remove an environment: if any folder's Python files
+    /// would now go to another server (a package's environment made, or gone), Python's
+    /// servers start again.
+    pub fn python_folders_changed(&mut self, cx: &mut Context<Self>) {
+        let moved = self.python_roots.borrow().iter().any(|(folder, served)| {
+            crate::python_env::owner_for(&self.root, folder).map_or_else(|| self.root.clone(), |(owner, _)| owner)
+                != *served
+        });
+        if moved {
+            self.restart_python(cx);
+        }
+    }
+
     /// Stops every server politely.
     /// Python's language server started again (the project's environment changed: it reads
     /// the packages from the new one), its open files handed to it again.
     pub fn restart_python(&mut self, cx: &mut Context<Self>) {
-        let running: Vec<&'static str> =
-            self.servers.keys().copied().filter(|name| matches!(*name, "pyright" | "basedpyright" | "pylsp")).collect();
-        for name in running {
-            if let Some(ServerState::Running { server }) = self.servers.remove(name) {
+        // (Environments made or gone: which folder serves which file is worked out again.)
+        self.python_roots.borrow_mut().clear();
+        let running: Vec<ServerKey> =
+            self.servers.keys().filter(|(name, _)| crate::lsp::is_python_server(name)).cloned().collect();
+        let mut names: Vec<&'static str> = Vec::new();
+        for key in running {
+            if let Some(ServerState::Running { server }) = self.servers.remove(&key) {
                 drop(server.request::<Shutdown>(()));
                 server.notify::<Exit>(());
             }
+            if !names.contains(&key.0) {
+                names.push(key.0);
+            }
+        }
+        for name in names {
             crate::server_log::append(name, "restarting: the project's Python environment changed");
             let open: Vec<(PathBuf, Rope)> = self
                 .documents
@@ -1252,6 +1345,59 @@ impl LspStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A monorepo: package `a` with an environment of its own (holding a module only it
+    /// has), package `b` without. Each file is checked once, with its own folder's Python:
+    /// `a`'s import is found, `b`'s isn't. Needs pyright on the PATH (tests don't look in
+    /// Null's own folder): `PATH="$HOME/Library/Application Support/Null/servers/node_modules/.bin:$PATH"
+    /// cargo test each_package_s_python_files_use_its_environment -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn each_package_s_python_files_use_its_environment(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let root = crate::tools::test_dir("lsp-python-packages");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        let made = std::process::Command::new("python3").args(["-m", "venv"]).arg(root.join("a/.venv")).status();
+        assert!(made.unwrap().success());
+        let lib = std::fs::read_dir(root.join("a/.venv/lib")).unwrap().next().unwrap().unwrap().path();
+        std::fs::write(lib.join("site-packages/onlya.py"), "VALUE = 1\n").unwrap();
+        std::fs::write(root.join("a/x.py"), "import onlya\nprint(onlya.VALUE)\nn: int = 'no'\n").unwrap();
+        std::fs::write(root.join("b/y.py"), "import onlya\n").unwrap();
+        let store = cx.new(|_| LspStore::new(root.clone()));
+        for file in ["a/x.py", "b/y.py"] {
+            let path = root.join(file);
+            let text = Rope::from_str(&std::fs::read_to_string(&path).unwrap());
+            store.update(cx, |s, cx| s.open(&path, text, cx));
+        }
+        let messages = |cx: &mut gpui::TestAppContext, file: &str| -> Vec<String> {
+            store.read_with(cx, |s, _| s.diagnostics(&root.join(file)).iter().map(|d| d.message.clone()).collect())
+        };
+        let mut checked = false;
+        for _ in 0..600 {
+            cx.run_until_parked();
+            if !messages(cx, "a/x.py").is_empty() && !messages(cx, "b/y.py").is_empty() {
+                checked = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let states = store.read_with(cx, |s, _| {
+            [s.readiness(&root.join("a/x.py")), s.readiness(&root.join("b/y.py"))].map(|r| format!("{r:?}")).join(" / ")
+        });
+        assert!(checked, "never checked: {states} {:?} {:?}", messages(cx, "a/x.py"), messages(cx, "b/y.py"));
+        // Settled: a's only problem is its own type error, b can't find a's module.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        let a = messages(cx, "a/x.py");
+        assert!(a.iter().all(|m| !m.contains("onlya")) && a.iter().any(|m| m.contains("int")), "{a:?}");
+        assert!(messages(cx, "b/y.py").iter().any(|m| m.contains("onlya")));
+        // Two servers: the package's and the project's.
+        assert_eq!(store.read_with(cx, |s, _| s.servers.len()), 2);
+        store.update(cx, |s, _| s.shutdown());
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     /// Python's server is told each folder's Python: a package's own environment, else the
     /// project's; other servers and settings, nothing (their defaults).

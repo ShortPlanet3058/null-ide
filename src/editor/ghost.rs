@@ -204,20 +204,30 @@ fn mark_fill_failed(settings: &ai::AiSettings) {
 /// The suggestion's lines: at most a few, no trailing blank ones, and stopping where
 /// it starts repeating the code that already follows the caret.
 fn shape_suggestion(completion: &str, suffix: &str, block: bool) -> Vec<String> {
-    let following: Vec<&str> = suffix.lines().skip(1).map(str::trim).filter(|l| !l.is_empty()).take(2).collect();
+    let following: Vec<&str> =
+        suffix.lines().skip(1).map(str::trim_end).filter(|l| !l.trim().is_empty()).take(2).collect();
+    // A line closing a block (`}`) is the same only as indented the same: one closing a
+    // block the suggestion opened isn't the caret's block's end.
+    let closes = |l: &str| l.trim_start().starts_with(['}', ')', ']']) && l.trim().len() <= 2;
+    // (Indentation by width: a tab as four spaces.)
+    let indented = |l: &str| l.trim_end().replace('\t', "    ");
+    let same = |a: &str, b: &str| if closes(b) { indented(a) == indented(b) } else { a.trim() == b.trim() };
+    // The next line closing a block: a suggestion that writes it again has run on past the
+    // caret's block (a small model goes on into new code).
+    let closer = following.first().copied().filter(|l| closes(l));
     let all: Vec<&str> = completion.lines().collect();
     let repeats_from = |i: usize| {
-        let rest: Vec<&str> = all[i..].iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        let rest: Vec<&str> = all[i..].iter().copied().filter(|l| !l.trim().is_empty()).collect();
         match (following.as_slice(), rest.as_slice()) {
-            ([first, second], [a, b, ..]) => a == first && b == second,
-            ([first, ..], [a]) => a == first,
-            ([first], [a, ..]) => a == first && first.len() > 2,
+            ([first, second], [a, b, ..]) => same(a, first) && same(b, second),
+            ([first, ..], [a]) => same(a, first),
+            ([first], [a, ..]) => same(a, first) && first.trim().len() > 2,
             _ => false,
         }
     };
     let mut lines: Vec<String> = Vec::new();
     for (i, line) in all.iter().enumerate() {
-        if i > 0 && repeats_from(i) {
+        if i > 0 && (repeats_from(i) || closer.is_some_and(|c| same(line, c))) {
             break;
         }
         lines.push(line.trim_end().to_string());
@@ -823,5 +833,11 @@ mod tests {
         // A brace that isn't there yet stays.
         assert_eq!(shape_suggestion("\n    write(1, &c, 1);\n}", "", true), ["", "    write(1, &c, 1);", "}"]);
         assert_eq!(shape_suggestion("x + 1\n\n\n", "", false), ["x + 1"]);
+        // Run on past the block (the `}` after the caret written again, then new code): cut
+        // there; a `}` of its own, indented otherwise, stays.
+        let run_on = "helper() * 2;\n    doubled\n}\n\nfn main() {\n    let result = helper();";
+        assert_eq!(shape_suggestion(run_on, "\n}\n", true), ["helper() * 2;", "    doubled"]);
+        let inner = "if x {\n        y();\n    }";
+        assert_eq!(shape_suggestion(inner, "\n}\n", true), ["if x {", "        y();", "    }"]);
     }
 }

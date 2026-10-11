@@ -600,6 +600,9 @@ fn openai_compatible(
     prompt: &Prompt,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
+    if id == ProviderId::Ollama {
+        crate::ollama::ensure_running(base);
+    }
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
     let mut request = agent().post(&url).header("Content-Type", "application/json");
     if let Some(key) = key {
@@ -1124,6 +1127,7 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
     match id {
         // Ollama formats the fill itself, from the model's own template.
         ProviderId::Ollama => {
+            crate::ollama::ensure_running(&base);
             let host = base.trim_end_matches('/').trim_end_matches("/v1").to_string();
             let body = json!({
                 "model": model,
