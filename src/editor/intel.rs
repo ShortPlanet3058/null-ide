@@ -643,6 +643,30 @@ impl Editor {
         }));
     }
 
+    /// The types the one at the caret comes from (`up`: what it extends or implements), or
+    /// those that come from it: one is gone to, several listed.
+    pub(super) fn show_types_around(&mut self, up: bool, cx: &mut Context<Self>) {
+        let offset = self.selection.head;
+        if let Some(message) = self.not_ready_message(cx) {
+            return self.show_notice(offset, message, cx);
+        }
+        let (Some(lsp), Some(path)) = (&self.lsp, &self.path) else { return };
+        let request = lsp.read(cx).types_around(path, self.lsp_position(offset), up);
+        let word = self.buffer.slice(self.word_at(offset));
+        self.definition_task = Some(cx.spawn(async move |this, cx| {
+            let found = request.await;
+            this.update(cx, |this, cx| {
+                let (none, what) = if up {
+                    ("Nothing this type comes from, as the server knows.", format!("types {word} comes from"))
+                } else {
+                    ("No types come from this one, as the server knows.", format!("types from {word}"))
+                };
+                this.go_or_list(found, offset, none, &what, cx)
+            })
+            .ok();
+        }));
+    }
+
     /// Places found for the symbol at `offset`: none says so, one is gone to, several are
     /// listed as "{count} {what}".
     fn go_or_list(

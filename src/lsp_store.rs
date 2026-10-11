@@ -480,6 +480,7 @@ impl LspStore {
                     document_highlight: Some(Default::default()),
                     inlay_hint: Some(Default::default()),
                     code_lens: Some(lsp_types::CodeLensClientCapabilities::default()),
+                    type_hierarchy: Some(Default::default()),
                     semantic_tokens: Some(lsp_types::SemanticTokensClientCapabilities {
                         requests: lsp_types::SemanticTokensClientCapabilitiesRequests {
                             range: Some(false),
@@ -861,6 +862,22 @@ impl LspStore {
         async move {
             match asked {
                 Some((server, params)) => crate::lsp::callees(&server, params).await,
+                None => Vec::new(),
+            }
+        }
+    }
+
+    /// The types the type at `position` comes from (`up`), or that come from it.
+    pub fn types_around(
+        &self,
+        path: &Path,
+        position: Position,
+        up: bool,
+    ) -> impl Future<Output = Vec<lsp_types::Location>> + use<> {
+        let asked = self.server_for(path).zip(Self::position_params(path, position));
+        async move {
+            match asked {
+                Some((server, params)) => crate::lsp::types_around(&server, params, up).await,
                 None => Vec::new(),
             }
         }
@@ -1466,6 +1483,58 @@ mod tests {
         std::fs::write(project.join("node_modules/typescript/lib/tsserver.js"), "").unwrap();
         assert_eq!(typescript_for(&program, &project.join("src")), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A type's place among types, from clangd (Xcode's): what `Mid` comes from (`Base`),
+    /// what comes from it (`Leaf`). `cargo test types_around_a_type -- --ignored`
+    #[gpui::test]
+    #[ignore]
+    fn types_around_a_type(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let root = crate::tools::test_dir("lsp-types-around");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let path = root.join("shapes.cpp");
+        let text = "struct Base {};\nstruct Mid : Base {};\nstruct Leaf : Mid {};\nint main() { Leaf l; (void)l; }\n";
+        std::fs::write(&path, text).unwrap();
+        let store = cx.new(|_| LspStore::new(root.clone()));
+        store.update(cx, |s, cx| s.open(&path, Rope::from_str(text), cx));
+        let ready = |cx: &mut gpui::TestAppContext| {
+            store.read_with(cx, |s, _| matches!(s.readiness(&path), Some(Readiness::Ready { .. })))
+        };
+        for _ in 0..600 {
+            cx.run_until_parked();
+            if ready(cx) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(ready(cx), "clangd never got ready");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        // On `Mid` (line 1, column 8).
+        let mid = Position::new(1, 8);
+        let lines =
+            |found: Vec<lsp_types::Location>| -> Vec<u32> { found.iter().map(|l| l.range.start.line).collect() };
+        // (Answered by the real server: waited for as it works.)
+        let ask = |cx: &mut gpui::TestAppContext, up: bool| -> Vec<lsp_types::Location> {
+            let answer = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let request = store.read_with(cx, |s, _| s.types_around(&path, mid, up));
+            let into = answer.clone();
+            cx.background_executor.spawn(async move { *into.lock().unwrap() = Some(request.await) }).detach();
+            for _ in 0..200 {
+                cx.run_until_parked();
+                if let Some(found) = answer.lock().unwrap().take() {
+                    return found;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("no answer");
+        };
+        assert_eq!(lines(ask(cx, true)), [0], "Base");
+        assert_eq!(lines(ask(cx, false)), [2], "Leaf");
+        store.update(cx, |s, _| s.shutdown());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Python's server is told each folder's Python: a package's own environment, else the

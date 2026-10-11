@@ -1818,6 +1818,12 @@ impl Element for EditorElement {
                 None
             };
 
+            // Blocks drawn over the text (a review's threads) are placed from the layout:
+            // with none yet, they wait for this one, so another frame draws them.
+            if editor.layout.is_none() && editor.has_overlay_blocks() {
+                let this = cx.entity();
+                window.on_next_frame(move |_, cx| this.update(cx, |_, cx| cx.notify()));
+            }
             editor.layout = Some(Layout {
                 text_origin: origin,
                 text_bounds,

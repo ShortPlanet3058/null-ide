@@ -1,4 +1,5 @@
 mod assist;
+pub use assist::Thread;
 mod bookmarks;
 mod brackets;
 mod breakpoints;
@@ -78,7 +79,7 @@ pub use fold::{Fold, FoldAll, FoldLevel1, FoldLevel2, FoldLevel3, Unfold, Unfold
 pub use ghost::{AcceptGhost, AcceptGhostLine, AcceptGhostWord, NextGhost};
 pub use intel::{HoverCard, Problem};
 pub use invisible::RemoveInvisibleCharacters;
-pub use language_pick::{SetLanguage, by_name as language_by_name, names as language_names};
+pub use language_pick::{SetLanguage, by_name as language_by_name, by_path as language_by_path, names as language_names};
 pub use meaning::SEMANTIC_TYPES;
 pub use numbers::{Decrement, Increment};
 pub use refactor::{
@@ -190,6 +191,8 @@ actions!(
         GoToImplementation,
         ShowCallers,
         ShowCallees,
+        ShowSupertypes,
+        ShowSubtypes,
         SkipOccurrence,
         ShowInfo,
         ShowCompletions,
@@ -433,6 +436,8 @@ pub enum EditorEvent {
     },
     /// Every change of a review was kept or undone.
     Reviewed,
+    /// A thread's Reply clicked (a pull request's review comments): its id.
+    ReplyAsked(u64),
     /// Files dropped from the Finder on a Markdown file, at char offset `at`: the workspace
     /// puts links to them there.
     FilesDropped {
@@ -773,6 +778,8 @@ pub struct Editor {
     /// An AI task's changes to this file, being reviewed.
     review: Option<review::Review>,
     note: Option<assist::Note>,
+    /// Conversations shown between the lines (a pull request's review comments).
+    threads: Vec<assist::Thread>,
     ghost: Option<ghost::Ghost>,
     ghost_task: Option<Task<()>>,
     ghost_cache: Vec<(String, Vec<String>)>,
@@ -1004,6 +1011,7 @@ impl Editor {
             ai_change: None,
             review: None,
             note: None,
+            threads: Vec::new(),
             ghost: None,
             ghost_task: None,
             ghost_cache: Vec::new(),
@@ -2857,6 +2865,13 @@ impl Editor {
         self.edit(at..at, text, EditKind::Typing, cx);
     }
 
+    /// All the text replaced with `text`, as typing would (for tests elsewhere in the crate).
+    #[cfg(test)]
+    pub fn set_text_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        let len = self.buffer.len_chars();
+        self.edit(0..len, text, EditKind::Typing, cx);
+    }
+
     /// An image from the clipboard saved next to this Markdown file as
     /// `pasted-2026-10-06-120312.png` (UTC), and a link to it in place of the selection.
     fn paste_image(&mut self, image: gpui::Image, cx: &mut Context<Self>) {
@@ -4536,6 +4551,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::use_selection_for_find))
             .on_action(cx.listener(Self::show_callers))
             .on_action(cx.listener(Self::show_callees))
+            .on_action(cx.listener(|this, _: &ShowSupertypes, _, cx| this.show_types_around(true, cx)))
+            .on_action(cx.listener(|this, _: &ShowSubtypes, _, cx| this.show_types_around(false, cx)))
             .on_action(cx.listener(Self::join_lines))
             .on_action(cx.listener(Self::rewrap))
             .on_action(cx.listener(Self::delete_to_line_end))

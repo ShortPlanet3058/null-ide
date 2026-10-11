@@ -159,6 +159,9 @@ pub fn register(keymap: Keymap, cx: &mut App) {
     crate::terminal::bind_keys(cx);
     crate::key_prompt::bind_keys(cx);
     crate::text_input::bind_keys(cx);
+    crate::git_view::bind_keys(cx);
+    crate::commit_page::bind_keys(cx);
+    crate::github_page::bind_keys(cx);
     crate::settings_panel::bind_keys(cx);
     crate::welcome::bind_keys(cx);
     crate::editor::bind_refactor_keys(cx);

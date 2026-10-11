@@ -328,6 +328,47 @@ pub async fn callees(server: &LanguageServer, at: lsp_types::TextDocumentPositio
     found
 }
 
+/// The types the type at `at` comes from (`up`: what it extends or implements), or those
+/// that come from it: each where it's defined.
+pub async fn types_around(
+    server: &LanguageServer,
+    at: lsp_types::TextDocumentPositionParams,
+    up: bool,
+) -> Vec<lsp_types::Location> {
+    use lsp_types::request::{TypeHierarchyPrepare, TypeHierarchySubtypes, TypeHierarchySupertypes};
+    let prepared = server
+        .request::<TypeHierarchyPrepare>(lsp_types::TypeHierarchyPrepareParams {
+            text_document_position_params: at,
+            work_done_progress_params: Default::default(),
+        })
+        .await;
+    let Some(item) = prepared.ok().flatten().and_then(|items| items.into_iter().next()) else { return Vec::new() };
+    let types = if up {
+        server
+            .request::<TypeHierarchySupertypes>(lsp_types::TypeHierarchySupertypesParams {
+                item,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+    } else {
+        server
+            .request::<TypeHierarchySubtypes>(lsp_types::TypeHierarchySubtypesParams {
+                item,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+    };
+    types
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| lsp_types::Location { uri: t.uri, range: t.selection_range })
+        .collect()
+}
+
 pub fn uri_for(path: &Path) -> Option<lsp_types::Uri> {
     url::Url::from_file_path(path).ok()?.as_str().parse().ok()
 }

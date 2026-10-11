@@ -151,6 +151,7 @@ actions!(
         ReplaceInProject,
         ShowFiles,
         ShowOutline,
+        ShowChanges,
         ImportVsCodeSettings,
         GoToOutlineMatch,
         ClearOutlineFilter,
@@ -363,6 +364,16 @@ struct TextMenu {
 
 /// What a terminal's menu offers: copying what's selected, pasting, clearing; another
 /// terminal beside it or a new one.
+/// What a merge (rebase, …) is called in what's said about it.
+fn joining_name(kind: git::Joining) -> &'static str {
+    match kind {
+        git::Joining::Merge => "the merge",
+        git::Joining::Rebase => "the rebase",
+        git::Joining::CherryPick => "the cherry-pick",
+        git::Joining::Revert => "the revert",
+    }
+}
+
 fn terminal_menu_items(selected: bool) -> Vec<TextMenuItem> {
     let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group, at_click: false };
     let mut items = Vec::new();
@@ -389,6 +400,12 @@ struct TextMenuItem {
 
 /// The program `cargo build` makes for a project: its first `[[bin]]`, or the package
 /// named in Cargo.toml, in target/debug.
+/// Where AI's commit message goes: the commit list's field, or the Changes tab's.
+enum CommitTarget {
+    Palette(gpui::WeakEntity<crate::palette::Palette>),
+    Changes,
+}
+
 /// The program `cargo build --message-format=json` says it built: the one named as
 /// `expected` is (its file name), else the only one; None when it built none, or several
 /// and none of them is the one expected (which, isn't for Null to guess).
@@ -678,6 +695,17 @@ pub struct Workspace {
     sidebar_outline: bool,
     /// The sidebar shows the project's tests (see `crate::test_at::discover`).
     sidebar_tests: bool,
+    /// The sidebar shows the Changes tab (git).
+    sidebar_git: bool,
+    git_view: Entity<crate::git_view::GitView>,
+    /// A commit looked at, in the place of the code (until a file's opened, or Esc).
+    git_page: Option<(Entity<crate::commit_page::CommitPage>, Subscription)>,
+    /// A pull request (or issue) looked at, the same way.
+    github_page: Option<(Entity<crate::github_page::GitHubPage>, Subscription)>,
+    /// A merge (rebase, cherry-pick, revert) git is waiting in, and the files in it with
+    /// conflicts left.
+    joining: Option<git::JoiningState>,
+    to_settle: Vec<PathBuf>,
     /// The project's own Python environment (`.venv`), if it has one.
     python_env: Option<PathBuf>,
     /// The open file's (its package's own, in a monorepo), and which file that was for.
@@ -870,6 +898,7 @@ impl Workspace {
         // This project's own settings, over yours, while its window is in front.
         crate::settings::use_project(&root, cx);
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
+        let git_view = cx.new(|cx| crate::git_view::GitView::new(root.clone(), cx));
         let lsp = cx.new(|_| LspStore::new(root.clone()));
         let ignore_rules = crate::project_index::ignore_rules(&root);
         let tree = cx.new(|cx| {
@@ -994,6 +1023,12 @@ impl Workspace {
             sidebar_search: Transition::new(false),
             sidebar_outline: false,
             sidebar_tests: false,
+            sidebar_git: false,
+            git_view,
+            git_page: None,
+            github_page: None,
+            joining: None,
+            to_settle: Vec::new(),
             python_env: None,
             python_env_here: None,
             tests: None,
@@ -1108,6 +1143,8 @@ impl Workspace {
             async {}
         })
         .detach();
+        let git_events = cx.subscribe_in(&workspace.git_view, window, Self::git_view_event);
+        workspace._subscriptions.push(git_events);
         // Typed in the Outline's filter: the list shows what fits.
         let filter_changes =
             cx.subscribe(&workspace.outline_filter, |this, filter, _: &crate::text_input::TextInputEvent, cx| {
@@ -1531,12 +1568,30 @@ impl Workspace {
         self.git_status_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, _| this.git_status_at = Instant::now()).ok();
-            let (changed, sync) =
-                cx.background_executor().spawn(async move { (git::status(&root), git::ahead_behind(&root)) }).await;
+            let (changed, sync, joining, to_settle) = cx
+                .background_executor()
+                .spawn(async move {
+                    let changed = git::status(&root);
+                    let joining = git::joining(&root);
+                    // (Conflicted in git's index, and markers still in the file.)
+                    let to_settle: Vec<PathBuf> = changed
+                        .iter()
+                        .filter(|(path, status)| *status == git::FileStatus::Conflicted && git::still_marked(path))
+                        .map(|(path, _)| path.clone())
+                        .collect();
+                    (changed, git::ahead_behind(&root), joining, to_settle)
+                })
+                .await;
             this.update(cx, |this, cx| {
+                this.joining = joining;
+                this.to_settle = to_settle;
                 this.tree.update(cx, |tree, cx| tree.set_git_status(changed.clone(), cx));
                 this.git_status = changed;
                 this.sync = sync;
+                // (Read again only while it shows: each file's changes are compared.)
+                if this.sidebar_git {
+                    this.git_view.update(cx, |view, cx| view.refresh(cx));
+                }
                 cx.notify();
             })
             .ok();
@@ -1737,12 +1792,18 @@ impl Workspace {
 
     /// Returns the changes set aside last. Conflicts open at the first, where ⌘. resolves each.
     fn bring_back_changes(&mut self, _: &BringBackChanges, window: &mut Window, cx: &mut Context<Self>) {
+        self.bring_back_at(0, window, cx);
+    }
+
+    /// Returns the changes set aside at `index` (0: the latest).
+    fn bring_back_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
+        self.save_named_tabs(cx);
         let root = self.tree.read(cx).root().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { git::bring_back(&root) }).await;
+            let result = cx.background_executor().spawn(async move { git::bring_back_at(&root, index) }).await;
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(conflicts) if conflicts.is_empty() => this.show_notice("Brought the changes back.".into(), cx),
@@ -1750,9 +1811,7 @@ impl Workspace {
                         let n = conflicts.len();
                         let files = if n == 1 { "1 file".to_string() } else { format!("{n} files") };
                         this.show_notice(format!("Brought back, with conflicts in {files}: ⌘. resolves each."), cx);
-                        if let Some(first) = conflicts.into_iter().next() {
-                            this.open_file(first, window, cx);
-                        }
+                        this.open_first_conflict(conflicts, window, cx);
                     }
                     Err(error) => this.show_notice(error, cx),
                 }
@@ -2091,6 +2150,18 @@ impl Workspace {
     fn write_commit_message(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
         // Weak: once the list is closed, the message stops coming.
         let Some(palette) = self.palette.as_ref().map(|(p, _)| p.downgrade()) else { return };
+        self.write_commit_message_into(files, CommitTarget::Palette(palette), cx);
+    }
+
+    /// AI's commit message for `files`' changes, written into `target` as it comes.
+    fn write_commit_message_into(&mut self, files: Vec<PathBuf>, target: CommitTarget, cx: &mut Context<Self>) {
+        let git_view = self.git_view.downgrade();
+        let put = move |message: &str, cx: &mut App| -> bool {
+            match &target {
+                CommitTarget::Palette(palette) => palette.update(cx, |p, cx| p.set_query(message, cx)).is_ok(),
+                CommitTarget::Changes => git_view.update(cx, |v, cx| v.set_message(message, cx)).is_ok(),
+            }
+        };
         let settings = cx.global::<Settings>().ai.clone();
         let root = self.tree.read(cx).root().to_path_buf();
         // Nothing in the field meanwhile: ↵ there must never commit a placeholder.
@@ -2135,7 +2206,7 @@ impl Workspace {
                     crate::ai::AiEvent::Done => true,
                     crate::ai::AiEvent::Failed(error) => {
                         this.update(cx, |this, cx| {
-                            palette.update(cx, |p, cx| p.set_query("", cx)).ok();
+                            put("", cx);
                             this.show_notice(format!("Couldn't write the message: {error}"), cx);
                         })
                         .ok();
@@ -2143,7 +2214,7 @@ impl Workspace {
                     }
                 };
                 let shown = message.trim().to_string();
-                if palette.update(cx, |p, cx| p.set_query(&shown, cx)).is_err() || done {
+                if !cx.update(|cx| put(&shown, cx)).unwrap_or(false) || done {
                     // Written (or no longer wanted): not still said to be on its way.
                     this.update(cx, |this, cx| {
                         if this.notice.as_ref().is_some_and(|(n, _)| n == WRITING) {
@@ -3194,6 +3265,8 @@ impl Workspace {
                 }
                 EditorEvent::RunCommand(command) => this.run_in_terminal(command.clone(), None, window, cx),
                 EditorEvent::Reviewed => this.file_reviewed(editor, cx),
+                // (Only a pull request's page shows threads: it hears this itself.)
+                EditorEvent::ReplyAsked(_) => {}
                 EditorEvent::FilesDropped { paths, at } => this.link_dropped(editor.clone(), paths, *at, cx),
                 EditorEvent::SaveFailed(message) => this.show_notice(message.clone(), cx),
                 EditorEvent::ChangedOnDisk => {
@@ -3392,6 +3465,7 @@ impl Workspace {
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
+        self.git_view.update(cx, |view, cx| view.set_root(path.clone(), cx));
         // Language servers work per project: restart them for the new folder.
         let root = path.clone();
         self.lsp.update(cx, |lsp, _| {
@@ -3431,6 +3505,9 @@ impl Workspace {
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // A commit (or pull request) looked at gives way to the file.
+        self.git_page = None;
+        self.github_page = None;
         self.show_tab(ix, true, window, cx);
     }
 
@@ -4469,6 +4546,7 @@ impl Workspace {
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
             (App, "Import Settings from VS Code…".into(), Box::new(ImportVsCodeSettings)),
+            (File, "Show Changes (Git)".into(), Box::new(ShowChanges)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
@@ -4611,6 +4689,8 @@ impl Workspace {
                 (Go, "Find References".into(), Box::new(crate::editor::FindReferences)),
                 (Go, "Show Callers".into(), Box::new(crate::editor::ShowCallers)),
                 (Go, "Show Callees (What This Calls)".into(), Box::new(crate::editor::ShowCallees)),
+                (Go, "Show Supertypes (What This Type Extends)".into(), Box::new(crate::editor::ShowSupertypes)),
+                (Go, "Show Subtypes (Types Extending This)".into(), Box::new(crate::editor::ShowSubtypes)),
                 (Go, "Go to Implementation".into(), Box::new(crate::editor::GoToImplementation)),
                 (Go, "Go to Type Definition".into(), Box::new(crate::editor::GoToTypeDefinition)),
                 (Go, "Show Problems".into(), Box::new(ShowProblems)),
@@ -5516,9 +5596,323 @@ impl Workspace {
         self.project_search.update(cx, |search, cx| search.refresh(cx));
     }
 
+    /// The Changes tab: what changed since the last commit, to commit; the branch.
+    fn show_changes(&mut self, _: &ShowChanges, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_git = true;
+        self.sidebar_outline = false;
+        self.sidebar_tests = false;
+        self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        self.leave_hidden_focus(window, cx);
+        self.git_view.update(cx, |view, cx| view.refresh(cx));
+        cx.notify();
+    }
+
+    /// A commit from the history, in the place of the code.
+    fn show_commit(&mut self, commit: git::LogCommit, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let page = cx.new(|cx| crate::commit_page::CommitPage::new(root, commit, cx));
+        self.github_page = None;
+        let subscription = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
+            use crate::commit_page::CommitPageEvent;
+            match event {
+                CommitPageEvent::Close => this.close_commit(window, cx),
+                CommitPageEvent::Said(said) => this.show_notice(said.clone(), cx),
+                CommitPageEvent::Changed => {
+                    this.refresh_git(cx);
+                    this.git_view.update(cx, |view, cx| view.refresh(cx));
+                }
+            }
+        });
+        window.focus(&page.focus_handle(cx));
+        self.git_page = Some((page, subscription));
+        cx.notify();
+    }
+
+    /// A pull request (or issue) from the GitHub tab, in the place of the code.
+    fn show_github(&mut self, number: u64, issue: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.tree.read(cx).root().to_path_buf();
+        let page = cx.new(|cx| crate::github_page::GitHubPage::new(root, number, issue, cx));
+        let subscription = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
+            use crate::github_page::GitHubPageEvent;
+            match event {
+                GitHubPageEvent::Close => {
+                    if this.github_page.take().is_some() {
+                        this.focus_main(window, cx);
+                        cx.notify();
+                    }
+                }
+                GitHubPageEvent::Said(said) => this.show_notice(said.clone(), cx),
+                GitHubPageEvent::Changed => {
+                    this.reload_open_files(cx);
+                    this.refresh_git(cx);
+                }
+            }
+        });
+        window.focus(&page.focus_handle(cx));
+        self.git_page = None;
+        self.github_page = Some((page, subscription));
+        cx.notify();
+    }
+
+    fn close_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_page.take().is_some() {
+            self.git_view.update(cx, |view, cx| {
+                view.shown = None;
+                cx.notify();
+            });
+            self.focus_main(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn git_view_event(
+        &mut self,
+        _: &Entity<crate::git_view::GitView>,
+        event: &crate::git_view::GitViewEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::git_view::GitViewEvent;
+        match event {
+            GitViewEvent::Open(path) => {
+                if !self.review_git_file(path, window, cx) {
+                    self.open_file(path.clone(), window, cx);
+                }
+            }
+            GitViewEvent::CommitAsked => {
+                // What's committed is what's on disk: the open files saved first.
+                self.save_named_tabs(cx);
+                self.git_view.update(cx, |view, cx| view.commit(cx));
+            }
+            GitViewEvent::Committed(result) => {
+                let notice = match result {
+                    Ok(id) => format!("Committed {id}."),
+                    Err(error) => format!("Couldn't commit: {error}"),
+                };
+                self.show_notice(notice, cx);
+                self.refresh_git(cx);
+            }
+            GitViewEvent::Draft(files) => self.write_commit_message_into(files.clone(), CommitTarget::Changes, cx),
+            GitViewEvent::ShowCommit(commit) => self.show_commit(commit.clone(), window, cx),
+            GitViewEvent::ShowPull(number) => self.show_github(*number, false, window, cx),
+            GitViewEvent::ShowIssue(number) => self.show_github(*number, true, window, cx),
+            GitViewEvent::Push => self.push_branch(&PushBranch, window, cx),
+            GitViewEvent::Pull => self.pull_branch(&PullBranch, window, cx),
+            GitViewEvent::SwitchTo(branch) => self.change_branch(Ok(branch.clone()), window, cx),
+            GitViewEvent::NewBranch(name) => self.change_branch(Err(name.clone()), window, cx),
+            GitViewEvent::Join { branch, rebase } => self.join_branch(branch.clone(), *rebase, window, cx),
+            GitViewEvent::BringBack(index) => self.bring_back_at(*index, window, cx),
+            GitViewEvent::SetAside => self.set_changes_aside(&SetChangesAside, window, cx),
+            GitViewEvent::Said(said) => self.show_notice(said.clone(), cx),
+            GitViewEvent::Changed => self.refresh_git(cx),
+        }
+    }
+
+    /// Merges `branch` into the one checked out, or rebases this one onto it (asked
+    /// first: its commits are made again). Conflicts open at the first; the banner over
+    /// the work finishes or stops it.
+    fn join_branch(&mut self, branch: String, rebase: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(here) = self.branch.clone() else {
+            return self.show_notice("This folder isn't a git repository.".into(), cx);
+        };
+        let asked = rebase.then(|| {
+            window.prompt(
+                PromptLevel::Info,
+                &format!("Rebase {here} onto {branch}?"),
+                Some("Its own commits are made again on top of that branch, one by one: new commits, so one already pushed would have to be pushed by force."),
+                &["Rebase", "Cancel"],
+                cx,
+            )
+        });
+        self.save_named_tabs(cx);
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(asked) = asked
+                && asked.await != Ok(0)
+            {
+                return;
+            }
+            let b = branch.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { if rebase { git::rebase_onto(&root, &b) } else { git::merge_in(&root, &b) } })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let files = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+                let notice = match &result {
+                    Ok(conflicts) if conflicts.is_empty() && rebase => format!("Rebased onto {branch}."),
+                    Ok(conflicts) if conflicts.is_empty() => format!("Merged {branch} in."),
+                    Ok(conflicts) => format!("Conflicts in {}: ⌘. resolves each.", files(conflicts.len())),
+                    Err(error) if rebase => format!("Couldn't rebase: {error}"),
+                    Err(error) => format!("Couldn't merge: {error}"),
+                };
+                this.show_notice(notice, cx);
+                this.refresh_git(cx);
+                if let Ok(conflicts) = result {
+                    this.open_first_conflict(conflicts, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The first of `conflicts` opened (read again from disk), at its first conflict.
+    fn open_first_conflict(&mut self, conflicts: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(first) = conflicts.into_iter().next() else { return };
+        self.git_page = None;
+        self.github_page = None;
+        self.open_file(first, window, cx);
+        if let Some(editor) = self.active_editor().cloned() {
+            editor.update(cx, |e, cx| {
+                e.reload_from_disk(cx);
+                e.go_to_conflict(true, cx);
+            });
+        }
+    }
+
+    /// The banner's Stop: the merge (rebase, …) undone, after asking.
+    fn stop_joining(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.joining.clone() else { return };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Stop {}?", joining_name(state.kind)),
+            Some("Everything goes back to how it was before it, conflicts settled so far too."),
+            &["Stop", "Cancel"],
+            cx,
+        );
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let result = cx.background_executor().spawn(async move { git::stop_joining(&root, state.kind) }).await;
+            this.update(cx, |this, cx| {
+                let notice = match result {
+                    Ok(()) => format!("Stopped {}: back as before.", joining_name(state.kind)),
+                    Err(error) => error,
+                };
+                this.show_notice(notice, cx);
+                this.reload_open_files(cx);
+                this.refresh_git(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The banner's Commit (Continue): the open files saved, then the merge's commit made
+    /// once no file has conflicts left.
+    fn finish_joining(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.joining.clone() else { return };
+        self.save_named_tabs(cx);
+        let root = self.tree.read(cx).root().to_path_buf();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::finish_joining(&root, state.kind) }).await;
+            this.update_in(cx, |this, window, cx| {
+                let notice = match &result {
+                    Ok(next) if next.is_empty() => match state.kind {
+                        git::Joining::Merge => format!("Merged {} in.", state.other),
+                        git::Joining::Rebase => format!("Rebased onto {}.", state.other),
+                        git::Joining::CherryPick => format!("Cherry-picked {}.", state.other),
+                        git::Joining::Revert => format!("Reverted {}.", state.other),
+                    },
+                    Ok(_) => "The next commit conflicts too: ⌘. resolves each.".to_string(),
+                    Err(error) => error.clone(),
+                };
+                this.show_notice(notice, cx);
+                this.reload_open_files(cx);
+                this.refresh_git(cx);
+                if let Ok(next) = result {
+                    this.open_first_conflict(next, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Open files changed on disk by git (and not here): read again.
+    fn reload_open_files(&mut self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            tab.editor.update(cx, |e, cx| {
+                if !e.buffer.is_dirty() && e.path().is_some() {
+                    e.reload_from_disk(cx);
+                }
+            });
+        }
+    }
+
+    /// The banner over the work while git waits in a merge (rebase, …).
+    fn render_joining(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let state = self.joining.clone()?;
+        let theme = cx.global::<Theme>().clone();
+        let (title, stop, finish) = match state.kind {
+            git::Joining::Merge => (format!("Merging {} into {}", state.other, state.into), "Stop the Merge", "Commit the Merge"),
+            git::Joining::Rebase => (format!("Rebasing {} onto {}", state.into, state.other), "Stop the Rebase", "Continue"),
+            git::Joining::CherryPick => (format!("Cherry-picking {}", state.other), "Stop", "Commit"),
+            git::Joining::Revert => (format!("Reverting {}", state.other), "Stop", "Commit"),
+        };
+        let left = self.to_settle.len();
+        let settled = left == 0;
+        let settle = match left {
+            0 => "Conflicts settled".to_string(),
+            1 => "1 file to settle".to_string(),
+            n => format!("{n} files to settle"),
+        };
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .px(px(10.))
+                .py(px(3.))
+                .rounded(px(ui::R_KEY))
+                .cursor_pointer()
+                .when(primary, |b| b.bg(theme.caret).text_color(theme.background))
+                .when(!primary, |b| b.border_1().border_color(theme.caret.opacity(0.35)))
+                .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.7))
+                .child(label)
+        };
+        Some(
+            div()
+                .h(px(40.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(18.))
+                .bg(theme.caret.opacity(0.08))
+                .border_b_1()
+                .border_color(theme.caret.opacity(0.25))
+                .text_size(px(ui::T_SM))
+                .child(div().text_color(theme.caret).child(title))
+                .child(
+                    div()
+                        .id("joining-settle")
+                        .text_color(theme.muted)
+                        .when(!settled, |d| d.cursor_pointer().hover(|s| s.text_color(theme.foreground)))
+                        .child(settle)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            let next = this.to_settle.clone();
+                            this.open_first_conflict(next, window, cx);
+                        })),
+                )
+                .child(div().flex_1())
+                .child(button("joining-stop", stop, false).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.stop_joining(window, cx))))
+                .child(
+                    button("joining-finish", finish, settled)
+                        .when(!settled, |b| b.text_color(theme.muted))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.finish_joining(window, cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_outline = false;
         self.sidebar_tests = false;
+        self.sidebar_git = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
@@ -5541,6 +5935,7 @@ impl Workspace {
     fn open_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_outline = true;
         self.sidebar_tests = false;
+        self.sidebar_git = false;
         self.outline_followed = None;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
@@ -5623,6 +6018,7 @@ impl Workspace {
     fn show_tests(&mut self, _: &ShowTests, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_tests = true;
         self.sidebar_outline = false;
+        self.sidebar_git = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
         self.leave_hidden_focus(window, cx);
@@ -6239,9 +6635,13 @@ impl Workspace {
         let searching = self.sidebar_search.on;
         let outlining = !searching && self.sidebar_outline;
         let testing = !searching && self.sidebar_tests;
+        let changes = !searching && self.sidebar_git;
         let tab = |id: &'static str, label: &'static str, on: bool| {
             ui::segment(on, theme)
                 .id(id)
+                // (Five side by side: room for their names.)
+                .px(px(4.))
+                .min_w_0()
                 .flex_1()
                 .flex()
                 .justify_center()
@@ -6255,7 +6655,7 @@ impl Workspace {
             .child(
                 ui::segmented(theme)
                     .child(
-                        tab("files", "Files", !searching && !outlining && !testing)
+                        tab("files", "Files", !searching && !outlining && !testing && !changes)
                             .active(|s| s.opacity(0.7))
                             .on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
@@ -6271,6 +6671,9 @@ impl Workspace {
                     ))
                     .child(tab("search", "Search", searching).active(|s| s.opacity(0.7)).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
+                    ))
+                    .child(tab("changes", "Changes", changes).active(|s| s.opacity(0.7)).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_changes(&ShowChanges, window, cx)),
                     )),
             )
             .into_any_element()
@@ -9256,6 +9659,8 @@ impl Render for Workspace {
         } else if self.sidebar_outline && sidebar_width > 0.5 {
             // (Read only while it shows.)
             div().flex_1().min_h_0().child(self.render_outline(cx))
+        } else if self.sidebar_git && sidebar_width > 0.5 {
+            div().flex_1().min_h_0().child(self.git_view.clone())
         } else if self.sidebar_tests && sidebar_width > 0.5 {
             div().flex_1().min_h_0().child(self.render_tests(cx))
         } else {
@@ -9559,6 +9964,12 @@ impl Render for Workspace {
                 )
             })
         };
+        // A commit looked at takes the code's place.
+        let body = match (&self.git_page, &self.github_page) {
+            (Some((page, _)), _) => div().size_full().child(page.clone()),
+            (_, Some((page, _))) => div().size_full().child(page.clone()),
+            _ => body,
+        };
         // One floating layer at a time: the palette, an AI answer, or the key prompt.
         // The welcome covers the whole window; the rest float over the work.
         let welcome = self.welcome.as_ref().map(|(w, _)| w.clone());
@@ -9586,6 +9997,7 @@ impl Render for Workspace {
             ),
             None => (None, false),
         };
+        let joining = self.render_joining(cx);
         let theme = cx.global::<Theme>();
 
         let titlebar = div()
@@ -10125,6 +10537,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::debug_test))
             .on_action(cx.listener(Self::go_to_outline_match))
             .on_action(cx.listener(Self::import_vs_code_settings))
+            .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::clear_outline_filter))
             .on_action(cx.listener(|this, _: &DebugAgain, window, cx| match this.debugged_test.clone() {
                 Some(test) => this.debug_rust_test(test, cx),
@@ -10287,6 +10700,7 @@ impl Render for Workspace {
                     root.child(titlebar)
                 }
             })
+            .children(joining)
             .child(
                 div().flex_1().min_h_0().flex().child(sidebar_panel).child(
                     div()
@@ -12404,6 +12818,337 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).expect("a notebook");
         assert_eq!(saved["cells"][0]["source"][0], "print(\"bye\")");
         assert_eq!(saved["cells"][0]["outputs"][0]["text"][0], "hi\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Changes tab: a repository's changes, file by file and part by part; one part
+    /// left out of the commit stays a change, the rest committed with the message.
+    #[gpui::test]
+    fn changes_are_committed_in_part(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("changes-tab");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("a.txt"), "ONE\ntwo\nthree\nfour\nfive\nSIX\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "hello\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.show_changes(&ShowChanges, window, cx));
+        let view = workspace.read_with(cx, |w, _| w.git_view.clone());
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |v, _| v.files.len() == 2) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        view.update(cx, |v, cx| {
+            assert_eq!(v.files.len(), 2, "{:?}", v.files);
+            let a = v.files.iter().position(|f| f.path.ends_with("a.txt")).unwrap();
+            assert_eq!(v.files[a].parts.len(), 2);
+            assert_eq!((v.files[a].added, v.files[a].removed), (2, 2));
+            // The second change (SIX) left for later.
+            v.toggle_part(a, 1, cx);
+            v.summary.update(cx, |input, cx| input.set_text("Capitals at the start", cx));
+        });
+        workspace.update_in(cx, |w, window, cx| {
+            let view = w.git_view.clone();
+            w.git_view_event(&view, &crate::git_view::GitViewEvent::CommitAsked, window, cx)
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if String::from_utf8_lossy(&git(&["log", "--format=%s"]).stdout).contains("Capitals") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let committed = String::from_utf8_lossy(&git(&["show", "HEAD:a.txt"]).stdout).into_owned();
+        assert_eq!(committed, "ONE\ntwo\nthree\nfour\nfive\nsix\n", "only the first change");
+        assert_eq!(String::from_utf8_lossy(&git(&["show", "HEAD:new.txt"]).stdout), "hello\n");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "ONE\ntwo\nthree\nfour\nfive\nSIX\n");
+        assert!(view.read_with(cx, |v, cx| v.summary.read(cx).text().is_empty()), "the message cleared");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The history: a commit clicked opens in the code's place, its first file's changes
+    /// shown; Esc, or a file opened, gives the place back.
+    #[gpui::test]
+    fn a_commit_from_the_history(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("history-tab");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&["commit", "-q", "-am", "second"]);
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.show_changes(&ShowChanges, window, cx);
+            w.git_view.update(cx, |v, cx| v.show_tab(crate::git_view::Tab::History, cx));
+        });
+        let view = workspace.read_with(cx, |w, _| w.git_view.clone());
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |v, _| v.history.len() == 2) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let second = view.read_with(cx, |v, _| v.history[0].clone());
+        assert_eq!(second.subject, "second");
+        workspace.update_in(cx, |w, window, cx| {
+            let view = w.git_view.clone();
+            w.git_view_event(&view, &crate::git_view::GitViewEvent::ShowCommit(second), window, cx)
+        });
+        let page = workspace.read_with(cx, |w, _| w.git_page.as_ref().map(|(p, _)| p.clone())).expect("shown");
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if page.read_with(cx, |p, _| p.shown.is_some()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        page.read_with(cx, |p, cx| {
+            assert_eq!(p.files.len(), 1);
+            assert_eq!(p.files[0].added, 1);
+            let editor = p.shown.as_ref().expect("the file's changes").read(cx);
+            assert_eq!(editor.buffer.rope().to_string(), "one\ntwo\n");
+        });
+        cx.dispatch_action(crate::commit_page::CloseCommit);
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.git_page.is_none()), "Esc closes it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A branch merged in from the Branches tab: conflicting, the banner says so; settled
+    /// and saved, Commit the Merge makes the merge's commit.
+    #[gpui::test]
+    fn a_branch_merged_in(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("merge-banner");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        git(&["switch", "-q", "-c", "side"]);
+        std::fs::write(dir.join("a.txt"), "side\n").unwrap();
+        git(&["commit", "-q", "-am", "side's"]);
+        git(&["switch", "-q", "main"]);
+        std::fs::write(dir.join("a.txt"), "main\n").unwrap();
+        git(&["commit", "-q", "-am", "main's"]);
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        let wait_for = |cx: &mut gpui::VisualTestContext, done: &dyn Fn(&Workspace) -> bool| {
+            for _ in 0..300 {
+                // (git's status is read again after a pause: test timers wait to be moved on.)
+                cx.executor().advance_clock(Duration::from_millis(200));
+                cx.run_until_parked();
+                if workspace.read_with(cx, |w, _| done(w)) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        wait_for(cx, &|w| w.branch.is_some());
+        workspace.update_in(cx, |w, window, cx| {
+            let view = w.git_view.clone();
+            let join = crate::git_view::GitViewEvent::Join { branch: "side".into(), rebase: false };
+            w.git_view_event(&view, &join, window, cx)
+        });
+        wait_for(cx, &|w| w.joining.is_some() && !w.to_settle.is_empty());
+        workspace.read_with(cx, |w, cx| {
+            let state = w.joining.as_ref().expect("merging");
+            assert_eq!((state.kind, state.other.as_str()), (git::Joining::Merge, "side"));
+            assert_eq!(w.to_settle, [dir.join("a.txt")]);
+            let editor = w.active_editor().expect("the conflict, open").read(cx);
+            assert_eq!(editor.conflicts().len(), 1);
+        });
+        // Settled, as ⌘. would, then committed.
+        workspace.update_in(cx, |w, window, cx| {
+            let editor = w.active_editor().unwrap().clone();
+            editor.update(cx, |e, cx| e.set_text_for_test("both\n", cx));
+            w.finish_joining(window, cx);
+        });
+        wait_for(cx, &|w| w.joining.is_none());
+        let log = String::from_utf8_lossy(&git(&["log", "-1", "--format=%P"]).stdout).into_owned();
+        assert_eq!(log.split_whitespace().count(), 2, "a merge commit");
+        assert_eq!(String::from_utf8_lossy(&git(&["show", "HEAD:a.txt"]).stdout), "both\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The GitHub tab, through a stand-in for gh: a pull request listed, opened in the
+    /// code's place, a file's changes with the review's thread under its line, and a reply
+    /// sent to that thread.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_pull_request_reviewed(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("github-page");
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = std::fs::canonicalize(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        if std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q", "-b", "main"]).status().is_err() {
+            return;
+        }
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(repo.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "-q", "-c", "feature"]);
+        std::fs::write(repo.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        git(&["commit", "-q", "-am", "b"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "-q", "main"]);
+
+        // gh's answers, and what it was asked.
+        let pull = format!(
+            r#"{{"number":5,"title":"Add b","author":{{"login":"ada"}},"headRefName":"feature","baseRefName":"main",
+               "isDraft":false,"state":"OPEN","comments":[],"reviewDecision":"","updatedAt":"2026-10-11T00:00:00Z",
+               "url":"u","statusCheckRollup":[],"body":"Adds b.","files":[{{"path":"a.rs","additions":1,"deletions":0,
+               "changeType":"MODIFIED"}}],"baseRefOid":"{base}","headRefOid":"{head}","mergeable":"MERGEABLE"}}"#
+        )
+        .replace('\n', " ");
+        std::fs::write(dir.join("pulls.json"), format!("[{pull}]")).unwrap();
+        std::fs::write(dir.join("pull.json"), &pull).unwrap();
+        std::fs::write(
+            dir.join("review.json"),
+            r#"{"id":11,"user":{"login":"bo"},"body":"Why b?","created_at":"2026-10-11T00:00:00Z","path":"a.rs","line":2}"#,
+        )
+        .unwrap();
+        let asked = dir.join("asked.log");
+        let script = format!(
+            r#"#!/bin/sh
+echo "$@" >> '{log}'
+case "$1 $2" in
+  "api user") echo ada ;;
+  "pr list") cat '{d}/pulls.json' ;;
+  "issue list") echo '[]' ;;
+  "pr view") if [ "$3" = "5" ]; then cat '{d}/pull.json'; else echo 'no pull requests found' >&2; exit 1; fi ;;
+  "api --paginate") cat '{d}/review.json' ;;
+  *) echo '{{}}' ;;
+esac
+"#,
+            log = asked.display(),
+            d = dir.display()
+        );
+        let fake = dir.join("gh");
+        std::fs::write(&fake, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        *crate::github::FAKE.lock().unwrap() = Some(fake);
+
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = repo.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        fn wait(cx: &mut gpui::VisualTestContext, done: &mut dyn FnMut(&mut gpui::VisualTestContext) -> bool) {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                if done(cx) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        workspace.update_in(cx, |w, window, cx| {
+            w.show_changes(&ShowChanges, window, cx);
+            w.git_view.update(cx, |v, cx| v.show_tab(crate::git_view::Tab::GitHub, cx));
+        });
+        let view = workspace.read_with(cx, |w, _| w.git_view.clone());
+        wait(cx, &mut |cx| view.read_with(cx, |v, _| v.github.pulls.len() == 1));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.github.account, Some(crate::github::Account::SignedIn("ada".into())));
+            assert_eq!(v.github.pulls[0].title, "Add b");
+            assert!(v.github.mine.is_none(), "main has no pull request");
+        });
+        workspace.update_in(cx, |w, window, cx| {
+            let view = w.git_view.clone();
+            w.git_view_event(&view, &crate::git_view::GitViewEvent::ShowPull(5), window, cx)
+        });
+        let page = workspace.read_with(cx, |w, _| w.github_page.as_ref().map(|(p, _)| p.clone())).expect("shown");
+        wait(cx, &mut |cx| page.read_with(cx, |p, _| p.detail.is_some()));
+        page.update(cx, |p, cx| p.show_file(0, cx));
+        wait(cx, &mut |cx| page.read_with(cx, |p, _| p.shown.is_some()));
+        page.read_with(cx, |p, cx| {
+            let editor = p.shown.as_ref().unwrap().read(cx);
+            assert_eq!(editor.buffer.rope().to_string(), "fn a() {}\nfn b() {}\n");
+            assert!(editor.in_review(), "its changes shown");
+            let threads = editor.threads();
+            assert_eq!(threads.len(), 1);
+            assert_eq!(threads[0].line, 1, "under the line it's on");
+            assert_eq!(threads[0].comments[0].1, "Why b?");
+        });
+        // Reply, from the thread's Reply…
+        let editor = page.read_with(cx, |p, _| p.shown.clone().unwrap());
+        editor.update(cx, |_, cx| cx.emit(crate::editor::EditorEvent::ReplyAsked(11)));
+        cx.run_until_parked();
+        assert_eq!(page.read_with(cx, |p, _| p.replying), Some(11));
+        page.update_in(cx, |p, window, cx| {
+            p.composer_for_test().update(cx, |input, cx| input.set_text("Because.", cx));
+            p.send_for_test(window, cx);
+        });
+        wait(cx, &mut |cx| page.read_with(cx, |p, _| p.replying.is_none()));
+        let asked_for = std::fs::read_to_string(&asked).unwrap();
+        assert!(asked_for.contains("api -X POST repos/{owner}/{repo}/pulls/5/comments/11/replies -f body=Because."), "{asked_for}");
+        cx.dispatch_action(crate::github_page::CloseGitHubPage);
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.github_page.is_none()));
+        *crate::github::FAKE.lock().unwrap() = None;
         std::fs::remove_dir_all(&dir).ok();
     }
 

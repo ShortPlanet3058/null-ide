@@ -192,6 +192,8 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Find References", crate::editor::FindReferences),
                 MenuItem::action("Show Callers", crate::editor::ShowCallers),
                 MenuItem::action("Show Callees", crate::editor::ShowCallees),
+                MenuItem::action("Show Supertypes", crate::editor::ShowSupertypes),
+                MenuItem::action("Show Subtypes", crate::editor::ShowSubtypes),
                 MenuItem::action("Rename Symbol", crate::editor::RenameSymbol),
                 MenuItem::action("Quick Fix…", crate::editor::QuickFix),
                 MenuItem::action("Format Document", crate::editor::FormatDocument),

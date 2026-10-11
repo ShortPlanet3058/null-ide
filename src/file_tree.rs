@@ -90,7 +90,7 @@ pub fn bind_keys(cx: &mut App) {
 
 pub const ROW_HEIGHT: f32 = ui::ROW;
 /// Width of the sidebar the tree is drawn in.
-pub const TREE_WIDTH: f32 = 240.;
+pub const TREE_WIDTH: f32 = 280.;
 const INDENT: f32 = 14.;
 const CHEVRON: &str = "icons/chevron-right.svg";
 /// How long a folder's arrow takes to turn when it opens or closes.
