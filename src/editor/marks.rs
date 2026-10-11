@@ -124,7 +124,9 @@ impl Editor {
                     ranges
                 }
                 None => {
-                    let Ok(ranges) = this.update(cx, |this, _| this.nearby_uses(&text, word.start, true)) else { return };
+                    let Ok(ranges) = this.update(cx, |this, _| this.nearby_uses(&text, word.start, true)) else {
+                        return;
+                    };
                     ranges
                 }
             };

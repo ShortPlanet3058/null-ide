@@ -700,19 +700,24 @@ mod tests {
         )
         .unwrap();
         let program = dir.join("main");
-        let built = std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+        let built =
+            std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
         assert!(built.unwrap().success());
         // A log point on `total += i;`: prints each time, never stops.
         let debugger = cx.new(|_| Debugger::default());
         let log = crate::editor::Breakpoint { line: 4, condition: Some("log i is {i}".into()) };
-        debugger.update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![log])], Vec::new(), cx));
+        debugger.update(cx, |d, cx| {
+            d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![log])], Vec::new(), cx)
+        });
         assert!(wait_for(cx, &debugger, |d| d.state == DebugState::Idle), "stopped, or never ended");
         let output = debugger.read_with(cx, |d, _| d.output.clone());
         assert!(output.contains("i is 1") && output.contains("i is 4") && output.contains("total 10"), "{output}");
         // A count: stops the third time only (i is 3, total 1 + 2).
         let debugger = cx.new(|_| Debugger::default());
         let third = crate::editor::Breakpoint { line: 4, condition: Some("3".into()) };
-        debugger.update(cx, |d, cx| d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![third])], Vec::new(), cx));
+        debugger.update(cx, |d, cx| {
+            d.start(program.clone(), dir.clone(), vec![(source.clone(), vec![third])], Vec::new(), cx)
+        });
         assert!(wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_))), "never stopped");
         let locals = debugger.read_with(cx, |d, _| match &d.state {
             DebugState::Stopped(stop) => stop.locals.clone(),
@@ -721,9 +726,7 @@ mod tests {
         assert!(locals.iter().any(|(name, value)| name == "total" && value == "3"), "{locals:?}");
         // On from there: the count was reached, it stops every time after too (lldb's).
         debugger.update(cx, |d, cx| d.resume("continue", cx));
-        let again = |d: &Debugger| {
-            matches!(&d.state, DebugState::Stopped(s) if s.locals.iter().any(|(n, v)| n == "total" && v == "6"))
-        };
+        let again = |d: &Debugger| matches!(&d.state, DebugState::Stopped(s) if s.locals.iter().any(|(n, v)| n == "total" && v == "6"));
         assert!(wait_for(cx, &debugger, again), "from the 3rd time on");
         debugger.update(cx, |d, cx| d.stop(cx));
         std::fs::remove_dir_all(&dir).ok();
@@ -738,9 +741,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("main.cpp");
-        std::fs::write(&source, "#include <stdexcept>\nint main() {\n    throw std::runtime_error(\"no\");\n}\n").unwrap();
+        std::fs::write(&source, "#include <stdexcept>\nint main() {\n    throw std::runtime_error(\"no\");\n}\n")
+            .unwrap();
         let program = dir.join("main");
-        let built = std::process::Command::new("xcrun").args(["clang++", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+        let built = std::process::Command::new("xcrun")
+            .args(["clang++", "-g", "-O0", "-o"])
+            .arg(&program)
+            .arg(&source)
+            .status();
         assert!(built.unwrap().success());
         let debugger = cx.new(|_| Debugger::default());
         debugger.update(cx, |d, cx| {
@@ -756,7 +764,8 @@ mod tests {
         debugger.update(cx, |d, cx| d.stop(cx));
         // A Rust panic.
         let source = dir.join("main.rs");
-        std::fs::write(&source, "fn main() {\n    let v: Vec<u8> = Vec::new();\n    println!(\"{}\", v[3]);\n}\n").unwrap();
+        std::fs::write(&source, "fn main() {\n    let v: Vec<u8> = Vec::new();\n    println!(\"{}\", v[3]);\n}\n")
+            .unwrap();
         let program = dir.join("panics");
         let built = std::process::Command::new("rustc").args(["-g", "-o"]).arg(&program).arg(&source).status();
         assert!(built.unwrap().success());

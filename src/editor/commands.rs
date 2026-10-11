@@ -276,7 +276,8 @@ impl Editor {
         let marks = self.is_markdown() && !self.selection.is_empty() && matches!(c, '*' | '_' | '~');
         // (Brackets and quotes switched off: typed as they are.)
         let auto = cx.global::<crate::settings::Settings>().auto_close;
-        let pair = PAIRS.iter().copied().filter(|_| auto).find(|(o, cl)| *o == c || *cl == c).or(marks.then_some((c, c)));
+        let pair =
+            PAIRS.iter().copied().filter(|_| auto).find(|(o, cl)| *o == c || *cl == c).or(marks.then_some((c, c)));
         let Some((open, close)) = pair else { return false };
         let caret = self.selection.head;
         let next = self.buffer.char_at(caret);
@@ -713,7 +714,9 @@ impl Editor {
         else {
             return false;
         };
-        self.selection.is_empty() && PAIRS.contains(&(before, after)) && cx.global::<crate::settings::Settings>().auto_close
+        self.selection.is_empty()
+            && PAIRS.contains(&(before, after))
+            && cx.global::<crate::settings::Settings>().auto_close
     }
 
     /// The bracket next to the caret and the one that matches it, as char offsets.
@@ -1159,7 +1162,8 @@ mod editor_tests {
     #[gpui::test]
     fn finding_says_when_it_goes_round(cx: &mut TestAppContext) {
         let e = editor(cx, "a x a x", "x.txt");
-        let query = crate::search::SearchQuery { text: "a".into(), case_sensitive: false, whole_word: false, regex: false };
+        let query =
+            crate::search::SearchQuery { text: "a".into(), case_sensitive: false, whole_word: false, regex: false };
         e.update(cx, |e, cx| {
             e.set_search(query, cx);
             e.selection = super::super::Selection { anchor: 4, head: 5 };

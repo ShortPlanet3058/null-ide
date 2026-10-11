@@ -220,7 +220,9 @@ fn test_named(language: &str, node: Node, text: &str) -> Option<(String, usize)>
             // collects them; not one inside another function.
             let in_tests = ancestors(node).skip(1).filter(|n| n.kind() == "class_definition").all(|class| {
                 class.child_by_field_name("name").is_some_and(|n| node_text(n, text).starts_with("Test"))
-                    || class.child_by_field_name("superclasses").is_some_and(|b| node_text(b, text).contains("TestCase"))
+                    || class
+                        .child_by_field_name("superclasses")
+                        .is_some_and(|b| node_text(b, text).contains("TestCase"))
             });
             let nested = ancestors(node).skip(1).any(|n| n.kind() == "function_definition");
             if !node_text(name, text).starts_with("test") || !in_tests || nested {
@@ -419,7 +421,9 @@ pub fn find(language: &str, root: &Path, path: &Path, text: &str, tree: &Tree, b
                     let command = format!("{python} -m pytest {}", quote(&format!("{relative}::{id}")));
                     Some(TestRun { command, name })
                 }
-                None => Some(all(format!("{} -m pytest {}", crate::python_env::python_for(root, path), quote(&relative)))),
+                None => {
+                    Some(all(format!("{} -m pytest {}", crate::python_env::python_for(root, path), quote(&relative))))
+                }
             }
         }
         "JavaScript" | "TypeScript" | "TSX" => {

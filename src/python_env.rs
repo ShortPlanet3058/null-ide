@@ -106,7 +106,8 @@ fn poetry_in(root: &Path, name: &str, folder: &Path) -> Option<PathBuf> {
         .filter(|(_, env)| python_in(env).exists())
         .collect();
     let chosen = std::fs::read_to_string(folder.join("envs.toml")).ok().and_then(|t| toml_value(&t, &base, "minor"));
-    if let Some(env) = chosen.and_then(|minor| found.iter().find(|(_, env)| env.ends_with(format!("{prefix}{minor}")))) {
+    if let Some(env) = chosen.and_then(|minor| found.iter().find(|(_, env)| env.ends_with(format!("{prefix}{minor}"))))
+    {
         return Some(env.1.clone());
     }
     found.sort();
@@ -209,12 +210,8 @@ fn poetry_folder(local: &str) -> Option<PathBuf> {
 fn poetry_env_name(name: &str, folder: &Path) -> String {
     use base64::Engine;
     use sha2::Digest;
-    let safe: String = name
-        .to_lowercase()
-        .chars()
-        .map(|c| if " $`!*@\"\\\r\n\t".contains(c) { '_' } else { c })
-        .take(42)
-        .collect();
+    let safe: String =
+        name.to_lowercase().chars().map(|c| if " $`!*@\"\\\r\n\t".contains(c) { '_' } else { c }).take(42).collect();
     let hash = sha2::Sha256::digest(folder.to_string_lossy().as_bytes());
     let hash = base64::engine::general_purpose::URL_SAFE.encode(hash);
     format!("{safe}-{}", &hash[..8])
@@ -303,7 +300,10 @@ mod tests {
         let activate = |env: &str, shell: &str| activate_command(Path::new(env), shell);
         assert_eq!(activate("/p/.venv", "/bin/zsh").as_deref(), Some(" source '/p/.venv/bin/activate'"));
         assert_eq!(activate(".venv", "/bin/zsh").as_deref(), Some(" source '.venv/bin/activate'"));
-        assert_eq!(activate("/p/.venv", "/opt/homebrew/bin/fish").as_deref(), Some(" source '/p/.venv/bin/activate.fish'"));
+        assert_eq!(
+            activate("/p/.venv", "/opt/homebrew/bin/fish").as_deref(),
+            Some(" source '/p/.venv/bin/activate.fish'")
+        );
         assert_eq!(activate(".venv", "/bin/sh").as_deref(), Some(" . '.venv/bin/activate'"));
         assert_eq!(activate(".venv", "/usr/local/bin/nu").as_deref(), Some(" overlay use '.venv/bin/activate.nu'"));
         assert_eq!(activate(".venv", "/usr/bin/xonsh"), None, "one it doesn't know: nothing typed");
@@ -346,13 +346,23 @@ mod tests {
         let both = "[project]\nname = \"new\"\n[tool.poetry]\nname = \"old\"\n";
         assert_eq!(poetry_name(both, false).as_deref(), Some("new"), "[project]'s wins, as in Poetry");
         assert_eq!(poetry_name("[project]\nname = \"uv-made\"\n", false), None, "not Poetry's");
-        assert_eq!(poetry_name("[project]\nname = \"My_App.core\"\n", true).as_deref(), Some("my-app-core"), "locked: Poetry's");
+        assert_eq!(
+            poetry_name("[project]\nname = \"My_App.core\"\n", true).as_deref(),
+            Some("my-app-core"),
+            "locked: Poetry's"
+        );
         let built = "[project]\nname = \"x\"\n[build-system]\nbuild-backend = \"poetry.core.masonry.api\"\n";
         assert_eq!(poetry_name(built, false).as_deref(), Some("x"), "built by Poetry");
         assert_eq!(poetry_name("[tool.poetry]\npackage-mode = false\n", false).as_deref(), Some("non-package-mode"));
         assert_eq!(toml_value("virtualenvs.path = \"/v\" # set\n", "virtualenvs", "path").as_deref(), Some("/v"));
-        assert_eq!(toml_value("cache-dir = '/c'\n[virtualenvs]\npath = \"{cache-dir}/v\"\n", "", "cache-dir").as_deref(), Some("/c"));
-        assert_eq!(toml_value("[virtualenvs]\npath = \"{cache-dir}/v\"\n", "virtualenvs", "path").as_deref(), Some("{cache-dir}/v"));
+        assert_eq!(
+            toml_value("cache-dir = '/c'\n[virtualenvs]\npath = \"{cache-dir}/v\"\n", "", "cache-dir").as_deref(),
+            Some("/c")
+        );
+        assert_eq!(
+            toml_value("[virtualenvs]\npath = \"{cache-dir}/v\"\n", "virtualenvs", "path").as_deref(),
+            Some("{cache-dir}/v")
+        );
         // Found among Poetry's: this project's (not another's of the same name), the newest Python.
         let dir = crate::tools::test_dir("poetry-env");
         let _ = std::fs::remove_dir_all(&dir);

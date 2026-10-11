@@ -49,8 +49,9 @@ pub(super) struct Lenses {
 fn shell_line(args: &[String]) -> String {
     args.iter()
         .map(|a| {
-            let plain =
-                !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '@' | '+'));
+            let plain = !a.is_empty()
+                && a.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '@' | '+'));
             if plain { a.clone() } else { format!("'{}'", a.replace('\'', r"'\''")) }
         })
         .collect::<Vec<_>>()
@@ -87,7 +88,9 @@ pub fn action_of(lens: &lsp_types::CodeLens, offset: usize) -> Option<LensItem> 
                 .get("environment")
                 .and_then(|v| v.as_object())
                 .map(|vars| {
-                    vars.iter().filter_map(|(k, v)| Some(format!("{k}={}", shell_line(&[v.as_str()?.to_string()])))).collect()
+                    vars.iter()
+                        .filter_map(|(k, v)| Some(format!("{k}={}", shell_line(&[v.as_str()?.to_string()]))))
+                        .collect()
                 })
                 .unwrap_or_default();
             if !environment.is_empty() {
@@ -223,7 +226,12 @@ impl Editor {
     }
 
     /// A click on a lens part: what it does, done. True when it was one.
-    pub(super) fn click_lens(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn click_lens(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(action) = self.lenses.hits.iter().find(|(b, _)| b.contains(&position)).map(|(_, a)| a.clone()) else {
             return false;
         };
@@ -276,13 +284,18 @@ mod tests {
             ..Default::default()
         };
         lsp.update(cx, |lsp, _| lsp.set_diagnostics(path.clone(), vec![problem]));
-        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("fn adds() {}\n"), Some(path.clone()), cx));
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("fn adds() {}\n"), Some(path.clone()), cx));
         e.update(cx, |e, cx| {
             e.lsp = Some(lsp.clone());
             cx.notify();
-            let mut run = lens("▶ Run Test", "rust-analyzer.runSingle", Some(vec![serde_json::json!({
-                "args": { "cargoArgs": ["test", "--", "adds", "--exact"] }
-            })]));
+            let mut run = lens(
+                "▶ Run Test",
+                "rust-analyzer.runSingle",
+                Some(vec![serde_json::json!({
+                    "args": { "cargoArgs": ["test", "--", "adds", "--exact"] }
+                })]),
+            );
             run.range = lsp_types::Range::new(lsp_types::Position::new(0, 3), lsp_types::Position::new(0, 7));
             e.lenses = Lenses { raw: vec![(0, run)], revision: e.buffer.revision(), ..Lenses::default() };
         });
@@ -319,15 +332,20 @@ mod tests {
             .detach()
         });
         e.update_in(cx, |e, window, cx| {
-            let mut run = lens("▶ Run Test", "rust-analyzer.runSingle", Some(vec![serde_json::json!({
-                "args": { "cargoArgs": ["test", "--", "adds", "--exact"] }
-            })]));
+            let mut run = lens(
+                "▶ Run Test",
+                "rust-analyzer.runSingle",
+                Some(vec![serde_json::json!({
+                    "args": { "cargoArgs": ["test", "--", "adds", "--exact"] }
+                })]),
+            );
             run.range = lsp_types::Range::new(lsp_types::Position::new(0, 3), lsp_types::Position::new(0, 7));
             e.lenses = Lenses { raw: vec![(0, run)], revision: e.buffer.revision(), ..Lenses::default() };
             let items = e.lens_on_line(0, cx);
             assert_eq!(items.len(), 1);
             assert!(e.lens_on_line(1, cx).is_empty(), "other lines: nothing");
-            let at = gpui::Bounds::new(gpui::point(gpui::px(100.), gpui::px(0.)), gpui::size(gpui::px(60.), gpui::px(20.)));
+            let at =
+                gpui::Bounds::new(gpui::point(gpui::px(100.), gpui::px(0.)), gpui::size(gpui::px(60.), gpui::px(20.)));
             e.set_lens_hits(vec![(at, items[0].action.clone())]);
             assert!(e.click_lens(gpui::point(gpui::px(120.), gpui::px(10.)), window, cx));
             assert!(!e.click_lens(gpui::point(gpui::px(10.), gpui::px(10.)), window, cx), "not on it");
@@ -335,10 +353,17 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(*ran.borrow(), ["cargo test -- adds --exact"]);
         // Where, and with what, as rust-analyzer says.
-        let run = lens("Update Test", "rust-analyzer.runSingle", Some(vec![serde_json::json!({
-            "args": { "cargoArgs": ["test"], "cwd": "/a b", "environment": { "UPDATE_EXPECT": "1" } }
-        })]));
-        assert_eq!(action_of(&run, 0).unwrap().action, LensAction::Run("(cd '/a b' && UPDATE_EXPECT=1 cargo test)".into()));
+        let run = lens(
+            "Update Test",
+            "rust-analyzer.runSingle",
+            Some(vec![serde_json::json!({
+                "args": { "cargoArgs": ["test"], "cwd": "/a b", "environment": { "UPDATE_EXPECT": "1" } }
+            })]),
+        );
+        assert_eq!(
+            action_of(&run, 0).unwrap().action,
+            LensAction::Run("(cd '/a b' && UPDATE_EXPECT=1 cargo test)".into())
+        );
     }
 
     #[test]
