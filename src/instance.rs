@@ -24,9 +24,67 @@ struct Message {
     request: Request,
 }
 
-/// Where the running Null says where it listens: its port, then its secret.
+/// Where the running Null says where it listens: its port, then its secret. One for each
+/// copy of Null (by where it's installed), so a build being tried never hands over to the
+/// Null installed, nor the other way round.
 fn address_file() -> Option<PathBuf> {
-    Some(crate::tools::data_dir()?.join("instance"))
+    use sha2::Digest;
+    let exe = std::env::current_exe().ok()?;
+    let digest = sha2::Sha256::digest(exe.to_string_lossy().as_bytes());
+    let id: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    Some(crate::tools::data_dir()?.join(format!("instance-{id}")))
+}
+
+/// What a launch does: hands over to the Null running, or is the one, listening for the
+/// launches after it (when it could).
+pub enum Launch {
+    HandedOver,
+    First(Option<futures::channel::mpsc::UnboundedReceiver<Request>>),
+}
+
+/// Hands `request` over to the Null running, or becomes the one Null: the first to take
+/// the lock, held while it runs. Launches together (`null a.rs b.rs`, several files opened
+/// from Explorer) wait for that one to listen, then hand over to it.
+pub fn launch(request: &Request, wait: bool) -> Launch {
+    if wait || !hands_over() {
+        return Launch::First(None);
+    }
+    let started = std::time::Instant::now();
+    loop {
+        if hand_over(request) {
+            return Launch::HandedOver;
+        }
+        if take_lock() {
+            return Launch::First(listen());
+        }
+        // (The one with the lock not listening in time: on alone rather than not at all.)
+        if started.elapsed() > Duration::from_secs(3) {
+            return Launch::First(None);
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+/// The lock saying a Null runs (and listens), taken for as long as this one runs.
+fn take_lock() -> bool {
+    static HELD: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| {
+        let file = address_file()?.with_extension("lock");
+        std::fs::create_dir_all(file.parent()?).ok()?;
+        let file = std::fs::File::create(&file).ok()?;
+        file.try_lock().is_ok().then_some(file)
+    })
+    .is_some()
+}
+
+/// As Null quits: launches from now on start their own (and don't wait on a port that's
+/// gone, which on Windows takes a while to say so).
+pub fn forget() {
+    if hands_over()
+        && let Some(file) = address_file()
+    {
+        std::fs::remove_file(file).ok();
+    }
 }
 
 /// Whether launches are handed over here at all: not on the Mac (the system does it), and
@@ -36,10 +94,7 @@ fn hands_over() -> bool {
 }
 
 /// Hands `request` to the Null already running, if there is one and it takes it.
-pub fn hand_over(request: &Request) -> bool {
-    if !hands_over() {
-        return false;
-    }
+fn hand_over(request: &Request) -> bool {
     let Some(text) = address_file().and_then(|f| std::fs::read_to_string(f).ok()) else { return false };
     let mut lines = text.lines();
     let (Some(port), Some(secret)) = (lines.next().and_then(|p| p.trim().parse::<u16>().ok()), lines.next()) else {
@@ -63,10 +118,7 @@ fn send(port: u16, secret: &str, request: &Request) -> Option<()> {
 }
 
 /// Listens for later launches, as the running Null: what they ask arrives on the receiver.
-pub fn listen() -> Option<futures::channel::mpsc::UnboundedReceiver<Request>> {
-    if !hands_over() {
-        return None;
-    }
+fn listen() -> Option<futures::channel::mpsc::UnboundedReceiver<Request>> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).ok()?;
     let port = listener.local_addr().ok()?.port();
     let secret = new_secret();

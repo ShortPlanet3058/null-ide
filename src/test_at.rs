@@ -96,11 +96,13 @@ pub fn run_everything(files: &[FileTests]) -> Option<String> {
     let bare = |package: &str| package.trim_matches('\'').to_string();
     for command in commands.iter_mut() {
         let within = match command.split_once(" -m pytest ") {
-            Some((_, package)) => Some(format!("{}/", bare(package))),
+            Some((_, package)) => Some(bare(package)),
             None if command.ends_with(" -m pytest") => None,
             None => continue,
         };
-        let inner = packages.iter().filter(|p| within.as_ref().is_none_or(|w| bare(p).starts_with(w.as_str())));
+        // (Inside it as paths go: `api/plugins` in `api`, with `\` on Windows.)
+        let inside = |p: &str, w: &str| p != w && Path::new(p).starts_with(w);
+        let inner = packages.iter().filter(|p| within.as_ref().is_none_or(|w| inside(&bare(p), w)));
         let ignores: String = inner.map(|p| format!(" --ignore={p}")).collect();
         command.push_str(&ignores);
     }
