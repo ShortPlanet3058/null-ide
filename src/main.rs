@@ -167,8 +167,16 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
         // Opened from the Finder (or the Dock), there's no folder to go by: the last project.
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let from_finder = cwd == Path::new("/") || Some(&cwd) == home.as_ref();
-        if from_finder && let Some(last) = session::last_project() {
-            return (last, None);
+        if from_finder {
+            if let Some(last) = session::last_project() {
+                return (last, None);
+            }
+            // The very first time: not the whole disk (or home) as a project, read and
+            // watched, but an empty folder of Null's own until one is opened.
+            if let Some(scratch) = tools::data_dir().map(|d| d.join("Scratch")) {
+                std::fs::create_dir_all(&scratch).ok();
+                return (scratch, None);
+            }
         }
         return (cwd, None);
     };

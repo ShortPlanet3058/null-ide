@@ -4503,7 +4503,6 @@ impl Workspace {
             (Go, "Back".into(), Box::new(GoBack)),
             (Go, "Go to Last Edit".into(), Box::new(GoToLastEdit)),
             (Go, "Forward".into(), Box::new(GoForward)),
-            (File, "Review Changes…".into(), Box::new(ReviewChanges)),
             (
                 View,
                 toggle(settings.line_blame, "Hide Who Changed the Line", "Show Who Changed the Line"),
@@ -4531,17 +4530,17 @@ impl Workspace {
                 toggle(settings.spell_check, "Hide Spelling Mistakes", "Show Spelling Mistakes"),
                 Box::new(ToggleSpellCheck),
             ),
-            (File, "Commit…".into(), Box::new(CommitAll)),
-            (File, "Undo Last Commit".into(), Box::new(UndoLastCommit)),
-            (File, "Set Changes Aside".into(), Box::new(SetChangesAside)),
-            (File, "Bring Back Changes".into(), Box::new(BringBackChanges)),
-            (File, "Push".into(), Box::new(PushBranch)),
-            (File, "Pull".into(), Box::new(PullBranch)),
-            (File, "Show File History".into(), Box::new(FileHistory)),
+            (Git, "Commit…".into(), Box::new(CommitAll)),
+            (Git, "Undo Last Commit".into(), Box::new(UndoLastCommit)),
+            (Git, "Set Changes Aside".into(), Box::new(SetChangesAside)),
+            (Git, "Bring Back Changes".into(), Box::new(BringBackChanges)),
+            (Git, "Push".into(), Box::new(PushBranch)),
+            (Git, "Pull".into(), Box::new(PullBranch)),
+            (Git, "Show File History".into(), Box::new(FileHistory)),
             (File, "Compare with Saved".into(), Box::new(CompareWithSaved)),
-            (File, "Copy Link to Line".into(), Box::new(CopyLineLink)),
-            (File, "Open Line on the Web".into(), Box::new(OpenLineOnWeb)),
-            (File, "Fetch".into(), Box::new(FetchBranch)),
+            (Git, "Copy Link to Line".into(), Box::new(CopyLineLink)),
+            (Git, "Open Line on the Web".into(), Box::new(OpenLineOnWeb)),
+            (Git, "Fetch".into(), Box::new(FetchBranch)),
             (Go, "Find TODOs".into(), Box::new(FindTodos)),
             (Edit, "Toggle Bookmark".into(), Box::new(crate::editor::ToggleBookmark)),
             (Go, "Next Bookmark".into(), Box::new(crate::editor::NextBookmark)),
@@ -4559,7 +4558,7 @@ impl Workspace {
             (File, crate::file_tree::REVEAL_LABEL.into(), Box::new(RevealFile)),
             (File, "Compare with Clipboard".into(), Box::new(CompareWithClipboard)),
             (File, "Compare with File…".into(), Box::new(CompareWithFile)),
-            (File, "Switch Branch…".into(), Box::new(SwitchBranch)),
+            (Git, "Switch Branch…".into(), Box::new(SwitchBranch)),
             (Edit, "Replace in Project…".into(), Box::new(ReplaceInProject)),
             (View, "Show Files".into(), Box::new(ShowFiles)),
             (View, "Show Outline".into(), Box::new(ShowOutline)),
@@ -9467,7 +9466,7 @@ impl Workspace {
                     .children(hint(&Open, "Open a file or folder"))
                     .children(hint(&OpenRecent, "Open a recent project"))
                     .children(hint(&TogglePalette, "Find a file"))
-                    .children(hint(&ToggleSidebar, "Show or hide the files")),
+                    .children(hint(&ShowCommands, "Settings and commands")),
             )
             .into_any_element()
     }

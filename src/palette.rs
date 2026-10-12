@@ -123,6 +123,7 @@ impl PaletteKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
     File,
+    Git,
     Edit,
     Lines,
     Cursors,
@@ -134,8 +135,9 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 9] = [
+    pub const ALL: [Category; 10] = [
         Category::File,
+        Category::Git,
         Category::Edit,
         Category::Lines,
         Category::Cursors,
@@ -149,6 +151,7 @@ impl Category {
     pub fn label(self) -> &'static str {
         match self {
             Category::File => "File",
+            Category::Git => "Git",
             Category::Edit => "Edit",
             Category::Lines => "Lines",
             Category::Cursors => "Cursors",
