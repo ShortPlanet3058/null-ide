@@ -332,7 +332,8 @@ impl Editor {
     pub(super) fn schedule_ghost(&mut self, kept: Option<Ghost>, cx: &mut Context<Self>) {
         self.ghost_task = None;
         let ai_settings = cx.global::<Settings>().ai.clone();
-        if !ai_settings.completions {
+        // (AI switched off: its suggestions too, whatever their own switch says.)
+        if !ai_settings.completions || !ai_settings.enabled {
             return;
         }
         if !self.selection.is_empty() || self.multi_cursor() || self.completion.is_some() || self.prompt.is_some() {

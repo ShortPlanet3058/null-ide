@@ -368,6 +368,25 @@ struct TextMenu {
 
 /// What a terminal's menu offers: copying what's selected, pasting, clearing; another
 /// terminal beside it or a new one.
+/// Whether Null is in its first few launches (counted once a launch, in its own data
+/// folder): the status bar's tips show only then.
+fn early_launch() -> bool {
+    const TIPS_FOR: u32 = 3;
+    static EARLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EARLY.get_or_init(|| {
+        if cfg!(test) {
+            return true;
+        }
+        let Some(file) = crate::tools::data_dir().map(|d| d.join("launches")) else { return true };
+        let launches: u32 = std::fs::read_to_string(&file).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0) + 1;
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        std::fs::write(&file, launches.to_string()).ok();
+        launches <= TIPS_FOR
+    })
+}
+
 /// What a merge (rebase, …) is called in what's said about it.
 fn joining_name(kind: git::Joining) -> &'static str {
     match kind {
@@ -5290,9 +5309,13 @@ impl Workspace {
 
     /// ⌥⌘I: describe a bigger job for Claude Code or Codex.
     fn new_ai_task(&mut self, _: &NewAiTask, window: &mut Window, cx: &mut Context<Self>) {
-        let provider = cx.global::<Settings>().ai.active();
-        if !crate::ai::can_run_tasks(provider) {
-            return self.show_notice("AI tasks need a provider: choose one in Settings → AI.".into(), cx);
+        let ai = cx.global::<Settings>().ai.clone();
+        // (AI switched off: nothing about it, not even a notice.)
+        if !ai.enabled {
+            return;
+        }
+        if !crate::ai::can_run_tasks(ai.active()) {
+            return self.show_notice("AI tasks need Claude Code or Codex: choose one in Settings → AI.".into(), cx);
         }
         match self.ai_task.as_ref().map(|t| &t.state) {
             Some(TaskState::Starting | TaskState::Running(_)) => {
@@ -5304,7 +5327,7 @@ impl Workspace {
             }
             None => {}
         }
-        self.open_palette_with(PaletteKind::Task, Some(provider.label().into()), Vec::new(), window, cx);
+        self.open_palette_with(PaletteKind::Task, Some(ai.active().label().into()), Vec::new(), window, cx);
     }
 
     fn start_task(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -8854,7 +8877,8 @@ impl Workspace {
                     .detach();
                     Instant::now()
                 });
-                if since.elapsed() < TIP_FOR {
+                // (A tip for the first few launches only: then it's known.)
+                if since.elapsed() < TIP_FOR && early_launch() {
                     let tip = if cfg!(target_os = "macos") {
                         "Hold ⌥ over code for info · ⌘-click to jump"
                     } else {
@@ -8863,11 +8887,6 @@ impl Workspace {
                     return Some(
                         div().text_color(theme.muted).whitespace_nowrap().child(spaced(tip)).into_any_element(),
                     );
-                }
-                // On a problem: say how to fix it.
-                if self.active_editor().is_some_and(|e| e.read(cx).caret_on_problem(cx)) {
-                    let hint = if cfg!(target_os = "macos") { "⌘. to fix" } else { "Ctrl+. to fix" };
-                    return Some(div().text_color(theme.muted).whitespace_nowrap().child(hint).into_any_element());
                 }
                 checking.then(|| div().text_color(theme.faint).child("Checking…").into_any_element())
             }

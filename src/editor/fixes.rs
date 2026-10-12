@@ -125,7 +125,7 @@ impl Editor {
             };
         }
         // An error here, and AI on: it can try too.
-        let offer_ai = cx.global::<crate::settings::Settings>().ai.enabled
+        let offer_ai = cx.global::<crate::settings::Settings>().ai.ready()
             && problems.iter().any(|p| p.severity == lsp_types::DiagnosticSeverity::ERROR);
         let diagnostics = problems.into_iter().map(|p| p.diagnostic).collect();
         let request = lsp.read(cx).code_actions(&path, range, diagnostics);
@@ -153,12 +153,6 @@ impl Editor {
             })
             .ok();
         }));
-    }
-
-    /// Whether the caret's line has a problem the server reported.
-    pub fn caret_on_problem(&self, cx: &App) -> bool {
-        let line = self.buffer.point(self.selection.head).0;
-        self.problems(cx).iter().any(|p| p.start.0 <= line && line <= p.end.0)
     }
 
     pub(super) fn close_fixes(&mut self, cx: &mut Context<Self>) {

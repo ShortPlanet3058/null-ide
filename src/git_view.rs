@@ -798,7 +798,7 @@ impl GitView {
         if self.repository == Some(false) {
             return ui::empty_state("This folder isn't a git repository.", &theme).into_any_element();
         }
-        let ai = cx.global::<crate::settings::Settings>().ai.enabled;
+        let ai = cx.global::<crate::settings::Settings>().ai.ready();
         let kept = self.kept_count();
         let can_commit = self.can_commit(cx);
         let branch_row = self.branch.clone().map(|branch| {

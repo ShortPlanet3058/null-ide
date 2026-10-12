@@ -753,9 +753,12 @@ impl Settings {
     /// `~/.config/null/settings.json` on macOS and Linux (or `$XDG_CONFIG_HOME/null`),
     /// `%APPDATA%\Null\settings.json` on Windows.
     pub fn path() -> Option<PathBuf> {
-        // Tests never read or write the real settings.
+        // Tests never read or write the real settings, nor each other's (side by side, one
+        // test's settings were read by another).
         if cfg!(test) {
-            let dir = crate::tools::test_dir("test-config");
+            let thread = format!("{:?}", std::thread::current().id()).replace(|c: char| !c.is_ascii_alphanumeric(), "");
+            let dir = crate::tools::test_dir("test-config").join(thread);
+            std::fs::create_dir_all(&dir).ok();
             return Some(dir.join("settings.json"));
         }
         let dir = if cfg!(target_os = "windows") {

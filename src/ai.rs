@@ -319,6 +319,11 @@ impl AiSettings {
         if self.enabled { self.provider } else { ProviderId::Off }
     }
 
+    /// Whether AI can be asked: on, with a provider chosen. What shows anything AI.
+    pub fn ready(&self) -> bool {
+        self.active() != ProviderId::Off
+    }
+
     pub fn model(&self, id: ProviderId) -> Option<String> {
         self.providers
             .get(id.key())
