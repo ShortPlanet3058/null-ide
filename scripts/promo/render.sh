@@ -2,7 +2,8 @@
 # Films Null's promotional film (scripts/promo/promo.html) into site/media/null-film.mp4,
 # with its poster: the Mac's own WebKit draws each frame, its video encoder writes them,
 # then score.swift lays the music (music.mp3, made with Google Flow) under it, cut on its
-# bars. Nothing to install; about five minutes. Open promo.html in a browser to watch it as you
+# bars, with small sounds made from the film's own cues. Nothing to install; about half an
+# hour (4K at 60 frames a second). The films go to target/film. Open promo.html in a browser to watch it as you
 # change it (Space pauses, ← → step, ?t=24.5 opens it at a moment).
 #
 #   scripts/promo/render.sh            the film
@@ -25,9 +26,11 @@ if [ $# -gt 0 ]; then
     echo "$repo/target/promo-stills"
     exit
 fi
-mkdir -p "$repo/site/media"
-pictures="$repo/target/null-film-pictures.mp4"
-"$bin" "$here/promo.html" "$pictures" --poster 47 "$repo/site/media/null-film-poster.jpg"
-"$score" "$here/music.mp3" "$pictures" "$repo/site/media/null-film.mp4"
-rm -f "$pictures"
-ls -la "$repo/site/media"
+# The master in 4K at 60 frames a second, and a 1080p copy to share, both with the sound.
+out="$repo/target/film"
+mkdir -p "$out"
+"$bin" "$here/promo.html" "$out/pictures-4k.mp4" --fps 60 --size 3840x2160 --also 1920x1080 "$out/pictures-1080p.mp4" --poster 102 "$out/null-film-poster.jpg"
+"$score" "$here/music.mp3" "$out/pictures-4k.mp4" "$out/null-film-4k.mp4" "$out/pictures-4k.sounds.json"
+"$score" "$here/music.mp3" "$out/pictures-1080p.mp4" "$out/null-film-1080p.mp4" "$out/pictures-4k.sounds.json"
+rm -f "$out/pictures-4k.mp4" "$out/pictures-1080p.mp4"
+ls -la "$out"
