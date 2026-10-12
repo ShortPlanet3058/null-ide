@@ -177,8 +177,7 @@ fn backup_files(root: &Path) -> Vec<(PathBuf, Option<u32>)> {
         .collect()
 }
 
-/// The lock a Null holds while it runs: `backups/running.<pid>.lock` (on Unix: flock).
-#[cfg(unix)]
+/// The lock a Null holds while it runs: `backups/running.<pid>.lock`.
 fn lock_file(pid: u32) -> Option<PathBuf> {
     Some(crate::tools::data_dir()?.join("backups").join(format!("running.{pid}.lock")))
 }
@@ -187,41 +186,41 @@ fn lock_file(pid: u32) -> Option<PathBuf> {
 /// another Null tells it's still running by that, not by its number, which a process
 /// started since may have been given.
 fn hold_own_lock() {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        static HELD: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
-        HELD.get_or_init(|| {
-            let path = lock_file(std::process::id())?;
-            std::fs::create_dir_all(path.parent()?).ok()?;
-            let file = std::fs::File::create(&path).ok()?;
-            (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(file)
-        });
-    }
+    static HELD: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| {
+        let path = lock_file(std::process::id())?;
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        let file = std::fs::File::create(&path).ok()?;
+        file.try_lock().is_ok().then_some(file)
+    });
 }
 
 /// Whether process `pid` is a Null still running.
 fn running(pid: u32) -> bool {
+    // Its lock: held, it runs; free, it's gone (and its number may be another's now).
+    if let Some(path) = lock_file(pid)
+        && let Ok(file) = std::fs::File::open(&path)
+    {
+        let free = match file.try_lock() {
+            Ok(()) => true,
+            Err(std::fs::TryLockError::WouldBlock) => false,
+            // (Can't tell: kept as running, so its work isn't taken from it.)
+            Err(std::fs::TryLockError::Error(_)) => false,
+        };
+        if free {
+            drop(file);
+            std::fs::remove_file(&path).ok();
+        }
+        return !free;
+    }
+    // No lock (a Null from before them): whether any process has that number. Signal 0
+    // only asks: there, or there but someone else's.
     #[cfg(unix)]
     {
-        use std::os::fd::AsRawFd;
-        // Its lock: held, it runs; free, it's gone (and its number may be another's now).
-        if let Some(path) = lock_file(pid)
-            && let Ok(file) = std::fs::File::open(&path)
-        {
-            let free = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-            if free {
-                std::fs::remove_file(&path).ok();
-            }
-            return !free;
-        }
-        // No lock (a Null from before them): whether any process has that number. Signal 0
-        // only asks: there, or there but someone else's.
         unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
         false
     }
 }

@@ -33,6 +33,7 @@ mod github;
 mod github_page;
 mod highlight;
 mod html_markdown;
+mod instance;
 mod json_format;
 mod key_prompt;
 mod keymap;
@@ -262,6 +263,12 @@ fn main() {
     });
     let Opening { root, file, place, wait } = resolve_args();
     trace::mark("what to open worked out");
+    // Off the Mac: a Null already running opens it instead (a waiting one is its own).
+    let request = instance::Request { root: root.clone(), file: file.clone(), place };
+    if !wait && instance::hand_over(&request) {
+        return;
+    }
+    let mut handed = if wait { None } else { instance::listen() };
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
     // or by the `null` command while Null runs: opened in the window.
@@ -292,6 +299,16 @@ fn main() {
             }
         })
         .detach();
+        // What later launches hand over (off the Mac): opened as they would have opened.
+        if let Some(mut handed) = handed.take() {
+            cx.spawn(async move |cx| {
+                use futures::StreamExt;
+                while let Some(request) = handed.next().await {
+                    cx.update(|cx| open_project_window_now(request.root, request.file, request.place, cx)).ok();
+                }
+            })
+            .detach();
+        }
         // Local history past its month goes, now and then.
         std::thread::spawn(local_history::sweep);
         settings::init(cx);

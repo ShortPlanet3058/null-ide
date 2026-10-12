@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -800,7 +800,7 @@ fn spawn_cli_in(
         .ok_or_else(|| format!("“{program}” isn't installed. {}", install_hint(id).unwrap_or_default()))?;
     // Tools installed with npm start with `#!/usr/bin/env node`: give them a PATH that finds node.
     let search_path = crate::tools::search_path();
-    let mut command = Command::new(&path);
+    let mut command = crate::tools::command(&path);
     command.env("PATH", search_path);
     if let Some(dir) = dir {
         command.current_dir(dir);

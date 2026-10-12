@@ -1420,7 +1420,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("b")).unwrap();
         std::fs::create_dir_all(root.join("a")).unwrap();
-        let made = std::process::Command::new("python3").args(["-m", "venv"]).arg(root.join("a/.venv")).status();
+        let made = crate::tools::command("python3").args(["-m", "venv"]).arg(root.join("a/.venv")).status();
         assert!(made.unwrap().success());
         let lib = std::fs::read_dir(root.join("a/.venv/lib")).unwrap().next().unwrap().unwrap().path();
         std::fs::write(lib.join("site-packages/onlya.py"), "VALUE = 1\n").unwrap();

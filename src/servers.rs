@@ -2,7 +2,6 @@
 //! and how to install it when it's missing, into Null's own folder, never the system.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
 
 /// How to get a server.
@@ -168,12 +167,12 @@ pub fn xcrun_find(program: &'static str) -> Option<PathBuf> {
     }
     // Without the command line tools, xcrun (and the stubs in /usr/bin) pop up an install
     // dialog: ask xcode-select first, which doesn't.
-    let tools = Command::new("/usr/bin/xcode-select").arg("-p").output().is_ok_and(|o| o.status.success());
+    let tools = crate::tools::command("/usr/bin/xcode-select").arg("-p").output().is_ok_and(|o| o.status.success());
     if !tools {
         known.push((program, None));
         return None;
     }
-    let found = Command::new("/usr/bin/xcrun")
+    let found = crate::tools::command("/usr/bin/xcrun")
         .args(["--find", program])
         .output()
         .ok()
@@ -228,7 +227,7 @@ pub fn install(server: &Server) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
     let run = |program: &str, args: &[&str], env: &[(&str, &Path)]| -> Result<(), String> {
         let path = crate::tools::find(program).ok_or_else(|| format!("“{program}” isn't installed."))?;
-        let mut command = Command::new(path);
+        let mut command = crate::tools::command(path);
         command.args(args).current_dir(&dir).env("PATH", crate::tools::search_path());
         for (key, value) in env {
             command.env(key, value);

@@ -264,7 +264,7 @@ pub fn opens_in_browser(path: &Path) -> bool {
 pub fn open_in_browser(path: &Path, cx: &mut App) {
     #[cfg(target_os = "macos")]
     if let Some(browser) = default_browser() {
-        std::process::Command::new("open").arg("-a").arg(browser).arg(path).spawn().ok();
+        crate::tools::command("open").arg("-a").arg(browser).arg(path).spawn().ok();
         return;
     }
     if let Ok(url) = url::Url::from_file_path(path) {

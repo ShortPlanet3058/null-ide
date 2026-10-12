@@ -64,7 +64,7 @@ fn start(host: &str, address: &SocketAddr) {
     // Started already, and still starting: wait for that one.
     let running = started.as_mut().is_some_and(|child| child.try_wait().is_ok_and(|done| done.is_none()));
     if !running {
-        let child = std::process::Command::new(program)
+        let child = crate::tools::command(program)
             .arg("serve")
             .env("OLLAMA_HOST", host)
             .stdin(std::process::Stdio::null())

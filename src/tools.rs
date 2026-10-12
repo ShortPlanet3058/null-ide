@@ -26,6 +26,20 @@ pub fn test_dir(name: &str) -> PathBuf {
     this_run.join(name)
 }
 
+/// A program to run in the background: on Windows without a console window of its own
+/// flashing up (git, language servers and the rest are console programs).
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// The person's home folder: `$HOME`, or on Windows (where it's rarely set) `%USERPROFILE%`.
 pub fn home_dir() -> Option<PathBuf> {
     let var = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);

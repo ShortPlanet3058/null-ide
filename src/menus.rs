@@ -101,7 +101,8 @@ pub fn set(cx: &mut App) {
             name: "File".into(),
             items: vec![
                 MenuItem::action("New File", NewUntitled),
-                MenuItem::action("Open File or Folder…", Open),
+                MenuItem::action(crate::workspace::OPEN_LABEL, Open),
+                MenuItem::action("Open Folder…", crate::workspace::OpenFolder),
                 MenuItem::action("Open Recent…", crate::workspace::OpenRecent),
                 MenuItem::action("Open Folder in New Window…", crate::workspace::NewWindow),
                 MenuItem::action("Reopen Closed Tab", ReopenClosedTab),

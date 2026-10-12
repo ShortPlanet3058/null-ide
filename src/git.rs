@@ -9,7 +9,7 @@ use std::process::Command;
 /// git, run in `dir`. Paths given to it are names, never patterns: discarding `app/[id].tsx`
 /// mustn't touch `app/d.tsx`.
 fn command(dir: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = crate::tools::command("git");
     command.arg("-C").arg(dir).env("GIT_LITERAL_PATHSPECS", "1").env("GIT_TERMINAL_PROMPT", "0");
     // Asking (status) never writes git's index: that write was seen as a change, and set
     // every open file's committed version to be read again.

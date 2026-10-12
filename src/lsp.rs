@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -128,7 +128,7 @@ impl LanguageServer {
         root: &Path,
         name: &str,
     ) -> io::Result<(Self, mpsc::UnboundedReceiver<ServerMessage>)> {
-        let mut child = Command::new(program)
+        let mut child = crate::tools::command(program)
             .args(args)
             .current_dir(root)
             // A Python project's own environment first, for Python's server (pyright reads its

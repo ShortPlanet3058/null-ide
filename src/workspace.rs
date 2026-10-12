@@ -33,6 +33,7 @@ actions!(
     workspace,
     [
         Open,
+        OpenFolder,
         ShowKeyboardShortcuts,
         CloseTab,
         ToggleSidebar,
@@ -474,7 +475,7 @@ fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathB
 fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
     use std::io::Read;
     use std::process::Stdio;
-    let Ok(mut child) = std::process::Command::new(program)
+    let Ok(mut child) = crate::tools::command(program)
         .args(["--list", "--exact", id])
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -583,6 +584,10 @@ const TERMINAL_SLIDE: Duration = Duration::from_millis(240);
 /// Room for the window buttons at the left of the title bar.
 /// How many characters wide Focus mode's column of text is.
 const FOCUS_COLUMNS: f32 = 100.;
+/// What Open picks: on the Mac a file or a folder in one dialog; elsewhere files (folders
+/// through Open Folder).
+pub const OPEN_LABEL: &str = if cfg!(target_os = "macos") { "Open File or Folder…" } else { "Open File…" };
+
 const TITLEBAR_INSET: f32 = if cfg!(target_os = "macos") { 84. } else { 12. };
 
 fn smoothstep(t: f32) -> f32 {
@@ -4475,12 +4480,30 @@ impl Workspace {
         self.confirm_unsaved(CloseAction::Quit, window, cx);
     }
 
+    /// A file, or on the Mac a folder too (elsewhere the system's dialog picks one kind:
+    /// folders have Open Folder).
     fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
-            directories: true,
+            directories: cfg!(target_os = "macos"),
             multiple: false,
             prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            this.update_in(cx, |this, window, cx| this.open_path(path, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// A folder as the project, in this window.
+    fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Folder".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
@@ -4578,7 +4601,8 @@ impl Workspace {
             (File, "New File".into(), Box::new(NewUntitled)),
             (File, "New File in Project…".into(), Box::new(crate::file_tree::NewFile)),
             (File, "New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
-            (File, "Open File or Folder…".into(), Box::new(Open)),
+            (File, OPEN_LABEL.into(), Box::new(Open)),
+            (File, "Open Folder…".into(), Box::new(OpenFolder)),
             (File, "Open Recent…".into(), Box::new(OpenRecent)),
             (File, "Open Folder in New Window…".into(), Box::new(NewWindow)),
             (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
@@ -4617,6 +4641,7 @@ impl Workspace {
             ),
             (Git, "Commit…".into(), Box::new(CommitAll)),
             (Git, "Undo Last Commit".into(), Box::new(UndoLastCommit)),
+            (Git, "Discard All Changes…".into(), Box::new(RevertAllChanges)),
             (Git, "Set Changes Aside".into(), Box::new(SetChangesAside)),
             (Git, "Bring Back Changes".into(), Box::new(BringBackChanges)),
             (Git, "Push".into(), Box::new(PushBranch)),
@@ -4635,6 +4660,8 @@ impl Workspace {
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
+            (Edit, "Paste as Is".into(), Box::new(crate::editor::PasteAsIs)),
+            (App, "Install Shell Command".into(), Box::new(InstallShellCommand)),
             (Edit, "Organise Imports".into(), Box::new(OrganizeImports)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
@@ -7331,7 +7358,7 @@ impl Workspace {
                     let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
                     // (Its messages say where each program went: a target folder set
                     // elsewhere, a workspace's.)
-                    let built = std::process::Command::new(cargo)
+                    let built = crate::tools::command(cargo)
                         .args(&cargo_args)
                         .arg("--message-format=json-render-diagnostics")
                         .current_dir(&cwd)
@@ -7421,7 +7448,7 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
-                    let built = std::process::Command::new(cargo)
+                    let built = crate::tools::command(cargo)
                         .args(["test", "--no-run", "--message-format=json-render-diagnostics"])
                         .args(&target)
                         .current_dir(&krate)
@@ -10375,6 +10402,15 @@ impl Render for Workspace {
             .pr(px(12.))
             .window_control_area(WindowControlArea::Drag)
             .map(|bar| self.moves_window(bar, cx))
+            // No menu bar off the Mac: its place, every command, behind one button.
+            .when(!cfg!(target_os = "macos"), |bar| {
+                bar.child(
+                    ui::icon_button_for("app-menu", "icons/menu.svg", "Commands", Some(Box::new(ShowCommands)), theme)
+                        .mr(px(6.))
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                        .on_click(|_: &ClickEvent, window, cx| window.dispatch_action(Box::new(ShowCommands), cx)),
+                )
+            })
             .map(|bar| match tabs_right {
                 // Each side's tabs over it: the left ones end where the right side begins.
                 Some(right) => {
@@ -11023,6 +11059,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::use_open_router))
             .on_action(cx.listener(Self::turn_off_ai))
             .on_action(cx.listener(Self::turn_on_ai))
+            .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
@@ -11247,7 +11284,7 @@ mod tests {
         let lib = "pub fn twice(n: i32) -> i32 {\n    n * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        let got = super::twice(21);\n        assert_eq!(got, 42);\n    }\n}\n";
         std::fs::write(dir.join("src/lib.rs"), lib).unwrap();
         std::fs::write(dir.join("tests/api.rs"), "#[test]\nfn other() {}\n").unwrap();
-        let built = std::process::Command::new("cargo")
+        let built = crate::tools::command("cargo")
             .args(["test", "--no-run", "--offline", "--message-format=json-render-diagnostics"])
             .current_dir(&dir)
             .output()
@@ -11346,7 +11383,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().map(|o| o.status.success())
+            crate::tools::command("git").arg("-C").arg(&dir).args(args).output().map(|o| o.status.success())
         };
         if !git(&["init", "-q"]).unwrap_or(false) {
             return; // No git here.
@@ -11433,7 +11470,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let committed = std::process::Command::new("git")
+        let committed = crate::tools::command("git")
             .arg("-C")
             .arg(&dir)
             .args(["show", "--name-only", "--format=%s", "HEAD"])
@@ -12170,7 +12207,7 @@ mod tests {
         let dir = crate::tools::test_dir("discard-file");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+        let git = |args: &[&str]| crate::tools::command("git").arg("-C").arg(&dir).args(args).output();
         if git(&["init", "-q", "-b", "main"]).is_err() {
             return; // No git here.
         }
@@ -12212,7 +12249,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+            let out = crate::tools::command("git").arg("-C").arg(&dir).args(args).output();
             out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         };
         if git(&["init", "-q"]).is_err() {
@@ -12533,7 +12570,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+            let out = crate::tools::command("git").arg("-C").arg(&dir).args(args).output();
             out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         };
         if git(&["init", "-q", "-b", "main"]).is_err() {
@@ -12584,7 +12621,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+            let out = crate::tools::command("git").arg("-C").arg(&dir).args(args).output();
             out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         };
         if git(&["init", "-q", "-b", "main"]).is_err() {
@@ -12974,7 +13011,7 @@ mod tests {
         );
         let command = dir.join("null");
         std::fs::write(&command, script).unwrap();
-        let run = std::process::Command::new("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
+        let run = crate::tools::command("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         let given = std::fs::read_to_string(&log).unwrap();
         let dir = dunce::canonicalize(&dir).unwrap_or(dir);
@@ -12982,18 +13019,17 @@ mod tests {
         assert!(dir.join("new.txt").exists());
         assert_eq!(given.lines().count(), 2);
         // A place after the name: handed over, but no file named with it.
-        let run = std::process::Command::new("sh").arg(&command).args(["new.txt:4:2"]).current_dir(&dir).status();
+        let run = crate::tools::command("sh").arg(&command).args(["new.txt:4:2"]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         assert!(!dir.join("new.txt:4:2").exists());
         assert!(std::fs::read_to_string(&log).unwrap().lines().last().unwrap().ends_with("/new.txt:4:2"));
         // A folder with a `:2` in its name isn't cut: only a place at the end is.
         std::fs::create_dir_all(dir.join("notes:2026")).unwrap();
-        let run =
-            std::process::Command::new("sh").arg(&command).args(["notes:2026/todo.md"]).current_dir(&dir).status();
+        let run = crate::tools::command("sh").arg(&command).args(["notes:2026/todo.md"]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         assert!(dir.join("notes:2026/todo.md").exists() && !dir.join("notes").exists());
         // --wait: the other way of handing it over.
-        let run = std::process::Command::new("sh").arg(&command).args(["--wait", "MSG"]).current_dir(&dir).status();
+        let run = crate::tools::command("sh").arg(&command).args(["--wait", "MSG"]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         let last = std::fs::read_to_string(&log).unwrap().lines().last().unwrap().to_string();
         assert!(last.starts_with("wait ") && last.ends_with("/MSG"), "{last}");
@@ -13304,7 +13340,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dunce::canonicalize(&dir).unwrap();
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        let git = |args: &[&str]| crate::tools::command("git").arg("-C").arg(&dir).args(args).output().unwrap();
         if !git(&["init", "-q"]).status.success() {
             return;
         }
@@ -13403,7 +13439,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dunce::canonicalize(&dir).unwrap();
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        let git = |args: &[&str]| crate::tools::command("git").arg("-C").arg(&dir).args(args).output().unwrap();
         if !git(&["init", "-q"]).status.success() {
             return;
         }
@@ -13487,7 +13523,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dunce::canonicalize(&dir).unwrap();
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        let git = |args: &[&str]| crate::tools::command("git").arg("-C").arg(&dir).args(args).output().unwrap();
         if !git(&["init", "-q", "-b", "main"]).status.success() {
             return;
         }
@@ -13560,10 +13596,10 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let repo = dunce::canonicalize(&repo).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            let out = crate::tools::command("git").arg("-C").arg(&repo).args(args).output().unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
-        if std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q", "-b", "main"]).status().is_err() {
+        if crate::tools::command("git").arg("-C").arg(&repo).args(["init", "-q", "-b", "main"]).status().is_err() {
             return;
         }
         git(&["config", "user.name", "t"]);
