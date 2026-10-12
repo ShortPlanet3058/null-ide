@@ -5065,6 +5065,14 @@ impl Workspace {
                 this.close_palette(window, cx);
                 this.change_branch(Ok(branch), window, cx);
             }
+            PaletteEvent::SearchSettings(query) => {
+                let query = query.clone();
+                this.close_palette(window, cx);
+                this.open_settings_at(None, window, cx);
+                if let Some((panel, _)) = &this.settings_panel {
+                    panel.update(cx, |panel, cx| panel.search_for(&query, cx));
+                }
+            }
             PaletteEvent::OpenProjectInNewWindow(path) => {
                 let path = path.clone();
                 this.close_palette(window, cx);

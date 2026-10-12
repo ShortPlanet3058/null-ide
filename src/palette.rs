@@ -337,6 +337,8 @@ enum Item {
     Branch(usize),
     /// Start a branch named after what's typed.
     NewBranch,
+    /// ⌘K: what's typed, looked for in Settings (a setting not among the quick ones).
+    SearchSettings,
     RunTask(usize),
     Project(usize),
     /// Run what's typed, as a command.
@@ -380,6 +382,8 @@ pub enum PaletteEvent {
     OpenProject(PathBuf),
     /// Open this folder in a window of its own.
     OpenProjectInNewWindow(PathBuf),
+    /// Settings opened, looking for this.
+    SearchSettings(String),
 }
 
 pub struct Palette {
@@ -790,6 +794,8 @@ impl Palette {
         for (_, item, highlights) in found.into_iter().take(MAX_RESULTS) {
             self.push(item, highlights, true);
         }
+        // Every setting can be found from here: the rest are in Settings.
+        self.push(Item::SearchSettings, Vec::new(), false);
     }
 
     fn selected_item(&self) -> Option<Item> {
@@ -984,6 +990,7 @@ impl Palette {
             Item::Branch(i) if self.branches[i].current => cx.emit(PaletteEvent::Dismissed),
             Item::Branch(i) => cx.emit(PaletteEvent::SwitchBranch(self.branches[i].clone())),
             Item::NewBranch => cx.emit(PaletteEvent::CreateBranch(crate::git::branch_name(&self.query))),
+            Item::SearchSettings => cx.emit(PaletteEvent::SearchSettings(self.query.clone())),
             Item::RunTask(i) => {
                 let task = &self.tasks[i];
                 cx.emit(PaletteEvent::RunCommand(task.command.clone(), Some(task.label.clone())))
@@ -1172,6 +1179,12 @@ impl Palette {
                 div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
                 div().code_font(cx).text_size(px(ui::T_MD)).child(self.query.clone()).into_any_element(),
                 Some(div().text_color(dim).child("in the terminal").into_any_element()),
+            ),
+            Item::SearchSettings => (
+                div().text_size(px(13.)).text_color(dim).child("›").into_any_element(),
+                div().text_color(dim).child(format!("Search Settings for “{}”", self.query)).into_any_element(),
+                crate::palette::shortcut(&crate::workspace::OpenSettings, cx)
+                    .map(|keys| div().text_color(dim).child(keys).into_any_element()),
             ),
             Item::NewBranch => {
                 let from = self.branches.iter().find(|b| b.current).map(|b| format!("from {}", b.name));
@@ -1817,6 +1830,8 @@ mod tests {
         p.read_with(cx, |p, _| {
             p.rows
                 .iter()
+                // (Always last in ⌘K: looked at on its own.)
+                .filter(|r| r.item != Item::SearchSettings)
                 .map(|r| match r.item {
                     Item::Command(i) => p.commands[i].label.to_string(),
                     Item::Quick(q) => format!("quick: {}", q.label()),
@@ -1837,6 +1852,8 @@ mod tests {
         assert_eq!(items(cx, &p).len(), Quick::ALL.len());
         type_query(cx, &p, "dup");
         assert_eq!(items(cx, &p), ["Duplicate Line"]);
+        // Last, whatever's typed: looked for in Settings.
+        assert!(p.read_with(cx, |p, _| p.rows.last().is_some_and(|r| r.item == Item::SearchSettings)));
         // A command a quick setting covers isn't listed twice.
         type_query(cx, &p, "wrap");
         assert_eq!(items(cx, &p), ["quick: Wrap lines"]);

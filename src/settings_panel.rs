@@ -137,6 +137,12 @@ impl SettingsPanel {
         self.section = section;
     }
 
+    /// Settings looking for `query` (as typed in ⌘K).
+    pub fn search_for(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.search.update(cx, |input, cx| input.set_text_caret_at_end(query, cx));
+        cx.notify();
+    }
+
     pub fn new(shortcuts: Vec<Shortcut>, lsp: Entity<crate::lsp_store::LspStore>, cx: &mut Context<Self>) -> Self {
         let model = cx.new(|cx| TextInput::new("Model", cx));
         let address = cx.new(|cx| TextInput::new("Address", cx));
