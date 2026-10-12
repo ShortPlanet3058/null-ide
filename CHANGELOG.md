@@ -12,6 +12,10 @@
 - Git, Node, Python and other tools are found in their usual Windows folders, and a missing
   Git is said as such, not as "not a repository".
 - The welcome asks where AI answers come from on a step of its own, once AI is wanted.
+- Shortcuts work on every keyboard: on digits and symbols they follow the key's place on
+  the keyboard (on a French AZERTY: Ctrl+ù terminal, Ctrl+: comment, Ctrl+& first tab), and
+  Ctrl+J shows and hides the terminal (Join Lines moves to Ctrl+Shift+J). On Linux an
+  AZERTY's digit row works without Shift.
 
 **Everywhere**
 

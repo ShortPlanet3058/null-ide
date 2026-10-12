@@ -1507,6 +1507,13 @@ pub fn format_keys(binding: &KeyBinding) -> String {
                 "down" => "↓".to_string(),
                 "left" => "←".to_string(),
                 "right" => "→".to_string(),
+                // (Linux's names for an AZERTY's keys.)
+                "eacute" => "É".to_string(),
+                "egrave" => "È".to_string(),
+                "ccedilla" => "Ç".to_string(),
+                "agrave" => "À".to_string(),
+                "ugrave" => "Ù".to_string(),
+                "section" => "§".to_string(),
                 key if key.chars().count() == 1 => key.to_uppercase(),
                 key => key[..1].to_uppercase() + &key[1..],
             };

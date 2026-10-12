@@ -311,6 +311,8 @@ pub fn bind_keys(cx: &mut App) {
             // (The system's dialog picks files or folders, not both: Ctrl+O a folder, the
             // project, as work starts there; a file from inside it is Ctrl+P away.)
             KeyBinding::new("ctrl-o", OpenFolder, ctx),
+            // A letter: on every keyboard (Ctrl+` too, where the keyboard has it).
+            KeyBinding::new("ctrl-j", ToggleTerminal, ctx),
             KeyBinding::new("alt-left", GoBack, ctx),
             KeyBinding::new("alt-right", GoForward, ctx),
             KeyBinding::new("ctrl-pagedown", NextTab, ctx),
