@@ -33,6 +33,7 @@ actions!(
     workspace,
     [
         Open,
+        ShowKeyboardShortcuts,
         CloseTab,
         ToggleSidebar,
         NextTab,
@@ -4604,6 +4605,7 @@ impl Workspace {
                 Box::new(ToggleAutocomplete),
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
+            (App, "Keyboard Shortcuts".into(), Box::new(ShowKeyboardShortcuts)),
             (App, "Import Settings from VS Code…".into(), Box::new(ImportVsCodeSettings)),
             (View, "Show Changes".into(), Box::new(ShowChanges)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
@@ -10848,6 +10850,9 @@ impl Render for Workspace {
                 cx.listener(|_, _: &UseDuneTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Dune))),
             )
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, window, cx| {
+                this.open_settings_at(Some(Section::Keyboard), window, cx)
+            }))
             .on_action(cx.listener(Self::search_project))
             .on_action(cx.listener(Self::show_files))
             .on_action(cx.listener(Self::new_own_theme))

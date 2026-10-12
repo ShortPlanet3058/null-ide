@@ -73,7 +73,7 @@ impl Section {
         match self {
             Section::Appearance => "Appearance",
             Section::Editor => "Editor",
-            Section::Languages => "Languages",
+            Section::Languages => "Language servers",
             Section::Ai => "AI",
             Section::Keyboard => "Keyboard",
         }
@@ -653,6 +653,12 @@ impl SettingsPanel {
             ),
             Self::heading("Window", &theme),
             Self::row(
+                "Preview tabs",
+                Some("A file opened with one click replaces the last one, until you edit or double-click it"),
+                Self::toggle("preview-tabs", s.preview_tabs, &theme, cx, |s| s.preview_tabs = !s.preview_tabs),
+                &theme,
+            ),
+            Self::row(
                 "Show the sidebar",
                 Some(&keys_line("Shown and hidden with", &[&crate::workspace::ToggleSidebar], cx)),
                 Self::toggle("sidebar", s.sidebar_visible, &theme, cx, |s| s.sidebar_visible = !s.sidebar_visible),
@@ -727,7 +733,21 @@ impl SettingsPanel {
                 },
                 &theme,
             ),
-            Self::heading("Around the code", &theme),
+            Self::row(
+                "Close brackets and quotes",
+                Some("Typing ( [ { or a quote types its partner too, and surrounds what's selected"),
+                Self::toggle("auto-close", s.auto_close, &theme, cx, |s| s.auto_close = !s.auto_close),
+                &theme,
+            ),
+            Self::row(
+                "Format on paste",
+                Some("Pasted code tidied by its language server, where it can do part of a file (clangd, TypeScript…)"),
+                Self::toggle("format-on-paste", s.format_on_paste, &theme, cx, |s| {
+                    s.format_on_paste = !s.format_on_paste
+                }),
+                &theme,
+            ),
+            Self::heading("Cursor", &theme),
             Self::row(
                 "Blinking cursor",
                 Some("Blinks for a while after you stop typing, then stays lit"),
@@ -760,6 +780,7 @@ impl SettingsPanel {
                 Self::toggle("typewriter", s.typewriter, &theme, cx, |s| s.typewriter = !s.typewriter),
                 &theme,
             ),
+            Self::heading("Writing", &theme),
             Self::row(
                 "Dim other paragraphs",
                 Some("In Markdown and text, the paragraph you're writing stands out"),
@@ -788,26 +809,11 @@ impl SettingsPanel {
                 }),
                 &theme,
             ),
+            Self::heading("Guides", &theme),
             Self::row(
                 "Indent guides",
                 Some("Faint lines down the indentation, to see what's inside what"),
                 Self::toggle("indent-guides", s.indent_guides, &theme, cx, |s| s.indent_guides = !s.indent_guides),
-                &theme,
-            ),
-            Self::row(
-                "Problems at line ends",
-                Some("Each line's error or warning written after it, faintly. Off: only on the cursor's line"),
-                Self::toggle("problems-at-line-ends", s.problems_at_line_ends, &theme, cx, |s| {
-                    s.problems_at_line_ends = !s.problems_at_line_ends
-                }),
-                &theme,
-            ),
-            Self::row(
-                "Coloured bracket pairs",
-                Some("Each bracket pair gets its own colour, by depth"),
-                Self::toggle("bracket-colours", s.bracket_colours, &theme, cx, |s| {
-                    s.bracket_colours = !s.bracket_colours
-                }),
                 &theme,
             ),
             Self::row(
@@ -816,6 +822,14 @@ impl SettingsPanel {
                     "A faint line at the length the project keeps to: .editorconfig, rustfmt, Prettier, Black or Ruff",
                 ),
                 Self::toggle("line-guide", s.line_guide, &theme, cx, |s| s.line_guide = !s.line_guide),
+                &theme,
+            ),
+            Self::row(
+                "Coloured bracket pairs",
+                Some("Each bracket pair gets its own colour, by depth"),
+                Self::toggle("bracket-colours", s.bracket_colours, &theme, cx, |s| {
+                    s.bracket_colours = !s.bracket_colours
+                }),
                 &theme,
             ),
             Self::row(
@@ -832,16 +846,40 @@ impl SettingsPanel {
                 Self::toggle("symbol-marks", s.symbol_marks, &theme, cx, |s| s.symbol_marks = !s.symbol_marks),
                 &theme,
             ),
+            Self::heading("In the code", &theme),
             Self::row(
-                "Close brackets and quotes",
-                Some("Typing ( [ { or a quote types its partner too, and surrounds what's selected"),
-                Self::toggle("auto-close", s.auto_close, &theme, cx, |s| s.auto_close = !s.auto_close),
+                "Problems at line ends",
+                Some("Each line's error or warning written after it, faintly. Off: only on the cursor's line"),
+                Self::toggle("problems-at-line-ends", s.problems_at_line_ends, &theme, cx, |s| {
+                    s.problems_at_line_ends = !s.problems_at_line_ends
+                }),
                 &theme,
             ),
             Self::row(
                 "Who changed the line",
                 Some("At the end of the cursor's line, faintly: who last changed it, when, and why. From git"),
                 Self::toggle("line-blame", s.line_blame, &theme, cx, |s| s.line_blame = !s.line_blame),
+                &theme,
+            ),
+            Self::row(
+                "Type hints",
+                Some("Types and parameter names inside the code, faintly, from the language server"),
+                Self::toggle("inlay-hints", s.inlay_hints, &theme, cx, |s| s.inlay_hints = !s.inlay_hints),
+                &theme,
+            ),
+            Self::row(
+                "References and run links",
+                Some("At the end of the cursor's line: how often a name is used, ▶ to run a test"),
+                Self::toggle("code-lens", s.code_lens, &theme, cx, |s| s.code_lens = !s.code_lens),
+                &theme,
+            ),
+            Self::row(
+                "Suggestions while typing",
+                Some(&format!(
+                    "From the language server. {} asks for them either way",
+                    key(&crate::editor::ShowCompletions, cx)
+                )),
+                Self::toggle("autocomplete", s.autocomplete, &theme, cx, |s| s.autocomplete = !s.autocomplete),
                 &theme,
             ),
             Self::heading("Saving", &theme),
@@ -886,42 +924,6 @@ impl SettingsPanel {
                 "Keep unsaved changes when quitting",
                 Some("Quitting doesn't ask: what isn't saved comes back, still unsaved, next time"),
                 Self::toggle("keep-unsaved", s.keep_unsaved, &theme, cx, |s| s.keep_unsaved = !s.keep_unsaved),
-                &theme,
-            ),
-            Self::row(
-                "Preview tabs",
-                Some("A file opened with one click replaces the last one, until you edit or double-click it"),
-                Self::toggle("preview-tabs", s.preview_tabs, &theme, cx, |s| s.preview_tabs = !s.preview_tabs),
-                &theme,
-            ),
-            Self::row(
-                "Format on paste",
-                Some("Pasted code tidied by its language server, where it can do part of a file (clangd, TypeScript…)"),
-                Self::toggle("format-on-paste", s.format_on_paste, &theme, cx, |s| {
-                    s.format_on_paste = !s.format_on_paste
-                }),
-                &theme,
-            ),
-            Self::heading("Code intelligence", &theme),
-            Self::row(
-                "Suggestions while typing",
-                Some(&format!(
-                    "From the language server. {} asks for them either way",
-                    key(&crate::editor::ShowCompletions, cx)
-                )),
-                Self::toggle("autocomplete", s.autocomplete, &theme, cx, |s| s.autocomplete = !s.autocomplete),
-                &theme,
-            ),
-            Self::row(
-                "Type hints",
-                Some("Types and parameter names inside the code, faintly, from the language server"),
-                Self::toggle("inlay-hints", s.inlay_hints, &theme, cx, |s| s.inlay_hints = !s.inlay_hints),
-                &theme,
-            ),
-            Self::row(
-                "References and run links",
-                Some("At the end of the cursor's line: how often a name is used, ▶ to run a test"),
-                Self::toggle("code-lens", s.code_lens, &theme, cx, |s| s.code_lens = !s.code_lens),
                 &theme,
             ),
         ]

@@ -287,5 +287,13 @@ pub fn set(cx: &mut App) {
             name: "Window".into(),
             items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)],
         },
+        // (macOS puts its search of every menu here.)
+        Menu {
+            name: "Help".into(),
+            items: vec![
+                MenuItem::action("Keyboard Shortcuts", crate::workspace::ShowKeyboardShortcuts),
+                MenuItem::action("Quick Settings and Commands…", ShowCommands),
+            ],
+        },
     ]);
 }
