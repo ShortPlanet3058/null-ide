@@ -1018,7 +1018,7 @@ impl GitView {
         let more = |id: &'static str, more: usize, cx: &mut Context<Self>| {
             (more > 0).then(|| {
                 div().px(px(ui::INSET)).pt(px(6.)).text_size(px(ui::T_SM)).child(
-                    ui::link(id, format!("Show {more} more"), &theme).on_click(cx.listener(
+                    ui::link(id, format!("Show {} more", more.min(ROWS_AT_ONCE)), &theme).on_click(cx.listener(
                         |this, _: &ClickEvent, _, cx| {
                             this.rows_shown += ROWS_AT_ONCE;
                             cx.notify();

@@ -192,6 +192,7 @@ actions!(
         UseGemini,
         UseOpenRouter,
         TurnOffAi,
+        TurnOnAi,
         SetApiKey,
     ]
 );
@@ -4821,6 +4822,10 @@ impl Workspace {
             ]);
         }
         // With AI switched off, nothing about it shows up.
+        // AI off: one way back in (⌘K's switch for it shows only while it's on).
+        if !settings.ai.ready() {
+            commands.push((Ai, "Turn On AI…".into(), Box::new(TurnOnAi)));
+        }
         // With it on but no provider yet: only where answers can come from.
         if settings.ai.enabled {
             commands.extend([
@@ -5177,6 +5182,16 @@ impl Workspace {
             let keys = crate::palette::shortcut(&OpenSettings, cx).map(|k| format!(" ({k})")).unwrap_or_default();
             self.show_notice(format!("AI is on. Choose where answers come from in Settings → AI{keys}."), cx);
         }
+    }
+
+    /// ⌘K's way in while AI is off (its switch hidden then): on, and with no provider yet,
+    /// Settings → AI to choose one.
+    fn turn_on_ai(&mut self, _: &TurnOnAi, window: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.ai.enabled = true);
+        if cx.global::<Settings>().ai.provider == ProviderId::Off {
+            return self.open_settings_at(Some(Section::Ai), window, cx);
+        }
+        self.show_notice("AI is on.".into(), cx);
     }
 
     fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
@@ -8894,8 +8909,11 @@ impl Workspace {
     fn language_status(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         const TIP_FOR: Duration = Duration::from_secs(8);
         const BUSY_AFTER: Duration = Duration::from_millis(1200);
-        let editor = self.active_editor()?.read(cx);
-        let readiness = editor.readiness(cx)?;
+        // (No server here: whatever was busy before isn't timed on.)
+        let Some(readiness) = self.active_editor().and_then(|e| e.read(cx).readiness(cx)) else {
+            self.busy_since = None;
+            return None;
+        };
         let busy = matches!(readiness, Readiness::Starting | Readiness::Ready { checking: true });
         let busy_long = match (busy, self.busy_since) {
             (false, _) => {
@@ -9876,7 +9894,9 @@ impl Render for Workspace {
                 let e = e.read(cx);
                 if e.is_prose() { settings.wrap_prose } else { settings.word_wrap_for(e.language_name()) }
             });
-            let shown = menus::InFront { wrapping, terminal_open: Some(self.terminal_open.on) };
+            // (Focus mode hides the terminal: the menu would show it.)
+            let terminal_open = self.terminal_open.on && !self.focus_mode;
+            let shown = menus::InFront { wrapping, terminal_open: Some(terminal_open) };
             menus::in_front(shown, cx);
         }
         self.show_test_marks(cx);
@@ -10310,7 +10330,9 @@ impl Render for Workspace {
             .children(self.branch.clone().map(|branch| {
                 // The branch (a click switches it), and how many files changed (a click lists them).
                 // (With the sidebar out, its Git tab says how many already: said once.)
-                let changed = if self.sidebar.on { 0 } else { self.git_status.len() };
+                // (With conflicts the tab counts only those: the total stays here.)
+                let conflicts = self.git_status.iter().any(|(_, s)| *s == git::FileStatus::Conflicted);
+                let changed = if self.sidebar.on && !conflicts { 0 } else { self.git_status.len() };
                 div()
                     .flex()
                     .flex_none()
@@ -10904,6 +10926,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::use_gemini))
             .on_action(cx.listener(Self::use_open_router))
             .on_action(cx.listener(Self::turn_off_ai))
+            .on_action(cx.listener(Self::turn_on_ai))
             .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))

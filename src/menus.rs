@@ -67,7 +67,11 @@ pub fn set(cx: &mut App) {
     let shown = cx.try_global::<InFront>().copied().unwrap_or_default();
     let fade_label =
         if settings.fade_bars_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
-    let wrap_label = if shown.wrapping.unwrap_or(settings.word_wrap) { "Stop Wrapping Lines" } else { "Wrap Lines" };
+    let wrap_label = if shown.wrapping.unwrap_or_else(|| settings.word_wrap_for("Plain Text")) {
+        "Stop Wrapping Lines"
+    } else {
+        "Wrap Lines"
+    };
     let terminal_label = match shown.terminal_open {
         Some(true) => "Hide Terminal",
         Some(false) => "Show Terminal",
