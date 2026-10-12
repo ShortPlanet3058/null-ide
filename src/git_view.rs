@@ -210,6 +210,8 @@ pub struct GitView {
     pub draft_generation: u64,
     /// Commit… asked for the keyboard in the message: given once the message shows.
     focus_message: bool,
+    /// How many files each changes list draws (more on asking).
+    rows_shown: usize,
     reading: Option<Task<()>>,
     pub tab: Tab,
     /// Whether a remote is on GitHub (its tab shows only then): asked once per project.
@@ -248,6 +250,9 @@ impl Focusable for GitView {
     }
 }
 
+/// How many changed files a list draws at first, and how many more each ask adds.
+const ROWS_AT_ONCE: usize = 300;
+
 /// What a changed file's parts say, read off the main thread.
 struct Read {
     repository: bool,
@@ -285,9 +290,12 @@ fn read(root: &Path, ask_github: bool) -> Read {
     let files = git::status(root)
         .into_iter()
         .map(|(path, status)| {
-            let encoding = crate::encoding::read(&path).map(|(_, e)| e).unwrap_or_default();
-            let base = git::committed_text(&path, encoding).unwrap_or_default();
-            let current = crate::encoding::read(&path).map(|(t, _)| t).unwrap_or_default();
+            let (current, encoding) = crate::encoding::read(&path).unwrap_or_default();
+            // (A new file has no committed side: no git run for each of them.)
+            let base = match status {
+                FileStatus::Added => String::new(),
+                _ => git::committed_text(&path, encoding).unwrap_or_default(),
+            };
             let (added, removed) = git::counts(&base, &current);
             // A new, deleted or conflicted file goes in whole.
             let parts = if status == FileStatus::Modified { parts_of(&base, &current) } else { Vec::new() };
@@ -333,6 +341,7 @@ impl GitView {
             committing: false,
             drafting: false,
             focus_message: false,
+            rows_shown: ROWS_AT_ONCE,
             draft_generation: 0,
             reading: None,
             tab: Tab::Changes,
@@ -372,6 +381,7 @@ impl GitView {
         self.picked = None;
         self.renaming = None;
         self.on_github = None;
+        self.rows_shown = ROWS_AT_ONCE;
         // Another repository's GitHub: read again (what was asked of the last one dropped).
         let (list, closed) = (self.github.list, self.github.closed);
         self.github = GitHub { list, closed, ..GitHub::default() };
@@ -992,12 +1002,33 @@ impl GitView {
             });
             div().flex().flex_col().child(row).children(parts).into_any_element()
         };
+        // Thousands of changed files (a folder of new ones not ignored): the first of each
+        // list drawn, the rest a click away, so the sidebar stays quick.
         let (mut kept_rows, mut out_rows) = (Vec::new(), Vec::new());
-        for ix in 0..self.files.len() {
-            let file = self.files[ix].clone();
-            let row = file_row(ix, &file, cx);
-            if file.kept { kept_rows.push(row) } else { out_rows.push(row) }
+        let (mut kept_more, mut out_more) = (0, 0);
+        for (ix, file) in self.files.iter().enumerate() {
+            let (rows, more) =
+                if file.kept { (&mut kept_rows, &mut kept_more) } else { (&mut out_rows, &mut out_more) };
+            if rows.len() < self.rows_shown {
+                rows.push(file_row(ix, file, cx));
+            } else {
+                *more += 1;
+            }
         }
+        let more = |id: &'static str, more: usize, cx: &mut Context<Self>| {
+            (more > 0).then(|| {
+                div().px(px(ui::INSET)).pt(px(6.)).text_size(px(ui::T_SM)).child(
+                    ui::link(id, format!("Show {} more", more.min(ROWS_AT_ONCE)), &theme).on_click(cx.listener(
+                        |this, _: &ClickEvent, _, cx| {
+                            this.rows_shown += ROWS_AT_ONCE;
+                            cx.notify();
+                        },
+                    )),
+                )
+            })
+        };
+        let kept_more = more("git-kept-more", kept_more, cx);
+        let out_more = more("git-out-more", out_more, cx);
         let nothing = self.files.is_empty() && self.repository == Some(true);
         div()
             .id("git-changes")
@@ -1012,8 +1043,10 @@ impl GitView {
             .when(nothing, |d| d.child(ui::empty_state("Nothing changed since the last commit", &theme)))
             .when(!kept_rows.is_empty(), |d| d.child(ui::sidebar_heading("In this commit", &theme)))
             .child(div().px(px(6.)).flex().flex_col().children(kept_rows))
+            .children(kept_more)
             .when(!out_rows.is_empty(), |d| d.child(ui::sidebar_heading("Left out", &theme)))
             .child(div().px(px(6.)).flex().flex_col().children(out_rows))
+            .children(out_more)
             .into_any_element()
     }
 }

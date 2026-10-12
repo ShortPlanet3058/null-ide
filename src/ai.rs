@@ -436,6 +436,15 @@ pub enum AiEvent {
     Failed(String),
 }
 
+/// Where API keys are kept, as this platform calls it ("in the keychain").
+pub const KEY_STORE: &str = if cfg!(target_os = "macos") {
+    "the keychain"
+} else if cfg!(target_os = "windows") {
+    "Windows Credential Manager"
+} else {
+    "the system keyring"
+};
+
 /// Requests asked for (⌘I, a question, a commit message) still on their way…
 static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// …and when one last failed.

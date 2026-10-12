@@ -374,6 +374,8 @@ pub struct Palette {
     files_loaded: bool,
     recent_files: Vec<FileEntry>,
     recent_commands: Vec<&'static str>,
+    /// Whether AI can answer: its switch is listed only then (nothing AI while it's off).
+    ai_ready: bool,
     line_count: Option<usize>,
     terminal_open: bool,
     prose_here: bool,
@@ -460,6 +462,7 @@ impl Palette {
             files: listed.unwrap_or_default(),
             recent_files,
             recent_commands: options.recent_commands,
+            ai_ready: cx.global::<crate::settings::Settings>().ai.ready(),
             line_count: options.line_count,
             terminal_open: options.terminal_open,
             prose_here: options.prose_here,
@@ -712,8 +715,10 @@ impl Palette {
     }
 
     fn quick_rows(&mut self, query: &str) {
+        let ai_ready = self.ai_ready;
+        let listed = move |q: &Quick| *q != Quick::Ai || ai_ready;
         if query.is_empty() {
-            for quick in Quick::ALL {
+            for quick in Quick::ALL.into_iter().filter(listed) {
                 self.push(Item::Quick(quick), Vec::new(), false);
             }
             return;
@@ -721,12 +726,13 @@ impl Palette {
         // Quick settings and commands in one list, best match first.
         let mut found: Vec<(i32, Item, Vec<usize>)> = Quick::ALL
             .into_iter()
+            .filter(listed)
             .filter_map(|q| fuzzy::score(q.label(), query).map(|(s, h)| (s + 8, Item::Quick(q), h)))
             .collect();
         for (i, c) in self.commands.iter().enumerate() {
             // A command a quick setting stands in for: its own name finds that setting
             // ("toggle sidebar" finds Sidebar), shown once.
-            if let Some(quick) = quick_for(c.action.name()) {
+            if let Some(quick) = quick_for(c.action.name()).filter(listed) {
                 let also = || also_called(c.action.name()).and_then(|words| fuzzy::score(words, query));
                 if let Some((score, _)) = fuzzy::score(&c.label, query).or_else(also) {
                     match found.iter_mut().find(|(_, item, _)| *item == Item::Quick(quick)) {
@@ -1731,7 +1737,9 @@ mod tests {
     #[gpui::test]
     fn quick_settings_first_then_commands_when_typing(cx: &mut TestAppContext) {
         let p = palette(cx, PaletteKind::Quick);
-        assert_eq!(items(cx, &p).len(), Quick::ALL.len());
+        // (AI off by default: its switch isn't listed.)
+        assert_eq!(items(cx, &p).len(), Quick::ALL.len() - 1);
+        assert!(!items(cx, &p).contains(&"quick: AI".to_string()));
         type_query(cx, &p, "dup");
         assert_eq!(items(cx, &p), ["Duplicate Line"]);
         // Last, whatever's typed: looked for in Settings.

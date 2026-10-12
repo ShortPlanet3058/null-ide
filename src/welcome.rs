@@ -130,8 +130,8 @@ enum StepKind {
     Look,
     Type,
     Keys,
+    /// How present AI is, and (once it's on) where its answers come from.
     Presence,
-    Provider,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,13 +202,8 @@ impl Welcome {
         cx.notify();
     }
 
-    /// The steps as things stand: where answers come from only once AI is on.
-    fn steps(cx: &App) -> Vec<StepKind> {
-        let mut steps = vec![StepKind::Look, StepKind::Type, StepKind::Keys, StepKind::Presence];
-        if cx.global::<Settings>().ai.enabled {
-            steps.push(StepKind::Provider);
-        }
-        steps
+    fn steps(_: &App) -> Vec<StepKind> {
+        vec![StepKind::Look, StepKind::Type, StepKind::Keys, StepKind::Presence]
     }
 
     fn next(&mut self, _: &WelcomeNext, _: &mut Window, cx: &mut Context<Self>) {
@@ -477,9 +472,9 @@ impl Welcome {
             window.request_animation_frame();
         }
         let eased = 1. - (1. - t).powi(3);
-        let (title, sub, body): (&str, &str, AnyElement) =
-            match steps[n] {
-                StepKind::Look => (
+        let (title, sub, body): (&str, &str, AnyElement) = match steps[n] {
+            StepKind::Look => {
+                (
                     "Choose how Null looks",
                     "Switch any time from ⌘K or Settings.",
                     div()
@@ -506,62 +501,68 @@ impl Welcome {
                                 }))
                         }))
                         .into_any_element(),
-                ),
-                StepKind::Type => (
-                    "Pick a typeface you can read all day",
-                    "Each is monospaced, calm and made for code. The size changes with ⌘+ and ⌘- too.",
-                    self.type_step(&settings, &theme, cx),
-                ),
-                StepKind::Keys => (
-                    "Which shortcuts do your hands know?",
-                    "Null's own include the common VS Code ones. Change them any time in Settings.",
-                    div()
-                        .grid()
-                        .grid_cols(2)
-                        .gap(px(10.))
-                        .children(Keymap::ALL.into_iter().enumerate().map(|(i, k)| {
-                            Self::card(("keymap", i), k.label(), k.summary(), settings.keymap == k, &theme)
-                                .active(|s| s.opacity(0.7))
-                                .on_click(
-                                    cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.keymap = k)),
-                                )
-                        }))
-                        .into_any_element(),
-                ),
-                StepKind::Presence => {
-                    let now = match (settings.ai.enabled, settings.ai.completions) {
-                        (false, _) => Presence::Off,
-                        (true, false) => Presence::WhenAsked,
-                        (true, true) => Presence::WhileTyping,
-                    };
-                    // The keys that ask, as this keymap has them.
-                    let ask = ui::keys(&crate::editor::InlineAssist, "⌘I", cx);
-                    (
-                        "How present should AI be?",
-                        "It never opens a panel on its own, and never changes code without showing you the change.",
+                )
+            }
+            StepKind::Type => (
+                "Pick a typeface you can read all day",
+                "Each is monospaced, calm and made for code. The size changes with ⌘+ and ⌘- too.",
+                self.type_step(&settings, &theme, cx),
+            ),
+            StepKind::Keys => (
+                "Which shortcuts do your hands know?",
+                "Null's own include the common VS Code ones. Change them any time in Settings.",
+                div()
+                    .grid()
+                    .grid_cols(2)
+                    .gap(px(10.))
+                    .children(Keymap::ALL.into_iter().enumerate().map(|(i, k)| {
+                        Self::card(("keymap", i), k.label(), k.summary(), settings.keymap == k, &theme)
+                            .active(|s| s.opacity(0.7))
+                            .on_click(
+                                cx.listener(move |_, _: &ClickEvent, _, cx| settings::update(cx, |s| s.keymap = k)),
+                            )
+                    }))
+                    .into_any_element(),
+            ),
+            StepKind::Presence => {
+                let now = match (settings.ai.enabled, settings.ai.completions) {
+                    (false, _) => Presence::Off,
+                    (true, false) => Presence::WhenAsked,
+                    (true, true) => Presence::WhileTyping,
+                };
+                // The keys that ask, as this keymap has them.
+                let ask = ui::keys(&crate::editor::InlineAssist, "⌘I", cx);
+                let choices = div().grid().grid_cols(3).gap(px(10.)).children(PRESENCE.into_iter().enumerate().map(
+                    |(i, (choice, title, line))| {
+                        Self::card(("presence", i), title, &line.replace("⌘I", &ask), now == choice, &theme)
+                            .active(|s| s.opacity(0.7))
+                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                settings::update(cx, |s| {
+                                    s.ai.enabled = choice != Presence::Off;
+                                    s.ai.completions = choice == Presence::WhileTyping;
+                                })
+                            }))
+                    },
+                ));
+                // Where answers come from: asked only once AI is wanted.
+                let providers = (now != Presence::Off).then(|| {
                         div()
+                            .pt(px(10.))
                             .flex()
                             .flex_col()
-                            .gap(px(10.))
-                            .children(PRESENCE.into_iter().enumerate().map(|(i, (choice, title, line))| {
-                                Self::card(("presence", i), title, &line.replace("⌘I", &ask), now == choice, &theme)
-                                    .active(|s| s.opacity(0.7))
-                                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                        settings::update(cx, |s| {
-                                            s.ai.enabled = choice != Presence::Off;
-                                            s.ai.completions = choice == Presence::WhileTyping;
-                                        })
-                                    }))
-                            }))
-                            .into_any_element(),
-                    )
-                }
-                StepKind::Provider => (
-                    "Where should answers come from?",
-                    "A plan you already have, an API key from any of these (free tiers included), or this computer.",
-                    self.provider_step(&settings, &theme, cx),
-                ),
-            };
+                            .gap(px(4.))
+                            .child(div().text_size(px(15.)).text_color(theme.muted).child(
+                                "Where answers come from: a plan you have, an API key (free tiers included), or this computer.",
+                            ))
+                            .child(self.provider_step(&settings, &theme, cx))
+                    });
+                (
+                    "How present should AI be?",
+                    "It never opens a panel on its own, and never changes code without showing you the change.",
+                    div().flex().flex_col().gap(px(14.)).child(choices).children(providers).into_any_element(),
+                )
+            }
+        };
         let last = n + 1 == steps.len();
         let dot = |i: usize| -> Hsla { if i == n { theme.caret } else { theme.line_strong } };
         let count = steps.len();
@@ -571,25 +572,36 @@ impl Welcome {
             .flex_col()
             .child(Self::top_bar(Some((n, count)), &theme))
             .child(
-                div().flex_1().min_h_0().flex().justify_center().items_center().px(px(28.)).child(
-                    div()
-                        .w(px(720.))
-                        .max_w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(14.))
-                        .opacity(0.3 + 0.7 * eased)
-                        .ml(px(14. * (1. - eased)))
-                        .child(
-                            div()
-                                .text_size(px(30.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.foreground)
-                                .child(title),
-                        )
-                        .child(div().pb(px(10.)).text_size(px(15.)).text_color(theme.muted).child(sub))
-                        .child(body),
-                ),
+                // (Scrolls when a step is taller than the window: AI's, with its providers.)
+                div()
+                    .id("welcome-step")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .justify_center()
+                    .px(px(28.))
+                    .child(
+                        div()
+                            .my_auto()
+                            .py(px(12.))
+                            .w(px(720.))
+                            .max_w_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(14.))
+                            .opacity(0.3 + 0.7 * eased)
+                            .ml(px(14. * (1. - eased)))
+                            .child(
+                                div()
+                                    .text_size(px(30.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.foreground)
+                                    .child(title),
+                            )
+                            .child(div().pb(px(10.)).text_size(px(15.)).text_color(theme.muted).child(sub))
+                            .child(body),
+                    ),
             )
             .child(
                 // Lined up with the step above: same width, same edges.
@@ -779,9 +791,9 @@ impl Welcome {
                             .child(div().w_full().overflow_hidden().child(self.key.clone())),
                     )
                     .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(if found {
-                        format!("A key is already set. {get}. Kept in the keychain, never in a file.")
+                        format!("A key is already set. {get}. Kept in {}, never in a file.", crate::ai::KEY_STORE)
                     } else {
-                        format!("{get}. Kept in the keychain, never in a file.")
+                        format!("{get}. Kept in {}, never in a file.", crate::ai::KEY_STORE)
                     }))
                     .into_any_element(),
             )

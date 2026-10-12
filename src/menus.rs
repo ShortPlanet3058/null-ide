@@ -42,13 +42,41 @@ pub fn bind_keys(cx: &mut App) {
     }
 }
 
+/// What the window in front shows, for toggles that depend on it (the file's wrapping, the
+/// window's terminal); unknown before a window says.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct InFront {
+    pub wrapping: Option<bool>,
+    pub terminal_open: Option<bool>,
+}
+
+impl gpui::Global for InFront {}
+
+/// The window in front says what it shows: the menus are set again when that changes.
+pub fn in_front(shown: InFront, cx: &mut App) {
+    if cx.try_global::<InFront>() != Some(&shown) {
+        cx.set_global(shown);
+        set(cx);
+    }
+}
+
 /// Installs the menu bar. Menu items can't show a checkmark yet, so toggles
 /// are labelled with what choosing them will do.
 pub fn set(cx: &mut App) {
     let settings = cx.global::<crate::settings::Settings>();
+    let shown = cx.try_global::<InFront>().copied().unwrap_or_default();
     let fade_label =
         if settings.fade_bars_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
-    let wrap_label = if settings.word_wrap { "Stop Wrapping Lines" } else { "Wrap Lines" };
+    let wrap_label = if shown.wrapping.unwrap_or_else(|| settings.word_wrap_for("Plain Text")) {
+        "Stop Wrapping Lines"
+    } else {
+        "Wrap Lines"
+    };
+    let terminal_label = match shown.terminal_open {
+        Some(true) => "Hide Terminal",
+        Some(false) => "Show Terminal",
+        None => "Show or Hide Terminal",
+    };
     let sidebar_label = if settings.sidebar_visible { "Hide Sidebar" } else { "Show Sidebar" };
     cx.set_menus(vec![
         Menu {
@@ -216,8 +244,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Focus Mode", crate::workspace::ToggleFocusMode),
                 MenuItem::action(sidebar_label, ToggleSidebar),
-                // (Each window has its own terminal, so this one can't say which it'll do.)
-                MenuItem::action("Show or Hide Terminal", ToggleTerminal),
+                MenuItem::action(terminal_label, ToggleTerminal),
                 MenuItem::action("Run Task…", crate::workspace::RunTask),
                 MenuItem::action("Run Test at Cursor", crate::workspace::RunTestAtCursor),
                 MenuItem::action("Run Tests in File", crate::workspace::RunTestsInFile),

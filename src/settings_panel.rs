@@ -950,7 +950,7 @@ impl SettingsPanel {
                             .hover(|d| d.text_color(theme.foreground).bg(ui::hover_on_raised(theme)))
                     })
                     .child(r.model)
-                    .child(div().text_color(theme.faint).child(r.note))
+                    .child(div().text_size(px(ui::T_XS)).text_color(theme.muted).child(r.note))
                     .active(|s| s.opacity(0.7))
                     .on_click(move |_, _, cx| input.update(cx, |input, cx| input.set_text(r.model, cx)))
             }))
@@ -1136,10 +1136,10 @@ impl SettingsPanel {
         if current.uses_api_key() {
             let get = current.key_url().map(|u| format!(" · get one at {u}")).unwrap_or_default();
             let (status, label) = match self.has_key {
-                Some(true) => (format!("Kept in the keychain{get}"), "Change…"),
+                Some(true) => (format!("Kept in {}{get}", crate::ai::KEY_STORE), "Change…"),
                 Some(false) => (format!("Not set yet{get}"), "Set API Key…"),
                 // Not read yet this session (reading it can ask for permission).
-                None => (format!("Kept in the keychain{get}"), "Set API Key…"),
+                None => (format!("Kept in {}{get}", crate::ai::KEY_STORE), "Set API Key…"),
             };
             rows.push(Self::row(
                 "API key",

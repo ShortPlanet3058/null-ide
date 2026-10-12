@@ -192,6 +192,7 @@ actions!(
         UseGemini,
         UseOpenRouter,
         TurnOffAi,
+        TurnOnAi,
         SetApiKey,
     ]
 );
@@ -915,6 +916,9 @@ pub struct Workspace {
     branch_task: Option<Task<()>>,
     /// When language support first became ready this session, to show a short tip once.
     ready_since: Option<Instant>,
+    /// Since when the language server has been starting or checking: said only once it's
+    /// taken a moment (a quick check isn't worth a word flickering by).
+    busy_since: Option<Instant>,
     /// Where focus goes back to when the palette closes.
     focus_before_palette: Option<FocusHandle>,
     _subscriptions: Vec<Subscription>,
@@ -1091,6 +1095,7 @@ impl Workspace {
             settings_panel: None,
             welcome: None,
             ready_since: None,
+            busy_since: None,
             branch: None,
             sync: None,
             branch_task: None,
@@ -4817,6 +4822,10 @@ impl Workspace {
             ]);
         }
         // With AI switched off, nothing about it shows up.
+        // AI off: one way back in (⌘K's switch for it shows only while it's on).
+        if !settings.ai.ready() {
+            commands.push((Ai, "Turn On AI…".into(), Box::new(TurnOnAi)));
+        }
         // With it on but no provider yet: only where answers can come from.
         if settings.ai.enabled {
             commands.extend([
@@ -5173,6 +5182,16 @@ impl Workspace {
             let keys = crate::palette::shortcut(&OpenSettings, cx).map(|k| format!(" ({k})")).unwrap_or_default();
             self.show_notice(format!("AI is on. Choose where answers come from in Settings → AI{keys}."), cx);
         }
+    }
+
+    /// ⌘K's way in while AI is off (its switch hidden then): on, and with no provider yet,
+    /// Settings → AI to choose one.
+    fn turn_on_ai(&mut self, _: &TurnOnAi, window: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.ai.enabled = true);
+        if cx.global::<Settings>().ai.provider == ProviderId::Off {
+            return self.open_settings_at(Some(Section::Ai), window, cx);
+        }
+        self.show_notice("AI is on.".into(), cx);
     }
 
     fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
@@ -8889,18 +8908,40 @@ impl Workspace {
 
     fn language_status(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         const TIP_FOR: Duration = Duration::from_secs(8);
-        let editor = self.active_editor()?.read(cx);
-        let readiness = editor.readiness(cx)?;
+        const BUSY_AFTER: Duration = Duration::from_millis(1200);
+        // (No server here: whatever was busy before isn't timed on.)
+        let Some(readiness) = self.active_editor().and_then(|e| e.read(cx).readiness(cx)) else {
+            self.busy_since = None;
+            return None;
+        };
+        let busy = matches!(readiness, Readiness::Starting | Readiness::Ready { checking: true });
+        let busy_long = match (busy, self.busy_since) {
+            (false, _) => {
+                self.busy_since = None;
+                false
+            }
+            (true, Some(since)) => since.elapsed() >= BUSY_AFTER,
+            (true, None) => {
+                self.busy_since = Some(Instant::now());
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(BUSY_AFTER).await;
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+                false
+            }
+        };
         let theme = cx.global::<Theme>();
         let dot = |color| div().size(px(6.)).rounded_full().bg(color);
         let item = |color, text: String| {
             div().flex().items_center().gap(px(6.)).whitespace_nowrap().child(dot(color)).child(text).into_any_element()
         };
         match readiness {
-            Readiness::Starting => Some(item(theme.caret, "Starting…".into())),
+            // (Work in progress: a quiet dot, the accent kept for the cursor and main actions.)
+            Readiness::Starting => busy_long.then(|| item(theme.muted, "Starting…".into())),
             Readiness::Indexing { percent } => {
                 let percent = percent.map(|p| format!(" {p}%")).unwrap_or_default();
-                Some(item(theme.caret, format!("Indexing{percent}")))
+                Some(item(theme.muted, format!("Indexing{percent}")))
             }
             // One quiet line: what's missing, and a word to fix it.
             Readiness::Missing { server } | Readiness::InstallFailed { server } => {
@@ -8925,7 +8966,7 @@ impl Workspace {
                         .into_any_element(),
                 )
             }
-            Readiness::Installing { server } => Some(item(theme.caret, format!("Installing {}…", server.name))),
+            Readiness::Installing { server } => Some(item(theme.muted, format!("Installing {}…", server.name))),
             Readiness::Unavailable { program } => {
                 Some(div().text_color(theme.faint).child(format!("{program} didn't start")).into_any_element())
             }
@@ -8949,7 +8990,7 @@ impl Workspace {
                         div().text_color(theme.muted).whitespace_nowrap().child(spaced(tip)).into_any_element(),
                     );
                 }
-                checking.then(|| div().text_color(theme.faint).child("Checking…").into_any_element())
+                (checking && busy_long).then(|| div().text_color(theme.muted).child("Checking…").into_any_element())
             }
         }
     }
@@ -9846,6 +9887,18 @@ impl Render for Workspace {
             .then(|| crate::trace::step(|| "window first laid out".into()))
             .flatten();
         ui::apply_zoom(window, cx);
+        // The menu bar's toggles say what they'll do in the window in front.
+        if window.is_window_active() {
+            let settings = cx.global::<Settings>();
+            let wrapping = self.active_editor().map(|e| {
+                let e = e.read(cx);
+                if e.is_prose() { settings.wrap_prose } else { settings.word_wrap_for(e.language_name()) }
+            });
+            // (Focus mode hides the terminal: the menu would show it.)
+            let terminal_open = self.terminal_open.on && !self.focus_mode;
+            let shown = menus::InFront { wrapping, terminal_open: Some(terminal_open) };
+            menus::in_front(shown, cx);
+        }
         self.show_test_marks(cx);
         // The files open in tabs, for a search of those only.
         let open: Vec<PathBuf> =
@@ -10276,7 +10329,10 @@ impl Render for Workspace {
             .opacity(opacity)
             .children(self.branch.clone().map(|branch| {
                 // The branch (a click switches it), and how many files changed (a click lists them).
-                let changed = self.git_status.len();
+                // (With the sidebar out, its Git tab says how many already: said once.)
+                // (With conflicts the tab counts only those: the total stays here.)
+                let conflicts = self.git_status.iter().any(|(_, s)| *s == git::FileStatus::Conflicted);
+                let changed = if self.sidebar.on && !conflicts { 0 } else { self.git_status.len() };
                 div()
                     .flex()
                     .flex_none()
@@ -10870,6 +10926,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::use_gemini))
             .on_action(cx.listener(Self::use_open_router))
             .on_action(cx.listener(Self::turn_off_ai))
+            .on_action(cx.listener(Self::turn_on_ai))
             .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
