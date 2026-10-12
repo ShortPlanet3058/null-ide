@@ -210,6 +210,8 @@ pub struct GitView {
     pub draft_generation: u64,
     reading: Option<Task<()>>,
     pub tab: Tab,
+    /// Whether a remote is on GitHub (its tab shows only then).
+    on_github: bool,
     pub history: Vec<git::LogCommit>,
     graph: Vec<GraphRow>,
     /// Where the branches, tags and HEAD were when the history was read.
@@ -247,6 +249,7 @@ impl Focusable for GitView {
 /// What a changed file's parts say, read off the main thread.
 struct Read {
     repository: bool,
+    on_github: bool,
     branch: Option<String>,
     ahead_behind: Option<(usize, usize)>,
     files: Vec<ChangedFile>,
@@ -274,7 +277,7 @@ fn parts_of(base: &str, current: &str) -> Vec<Part> {
 fn read(root: &Path) -> Read {
     let branch = git::current_branch(root);
     if branch.is_none() {
-        return Read { repository: false, branch: None, ahead_behind: None, files: Vec::new() };
+        return Read { repository: false, on_github: false, branch: None, ahead_behind: None, files: Vec::new() };
     }
     let files = git::status(root)
         .into_iter()
@@ -288,7 +291,13 @@ fn read(root: &Path) -> Read {
             ChangedFile { path, status, added, removed, kept: true, parts, unfolded: false }
         })
         .collect();
-    Read { repository: true, branch, ahead_behind: git::ahead_behind(root), files }
+    Read {
+        repository: true,
+        on_github: git::remote_on_github(root),
+        branch,
+        ahead_behind: git::ahead_behind(root),
+        files,
+    }
 }
 
 impl GitView {
@@ -323,6 +332,7 @@ impl GitView {
             draft_generation: 0,
             reading: None,
             tab: Tab::Changes,
+            on_github: false,
             history: Vec::new(),
             graph: Vec::new(),
             history_refs: String::new(),
@@ -449,6 +459,7 @@ impl GitView {
                     }
                 }
                 this.repository = Some(read.repository);
+                this.on_github = read.on_github;
                 this.branch = read.branch;
                 this.ahead_behind = read.ahead_behind;
                 cx.notify();
@@ -553,6 +564,11 @@ impl GitView {
             .ok();
         })
         .detach();
+    }
+
+    #[cfg(test)]
+    pub fn toggle_file_for_test(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.toggle_file(ix, cx);
     }
 
     fn toggle_file(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -783,7 +799,9 @@ impl GitView {
             .child(tab("git-tab-changes", "Changes", Tab::Changes, cx))
             .child(tab("git-tab-history", "History", Tab::History, cx))
             .child(tab("git-tab-branches", "Branches", Tab::Branches, cx))
-            .child(tab("git-tab-github", "GitHub", Tab::GitHub, cx))
+            .when(self.on_github || self.tab == Tab::GitHub, |d| {
+                d.child(tab("git-tab-github", "GitHub", Tab::GitHub, cx))
+            })
             .into_any_element()
     }
 

@@ -433,15 +433,38 @@ pub enum AiEvent {
 
 /// Runs [`ask`] on its own thread and streams what happens. Dropping the receiver
 /// stops listening; the request itself finishes in the background.
+/// Requests asked for (⌘I, a question, a commit message) still on their way…
+static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// …and when one last failed.
+static FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Whether AI is answering something asked of it (not a suggestion while typing): what its
+/// dot in the status bar shows.
+pub fn working() -> bool {
+    WORKING.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+/// Whether a request failed in the last few seconds.
+pub fn failed_lately() -> bool {
+    FAILED_AT.lock().ok().and_then(|at| *at).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(8))
+}
+
 pub fn stream(settings: AiSettings, prompt: Prompt) -> futures::channel::mpsc::UnboundedReceiver<AiEvent> {
     let (tx, rx) = futures::channel::mpsc::unbounded();
     std::thread::Builder::new()
         .name("ai-request".into())
         .spawn(move || {
+            WORKING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let text_tx = tx.clone();
             let result = ask(&settings, &prompt, &mut |text| {
                 text_tx.unbounded_send(AiEvent::Text(text.to_string())).ok();
             });
+            WORKING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            if result.is_err()
+                && let Ok(mut at) = FAILED_AT.lock()
+            {
+                *at = Some(std::time::Instant::now());
+            }
             tx.unbounded_send(match result {
                 Ok(()) => AiEvent::Done,
                 Err(message) => AiEvent::Failed(message),

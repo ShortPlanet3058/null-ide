@@ -789,8 +789,16 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Spelling",
-                Some("Marks misspelled words in Markdown, text and comments; ⌘. on one offers corrections"),
+                Some("Marks misspelled words in Markdown and text; ⌘. on one offers corrections"),
                 Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),
+                &theme,
+            ),
+            Self::row(
+                "Spelling in comments",
+                Some("Code's comments are checked too"),
+                Self::toggle("spell-check-comments", s.spell_check_comments, &theme, cx, |s| {
+                    s.spell_check_comments = !s.spell_check_comments
+                }),
                 &theme,
             ),
             Self::row(
@@ -921,6 +929,12 @@ impl SettingsPanel {
                 "Type hints",
                 Some("Types and parameter names inside the code, faintly, from the language server"),
                 Self::toggle("inlay-hints", s.inlay_hints, &theme, cx, |s| s.inlay_hints = !s.inlay_hints),
+                &theme,
+            ),
+            Self::row(
+                "References and run links",
+                Some("At the end of the cursor's line: how often a name is used, ▶ to run a test"),
+                Self::toggle("code-lens", s.code_lens, &theme, cx, |s| s.code_lens = !s.code_lens),
                 &theme,
             ),
         ]

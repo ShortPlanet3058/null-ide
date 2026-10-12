@@ -6545,7 +6545,7 @@ mod tests {
     #[gpui::test]
     fn misspelled_words_are_marked_and_corrected(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            cx.set_global(Settings::default());
+            cx.set_global(Settings { spell_check_comments: true, ..Default::default() });
             cx.set_global(Theme::oled());
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
             crate::keymap::register(crate::keymap::Keymap::Null, cx);

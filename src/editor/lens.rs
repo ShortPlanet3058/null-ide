@@ -271,7 +271,7 @@ mod tests {
         use crate::buffer::Buffer;
         use gpui::AppContext as _;
         cx.update(|cx| {
-            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::settings::Settings { code_lens: true, ..Default::default() });
             cx.set_global(crate::theme::Theme::oled());
             cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });

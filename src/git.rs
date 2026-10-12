@@ -100,6 +100,7 @@ pub fn commit_all(root: &Path, message: &str) -> Result<String, String> {
 }
 
 /// Commits every change but those to `left_out`, which stay as they are, uncommitted.
+#[cfg(test)]
 pub fn commit(root: &Path, message: &str, left_out: &[PathBuf]) -> Result<String, String> {
     run(root, &["add", "-A", "--", "."])?;
     if !left_out.is_empty() {
@@ -492,6 +493,12 @@ pub fn push(root: &Path) -> Result<String, String> {
         run(root, &["push", "-q", "-u", "origin", &branch])?
     };
     Ok(branch)
+}
+
+/// Whether one of the repository's remotes is on GitHub (or GitHub Enterprise: a host
+/// with "github" in its name).
+pub fn remote_on_github(root: &Path) -> bool {
+    git(root, &["remote", "-v"]).is_some_and(|remotes| remotes.to_lowercase().contains("github"))
 }
 
 /// The branch checked out, if one is (not a commit looked at on no branch).
