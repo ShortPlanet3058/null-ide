@@ -255,8 +255,14 @@ impl Render for CommitPage {
                             .child(commit.subject.clone()),
                     )
                     .child(
-                        ui::icon_button("close-commit", "icons/x.svg", "Close (Esc)", &theme)
-                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CommitPageEvent::Close))),
+                        ui::icon_button_for(
+                            "close-commit",
+                            "icons/x.svg",
+                            "Close",
+                            Some(Box::new(CloseCommit)),
+                            &theme,
+                        )
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CommitPageEvent::Close))),
                     ),
             )
             .child(

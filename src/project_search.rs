@@ -527,8 +527,8 @@ impl ProjectSearch {
             .pr(px(6.))
             .whitespace_nowrap()
             .cursor_pointer()
-            .when(self.selected == Some(ix), |r| r.bg(theme.accent_soft))
-            .hover(|s| s.bg(ui::hover(theme)));
+            .when(self.selected == Some(ix), |r| r.bg(theme.hairline))
+            .when(self.selected != Some(ix), |r| r.hover(|s| s.bg(ui::hover(theme))));
         match self.rows[ix] {
             Row::File(f) => {
                 let group: SharedString = format!("file-{ix}").into();
@@ -644,7 +644,7 @@ impl ProjectSearch {
 
     /// The ✕ on a result row, shown while the row is hovered.
     fn dismiss_button(&self, id: (&'static str, usize), group: SharedString, cx: &App) -> gpui::Stateful<gpui::Div> {
-        ui::icon_button(id, "icons/x.svg", "Remove from Results", cx.global::<Theme>())
+        ui::icon_button(id, "icons/x.svg", "Remove from results", cx.global::<Theme>())
             .size(px(18.))
             .invisible()
             .group_hover(group, |s| s.visible())

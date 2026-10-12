@@ -459,8 +459,9 @@ impl Render for GitHubPage {
             .flex_col()
             .bg(theme.background)
             .text_size(px(ui::T_MD));
-        let close = ui::icon_button("close-github", "icons/x.svg", "Close (Esc)", &theme)
-            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(GitHubPageEvent::Close)));
+        let close =
+            ui::icon_button_for("close-github", "icons/x.svg", "Close", Some(Box::new(CloseGitHubPage)), &theme)
+                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(GitHubPageEvent::Close)));
         let Some(detail) = &self.detail else {
             let said = self.error.clone().unwrap_or_else(|| format!("Reading #{} from GitHub…", self.number));
             return page.child(
@@ -484,7 +485,7 @@ impl Render for GitHubPage {
                 meta.push(div().code_font(cx).child(format!("{} → {}", p.pull.head, p.pull.base)).into_any_element());
                 let (checks, colour) = match p.pull.checks {
                     Checks::Passed(n) => (format!("{n} checks passed"), theme.git_added),
-                    Checks::Running => ("checks running".to_string(), theme.caret),
+                    Checks::Running => ("Checks running".to_string(), theme.muted),
                     Checks::Failed(n) => (format!("{n} checks failed"), theme.git_deleted),
                     Checks::None => (String::new(), theme.muted),
                 };
@@ -580,11 +581,13 @@ impl Render for GitHubPage {
         };
         let state_word = match state.as_str() {
             "MERGED" => Some(("Merged", theme.ansi[13])),
-            "CLOSED" => Some(("Closed", theme.faint)),
+            "CLOSED" => Some(("Closed", theme.muted)),
             _ => None,
         };
         let open = state == "OPEN";
         let is_pull = !self.issue;
+        // A comment being written: Send is the main action then, not Merge.
+        let writing = !self.composer.read(cx).text().trim().is_empty();
         let header = div()
             .px(px(28.))
             .pt(px(18.))
@@ -611,7 +614,7 @@ impl Render for GitHubPage {
                             .child(title)
                             .child(
                                 div()
-                                    .text_color(theme.faint)
+                                    .text_color(theme.muted)
                                     .font_weight(gpui::FontWeight::NORMAL)
                                     .child(format!("#{}", self.number)),
                             ),
@@ -636,8 +639,12 @@ impl Render for GitHubPage {
                     .gap(px(8.))
                     .when(is_pull && open, |d| {
                         d.child(
-                            ui::primary_button("pull-merge", "Merge", true, &theme)
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.merge(window, cx))),
+                            if writing {
+                                ui::button("pull-merge", "Merge", &theme)
+                            } else {
+                                ui::primary_button("pull-merge", "Merge", true, &theme)
+                            }
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.merge(window, cx))),
                         )
                         .child(ui::button("pull-approve", "Approve", &theme).on_click(
                             cx.listener(|this, _: &ClickEvent, _, cx| {

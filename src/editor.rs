@@ -3561,7 +3561,7 @@ impl Editor {
                 .rounded(px(ui::R_ROW))
                 .cursor_pointer()
                 .when(selected, |row| row.bg(theme.accent_soft))
-                .when(!selected, |row| row.hover(|r| r.bg(ui::hover(theme))))
+                .when(!selected, |row| row.hover(|r| r.bg(ui::hover_on_raised(theme))))
                 .child(
                     div()
                         .w(px(DOT_COLUMN))

@@ -302,7 +302,7 @@ impl Welcome {
             .border_1()
             .cursor_pointer()
             .when(active, |d| d.border_color(theme.caret).bg(theme.accent_soft))
-            .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(theme.hairline)))
+            .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(ui::hover(theme))))
             .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(title.to_string()))
             .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(line.to_string()))
     }
@@ -534,6 +534,8 @@ impl Welcome {
                         (true, false) => Presence::WhenAsked,
                         (true, true) => Presence::WhileTyping,
                     };
+                    // The keys that ask, as this keymap has them.
+                    let ask = ui::keys(&crate::editor::InlineAssist, "⌘I", cx);
                     (
                         "How present should AI be?",
                         "It never opens a panel on its own, and never changes code without showing you the change.",
@@ -542,7 +544,7 @@ impl Welcome {
                             .flex_col()
                             .gap(px(10.))
                             .children(PRESENCE.into_iter().enumerate().map(|(i, (choice, title, line))| {
-                                Self::card(("presence", i), title, line, now == choice, &theme)
+                                Self::card(("presence", i), title, &line.replace("⌘I", &ask), now == choice, &theme)
                                     .active(|s| s.opacity(0.7))
                                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                                         settings::update(cx, |s| {
@@ -611,7 +613,7 @@ impl Welcome {
                             .text_size(px(ui::T_LG))
                             .text_color(theme.muted)
                             .cursor_pointer()
-                            .hover(|d| d.bg(theme.hairline).text_color(theme.foreground))
+                            .hover(|d| d.bg(ui::hover(&theme)).text_color(theme.foreground))
                             .child("Back")
                             .active(|s| s.opacity(0.7))
                             .on_click(
@@ -663,7 +665,7 @@ impl Welcome {
                 .border_color(theme.line_strong)
                 .text_color(theme.foreground)
                 .cursor_pointer()
-                .hover(|d| d.bg(theme.hairline))
+                .hover(|d| d.bg(ui::hover(theme)))
                 .child(label)
         };
         div()
@@ -685,7 +687,7 @@ impl Welcome {
                         .font_family(SharedString::from(family))
                         .cursor_pointer()
                         .when(active, |d| d.border_color(theme.caret).bg(theme.accent_soft))
-                        .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(theme.hairline)))
+                        .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(ui::hover(theme))))
                         .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(label))
                         .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child("{ 0O 1lI } => ;"))
                         .active(|s| s.opacity(0.7))
@@ -739,7 +741,7 @@ impl Welcome {
                             .border_1()
                             .cursor_pointer()
                             .when(active, |d| d.border_color(theme.caret).bg(theme.accent_soft))
-                            .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(theme.hairline)))
+                            .when(!active, |d| d.border_color(theme.line_strong).hover(|d| d.bg(ui::hover(theme))))
                             .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(id.label()))
                             .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(line))
                             .active(|s| s.opacity(0.7))

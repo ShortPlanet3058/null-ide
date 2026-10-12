@@ -229,11 +229,11 @@ numbers can show everywhere, only in code, or nowhere.
 
 ## Git
 
-- **⌃⇧G** lists what changed since the last commit; each file opens with its changes to
-  keep or take back one by one.
-- **Commit** lists the files under the message: ⇥ leaves one out; with AI on, ⌘I writes the
-  message from the changes. **Undo Last Commit** takes it back (not once pushed), its
-  message waiting for the next. **Set Changes Aside** and **Bring Back Changes** stash and
+- **⌃⇧G** opens the Git panel at what changed since the last commit; each file opens with
+  its changes to keep or discard one by one.
+- **Commit…** puts the keyboard in the panel's message: tick files (or parts of them) in or
+  out; with AI ready, **Draft** writes the message from the changes. **Undo Last Commit**
+  takes it back (not once pushed), its message back in the field for the next. **Set Changes Aside** and **Bring Back Changes** stash and
   return them. **Push**, **Pull** and **Fetch**;
   ↑ and ↓ beside the branch count what's to push and pull (as last fetched: Null never
   goes to the network on its own). Switch or start a branch from the status bar.

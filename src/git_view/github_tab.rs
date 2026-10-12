@@ -231,12 +231,14 @@ impl GitView {
     pub(super) fn render_github(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return ui::empty_state("This folder isn't a git repository.", &theme).into_any_element();
+            return ui::empty_state("This folder isn't a git repository", &theme).into_any_element();
         }
         let said = match &self.github.account {
             None => Some("Asking GitHub…".to_string()),
             Some(Account::Missing) => Some(github::MISSING.to_string()),
-            Some(Account::SignedOut) => Some("gh isn't signed in to GitHub: run gh auth login in the terminal.".into()),
+            Some(Account::SignedOut) => {
+                Some("gh isn't signed in to GitHub: run “gh auth login” in the terminal".into())
+            }
             Some(Account::Failed(error)) => Some(format!("Couldn't ask GitHub: {error}")),
             Some(Account::SignedIn(_)) => None,
         };
@@ -245,7 +247,8 @@ impl GitView {
             return div()
                 .flex()
                 .flex_col()
-                .child(ui::empty_state(said, &theme))
+                // (Said as a list says it has nothing: no full stop.)
+                .child(ui::empty_state(said.trim_end_matches('.').to_string(), &theme))
                 .when(retry, |d| {
                     d.child(
                         div().flex().px(px(ui::INSET)).pt(px(8.)).text_size(px(ui::T_SM)).child(
@@ -260,14 +263,12 @@ impl GitView {
             Some(Account::SignedIn(login)) => login.clone(),
             _ => String::new(),
         };
-        let link = |id: &'static str, label: String| {
-            div().id(id).flex_none().text_color(theme.caret).cursor_pointer().hover(|s| s.opacity(0.8)).child(label)
-        };
+        let link = |id: &'static str, label: String| ui::link(id, label, &theme);
 
         // The branch's pull request, or the way to make one.
         let branch = self.github.on_branch.clone();
         let mine: gpui::AnyElement = if branch.is_none() {
-            ui::empty_state("Not on a branch: switch to one to see its pull request.", &theme)
+            ui::empty_state("Not on a branch: switch to one to see its pull request", &theme)
                 .pt(px(4.))
                 .pb(px(8.))
                 .into_any_element()
@@ -388,11 +389,11 @@ impl GitView {
         }
         let empty = match (self.github.list, self.github.closed) {
             _ if self.github.reading => "Asking GitHub…",
-            (List::Pulls, false) => "No open pull requests.",
-            (List::Pulls, true) => "No closed pull requests.",
-            (List::Issues, false) => "No open issues.",
-            (List::Issues, true) => "No closed issues.",
-            (List::ForYou, _) => "Nothing asked of you.",
+            (List::Pulls, false) => "No open pull requests",
+            (List::Pulls, true) => "No closed pull requests",
+            (List::Issues, false) => "No open issues",
+            (List::Issues, true) => "No closed issues",
+            (List::ForYou, _) => "Nothing asked of you",
         };
 
         div()
@@ -591,7 +592,7 @@ fn row(dot: gpui::Hsla, title: String, number: u64, said: String, theme: &Theme)
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .child(div().flex_none().text_size(px(ui::T_XS)).text_color(theme.muted).child(format!("#{number}"))),
         )
-        .child(div().pl(px(15.)).truncate().text_size(px(ui::T_XS)).text_color(theme.faint).child(said))
+        .child(div().pl(px(15.)).truncate().text_size(px(ui::T_XS)).text_color(theme.muted).child(said))
 }
 
 use crate::fonts::CodeFont as _;

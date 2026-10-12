@@ -114,7 +114,7 @@ impl SwitchTrack for Div {
 
 /// A heading over a group of rows, in small capitals.
 pub fn section_heading(text: &str, theme: &Theme) -> Div {
-    div().text_size(px(T_XS)).font_weight(FontWeight::SEMIBOLD).text_color(theme.faint).child(text.to_uppercase())
+    div().text_size(px(T_XS)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).child(text.to_uppercase())
 }
 
 /// The keys that run `action` now (this keymap's, or the person's own), else `fallback`:
@@ -131,6 +131,16 @@ pub fn resolve_each(cx: &gpui::App) -> String {
 /// The colour under a row (or a quiet control) the mouse is over.
 pub fn hover(theme: &Theme) -> gpui::Hsla {
     theme.hairline.opacity(0.6)
+}
+
+/// [`hover`] on a raised surface (a menu, a popover, Settings), where hairline barely shows.
+pub fn hover_on_raised(theme: &Theme) -> gpui::Hsla {
+    theme.line_strong.opacity(0.6)
+}
+
+/// The colour under the row picked in a list on a raised surface.
+pub fn picked_on_raised(theme: &Theme) -> gpui::Hsla {
+    theme.line_strong
 }
 
 /// Where content starts in the sidebar, from its edge.
@@ -152,7 +162,8 @@ pub fn button(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, th
         .text_size(px(T_SM))
         .text_color(theme.foreground)
         .cursor_pointer()
-        .hover(|d| d.bg(hover(theme)))
+        // (Strong enough to show on raised surfaces too, where buttons often sit.)
+        .hover(|d| d.bg(hover_on_raised(theme)))
         .active(|d| d.opacity(0.7))
         .child(label.into())
 }
@@ -183,7 +194,7 @@ pub fn primary_button(
             .hover(|d| d.opacity(0.9))
             .active(|d| d.opacity(0.7))
     } else {
-        button.bg(theme.hairline).text_color(theme.faint)
+        button.border_1().border_color(theme.line_strong).text_color(theme.muted)
     }
 }
 
@@ -207,6 +218,17 @@ pub fn icon_button(
     tip_label: &'static str,
     theme: &Theme,
 ) -> gpui::Stateful<Div> {
+    icon_button_for(id, icon, tip_label, None, theme)
+}
+
+/// [`icon_button`] whose tip also names the keys of `action`, the one it runs.
+pub fn icon_button_for(
+    id: impl Into<gpui::ElementId>,
+    icon: &'static str,
+    tip_label: &'static str,
+    action: Option<Box<dyn gpui::Action>>,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
     use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
     div()
         .id(id)
@@ -219,7 +241,7 @@ pub fn icon_button(
         .cursor_pointer()
         .hover(|d| d.bg(hover(theme)))
         .active(|d| d.opacity(0.7))
-        .tooltip(tip(tip_label, None))
+        .tooltip(tip(tip_label, action))
         .child(gpui::svg().path(icon).size(px(12.)).text_color(theme.muted))
 }
 
@@ -247,16 +269,18 @@ pub fn empty_state(text: impl Into<SharedString>, theme: &Theme) -> Div {
     div().px(px(INSET)).pt(px(12.)).text_size(px(T_SM)).text_color(theme.muted).child(text.into())
 }
 
-/// A raised card (a branch, a pull request) on the sidebar or a page.
+/// A raised card (a branch, a pull request) on the sidebar or a page, framed so it shows on
+/// light themes too.
 pub fn card(theme: &Theme) -> Div {
-    div().rounded(px(R_ROW_LG)).bg(theme.raised)
+    div().rounded(px(R_ROW_LG)).bg(theme.raised).border_1().border_color(theme.hairline)
 }
 
 /// A box ticked, half-ticked (`partly`: some of it), or empty.
 pub fn checkbox(on: bool, partly: bool, theme: &Theme) -> Div {
     let box_ = div().flex_none().size(px(14.)).rounded(px(R_KEY)).flex().items_center().justify_center();
     if on {
-        box_.bg(theme.caret).text_color(theme.on_accent).text_size(px(10.)).child(if partly { "–" } else { "✓" })
+        // (Not in the accent: a column of them would light up the whole list.)
+        box_.bg(theme.muted).text_color(theme.background).text_size(px(10.)).child(if partly { "–" } else { "✓" })
     } else {
         box_.border_1().border_color(theme.line_strong)
     }
@@ -264,7 +288,15 @@ pub fn checkbox(on: bool, partly: bool, theme: &Theme) -> Div {
 
 /// The track of a segmented choice (theme, sidebar view…); pieces go inside it.
 pub fn segmented(theme: &Theme) -> Div {
-    div().flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(R_CONTROL)).bg(theme.sunken)
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .p(px(2.))
+        .rounded(px(R_CONTROL))
+        .bg(theme.sunken)
+        .border_1()
+        .border_color(theme.hairline)
 }
 
 /// One piece of a segmented choice.

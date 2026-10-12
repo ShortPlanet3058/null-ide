@@ -163,13 +163,13 @@ impl GitView {
         .detach();
     }
 
-    /// Throws away changes set aside, asked first.
+    /// Discards changes set aside, asked first.
     fn drop_set_aside(&mut self, set: git::SetAside, window: &mut Window, cx: &mut Context<Self>) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Throw away “{}”?", set.message),
+            &format!("Discard “{}”?", set.message),
             Some("These changes can't be brought back afterwards."),
-            &["Throw Away", "Cancel"],
+            &["Discard", "Cancel"],
             cx,
         );
         let root = self.root.clone();
@@ -193,7 +193,7 @@ impl GitView {
     pub(super) fn render_branches(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return ui::empty_state("This folder isn't a git repository.", &theme).into_any_element();
+            return ui::empty_state("This folder isn't a git repository", &theme).into_any_element();
         }
         let heading = |text: &str| ui::sidebar_heading(text, &theme);
         // An action under the branch picked: a word to click.
@@ -385,7 +385,7 @@ impl GitView {
                 .py(px(4.))
                 .text_size(px(ui::T_SM))
                 .child(div().flex_1().min_w_0().flex().flex_col().child(div().truncate().child(message)).child(
-                    div().truncate().text_size(px(ui::T_XS)).text_color(theme.faint).child(format!(
+                    div().truncate().text_size(px(ui::T_XS)).text_color(theme.muted).child(format!(
                         "on {} · {}",
                         set.branch,
                         git::ago(set.time, now)
@@ -394,7 +394,7 @@ impl GitView {
                 .child(link(format!("bring-back-{index}"), "Bring Back").on_click(
                     cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::BringBack(brought.clone()))),
                 ))
-                .child(ui::icon_button(("drop-set-aside", index), "icons/x.svg", "Throw Away", &theme).on_click(
+                .child(ui::icon_button(("drop-set-aside", index), "icons/x.svg", "Discard", &theme).on_click(
                     cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.drop_set_aside(dropped.clone(), window, cx)
                     }),
@@ -432,13 +432,14 @@ impl GitView {
             .child(
                 div().flex().items_center().pr(px(16.)).child(div().flex_1().child(heading("Set aside"))).child(
                     div().pt(px(10.)).text_size(px(ui::T_SM)).child(
-                        link("set-aside-now".into(), "Set Aside Changes")
+                        link("set-aside-now".into(), "Set Changes Aside")
                             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::SetAside))),
                     ),
                 ),
             )
             .when(self.branches.set_aside.is_empty(), |d| {
-                d.child(ui::empty_state("Nothing set aside.", &theme).pt(px(0.)))
+                // In line with the rows' text.
+                d.child(ui::empty_state("Nothing set aside", &theme).pt(px(0.)).pl(px(31.)))
             })
             .child(div().px(px(6.)).flex().flex_col().children(set_rows))
             .into_any_element()

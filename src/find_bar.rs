@@ -338,7 +338,7 @@ impl FindBar {
             .rounded(px(ui::R_ROW))
             .cursor_pointer()
             .group(id)
-            .hover(|s| s.bg(ui::hover(theme)))
+            .hover(|s| s.bg(ui::hover_on_raised(theme)))
             // An icon takes its own colour (it doesn't inherit the text's).
             .child(
                 svg()
@@ -394,7 +394,7 @@ impl FindBar {
             .text_size(px(ui::T_SM))
             .text_color(if on { theme.caret } else { theme.muted })
             .when(on, |b| b.bg(theme.accent_soft))
-            .when(!on, |b| b.hover(|s| s.bg(ui::hover(theme)).text_color(theme.foreground)))
+            .when(!on, |b| b.hover(|s| s.bg(ui::hover_on_raised(theme)).text_color(theme.foreground)))
             .child(label)
             .tooltip({
                 let (label, action) = Self::tooltip_for(id);
@@ -563,7 +563,7 @@ impl Render for FindBar {
                 .rounded(px(ui::R_ROW))
                 .text_size(px(ui::T_SM))
                 .text_color(theme.muted)
-                .hover(|s| s.bg(ui::hover(&theme)).text_color(theme.foreground))
+                .hover(|s| s.bg(ui::hover_on_raised(&theme)).text_color(theme.foreground))
                 .child(label)
         };
         let replace_row = div()

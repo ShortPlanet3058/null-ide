@@ -49,6 +49,7 @@ pub fn set(cx: &mut App) {
     let fade_label =
         if settings.fade_bars_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
     let wrap_label = if settings.word_wrap { "Stop Wrapping Lines" } else { "Wrap Lines" };
+    let sidebar_label = if settings.sidebar_visible { "Hide Sidebar" } else { "Show Sidebar" };
     cx.set_menus(vec![
         Menu {
             name: "Null".into(),
@@ -214,8 +215,9 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Markdown Preview to the Side", crate::workspace::OpenPreviewToTheSide),
                 MenuItem::separator(),
                 MenuItem::action("Focus Mode", crate::workspace::ToggleFocusMode),
-                MenuItem::action("Toggle Sidebar", ToggleSidebar),
-                MenuItem::action("Toggle Terminal", ToggleTerminal),
+                MenuItem::action(sidebar_label, ToggleSidebar),
+                // (Each window has its own terminal, so this one can't say which it'll do.)
+                MenuItem::action("Show or Hide Terminal", ToggleTerminal),
                 MenuItem::action("Run Task…", crate::workspace::RunTask),
                 MenuItem::action("Run Test at Cursor", crate::workspace::RunTestAtCursor),
                 MenuItem::action("Run Tests in File", crate::workspace::RunTestsInFile),

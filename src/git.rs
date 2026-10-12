@@ -495,10 +495,46 @@ pub fn push(root: &Path) -> Result<String, String> {
     Ok(branch)
 }
 
-/// Whether one of the repository's remotes is on GitHub (or GitHub Enterprise: a host
-/// with "github" in its name).
+/// Whether one of the repository's remotes is on GitHub: a host with "github" in its name
+/// (an SSH alias for it too, usually), or one `gh` is signed in to (GitHub Enterprise).
 pub fn remote_on_github(root: &Path) -> bool {
-    git(root, &["remote", "-v"]).is_some_and(|remotes| remotes.to_lowercase().contains("github"))
+    let Some(remotes) = git(root, &["remote", "-v"]) else { return false };
+    let remotes = remotes.to_lowercase();
+    if remotes.contains("github") {
+        return true;
+    }
+    let known = gh_hosts();
+    remotes
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter_map(remote_host)
+        .any(|host| known.iter().any(|k| k == host))
+}
+
+/// The host in a remote's address: `https://host/…`, `ssh://user@host:port/…` or `user@host:…`.
+fn remote_host(url: &str) -> Option<&str> {
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest.split('/').next()?,
+        None => url.split_once(':')?.0,
+    };
+    let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    let host = host.split(':').next()?;
+    (!host.is_empty()).then_some(host)
+}
+
+/// The hosts `gh` is signed in to, from its hosts.yml (its top-level keys).
+fn gh_hosts() -> Vec<String> {
+    let dir = std::env::var_os("GH_CONFIG_DIR").map(PathBuf::from).or_else(|| {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(|d| PathBuf::from(d).join("gh"))
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/gh")))
+    });
+    let Some(text) = dir.and_then(|d| std::fs::read_to_string(d.join("hosts.yml")).ok()) else { return Vec::new() };
+    text.lines()
+        .filter(|line| !line.starts_with([' ', '\t', '#']))
+        .filter_map(|line| line.trim_end().strip_suffix(':'))
+        .map(|host| host.trim_matches(['"', '\'']).to_lowercase())
+        .collect()
 }
 
 /// The branch checked out, if one is (not a commit looked at on no branch).
@@ -2054,5 +2090,13 @@ mod tests {
         assert!(committed_text(&readme, Default::default()).is_some_and(|t| t.contains("Null")));
         assert!(current_branch(readme.parent().unwrap()).is_some());
         assert!(committed_text(&readme.with_file_name("does-not-exist.txt"), Default::default()).is_none());
+    }
+
+    #[test]
+    fn a_remotes_host_is_read_from_each_kind_of_address() {
+        assert_eq!(remote_host("https://github.example.com/team/app.git"), Some("github.example.com"));
+        assert_eq!(remote_host("ssh://git@git.corp.example:2222/team/app.git"), Some("git.corp.example"));
+        assert_eq!(remote_host("git@git.corp.example:team/app.git"), Some("git.corp.example"));
+        assert_eq!(remote_host("/Users/me/elsewhere.git"), None);
     }
 }

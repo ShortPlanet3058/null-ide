@@ -548,7 +548,7 @@ impl Editor {
                 if another {
                     chat.temperature = Some(0.8);
                 }
-                ai::stream(settings.clone(), chat)
+                ai::stream_quietly(settings.clone(), chat)
             };
             let mut answer = String::new();
             while let Some(event) = events.next().await {

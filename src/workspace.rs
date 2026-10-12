@@ -368,8 +368,6 @@ struct TextMenu {
     clicked: Option<(Entity<Editor>, usize)>,
 }
 
-/// What a terminal's menu offers: copying what's selected, pasting, clearing; another
-/// terminal beside it or a new one.
 /// Whether Null is in its first few launches (counted once a launch, in its own data
 /// folder): the status bar's tips show only then.
 fn early_launch() -> bool {
@@ -399,6 +397,8 @@ fn joining_name(kind: git::Joining) -> &'static str {
     }
 }
 
+/// What a terminal's menu offers: copying what's selected, pasting, clearing; another
+/// terminal beside it or a new one.
 fn terminal_menu_items(selected: bool) -> Vec<TextMenuItem> {
     let item = |label, action: Box<dyn Action>, group| TextMenuItem { label, action, group, at_click: false };
     let mut items = Vec::new();
@@ -780,8 +780,8 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
-    /// The message of a commit taken back, waiting in Commit's field for the next one.
-    commit_draft: Option<String>,
+    /// While AI's dot shows: a redraw soon, so it goes when AI's done (or its failure's old).
+    ai_dot_watch: Option<Task<()>>,
     settings_panel: Option<(Entity<SettingsPanel>, Subscription)>,
     /// The first-launch screen, until it's been seen.
     welcome: Option<(Entity<Welcome>, Subscription)>,
@@ -1087,7 +1087,7 @@ impl Workspace {
             chrome: Transition::new(true),
             last_mouse: None,
             palette: None,
-            commit_draft: None,
+            ai_dot_watch: None,
             settings_panel: None,
             welcome: None,
             ready_since: None,
@@ -1645,6 +1645,18 @@ impl Workspace {
         self.show_changes(&ShowChanges, window, cx);
     }
 
+    /// The Git sidebar tab clicked: the Git view as it was left (its tab kept).
+    fn show_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_git = true;
+        self.sidebar_outline = false;
+        self.sidebar_tests = false;
+        self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
+        settings::update(cx, |s| s.sidebar_visible = true);
+        self.leave_hidden_focus(window, cx);
+        self.git_view.update(cx, |view, cx| view.refresh(cx));
+        cx.notify();
+    }
+
     /// From the changes list: the file opens with its changes since the last commit, to
     /// keep or revert one by one. A deleted file is restored.
     fn review_git_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -1652,7 +1664,7 @@ impl Workspace {
         if status == git::FileStatus::Deleted {
             let root = self.tree.read(cx).root().to_path_buf();
             let message = match git::revert(&root, path, status) {
-                Ok(()) => format!("Restored {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                Ok(()) => format!("Restored {}.", path.file_name().unwrap_or_default().to_string_lossy()),
                 Err(error) => format!("Couldn't restore it: {error}"),
             };
             self.show_notice(message, cx);
@@ -1668,19 +1680,17 @@ impl Workspace {
         true
     }
 
-    /// The Git view with the keyboard in its message (and the message an undone commit
-    /// left waiting, if any).
+    /// The Git view's changes with the keyboard in their message (once it shows: with
+    /// nothing changed there's no message to write).
     fn commit_all(&mut self, _: &CommitAll, window: &mut Window, cx: &mut Context<Self>) {
+        if self.branch.is_none() {
+            return self.show_notice("This folder isn't a git repository.".into(), cx);
+        }
         self.show_changes(&ShowChanges, window, cx);
-        let draft = self.commit_draft.take();
-        self.git_view.update(cx, |view, cx| {
-            if let Some(draft) = &draft {
-                view.set_message(draft, cx);
-            }
-            view.tab = crate::git_view::Tab::Changes;
-        });
-        let summary = self.git_view.read(cx).summary.clone();
-        window.focus(&summary.focus_handle(cx));
+        if self.git_status.is_empty() {
+            return self.show_notice("Nothing to commit.".into(), cx);
+        }
+        self.git_view.update(cx, |view, cx| view.focus_message_when_shown(cx));
     }
 
     /// Takes the last commit back (not one already pushed): its changes stay, and its
@@ -1696,7 +1706,7 @@ impl Workspace {
                 match result {
                     Ok(message) => {
                         let subject = message.lines().next().unwrap_or_default().to_string();
-                        this.commit_draft = Some(message);
+                        this.git_view.update(cx, |view, cx| view.set_message(&message, cx));
                         this.show_notice(
                             format!("Undid “{subject}”: its changes are back, ready for the next commit."),
                             cx,
@@ -2276,7 +2286,7 @@ impl Workspace {
         let e = editor.read(cx);
         let Some(path) = e.path().map(Path::to_path_buf) else { return };
         if !self.lsp.read(cx).serves(&path) {
-            return self.show_notice("No language server for this file: nothing to organize imports with.".into(), cx);
+            return self.show_notice("No language server for this file: nothing to organise imports with.".into(), cx);
         }
         let last = e.buffer.len_lines().saturating_sub(1);
         let end = lsp_types::Position::new(last as u32, e.buffer.line_text(last).encode_utf16().count() as u32);
@@ -2290,7 +2300,7 @@ impl Workspace {
                 let command = || this.lsp.read(cx).organize_command(&path).map(lsp_types::CodeActionOrCommand::Command);
                 match organize_action(actions).or_else(command) {
                     Some(action) => this.run_fix(path, action, cx),
-                    None => this.show_notice("The language server has no imports to organize here.".into(), cx),
+                    None => this.show_notice("The language server has no imports to organise here.".into(), cx),
                 }
             })
             .ok();
@@ -4265,15 +4275,19 @@ impl Workspace {
         let dirty: Vec<Entity<Editor>> =
             self.tabs.iter().map(|t| t.editor.clone()).filter(|e| e.read(cx).buffer.is_dirty()).collect();
         let count = dirty.len();
+        // (Untitled ones, and ones changed on disk, are asked about instead: not failures.)
         let unsaved: Vec<String> = dirty
             .into_iter()
-            .filter_map(|e| e.update(cx, |e, cx| (!e.save_to_disk(cx)).then(|| e.file_name())))
+            .filter_map(|e| {
+                e.update(cx, |e, cx| {
+                    let failed = !e.save_to_disk(cx) && e.path().is_some() && !e.disk_changed;
+                    failed.then(|| e.file_name())
+                })
+            })
             .collect();
         // (All saved: nothing to say.)
         if count > 1 && !unsaved.is_empty() {
-            let saved = count - unsaved.len();
-            let names = unsaved.join(", ");
-            self.show_notice(format!("Saved {saved} of {count} files: {names} couldn't be written."), cx);
+            self.show_notice(format!("Couldn't write {}; the rest are saved.", unsaved.join(", ")), cx);
         }
     }
 
@@ -4354,7 +4368,7 @@ impl Workspace {
     /// The notices shown lately, newest first, with when: one picked is copied.
     fn recent_notices(&mut self, _: &RecentNotices, window: &mut Window, cx: &mut Context<Self>) {
         if self.past_notices.is_empty() {
-            self.show_notice("Nothing to say yet".into(), cx);
+            self.show_notice("Nothing to say yet.".into(), cx);
             self.past_notices.clear();
             return;
         }
@@ -4556,7 +4570,7 @@ impl Workspace {
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
-            (Edit, "Organize Imports".into(), Box::new(OrganizeImports)),
+            (Edit, "Organise Imports".into(), Box::new(OrganizeImports)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
             (File, "Move File to Trash…".into(), Box::new(TrashFile)),
             (File, "Copy Path".into(), Box::new(CopyFilePath)),
@@ -4607,7 +4621,7 @@ impl Workspace {
             (App, "Settings…".into(), Box::new(OpenSettings)),
             (App, "Keyboard Shortcuts".into(), Box::new(ShowKeyboardShortcuts)),
             (App, "Import Settings from VS Code…".into(), Box::new(ImportVsCodeSettings)),
-            (View, "Show Changes".into(), Box::new(ShowChanges)),
+            (View, "Show Changes".into(), Box::new(ReviewChanges)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
@@ -4662,7 +4676,7 @@ impl Workspace {
             (View, toggle(self.terminal_open.on, "Hide Terminal", "Show Terminal"), Box::new(ToggleTerminal)),
             (
                 View,
-                toggle(self.terminal_maximized, "Restore Terminal Size", "Maximize Terminal"),
+                toggle(self.terminal_maximized, "Restore Terminal Size", "Maximise Terminal"),
                 Box::new(ToggleMaximizeTerminal),
             ),
             (View, "New Terminal".into(), Box::new(NewTerminal)),
@@ -4769,7 +4783,7 @@ impl Workspace {
                     toggle(
                         settings.organize_imports_on_save_for(language),
                         "Stop Organizing Imports on Save",
-                        "Organize Imports on Save",
+                        "Organise Imports on Save",
                     ),
                     Box::new(ToggleOrganizeImportsOnSave),
                 ),
@@ -4803,10 +4817,10 @@ impl Workspace {
             ]);
         }
         // With AI switched off, nothing about it shows up.
+        // With it on but no provider yet: only where answers can come from.
         if settings.ai.enabled {
             commands.extend([
-                (Ai, "Ask About This File…".into(), Box::new(AskAi) as Box<dyn Action>),
-                (Ai, ai_label(ProviderId::Nvidia), Box::new(UseNvidia)),
+                (Ai, ai_label(ProviderId::Nvidia), Box::new(UseNvidia) as Box<dyn Action>),
                 (Ai, ai_label(ProviderId::Ollama), Box::new(UseOllama)),
                 (Ai, ai_label(ProviderId::OpenaiCompatible), Box::new(UseOpenAiCompatible)),
                 (Ai, ai_label(ProviderId::Claude), Box::new(UseClaudeApi)),
@@ -4818,11 +4832,17 @@ impl Workspace {
                 (Ai, ai_label(ProviderId::OpenRouter), Box::new(UseOpenRouter)),
                 (Ai, "Set API Key…".into(), Box::new(SetApiKey)),
             ]);
+        }
+        if settings.ai.ready() {
+            commands.push((Ai, "Ask About This File…".into(), Box::new(AskAi)));
             if self.active.is_some() {
                 commands.push((Ai, "Edit with AI…".into(), Box::new(crate::editor::InlineAssist)));
             }
+        }
+        if settings.ai.enabled {
             match self.ai_task.as_ref().map(|t| &t.state) {
-                None => commands.push((Ai, "New AI Task…".into(), Box::new(NewAiTask))),
+                None if settings.ai.ready() => commands.push((Ai, "New AI Task…".into(), Box::new(NewAiTask))),
+                None => {}
                 Some(TaskState::Review(_)) => commands.extend([
                     (Ai, "Review AI Task Changes…".into(), Box::new(ReviewAiTask) as Box<dyn Action>),
                     (Ai, "Keep All AI Task Changes".into(), Box::new(KeepAllTaskChanges)),
@@ -5317,8 +5337,8 @@ impl Workspace {
     /// ⌥⌘I: describe a bigger job for Claude Code or Codex.
     fn new_ai_task(&mut self, _: &NewAiTask, window: &mut Window, cx: &mut Context<Self>) {
         let ai = cx.global::<Settings>().ai.clone();
-        // (AI switched off: nothing about it, not even a notice.)
-        if !ai.enabled {
+        // (AI switched off, or no provider: nothing about it, not even a notice.)
+        if !ai.ready() {
             return;
         }
         if !crate::ai::can_run_tasks(ai.active()) {
@@ -5486,7 +5506,7 @@ impl Workspace {
         let change = changes[index].clone();
         if change.kind == crate::ai_task::ChangeKind::Deleted {
             let message = match crate::ai_task::undo(&change) {
-                Ok(()) => format!("Restored {}", change.path.file_name().unwrap_or_default().to_string_lossy()),
+                Ok(()) => format!("Restored {}.", change.path.file_name().unwrap_or_default().to_string_lossy()),
                 Err(error) => format!("Couldn't restore it: {error}"),
             };
             changes.remove(index);
@@ -5499,7 +5519,7 @@ impl Workspace {
             editor.update(cx, |editor, cx| {
                 // The file as it is on disk now, whatever the tab had.
                 editor.reload_from_disk(cx);
-                editor.start_review(change.before.clone(), cx);
+                editor.start_ai_review(change.before.clone(), cx);
             });
             if !editor.read(cx).in_review() {
                 self.file_reviewed(&editor, cx);
@@ -5672,14 +5692,8 @@ impl Workspace {
 
     /// The Changes tab: what changed since the last commit, to commit; the branch.
     fn show_changes(&mut self, _: &ShowChanges, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_git = true;
-        self.sidebar_outline = false;
-        self.sidebar_tests = false;
-        self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
-        settings::update(cx, |s| s.sidebar_visible = true);
-        self.leave_hidden_focus(window, cx);
-        self.git_view.update(cx, |view, cx| view.refresh(cx));
-        cx.notify();
+        self.show_git(window, cx);
+        self.git_view.update(cx, |view, cx| view.show_tab(crate::git_view::Tab::Changes, cx));
     }
 
     /// A commit from the history, in the place of the code.
@@ -5989,27 +6003,30 @@ impl Workspace {
                 .border_b_1()
                 .border_color(theme.caret.opacity(0.25))
                 .text_size(px(ui::T_SM))
-                .child(div().text_color(theme.caret).child(title))
-                .child(
-                    div()
-                        .id("joining-settle")
-                        .text_color(theme.muted)
-                        .when(!settled, |d| d.cursor_pointer().hover(|s| s.text_color(theme.foreground)))
-                        .child(settle)
+                .child(div().text_color(theme.foreground).child(title))
+                .child(if settled {
+                    div().text_color(theme.muted).child(settle).into_any_element()
+                } else {
+                    ui::link("joining-settle", settle, &theme)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             let next = this.to_settle.clone();
                             this.open_first_conflict(next, window, cx);
-                        })),
-                )
+                        }))
+                        .into_any_element()
+                })
                 .child(div().flex_1())
                 .child(
                     ui::button("joining-stop", stop, &theme)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.stop_joining(window, cx))),
                 )
                 .child(
-                    // (Still there to click with files left: it says which needs deciding.)
-                    ui::primary_button("joining-finish", finish, settled, &theme)
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.finish_joining(window, cx))),
+                    // With files left, still there to click (quietly): it says which needs deciding.
+                    if settled {
+                        ui::primary_button("joining-finish", finish, true, &theme)
+                    } else {
+                        ui::button("joining-finish", finish, &theme)
+                    }
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.finish_joining(window, cx))),
                 )
                 .into_any_element(),
         )
@@ -6302,39 +6319,27 @@ impl Workspace {
             .collect();
         let count = if all.len() == 1 { "1 test".to_string() } else { format!("{} tests", all.len()) };
         let summary = if failed.is_empty() { count } else { format!("{count} · {} failed", failed.len()) };
-        let button = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .px(px(6.))
-                .py(px(2.))
-                .rounded(px(ui::R_KEY))
-                .cursor_pointer()
-                .text_color(theme.muted)
-                .hover(|s| s.text_color(theme.foreground).bg(theme.hairline))
-                .active(|s| s.opacity(0.7))
-                .child(label)
-        };
         let header = div()
             .flex_none()
             .h(px(ui::ROW))
             .mx(px(6.))
             .pl(px(12.))
-            .pr(px(4.))
+            .pr(px(10.))
             .mt(px(6.))
             .flex()
             .items_center()
-            .gap(px(2.))
+            .gap(px(12.))
             .text_size(px(ui::T_SM))
-            .child(div().flex_1().min_w_0().truncate().text_color(theme.faint).child(summary))
+            .child(div().flex_1().min_w_0().truncate().text_color(theme.muted).child(summary))
             .when(!failed.is_empty(), |d| {
                 let (command, which) = (failed_command.join("; "), failed.clone());
-                d.child(button("tests-run-failed", "Run Failed").on_click(cx.listener(
+                d.child(ui::link("tests-run-failed", "Run Failed", &theme).on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| this.run_tests(command.clone(), which.clone(), window, cx),
                 )))
             })
             .when_some(everything, |d, command| {
                 let which = all.clone();
-                d.child(button("tests-run-all", "Run All").on_click(cx.listener(
+                d.child(ui::link("tests-run-all", "Run All", &theme).on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| this.run_tests(command.clone(), which.clone(), window, cx),
                 )))
             });
@@ -6751,17 +6756,52 @@ impl Workspace {
     /// Whether the project has tests, or looks like one that may (they're looked for only
     /// when the Tests view is shown): its manifest, or a folder of tests.
     fn may_have_tests(&self, _: &App) -> bool {
-        match &self.tests {
-            Some(found) => !found.is_empty(),
-            None => self.testable,
-        }
+        self.testable || self.tests.as_ref().is_some_and(|found| !found.is_empty())
     }
 
-    /// Whether a project looks like one with tests (see `may_have_tests`), read once.
+    /// Whether a project looks like one with tests (see `may_have_tests`), read once: a
+    /// manifest or a folder of tests, at its top or one folder down (as in a monorepo), or
+    /// test files at its top.
     fn looks_testable(root: &Path) -> bool {
-        ["Cargo.toml", "package.json", "pyproject.toml", "pytest.ini", "setup.py", "go.mod", "tests", "test", "spec"]
-            .iter()
-            .any(|name| root.join(name).exists())
+        const SIGNS: [&str; 14] = [
+            "Cargo.toml",
+            "package.json",
+            "pyproject.toml",
+            "pytest.ini",
+            "setup.py",
+            "setup.cfg",
+            "tox.ini",
+            "requirements.txt",
+            "go.mod",
+            "go.work",
+            "tests",
+            "test",
+            "spec",
+            "__tests__",
+        ];
+        let signs = |dir: &Path| SIGNS.iter().any(|name| dir.join(name).exists());
+        let test_file = |name: &str| {
+            name.starts_with("test_") && name.ends_with(".py")
+                || name.ends_with("_test.py")
+                || name.ends_with("_test.go")
+                || name.contains(".test.")
+                || name.contains(".spec.")
+        };
+        if signs(root) {
+            return true;
+        }
+        let Ok(entries) = std::fs::read_dir(root) else { return false };
+        entries.flatten().take(500).any(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "node_modules" || name == "target" {
+                return false;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => signs(&entry.path()),
+                Ok(_) => test_file(&name),
+                Err(_) => false,
+            }
+        })
     }
 
     fn render_sidebar_switch(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -6825,9 +6865,7 @@ impl Workspace {
                                 )
                             })
                             .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.show_changes(&ShowChanges, window, cx)
-                            })),
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_git(window, cx))),
                     ),
             )
             .into_any_element()
@@ -6970,7 +7008,7 @@ impl Workspace {
         places.sort_by(|a, b| a.0.cmp(&b.0));
         places.dedup_by(|a, b| a.0 == b.0);
         if places.is_empty() {
-            return self.show_notice("No problems found".into(), cx);
+            return self.show_notice("No problems found.".into(), cx);
         }
         let here = self.active_editor().and_then(|e| {
             let e = e.read(cx);
@@ -7274,7 +7312,8 @@ impl Workspace {
     /// ⌥⇧⌘T: the Rust test at the caret, built and run alone under the debugger.
     fn debug_test(&mut self, _: &DebugTestAtCursor, _: &mut Window, cx: &mut Context<Self>) {
         if self.debugger.read(cx).is_active() {
-            return self.show_notice("Already debugging: stop it first (⇧F5).".into(), cx);
+            let stop = ui::keys(&StopDebugging, "⇧F5", cx);
+            return self.show_notice(format!("Already debugging: stop it first ({stop})."), cx);
         }
         let Some(editor) = self.active_editor().cloned() else { return };
         let Some(test) = editor.update(cx, |e, _| e.rust_test_at_caret()) else {
@@ -7460,7 +7499,7 @@ impl Workspace {
                 .rounded(px(ui::R_KEY))
                 .cursor_pointer()
                 .text_color(theme.muted)
-                .hover(|s| s.text_color(theme.foreground).bg(theme.hairline))
+                .hover(|s| s.text_color(theme.foreground).bg(ui::hover(&theme)))
                 .tooltip(ui::tip(tip, Some(action)))
                 .child(label)
                 .active(|s| s.opacity(0.7))
@@ -7597,7 +7636,7 @@ impl Workspace {
                                     .child(value),
                             )
                             .child(
-                                ui::icon_button(("dbg-unwatch", ix), "icons/x.svg", "Stop Watching", &theme)
+                                ui::icon_button(("dbg-unwatch", ix), "icons/x.svg", "Stop watching", &theme)
                                     .size(px(16.))
                                     .invisible()
                                     .group_hover(group, |s| s.visible())
@@ -7728,7 +7767,7 @@ impl Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         let projects: Vec<PathBuf> = crate::session::recent_projects().into_iter().filter(|p| *p != root).collect();
         if projects.is_empty() {
-            return self.show_notice("No other projects opened lately".into(), cx);
+            return self.show_notice("No other projects opened lately.".into(), cx);
         }
         self.pending_projects = projects;
         self.open_palette_with(PaletteKind::Projects, None, Vec::new(), window, cx);
@@ -8440,13 +8479,18 @@ impl Workspace {
         self.open_settings_at(None, window, cx);
     }
 
-    /// Opens Settings, at `section` if given. With Settings already open, closes it.
+    /// Opens Settings, at `section` if given. With Settings already open: goes to `section`,
+    /// or with none, closes it.
     fn open_settings_at(&mut self, section: Option<Section>, window: &mut Window, cx: &mut Context<Self>) {
         if self.welcome.is_some() {
             return;
         }
-        if self.settings_panel.is_some() {
-            return self.close_palette(window, cx);
+        if let Some((panel, _)) = &self.settings_panel {
+            let Some(section) = section else { return self.close_palette(window, cx) };
+            return panel.update(cx, |panel, cx| {
+                panel.show_section(section);
+                cx.notify();
+            });
         }
         if self.palette.is_some() {
             self.palette = None;
@@ -8538,16 +8582,16 @@ impl Workspace {
         if !failed.is_empty() {
             self.show_notice(format!("Couldn't write {}.", failed.join(", ")), cx);
         } else if files > 1 {
-            self.show_notice(format!("Changed {files} files"), cx);
+            self.show_notice(format!("Changed {files} files."), cx);
         }
     }
 
     fn apply_workspace_edit(&mut self, edit: lsp_types::WorkspaceEdit, cx: &mut Context<Self>) {
         let (places, files, failed) = self.apply_edit_to_files(edit, cx);
         let message = match (places, failed.is_empty()) {
-            (0, _) => "Nothing to rename".to_string(),
-            (_, true) if files == 1 => format!("Renamed in {places} places"),
-            (_, true) => format!("Renamed in {places} places across {files} files"),
+            (0, _) => "Nothing to rename.".to_string(),
+            (_, true) if files == 1 => format!("Renamed in {places} places."),
+            (_, true) => format!("Renamed in {places} places across {files} files."),
             (_, false) => format!("Renamed, but couldn't write {}.", failed.join(", ")),
         };
         self.show_notice(message, cx);
@@ -8707,7 +8751,7 @@ impl Workspace {
             (e, w) => format!("{} and {}", plural(e, "error"), plural(w, "warning")),
         };
         if locations.is_empty() {
-            return self.show_notice("No problems found".into(), cx);
+            return self.show_notice("No problems found.".into(), cx);
         }
         self.open_locations(title, locations, window, cx);
     }
@@ -8978,7 +9022,7 @@ impl Workspace {
                     .size(px(16.))
                     .flex_none()
                     .rounded(px(ui::R_KEY))
-                    .hover(|s| s.bg(theme.hairline))
+                    .hover(|s| s.bg(ui::hover(&theme)))
                     .child(
                         div()
                             .absolute()
@@ -9368,7 +9412,7 @@ impl Workspace {
                         .rounded(px(ui::R_ROW))
                         .cursor_pointer()
                         .text_color(theme.foreground)
-                        .hover(|s| s.bg(ui::hover(theme)))
+                        .hover(|s| s.bg(ui::hover_on_raised(theme)))
                         .child(label)
                         .children(keys.map(|k| div().text_color(theme.faint).child(k)))
                         .active(|s| s.opacity(0.7))
@@ -9421,7 +9465,7 @@ impl Workspace {
                         .rounded(px(ui::R_ROW))
                         .cursor_pointer()
                         .text_color(theme.foreground)
-                        .hover(|s| s.bg(ui::hover(theme)))
+                        .hover(|s| s.bg(ui::hover_on_raised(theme)))
                         .child(item.label())
                         .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -9484,7 +9528,7 @@ impl Workspace {
                     .children(hint(&Open, "Open a file or folder"))
                     .children(hint(&OpenRecent, "Open a recent project"))
                     .children(hint(&TogglePalette, "Find a file"))
-                    .children(hint(&ShowCommands, "Settings and commands")),
+                    .children(hint(&ShowCommands, "Quick settings and commands")),
             )
             .into_any_element()
     }
@@ -10152,6 +10196,17 @@ impl Render for Workspace {
             self.key_prompt.as_ref().map(|(prompt, _)| prompt.clone().into_any_element())
         };
         let ai_provider = cx.global::<Settings>().ai.active();
+        let ai_dot = ai_provider != ProviderId::Off && (crate::ai::working() || crate::ai::failed_lately());
+        if ai_dot && self.ai_dot_watch.is_none() {
+            self.ai_dot_watch = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                this.update(cx, |this, cx| {
+                    this.ai_dot_watch = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
         // How the file is written, when it's not the usual: its indentation, Windows line endings.
         let default_indent = cx
             .global::<Settings>()
@@ -10465,7 +10520,7 @@ impl Render for Workspace {
             }))
             // AI's only mark: a dot, while it answers (or just after it failed). Its name shows
             // on hover; a click opens its settings.
-            .when(ai_provider != ProviderId::Off && (crate::ai::working() || crate::ai::failed_lately()), |bar| {
+            .when(ai_dot, |bar| {
                 let failed = !crate::ai::working();
                 let dot = if failed { theme.error.opacity(0.8) } else { theme.caret.opacity(0.6) };
                 let lit = if failed { theme.error } else { theme.caret };
@@ -11153,9 +11208,13 @@ mod tests {
         settle(cx);
         assert_eq!(workspace.read_with(cx, |w, _| w.git_status.len()), 2);
 
-        // Review Changes: the Git view; a file's row opens it with its changes to review.
-        workspace.update_in(cx, |w, window, cx| w.review_changes(&ReviewChanges, window, cx));
+        // Review Changes (from the History tab, left showing): the Git view at its changes,
+        // read again; a file's row opens it with its changes to review.
         let view = workspace.read_with(cx, |w, _| w.git_view.clone());
+        view.update(cx, |v, cx| v.show_tab(crate::git_view::Tab::History, cx));
+        settle(cx);
+        workspace.update_in(cx, |w, window, cx| w.review_changes(&ReviewChanges, window, cx));
+        assert!(view.read_with(cx, |v, _| v.tab == crate::git_view::Tab::Changes));
         for _ in 0..100 {
             settle(cx);
             if view.read_with(cx, |v, _| v.files.len() == 2) {
@@ -12018,7 +12077,6 @@ mod tests {
         settle(cx);
         let view = workspace.read_with(cx, |w, _| w.git_view.clone());
         assert_eq!(view.read_with(cx, |v, cx| v.summary.read(cx).text().to_string()), "Add b");
-        assert!(workspace.read_with(cx, |w, _| w.commit_draft.is_none()));
         for _ in 0..100 {
             settle(cx);
             if view.read_with(cx, |v, _| !v.files.is_empty()) {
@@ -12035,6 +12093,26 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(git(&["log", "-1", "--format=%s"]).unwrap(), "Add b");
+        // Nothing left: Commit… says so, and the keyboard stays out of the hidden message.
+        for _ in 0..100 {
+            settle(cx);
+            if workspace.read_with(cx, |w, _| w.git_status.is_empty()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        workspace.update_in(cx, |w, window, cx| {
+            window.focus(&w.focus_handle);
+            w.commit_all(&CommitAll, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.notice.as_ref().map(|(n, _)| n.as_str()), Some("Nothing to commit."));
+        });
+        cx.update(|window, cx| {
+            let summary = view.read(cx).summary.focus_handle(cx);
+            assert!(!summary.is_focused(window), "focus went to a message that isn't shown");
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 

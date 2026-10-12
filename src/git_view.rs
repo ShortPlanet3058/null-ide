@@ -208,10 +208,12 @@ pub struct GitView {
     pub drafting: bool,
     /// Moved on when a draft should stop (committed, or another asked for).
     pub draft_generation: u64,
+    /// Commit… asked for the keyboard in the message: given once the message shows.
+    focus_message: bool,
     reading: Option<Task<()>>,
     pub tab: Tab,
-    /// Whether a remote is on GitHub (its tab shows only then).
-    on_github: bool,
+    /// Whether a remote is on GitHub (its tab shows only then): asked once per project.
+    on_github: Option<bool>,
     pub history: Vec<git::LogCommit>,
     graph: Vec<GraphRow>,
     /// Where the branches, tags and HEAD were when the history was read.
@@ -249,7 +251,8 @@ impl Focusable for GitView {
 /// What a changed file's parts say, read off the main thread.
 struct Read {
     repository: bool,
-    on_github: bool,
+    /// Asked only when not known yet.
+    on_github: Option<bool>,
     branch: Option<String>,
     ahead_behind: Option<(usize, usize)>,
     files: Vec<ChangedFile>,
@@ -274,10 +277,10 @@ fn parts_of(base: &str, current: &str) -> Vec<Part> {
         .collect()
 }
 
-fn read(root: &Path) -> Read {
+fn read(root: &Path, ask_github: bool) -> Read {
     let branch = git::current_branch(root);
     if branch.is_none() {
-        return Read { repository: false, on_github: false, branch: None, ahead_behind: None, files: Vec::new() };
+        return Read { repository: false, on_github: None, branch: None, ahead_behind: None, files: Vec::new() };
     }
     let files = git::status(root)
         .into_iter()
@@ -293,7 +296,7 @@ fn read(root: &Path) -> Read {
         .collect();
     Read {
         repository: true,
-        on_github: git::remote_on_github(root),
+        on_github: ask_github.then(|| git::remote_on_github(root)),
         branch,
         ahead_behind: git::ahead_behind(root),
         files,
@@ -329,10 +332,11 @@ impl GitView {
             body,
             committing: false,
             drafting: false,
+            focus_message: false,
             draft_generation: 0,
             reading: None,
             tab: Tab::Changes,
-            on_github: false,
+            on_github: None,
             history: Vec::new(),
             graph: Vec::new(),
             history_refs: String::new(),
@@ -367,6 +371,7 @@ impl GitView {
         self.branches = Branches::default();
         self.picked = None;
         self.renaming = None;
+        self.on_github = None;
         // Another repository's GitHub: read again (what was asked of the last one dropped).
         let (list, closed) = (self.github.list, self.github.closed);
         self.github = GitHub { list, closed, ..GitHub::default() };
@@ -426,9 +431,9 @@ impl GitView {
 
     /// Reads what changed again (in the background); what was chosen stays chosen.
     pub fn refresh_changes(&mut self, cx: &mut Context<Self>) {
-        let root = self.root.clone();
+        let (root, ask_github) = (self.root.clone(), self.on_github.is_none());
         self.reading = Some(cx.spawn(async move |this, cx| {
-            let read = cx.background_executor().spawn(async move { read(&root) }).await;
+            let read = cx.background_executor().spawn(async move { read(&root, ask_github) }).await;
             this.update(cx, |this, cx| {
                 let before = std::mem::take(&mut this.files);
                 this.files = read.files;
@@ -458,14 +463,26 @@ impl GitView {
                         }
                     }
                 }
+                // Nothing to commit: no message to write, so the keyboard stays where it is.
+                if this.files.is_empty() {
+                    this.focus_message = false;
+                }
                 this.repository = Some(read.repository);
-                this.on_github = read.on_github;
+                if read.on_github.is_some() {
+                    this.on_github = read.on_github;
+                }
                 this.branch = read.branch;
                 this.ahead_behind = read.ahead_behind;
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// The keyboard to the message as soon as it shows (now, when files are listed already).
+    pub fn focus_message_when_shown(&mut self, cx: &mut Context<Self>) {
+        self.focus_message = true;
+        cx.notify();
     }
 
     /// The message: its first line, a blank line and its body, when there's one.
@@ -594,7 +611,7 @@ impl GitView {
     fn render_history(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return ui::empty_state("This folder isn't a git repository.", &theme).into_any_element();
+            return ui::empty_state("This folder isn't a git repository", &theme).into_any_element();
         }
         let query = self.filter.read(cx).text().trim().to_lowercase();
         self.history_shown = (0..self.history.len())
@@ -613,7 +630,7 @@ impl GitView {
             .flex()
             .flex_col()
             .child(ui::field(&theme).mx(px(12.)).mt(px(4.)).mb(px(6.)).child(self.filter.clone()))
-            .when(nothing && !self.history.is_empty(), |d| d.child(ui::empty_state("No commit says that.", &theme)))
+            .when(nothing && !self.history.is_empty(), |d| d.child(ui::empty_state("No commit says that", &theme)))
             .child(
                 // Only the rows in sight are made (all 500, each with its graph, were made
                 // every frame).
@@ -745,7 +762,7 @@ impl GitView {
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_size(px(ui::T_XS))
-                                .text_color(theme.faint)
+                                .text_color(theme.muted)
                                 .child(format!("{} · {}", commit.author, git::ago(commit.time, now)))
                                 .when(!refs.is_empty(), |d| {
                                     d.child("·").child(div().text_color(theme.muted).truncate().child(refs.join(", ")))
@@ -787,7 +804,7 @@ impl GitView {
             .child(tab("git-tab-changes", "Changes", Tab::Changes, cx))
             .child(tab("git-tab-history", "History", Tab::History, cx))
             .child(tab("git-tab-branches", "Branches", Tab::Branches, cx))
-            .when(self.on_github || self.tab == Tab::GitHub, |d| {
+            .when(self.on_github == Some(true) || self.tab == Tab::GitHub, |d| {
                 d.child(tab("git-tab-github", "GitHub", Tab::GitHub, cx))
             })
             .into_any_element()
@@ -796,7 +813,7 @@ impl GitView {
     fn render_changes(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return ui::empty_state("This folder isn't a git repository.", &theme).into_any_element();
+            return ui::empty_state("This folder isn't a git repository", &theme).into_any_element();
         }
         let ai = cx.global::<crate::settings::Settings>().ai.ready();
         let kept = self.kept_count();
@@ -916,7 +933,7 @@ impl GitView {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_color(theme.faint)
+                                    .text_color(theme.muted)
                                     .text_size(px(ui::T_SM))
                                     .child(format!("{folder}{note}")),
                             )
@@ -968,7 +985,7 @@ impl GitView {
                         .child(ui::checkbox(part.kept, false, &theme))
                         .child(div().flex_none().child(lines))
                         .child(
-                            div().min_w_0().truncate().text_color(theme.faint).code_font(cx).child(part.label.clone()),
+                            div().min_w_0().truncate().text_color(theme.muted).code_font(cx).child(part.label.clone()),
                         )
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_part(ix, p, cx)))
                 }))
@@ -992,7 +1009,7 @@ impl GitView {
             .children(branch_row)
             // (Nothing to commit: no message to write either.)
             .when(!nothing, |d| d.child(message_box))
-            .when(nothing, |d| d.child(ui::empty_state("Nothing changed since the last commit.", &theme)))
+            .when(nothing, |d| d.child(ui::empty_state("Nothing changed since the last commit", &theme)))
             .when(!kept_rows.is_empty(), |d| d.child(ui::sidebar_heading("In this commit", &theme)))
             .child(div().px(px(6.)).flex().flex_col().children(kept_rows))
             .when(!out_rows.is_empty(), |d| d.child(ui::sidebar_heading("Left out", &theme)))
@@ -1015,7 +1032,11 @@ fn counts(added: usize, removed: usize, theme: &Theme, cx: &App) -> gpui::Div {
 use crate::fonts::CodeFont as _;
 
 impl Render for GitView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_message && self.tab == Tab::Changes && !self.files.is_empty() {
+            self.focus_message = false;
+            window.focus(&self.summary.focus_handle(cx));
+        }
         let tabs = self.render_tabs(cx);
         let shown = match self.tab {
             Tab::Changes => self.render_changes(cx),

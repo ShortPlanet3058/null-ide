@@ -1674,7 +1674,7 @@ impl FileTree {
                         .cursor_pointer()
                         .text_color(if destructive { theme.error } else { theme.foreground })
                         .when(selected, |d| d.bg(theme.accent_soft))
-                        .hover(|s| s.bg(ui::hover(theme)))
+                        .hover(|s| s.bg(ui::hover_on_raised(theme)))
                         .child(div().flex_1().child(item.label()))
                         .children(item.keys().map(|k| div().text_size(px(ui::T_SM)).text_color(theme.muted).child(k)))
                         .active(|s| s.opacity(0.7))

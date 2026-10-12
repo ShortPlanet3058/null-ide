@@ -436,8 +436,6 @@ pub enum AiEvent {
     Failed(String),
 }
 
-/// Runs [`ask`] on its own thread and streams what happens. Dropping the receiver
-/// stops listening; the request itself finishes in the background.
 /// Requests asked for (⌘I, a question, a commit message) still on their way…
 static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// …and when one last failed.
@@ -454,18 +452,50 @@ pub fn failed_lately() -> bool {
     FAILED_AT.lock().ok().and_then(|at| *at).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(8))
 }
 
+/// Counts a request as working while it lives, even if it panics on the way.
+struct Working;
+
+impl Working {
+    fn start() -> Self {
+        WORKING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Working
+    }
+}
+
+impl Drop for Working {
+    fn drop(&mut self) {
+        WORKING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Runs [`ask`] on its own thread and streams what happens, lighting AI's dot while it
+/// runs. Dropping the receiver stops listening; the request itself finishes in the background.
 pub fn stream(settings: AiSettings, prompt: Prompt) -> futures::channel::mpsc::UnboundedReceiver<AiEvent> {
+    stream_with(settings, prompt, true)
+}
+
+/// [`stream`] for suggestions while typing: AI's dot stays out of it.
+pub fn stream_quietly(settings: AiSettings, prompt: Prompt) -> futures::channel::mpsc::UnboundedReceiver<AiEvent> {
+    stream_with(settings, prompt, false)
+}
+
+fn stream_with(
+    settings: AiSettings,
+    prompt: Prompt,
+    shown: bool,
+) -> futures::channel::mpsc::UnboundedReceiver<AiEvent> {
     let (tx, rx) = futures::channel::mpsc::unbounded();
     std::thread::Builder::new()
         .name("ai-request".into())
         .spawn(move || {
-            WORKING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let working = shown.then(Working::start);
             let text_tx = tx.clone();
             let result = ask(&settings, &prompt, &mut |text| {
                 text_tx.unbounded_send(AiEvent::Text(text.to_string())).ok();
             });
-            WORKING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            if result.is_err()
+            drop(working);
+            if shown
+                && result.is_err()
                 && let Ok(mut at) = FAILED_AT.lock()
             {
                 *at = Some(std::time::Instant::now());

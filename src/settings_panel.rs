@@ -358,19 +358,7 @@ impl SettingsPanel {
 
     /// A text field as wide as its row.
     fn wide_field(input: &Entity<TextInput>, theme: &Theme) -> AnyElement {
-        div()
-            .w_full()
-            .h(px(ui::FIELD + 4.))
-            .px(px(10.))
-            .flex()
-            .items_center()
-            .rounded(px(ui::R_CONTROL))
-            .border_1()
-            .border_color(theme.line_strong)
-            .bg(theme.background)
-            .text_size(px(ui::T_MD))
-            .child(div().w_full().overflow_hidden().child(input.clone()))
-            .into_any_element()
+        ui::field(theme).w_full().child(div().w_full().overflow_hidden().child(input.clone())).into_any_element()
     }
 
     fn toggle(
@@ -555,13 +543,10 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Interface size",
-                Some(
-                    format!(
-                        "Menus, tabs and panels, not the code. {}",
-                        keys_line("Also", &[&crate::workspace::ZoomIn, &crate::workspace::ZoomOut], cx)
-                    )
-                    .trim_end(),
-                ),
+                Some(&format!(
+                    "Menus, tabs and panels, not the code{}",
+                    keys_line("; also", &[&crate::workspace::ZoomIn, &crate::workspace::ZoomOut], cx)
+                )),
                 interface_size,
                 &theme,
             ),
@@ -683,8 +668,8 @@ impl SettingsPanel {
             Self::row(
                 "Wrap long lines",
                 Some(&format!(
-                    "Fit lines to the window instead of scrolling sideways. {}",
-                    key(&crate::menus::ToggleWordWrap, cx)
+                    "Fit lines to the window instead of scrolling sideways{}",
+                    keys_line(";", &[&crate::menus::ToggleWordWrap], cx)
                 )),
                 Self::toggle("wrap", s.word_wrap, &theme, cx, |s| s.word_wrap = !s.word_wrap),
                 &theme,
@@ -692,9 +677,9 @@ impl SettingsPanel {
             Self::row(
                 "Wrap Markdown and text",
                 Some(if cfg!(target_os = "macos") {
-                    "Paragraphs fit the window, whatever code does. ⌃⌥Z in one of these files switches this"
+                    "Paragraphs fit the window, whatever code does; ⌃⌥Z in one of these files switches this"
                 } else {
-                    "Paragraphs fit the window, whatever code does. Alt+Z in one of these files switches this"
+                    "Paragraphs fit the window, whatever code does; Alt+Z in one of these files switches this"
                 }),
                 Self::toggle("wrap-prose", s.wrap_prose, &theme, cx, |s| s.wrap_prose = !s.wrap_prose),
                 &theme,
@@ -707,7 +692,7 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Indentation",
-                Some("For new files and files without indentation yet. .editorconfig wins"),
+                Some("For new files and files without indentation yet; .editorconfig wins"),
                 {
                     use crate::file_style::Indent;
                     Self::choices(
@@ -797,7 +782,10 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Spelling",
-                Some("Marks misspelled words in Markdown and text; ⌘. on one offers corrections"),
+                Some(&format!(
+                    "Marks misspelled words in Markdown and text; {} on one offers corrections",
+                    ui::keys(&crate::editor::QuickFix, "⌘.", cx)
+                )),
                 Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),
                 &theme,
             ),
@@ -849,7 +837,7 @@ impl SettingsPanel {
             Self::heading("In the code", &theme),
             Self::row(
                 "Problems at line ends",
-                Some("Each line's error or warning written after it, faintly. Off: only on the cursor's line"),
+                Some("Each line's error or warning written after it, faintly; when off, only on the cursor's line"),
                 Self::toggle("problems-at-line-ends", s.problems_at_line_ends, &theme, cx, |s| {
                     s.problems_at_line_ends = !s.problems_at_line_ends
                 }),
@@ -857,7 +845,7 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Who changed the line",
-                Some("At the end of the cursor's line, faintly: who last changed it, when, and why. From git"),
+                Some("At the end of the cursor's line, faintly: who last changed it, when, and why; from git"),
                 Self::toggle("line-blame", s.line_blame, &theme, cx, |s| s.line_blame = !s.line_blame),
                 &theme,
             ),
@@ -876,7 +864,7 @@ impl SettingsPanel {
             Self::row(
                 "Suggestions while typing",
                 Some(&format!(
-                    "From the language server. {} asks for them either way",
+                    "From the language server; {} asks for them either way",
                     key(&crate::editor::ShowCompletions, cx)
                 )),
                 Self::toggle("autocomplete", s.autocomplete, &theme, cx, |s| s.autocomplete = !s.autocomplete),
@@ -906,14 +894,14 @@ impl SettingsPanel {
             Self::row(
                 "Format on save",
                 Some(&format!(
-                    "Tidies the file with its language server when saving. {} formats any time",
+                    "Tidies the file with its language server when saving; {} formats any time",
                     key(&crate::editor::FormatDocument, cx)
                 )),
                 Self::toggle("format-on-save", s.format_on_save, &theme, cx, |s| s.format_on_save = !s.format_on_save),
                 &theme,
             ),
             Self::row(
-                "Organize imports on save",
+                "Organise imports on save",
                 Some("Sorts the imports and takes out the unused ones, as the language server does, when saving"),
                 Self::toggle("organize-on-save", s.organize_imports_on_save, &theme, cx, |s| {
                     s.organize_imports_on_save = !s.organize_imports_on_save
@@ -959,7 +947,7 @@ impl SettingsPanel {
                     .when(!active, |d| {
                         d.border_color(theme.line_strong)
                             .text_color(theme.muted)
-                            .hover(|d| d.text_color(theme.foreground).bg(theme.hairline))
+                            .hover(|d| d.text_color(theme.foreground).bg(ui::hover_on_raised(theme)))
                     })
                     .child(r.model)
                     .child(div().text_color(theme.faint).child(r.note))
@@ -977,7 +965,7 @@ impl SettingsPanel {
             div()
                 .pt(px(6.))
                 .text_size(px(ui::T_SM))
-                .text_color(theme.faint)
+                .text_color(theme.muted)
                 .child("Completions, errors, info on hover and go to definition. Null installs them in its own folder, never on the system.")
                 .into_any_element(),
         ];
@@ -987,7 +975,7 @@ impl SettingsPanel {
             let (detail, control): (String, AnyElement) = match (state, &found) {
                 (Some(Ok(())), _) => (
                     server.name.to_string(),
-                    div().text_size(px(ui::T_MD)).text_color(theme.caret).child("Installing…").into_any_element(),
+                    div().text_size(px(ui::T_MD)).text_color(theme.foreground).child("Installing…").into_any_element(),
                 ),
                 (_, Some(path)) => {
                     // Where it is, briefly: "with Xcode", "~/.cargo/bin", "installed by Null".
@@ -1020,7 +1008,7 @@ impl SettingsPanel {
                             }))
                             .into_any_element()
                     } else {
-                        div().text_size(px(ui::T_MD)).text_color(theme.faint).child("Not installed").into_any_element()
+                        div().text_size(px(ui::T_MD)).text_color(theme.muted).child("Not installed").into_any_element()
                     };
                     (detail, control)
                 }
@@ -1092,8 +1080,8 @@ impl SettingsPanel {
                             .py(px(6.))
                             .rounded(px(ui::R_ROW_LG))
                             .cursor_pointer()
-                            .when(active, |d| d.bg(theme.hairline))
-                            .when(!active, |d| d.hover(|d| d.bg(ui::hover(&theme))))
+                            .when(active, |d| d.bg(ui::picked_on_raised(&theme)))
+                            .when(!active, |d| d.hover(|d| d.bg(ui::hover_on_raised(&theme))))
                             .child(
                                 div()
                                     .size(px(14.))
@@ -1118,7 +1106,7 @@ impl SettingsPanel {
                                         div()
                                             .text_size(px(ui::T_XS))
                                             .line_height(px(15.))
-                                            .text_color(theme.faint)
+                                            .text_color(theme.muted)
                                             .child(id.description()),
                                     ),
                             )
@@ -1166,9 +1154,9 @@ impl SettingsPanel {
         rows.push(Self::stacked_row(
             "Model",
             Some(if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
-                "For edits, answers and tasks. Empty: the one chosen in the tool"
+                "For edits, answers and tasks; when empty, the one chosen in the tool"
             } else {
-                "For edits, answers and tasks. Empty: the first one below"
+                "For edits, answers and tasks; when empty, the first one below"
             }),
             div().flex().flex_col().gap(px(8.)).child(Self::wide_field(&self.model, &theme)).child(Self::model_chips(
                 "model",
@@ -1185,7 +1173,7 @@ impl SettingsPanel {
             let key = current.key();
             rows.push(Self::row(
                 "Thinking",
-                Some("More is slower, and better on hard questions. Suggestions always use the least"),
+                Some("More is slower, and better on hard questions; suggestions always use the least"),
                 Self::choices("effort", options, effort, &theme, cx, move |_, effort, cx| {
                     settings::update(cx, |s| s.ai.providers.entry(key.into()).or_default().effort = Some(effort))
                 }),
@@ -1204,7 +1192,7 @@ impl SettingsPanel {
         rows.push(Self::row(
             "Suggest code as you type",
             Some(&format!(
-                "Names from the file at once, then the AI's guess when you pause. {} takes it, {} a word, {} a line, {} another",
+                "Names from the file at once, then the AI's guess when you pause; {} takes it, {} a word, {} a line, {} another",
                 key(&crate::editor::AcceptGhost, cx),
                 key(&crate::editor::AcceptGhostWord, cx),
                 key(&crate::editor::AcceptGhostLine, cx),
@@ -1217,7 +1205,7 @@ impl SettingsPanel {
             if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
                 rows.push(Self::row(
                     "From the AI",
-                    Some("Command line tools take seconds to start, too slow for this: names from the file only. A free Mistral key gives the best suggestions"),
+                    Some("Command line tools take seconds to start, too slow for this: names from the file only; a free Mistral key gives the best suggestions"),
                     div(),
                     &theme,
                 ));
@@ -1391,7 +1379,7 @@ impl SettingsPanel {
             div()
                 .pt(px(8.))
                 .text_size(px(ui::T_SM))
-                .text_color(theme.faint)
+                .text_color(theme.muted)
                 .child("Click a command's keys, then press new ones. Esc keeps them; ⌫ removes them.")
                 .into_any_element(),
         );
@@ -1434,7 +1422,7 @@ impl SettingsPanel {
                             Some(keys) => ui::key_cap(keys, &theme).into_any_element(),
                             None => div()
                                 .text_size(px(ui::T_SM))
-                                .text_color(theme.faint)
+                                .text_color(theme.muted)
                                 .child("Add keys")
                                 .into_any_element(),
                         }
@@ -1520,21 +1508,7 @@ impl Render for SettingsPanel {
                     .child("Settings"),
             )
             // Typing as soon as Settings opens searches it.
-            .child(
-                div()
-                    .mx(px(2.))
-                    .mb(px(10.))
-                    .px(px(8.))
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(ui::R_CONTROL))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.hairline)
-                    .text_size(px(ui::T_MD))
-                    .child(self.search.clone()),
-            )
+            .child(ui::field(&theme).mx(px(2.)).mb(px(10.)).child(self.search.clone()))
             .children(Section::ALL.into_iter().map(|section| {
                 let active = Some(section) == current;
                 div()
@@ -1544,8 +1518,11 @@ impl Render for SettingsPanel {
                     .rounded(px(ui::R_CONTROL))
                     .text_size(px(ui::T_LG))
                     .cursor_pointer()
-                    .when(active, |d| d.bg(theme.hairline).text_color(theme.foreground))
-                    .when(!active, |d| d.text_color(theme.muted).hover(|d| d.text_color(theme.foreground)))
+                    .when(active, |d| d.bg(ui::picked_on_raised(&theme)).text_color(theme.foreground))
+                    .when(!active, |d| {
+                        d.text_color(theme.muted)
+                            .hover(|d| d.bg(ui::hover_on_raised(&theme)).text_color(theme.foreground))
+                    })
                     .child(section.label())
                     .active(|s| s.opacity(0.7))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1570,7 +1547,7 @@ impl Render for SettingsPanel {
                     .py(px(6.))
                     .rounded(px(ui::R_CONTROL))
                     .text_size(px(ui::T_SM))
-                    .text_color(if set_here > 0 { theme.muted } else { theme.faint })
+                    .text_color(theme.muted)
                     .cursor_pointer()
                     .hover(|d| d.text_color(theme.foreground))
                     .child(label)
@@ -1586,7 +1563,7 @@ impl Render for SettingsPanel {
                     .py(px(6.))
                     .rounded(px(ui::R_CONTROL))
                     .text_size(px(ui::T_SM))
-                    .text_color(theme.faint)
+                    .text_color(theme.muted)
                     .cursor_pointer()
                     .hover(|d| d.text_color(theme.foreground))
                     .child("Edit as JSON…")
