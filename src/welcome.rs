@@ -779,9 +779,9 @@ impl Welcome {
                             .child(div().w_full().overflow_hidden().child(self.key.clone())),
                     )
                     .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(if found {
-                        format!("A key is already set. {get}. Kept in the keychain, never in a file.")
+                        format!("A key is already set. {get}. Kept in {}, never in a file.", crate::ai::KEY_STORE)
                     } else {
-                        format!("{get}. Kept in the keychain, never in a file.")
+                        format!("{get}. Kept in {}, never in a file.", crate::ai::KEY_STORE)
                     }))
                     .into_any_element(),
             )

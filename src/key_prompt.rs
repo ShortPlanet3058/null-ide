@@ -42,7 +42,7 @@ impl KeyPrompt {
         let label = self.provider.label();
         let message = match ai::store_api_key(self.provider, &key) {
             Ok(()) if key.trim().is_empty() => format!("Removed the {label} key."),
-            Ok(()) => format!("Kept the {label} key in the keychain."),
+            Ok(()) => format!("Kept the {label} key in {}.", crate::ai::KEY_STORE),
             Err(err) => format!("Couldn't save the key: {err}"),
         };
         cx.emit(KeyPromptEvent::Finished(message));
@@ -62,13 +62,7 @@ impl Focusable for KeyPrompt {
 impl Render for KeyPrompt {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<Theme>();
-        let store = if cfg!(target_os = "macos") {
-            "keychain"
-        } else if cfg!(target_os = "windows") {
-            "Windows Credential Manager"
-        } else {
-            "system keyring"
-        };
+        let store = crate::ai::KEY_STORE;
         div()
             .key_context("KeyPrompt")
             .on_action(cx.listener(Self::save))
@@ -112,7 +106,7 @@ impl Render for KeyPrompt {
                 }),
             )
             .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(format!(
-                "Kept in the {store}, never in the settings file. Leave it empty and press ↵ to remove the saved key."
+                "Kept in {store}, never in the settings file. Leave it empty and press ↵ to remove the saved key."
             )))
     }
 }
