@@ -1,0 +1,692 @@
+<!doctype html>
+<!--
+  Null's promotional film. Every frame is drawn by render(t) from the time alone, so
+  scripts/promo/render.sh can film it frame by frame (and opening this file in a browser
+  plays it: Space pauses, ← → step, a click on the bar seeks).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Null: promotional film</title>
+<style>
+@font-face { font-family: "Instrument Sans"; font-weight: 400; src: url("../../assets/fonts/instrument-sans/InstrumentSans-Regular.ttf"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 500; src: url("../../assets/fonts/instrument-sans/InstrumentSans-Medium.ttf"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 600; src: url("../../assets/fonts/instrument-sans/InstrumentSans-SemiBold.ttf"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 700; src: url("../../assets/fonts/instrument-sans/InstrumentSans-Bold.ttf"); }
+@font-face { font-family: "Geist Mono"; font-weight: 400; src: url("../../assets/fonts/geist-mono/GeistMono-Regular.ttf"); }
+@font-face { font-family: "Geist Mono"; font-weight: 500; src: url("../../assets/fonts/geist-mono/GeistMono-Medium.ttf"); }
+
+:root {
+  --ui: "Instrument Sans", -apple-system, sans-serif;
+  --mono: "Geist Mono", ui-monospace, Menlo, monospace;
+  --amber: #f2b35b;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #000; overflow: hidden; }
+body.player { display: grid; place-items: center; height: 100vh; }
+#stage {
+  position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #000;
+  color: #ebe8e2; font-family: var(--ui); -webkit-font-smoothing: antialiased;
+  transform-origin: center;
+}
+.layer { position: absolute; inset: 0; }
+.caret { position: absolute; width: 4px; background: var(--amber); border-radius: 2px; box-shadow: 0 0 22px rgba(242,179,91,.55); }
+
+/* ---------- opening ---------- */
+#word { position: absolute; left: 0; right: 0; top: 410px; text-align: center; font: 500 150px/1 var(--mono); letter-spacing: -0.02em; }
+#word .caret { height: 150px; top: 0; }
+#definition { position: absolute; left: 0; right: 0; top: 610px; text-align: center; font: 400 38px/1.4 var(--ui); color: #8b8a92; }
+#definition i { color: #46464e; font-style: italic; margin-right: 18px; }
+
+/* ---------- the clutter ---------- */
+#clutter .c { position: absolute; background: #121216; border: 1px solid #26262d; color: #74737b; font: 500 15px/1 var(--ui); overflow: hidden; }
+#clutter .row { display: flex; align-items: center; gap: 18px; height: 100%; padding: 0 14px; white-space: nowrap; }
+#clutter .ico { width: 22px; height: 22px; border-radius: 5px; background: #2a2a31; flex: none; }
+#clutter .col { display: flex; flex-direction: column; align-items: center; gap: 20px; padding-top: 16px; }
+#clutter .tab { padding: 0 16px; height: 100%; display: flex; align-items: center; border-right: 1px solid #26262d; }
+#clutter .line { height: 10px; border-radius: 3px; background: #24242a; margin: 10px 14px; }
+#clutter .head { font: 600 13px/1 var(--ui); letter-spacing: .08em; color: #8b8a92; padding: 14px; }
+#clutter .toast { background: #1b1b21; border: 1px solid #34343c; border-radius: 10px; color: #c9c7cf; font: 500 17px/1.35 var(--ui); padding: 16px 18px; box-shadow: 0 12px 40px rgba(0,0,0,.6); }
+#clutter .toast b { display: block; color: #ebe8e2; font-weight: 600; margin-bottom: 6px; }
+#clutter .toast .btns { display: flex; gap: 10px; margin-top: 12px; }
+#clutter .toast .btn { background: #2e2e36; border-radius: 6px; padding: 6px 12px; font-size: 14px; color: #ebe8e2; }
+#clutter .toast .btn.blue { background: #3b6fd8; }
+#clutter .badge { display: inline-block; background: #d9534f; color: #fff; border-radius: 9px; padding: 2px 7px; font-size: 12px; }
+#clutter .modal { background: #18181d; border: 1px solid #3a3a42; border-radius: 14px; box-shadow: 0 30px 90px rgba(0,0,0,.75); color: #c9c7cf; font: 400 18px/1.5 var(--ui); padding: 26px 30px; }
+#clutter .modal h3 { margin: 0 0 12px; font: 600 26px/1.2 var(--ui); color: #ebe8e2; }
+#clutter .code { font: 400 15px/26px var(--mono); color: #4d4d55; padding: 12px 18px; white-space: pre; }
+
+#back { position: absolute; left: 0; right: 0; top: 500px; text-align: center; font: 500 64px/1 var(--ui); letter-spacing: -0.015em; }
+#back .caret { height: 64px; top: -2px; }
+
+/* ---------- captions and keys ---------- */
+#scrim-top, #scrim-bottom { position: absolute; left: 0; right: 0; height: 190px; pointer-events: none; }
+#scrim-top { top: 0; background: linear-gradient(#000 0, #000 45%, rgba(0,0,0,0)); }
+#scrim-bottom { bottom: 0; background: linear-gradient(rgba(0,0,0,0), #000 60%, #000); }
+#caption { position: absolute; left: 0; right: 0; top: 52px; text-align: center; font: 500 44px/1.15 var(--ui); letter-spacing: -0.01em; }
+#caption .sub { color: #8b8a92; }
+#keys { position: absolute; left: 0; right: 0; top: 1003px; display: flex; justify-content: center; align-items: center; gap: 10px; }
+.key { min-width: 54px; height: 54px; padding: 0 16px; display: grid; place-items: center; border-radius: 11px; background: #17171c; border: 1px solid #34343c; border-bottom-width: 3px; font: 500 26px/1 var(--ui); color: #ebe8e2; }
+.key-alt { margin-left: 14px; font: 400 22px/1 var(--ui); color: #66656d; }
+
+/* ---------- the window ---------- */
+#window {
+  position: absolute; left: 200px; top: 150px; width: 1520px; height: 840px; border-radius: 14px; overflow: hidden;
+  background: var(--bg); color: var(--fg); box-shadow: 0 40px 120px rgba(0,0,0,.85), 0 0 0 1px rgba(255,255,255,.09);
+  font-family: var(--ui);
+}
+#titlebar { position: absolute; left: 0; right: 0; top: 0; height: 50px; border-bottom: 1px solid var(--line); }
+.light { position: absolute; top: 19px; width: 13px; height: 13px; border-radius: 50%; }
+#filetab { position: absolute; left: 104px; top: 8px; height: 34px; padding: 0 14px; display: flex; align-items: center; gap: 14px; border-radius: 8px; background: var(--raised); font-size: 16px; }
+#filetab .x { color: var(--muted); font-size: 13px; }
+#sidebar { position: absolute; left: 0; top: 50px; bottom: 36px; width: 350px; border-right: 1px solid var(--line); background: var(--bg); }
+#segments { position: absolute; left: 16px; right: 16px; top: 14px; height: 40px; border: 1px solid var(--line); border-radius: 10px; display: flex; align-items: center; padding: 3px; gap: 0; font-size: 15px; color: var(--muted); }
+#segments span { padding: 7px 11px; border-radius: 7px; white-space: nowrap; }
+#segments span.on { background: var(--raised); color: var(--fg); }
+#project { position: absolute; left: 20px; top: 76px; font: 600 14px/1 var(--ui); letter-spacing: .04em; color: var(--muted); }
+#tree { position: absolute; left: 8px; right: 8px; top: 102px; font-size: 16px; }
+#tree div { height: 33px; display: flex; align-items: center; gap: 10px; border-radius: 8px; padding-left: 14px; color: var(--muted); }
+#tree div.on { background: var(--sel-row); color: var(--fg); }
+#tree .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+#tree .on .dot { background: var(--caret); }
+#tree .chev { width: 10px; color: var(--muted); font-size: 13px; }
+#status { position: absolute; left: 0; right: 0; bottom: 0; height: 36px; display: flex; align-items: center; gap: 22px; padding: 0 22px; font-size: 15px; color: var(--muted); border-top: 1px solid var(--line); }
+#status .grow { flex: 1; }
+#code { position: absolute; left: 351px; right: 0; top: 51px; bottom: 37px; overflow: hidden; font: 400 18px/33px var(--mono); }
+.row { position: absolute; left: 0; right: 0; height: 33px; white-space: pre; }
+.row .n { position: absolute; left: 0; width: 64px; text-align: right; color: var(--faint); }
+.row .t { position: absolute; left: 100px; }
+.row.cur .n { color: var(--fg); }
+.row.del { background: var(--del); }
+.row.del .t span { color: var(--faint) !important; }
+.row.del .t .struck { text-decoration: line-through; text-decoration-color: var(--faint); }
+.row.add { background: var(--add); }
+.row.add::before, .row.del::before { content: ""; position: absolute; left: 76px; top: 0; bottom: 0; width: 3px; }
+.row.add::before { background: var(--modified); }
+.hint { position: absolute; left: 100px; display: flex; gap: 8px; align-items: center; font: 400 15px/1 var(--ui); color: var(--muted); }
+.hint .k { border: 1px solid var(--line-2); border-radius: 6px; padding: 5px 7px; font-size: 13px; color: var(--fg); margin-left: 10px; }
+.hint .k:first-child { margin-left: 0; }
+.prompt { position: absolute; left: 100px; width: 760px; height: 42px; display: flex; align-items: center; gap: 12px; padding: 0 12px; border-radius: 9px; background: var(--raised); border: 1px solid var(--caret-half); font: 400 17px/1 var(--ui); }
+.prompt .star { color: var(--caret); }
+.prompt .grow { flex: 1; color: var(--fg); position: relative; }
+.prompt .ph { color: var(--faint); }
+.prompt .hintr { color: var(--muted); font-size: 15px; }
+.k-kw { color: var(--kw); } .k-ty { color: var(--ty); } .k-fn { color: var(--fn); } .k-st { color: var(--st); }
+.k-nu { color: var(--nu); } .k-co { color: var(--co); } .k-pu { color: var(--pu); } .k-at { color: var(--at); }
+#codecaret { position: absolute; width: 2px; height: 25px; background: var(--caret); }
+
+/* palettes */
+.palette { position: absolute; left: 330px; width: 860px; top: 70px; border-radius: 16px; background: var(--raised); border: 1px solid var(--line-2); box-shadow: 0 30px 90px rgba(0,0,0,.55); overflow: hidden; }
+.palette .q { height: 72px; display: flex; align-items: center; padding: 0 30px; font: 400 25px/1 var(--ui); border-bottom: 1px solid var(--line); position: relative; }
+.palette .q .ph { color: var(--faint); }
+.palette .q .r { position: absolute; right: 30px; font-size: 17px; color: var(--muted); }
+.palette .item { height: 54px; margin: 6px 9px; padding: 0 22px; display: flex; align-items: center; gap: 14px; border-radius: 10px; font-size: 19px; }
+.palette .item.on { background: var(--sel-row); }
+.palette .item .m { color: var(--caret); }
+.palette .item .w { margin-left: auto; color: var(--muted); font-size: 16px; }
+.palette .val { margin-left: auto; display: flex; align-items: center; gap: 14px; font-size: 18px; }
+.palette .arrow { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 7px; border: 1px solid var(--line-2); background: var(--bg); color: var(--fg); font-size: 15px; }
+.palette .arrow.hit { background: var(--caret); color: var(--bg); border-color: var(--caret); }
+.palette .tog { margin-left: auto; width: 42px; height: 24px; border-radius: 12px; background: var(--line-2); position: relative; }
+.palette .tog.on { background: var(--caret); }
+.palette .tog::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--fg); }
+.palette .tog.on::after { left: 21px; background: var(--bg); }
+
+/* ---------- speed and the end ---------- */
+.big { position: absolute; left: 0; right: 0; text-align: center; font: 500 76px/1.1 var(--ui); letter-spacing: -0.02em; }
+.big .muted { color: #8b8a92; }
+#endmark { position: absolute; left: 0; right: 0; top: 330px; display: flex; justify-content: center; align-items: center; gap: 34px; font: 600 190px/1 var(--ui); letter-spacing: -0.03em; }
+#endmark .caret { position: relative; width: 9px; height: 170px; border-radius: 4px; }
+#tagline { position: absolute; left: 0; right: 0; top: 590px; text-align: center; font: 400 48px/1.2 var(--ui); color: #b9b7bf; }
+#facts { position: absolute; left: 0; right: 0; top: 700px; text-align: center; font: 500 28px/1.2 var(--ui); color: #6f6e76; }
+#url { position: absolute; left: 0; right: 0; top: 790px; text-align: center; font: 400 26px/1 var(--mono); color: var(--amber); }
+
+/* player (in a browser only) */
+#bar { position: fixed; left: 0; right: 0; bottom: 0; height: 6px; background: #111; cursor: pointer; }
+#bar div { height: 100%; background: var(--amber); width: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="layer" id="opening">
+    <div id="word"><span id="wordtext"></span><span class="caret" id="wordcaret"></span></div>
+    <div id="definition"><i>adj.</i>amounting to nothing.</div>
+  </div>
+  <div class="layer" id="clutter"></div>
+  <div class="layer" id="backlayer">
+    <div id="back"><span id="backtext"></span><span class="caret" id="backcaret"></span></div>
+  </div>
+  <div class="layer" id="app">
+    <div id="window">
+      <div id="titlebar">
+        <div class="light" style="left:22px;background:#fe5f57"></div>
+        <div class="light" style="left:46px;background:#febc2e"></div>
+        <div class="light" style="left:70px;background:#28c840"></div>
+        <div id="filetab"><span>cart.rs</span><span class="x">✕</span></div>
+      </div>
+      <div id="sidebar">
+        <div id="segments"><span class="on">Files</span><span>Outline</span><span>Tests</span><span>Search</span><span>Git 1</span></div>
+        <div id="project">SHOP</div>
+        <div id="tree">
+          <div><span class="chev">⌄</span>src</div>
+          <div class="on" style="padding-left:36px"><span class="dot"></span>cart.rs</div>
+          <div style="padding-left:36px"><span class="dot"></span>lib.rs</div>
+          <div style="padding-left:36px"><span class="dot"></span>price.rs</div>
+          <div><span class="chev">›</span>tests</div>
+          <div><span class="dot"></span>Cargo.lock</div>
+          <div><span class="dot"></span>Cargo.toml</div>
+          <div><span class="dot"></span>README.md</div>
+        </div>
+      </div>
+      <div id="code"><div id="rows"></div><div id="codecaret"></div></div>
+      <div id="status"><span style="display:flex;align-items:center;gap:7px"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="4.5" cy="3.5" r="1.6"/><circle cx="4.5" cy="12.5" r="1.6"/><circle cx="11.5" cy="5.5" r="1.6"/><path d="M4.5 5.1v5.8M11.5 7.1c0 2.4-2 3-5 3.9"/></svg>main</span><span id="crumbs">src/cart.rs › Cart</span><span class="grow"></span><span id="pos">Ln 23, Col 5</span><span>Rust</span></div>
+      <div id="overlay"></div>
+    </div>
+    <div id="scrim-top"></div><div id="scrim-bottom"></div>
+    <div id="caption"></div>
+    <div id="keys"></div>
+  </div>
+  <div class="layer" id="speed">
+    <div class="big" id="speed1" style="top:360px">Native, and drawn on the GPU.</div>
+    <div class="big" id="speed2" style="top:500px"><span id="count">42,000</span> files <span class="muted">listed in a quarter of a second.</span></div>
+  </div>
+  <div class="layer" id="end">
+    <div id="endmark"><span class="caret" id="endcaret"></span><span>Null</span></div>
+    <div id="tagline">A calm, fast code editor.</div>
+    <div id="facts">Free and open source&nbsp;&nbsp;·&nbsp;&nbsp;macOS&nbsp;&nbsp;·&nbsp;&nbsp;Windows&nbsp;&nbsp;·&nbsp;&nbsp;Linux</div>
+    <div id="url">shortplanet3058.github.io/null-ide</div>
+  </div>
+</div>
+<script>
+"use strict";
+window.DURATION = 42;
+
+// ---------- time helpers ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const out3 = x => 1 - Math.pow(1 - x, 3);
+const inOut = x => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const in3 = x => x * x * x;
+/** In from a to b, out from c to d. */
+const fade = (t, a, b, c, d) => Math.min(out3(prog(t, a, b)), 1 - in3(prog(t, c, d)));
+/** A caret blinks only when nothing happens: solid for `still` seconds after `since`. */
+const blink = (t, since = -1, still = 0.5) => (t - since < still ? 1 : ((t - since - still) % 1.06) < 0.53 ? 1 : 0);
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// A person's typing: each character its own (repeatable) time.
+function seeded(seed) {
+  let s = seed >>> 0;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+}
+function typing(text, start, perChar, seed = 7) {
+  const r = seeded(seed);
+  const at = [];
+  let time = start;
+  for (const ch of text) {
+    time += perChar * (0.55 + r() * 0.9) + (ch === " " ? perChar * 0.4 : 0) + (ch === "\n" ? perChar * 2.2 : 0);
+    at.push(time);
+  }
+  return {
+    text, at, start, end: time,
+    shown(t) { let n = 0; while (n < at.length && at[n] <= t) n++; return text.slice(0, n); },
+    last(t) { let l = start; for (const a of at) if (a <= t) l = a; return l; },
+  };
+}
+
+// ---------- Rust colours ----------
+const KW = new Set("pub fn let const struct impl match if else self Self use mut as return for in where enum crate mod".split(" "));
+function colour(src) {
+  const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|(#\[[^\]]*\])|(\b\d[\d_]*\b)|(\b[A-Za-z_][A-Za-z0-9_]*\b)(?=\s*\()|(\b[A-Za-z_][A-Za-z0-9_]*\b)|([^\sA-Za-z0-9_])/g;
+  let out = "", last = 0, m;
+  while ((m = re.exec(src))) {
+    out += esc(src.slice(last, m.index));
+    const [w] = m;
+    let cls;
+    if (m[1]) cls = "co";
+    else if (m[2]) cls = "st";
+    else if (m[3]) cls = "at";
+    else if (m[4]) cls = "nu";
+    else if (m[5]) cls = KW.has(w) ? "kw" : /^[A-Z]/.test(w) ? "ty" : "fn";
+    else if (m[6]) cls = KW.has(w) ? "kw" : /^[A-Z]/.test(w) ? "ty" : /^(u32|u64|i32|usize|str|bool)$/.test(w) ? "ty" : null;
+    else cls = "pu";
+    out += cls ? `<span class="k-${cls}">${esc(w)}</span>` : esc(w);
+    last = m.index + w.length;
+  }
+  return out + esc(src.slice(last));
+}
+
+// ---------- themes (Null's own, from src/theme.rs) ----------
+const THEMES = {
+  Null:     { bg: "#000000", fg: "#ebe8e2", muted: "#8b8a92", faint: "#46464e", line: "#1d1d22", line2: "#2c2c33", raised: "#141418", caret: "#f2b35b", kw: "#c6a6f6", ty: "#87c7e1", fn: "#f1d9a9", st: "#a9d59c", nu: "#f3a37e", co: "#5f626e", pu: "#8d8c96", at: "#9aa6ba", selrow: "rgba(242,179,91,.14)" },
+  Midnight: { bg: "#0b0e14", fg: "#dfe4ee", muted: "#8590a6", faint: "#414b60", line: "#1c2230", line2: "#283044", raised: "#151a24", caret: "#7cc4e8", kw: "#b7a3f2", ty: "#8bd0e6", fn: "#e9d7a8", st: "#a4d4a3", nu: "#f0a682", co: "#58627a", pu: "#8890a3", at: "#9aa8c2", selrow: "rgba(124,196,232,.14)" },
+  Moss:     { bg: "#101311", fg: "#e2e5dd", muted: "#8c9488", faint: "#474f47", line: "#222823", line2: "#2e352f", raised: "#1a1f1b", caret: "#b5cf85", kw: "#d0a6d8", ty: "#8ec9c0", fn: "#e8d39c", st: "#b7d48f", nu: "#eba37c", co: "#606b5f", pu: "#8f968b", at: "#a2ad9c", selrow: "rgba(181,207,133,.14)" },
+  Dune:     { bg: "#f6f1e7", fg: "#2b2620", muted: "#75695a", faint: "#b6aa97", line: "#e2d9c7", line2: "#d6cbb6", raised: "#fbf8f1", caret: "#b5532d", kw: "#8a3f8f", ty: "#2c6e7f", fn: "#8f4a10", st: "#527a26", nu: "#b5532d", co: "#a2967f", pu: "#7a6e5e", at: "#6a6455", selrow: "rgba(181,83,45,.12)" },
+  Paper:    { bg: "#fcfcfb", fg: "#1d1e22", muted: "#6a6b72", faint: "#b0b1b7", line: "#e6e5e1", line2: "#d4d3ce", raised: "#ffffff", caret: "#b4620c", kw: "#7a3ec8", ty: "#1e6c92", fn: "#8c4a00", st: "#3a7a2e", nu: "#b4461e", co: "#9a9ca3", pu: "#6f7077", at: "#5c6b82", selrow: "rgba(180,98,12,.12)" },
+};
+let themeShown = null;
+function setTheme(name) {
+  if (themeShown === name) return;
+  themeShown = name;
+  const th = THEMES[name], w = $("window").style;
+  const set = (k, v) => w.setProperty(k, v);
+  set("--bg", th.bg); set("--fg", th.fg); set("--muted", th.muted); set("--faint", th.faint);
+  set("--line", th.line); set("--line-2", th.line2); set("--raised", th.raised); set("--caret", th.caret);
+  set("--caret-half", th.caret + "80"); set("--sel-row", th.selrow);
+  for (const k of ["kw", "ty", "fn", "st", "nu", "co", "pu", "at"]) set("--" + k, th[k]);
+  set("--add", "rgba(104,201,140,.12)"); set("--del", "rgba(238,104,104,.11)"); set("--modified", "#7fa8e0");
+}
+
+// ---------- the file ----------
+const HEAD = [
+  "use crate::price::Cents;",
+  "",
+  "/// Orders at or above this ship for free.",
+  "const FREE_SHIPPING: Cents = Cents(50_00);",
+  "const SHIPPING: Cents = Cents(4_90);",
+  "",
+  "#[derive(Debug, Clone)]",
+  "pub struct Item {",
+  "    pub name: String,",
+  "    pub price: Cents,",
+  "    pub quantity: u32,",
+  "}",
+  "",
+  "#[derive(Debug, Default)]",
+  "pub struct Cart {",
+  "    items: Vec<Item>,",
+  "}",
+  "",
+  "impl Cart {",
+  "    pub fn add(&mut self, item: Item) {",
+  "        self.items.push(item);",
+  "    }",
+  "",
+];
+const TAIL = ["    pub fn shipping(&self) -> Cents {", "        SHIPPING", "    }", "}", ""];
+const TYPED =
+  "    /// What the items cost together, before shipping.\n" +
+  "    pub fn subtotal(&self) -> Cents {\n" +
+  "        self.items.iter().map(|i| i.price * i.quantity).sum()\n" +
+  "    }\n";
+const ADDED = [
+  "        if self.subtotal() >= FREE_SHIPPING {",
+  "            Cents(0)",
+  "        } else {",
+  "            SHIPPING",
+  "        }",
+];
+
+// ---------- timeline ----------
+const T = {
+  word: typing("null", 1.1, 0.13, 3),
+  back: typing("Null gives you the screen back.", 10.55, 0.042, 11),
+  code: typing(TYPED, 14.9, 0.022, 5),
+  query: typing("@ship", 21.25, 0.11, 9),
+  ask: typing("free shipping over FREE_SHIPPING", 27.0, 0.034, 13),
+};
+const CAPTIONS = [
+  [13.1, 16.9, "Your code, on true black. <span class='sub'>Nothing else.</span>"],
+  [17.1, 20.5, "The bars fade while you type."],
+  [20.7, 25.6, "Everything else is one keystroke away."],
+  [25.8, 29.9, "AI waits until you call it."],
+  [30.1, 33.4, "Every change shown in place. <span class='sub'>You keep it, or not.</span>"],
+];
+const KEYS = [
+  [20.95, 21.9, ["⌘", "P"], "Ctrl+P"],
+  [22.25, 22.9, ["↵"], ""],
+  [23.0, 23.75, ["⌘", "K"], "Ctrl+K"],
+  [23.85, 25.2, ["→"], ""],
+  [26.15, 27.0, ["⌘", "I"], "Ctrl+I"],
+  [28.15, 28.7, ["↵"], ""],
+  [31.55, 32.3, ["⇥"], "Tab"],
+];
+// ⌘K: the theme steps along, then comes back to Null.
+const THEME_STEPS = [[24.0, "Midnight"], [24.35, "Moss"], [24.7, "Dune"], [25.05, "Paper"], [25.4, "Null"]];
+
+// ---------- the clutter: what other editors show before any code ----------
+const CLUTTER = [
+  // [left, top, width, height, html, class, appears]
+  [0, 0, 1920, 36, `<div class="row">${"File Edit Selection View Go Run Terminal Window Help".split(" ").map(w => `<span>${w}</span>`).join("")}</div>`, "", 4.85],
+  [0, 36, 1920, 48, `<div class="row">${Array(14).fill('<span class="ico"></span>').join("")}<span style="margin-left:auto;background:#1d1d23;border:1px solid #2e2e36;border-radius:7px;padding:8px 160px 8px 12px">Search…</span><span>▶ Run</span><span>Debug ▾</span><span class="badge">3</span><span>Sign in to sync</span></div>`, "", 5.0],
+  [0, 84, 64, 966, `<div class="col">${Array(10).fill('<span class="ico"></span>').join("")}<span class="badge">12</span></div>`, "", 5.12],
+  [64, 84, 330, 966, `<div class="head">EXPLORER</div>${Array(9).fill('<div class="line"></div>').join("")}<div class="head">OPEN EDITORS <span class="badge">9</span></div>${Array(5).fill('<div class="line"></div>').join("")}<div class="head">OUTLINE</div>${Array(4).fill('<div class="line"></div>').join("")}<div class="head">TIMELINE</div><div class="head">NPM SCRIPTS</div>`, "", 5.22],
+  [394, 84, 1126, 42, `<div class="row" style="padding:0;gap:0">${["cart.rs", "lib.rs", "price.rs", "README.md", "Cargo.toml", "settings.json", "Welcome", "Release Notes", "untitled-3"].map(n => `<span class="tab">${n} ✕</span>`).join("")}</div>`, "", 5.32],
+  [394, 126, 1126, 30, `<div class="row" style="font-size:14px">src › cart.rs › impl Cart › fn add › item  ·  ⚑ 2 references  ·  ✎ You, 3 days ago</div>`, "", 5.4],
+  [394, 156, 1036, 570, `<div class="code">use crate::price::Cents;\n\nconst FREE_SHIPPING: Cents = Cents(50_00);\nconst SHIPPING: Cents = Cents(4_90);\n\n#[derive(Debug, Clone)]\npub struct Item {\n    pub name: String,\n    pub price: Cents,\n    pub quantity: u32,\n}</div>`, "", 5.45],
+  [1430, 156, 90, 570, Array(30).fill(0).map((_, i) => `<div style="height:4px;margin:6px 10px;width:${30 + ((i * 37) % 50)}px;background:#2a2a31"></div>`).join(""), "", 5.55],
+  [1520, 84, 400, 966, `<div class="head">✦ ASSISTANT  <span class="badge">NEW</span></div><div class="toast" style="margin:10px 14px">How can I help you today? I can explain, refactor, write tests…</div><div class="toast" style="margin:10px 14px">💡 Try: “Generate docs for this file”</div><div class="toast" style="margin:10px 14px">⚡ Upgrade for faster answers</div>${Array(6).fill('<div class="line"></div>').join("")}`, "", 5.65],
+  [394, 726, 1126, 324, `<div class="row" style="height:42px;border-bottom:1px solid #26262d;font-size:14px;letter-spacing:.05em">PROBLEMS <span class="badge">99+</span> OUTPUT  DEBUG CONSOLE  TERMINAL  PORTS  GIT LOG  TEST RESULTS</div><div class="code" style="color:#5e5d66">warning: unused import: \`std::fmt\`\n  --> src/lib.rs:3:5\nwarning: field \`quantity\` is never read\nerror[E0308]: mismatched types\n[Info  - 10:42:13] Indexing workspace… 37%\n[Info  - 10:42:14] Downloading telemetry config…</div>`, "", 5.78],
+  [0, 1050, 1920, 30, `<div class="row" style="font-size:13px;background:#1e3a6e;color:#d6e2ff;height:30px">⑂ main*  ⟳ 0↓ 3↑  ⊗ 4  ⚠ 99+  ·  Ln 1, Col 1  ·  Spaces: 4  ·  UTF-8  ·  LF  ·  {} Rust  ·  ✦ Assistant ready  ·  🔔 7  ·  Indexing…  ·  Layout: US  ·  ☁ Sync off</div>`, "", 5.9],
+  [700, 470, 420, 290, `<div class="code" style="padding:6px 0;color:#9a99a1">${["▢ push", "▢ pop", "▢ iter", "▢ iter_mut", "▢ insert", "▢ retain", "▢ sort_by", "▢ windows", "▢ chunks", "▢ extend"].map((w, i) => `<div style="padding:0 14px;${i === 0 ? "background:#24406e;color:#fff" : ""}">${w}</div>`).join("")}</div>`, "", 6.15],
+  [560, 380, 520, 96, `<div class="toast" style="height:100%;border-radius:0;box-shadow:none">fn push(&mut self, value: T)<br><span style="color:#74737b">Appends an element to the back of a collection… <u>Read more</u></span></div>`, "", 6.3],
+  [1460, 640, 440, 140, `<div class="toast" style="height:100%"><b>A new version is available</b>Restart to update now?<div class="btns"><span class="btn blue">Restart</span><span class="btn">Later</span><span class="btn">Release notes</span></div></div>`, "", 6.5],
+  [1460, 795, 440, 120, `<div class="toast" style="height:100%"><b>Recommended extensions</b>12 extensions are recommended for this file type.<div class="btns"><span class="btn blue">Install all</span><span class="btn">Show</span></div></div>`, "", 6.75],
+  [1460, 930, 440, 110, `<div class="toast" style="height:100%"><b>✦ Want me to explain this file?</b><div class="btns"><span class="btn blue">Explain</span><span class="btn">Don't ask again</span></div></div>`, "", 7.0],
+  [610, 200, 700, 300, `<div class="modal" style="height:100%"><h3>What's new in version 2.84</h3>• A redesigned activity bar with 6 new panels<br>• Smarter notifications (now with sounds)<br>• Personalised tips, every time you open a file<br>• Sign in to unlock cloud settings sync<div class="btns" style="display:flex;gap:10px;margin-top:22px"><span class="btn blue" style="background:#3b6fd8;border-radius:7px;padding:8px 16px;color:#fff">Got it</span><span style="background:#2e2e36;border-radius:7px;padding:8px 16px;color:#ebe8e2">Take the tour</span></div></div>`, "", 7.3],
+  [120, 640, 460, 150, `<div class="toast" style="height:100%"><b>💡 Tip of the day</b>Did you know you can customise 4,000 settings?<div class="btns"><span class="btn">Next tip</span><span class="btn">Close</span></div></div>`, "", 7.6],
+  [820, 860, 560, 92, `<div class="toast" style="height:100%;background:#2a2116;border-color:#5a4520;color:#e9cf9f"><b style="color:#f6dcaa">Your trial ends in 3 days</b>Upgrade to keep using premium features.</div>`, "", 7.85],
+  [300, 90, 520, 110, `<div class="toast" style="height:100%"><b>Sign in to sync your settings</b><div class="btns"><span class="btn blue">Sign in</span><span class="btn">Not now</span></div></div>`, "", 8.05],
+  [1080, 300, 420, 120, `<div class="toast" style="height:100%"><b>★ Enjoying the editor?</b>Rate us on the marketplace!<div class="btns"><span class="btn">★★★★★</span></div></div>`, "", 8.25],
+];
+function buildClutter() {
+  const root = $("clutter");
+  root.innerHTML = CLUTTER.map(([l, tp, w, h, html, cls], i) =>
+    `<div class="c ${cls}" id="cl${i}" style="left:${l}px;top:${tp}px;width:${w}px;height:${h}px">${html}</div>`).join("");
+  // Toasts and modals are their own cards: no panel box around them.
+  CLUTTER.forEach(([, , , , html], i) => {
+    if (/class="(toast|modal)"/.test(html.slice(0, 40))) {
+      const el = $("cl" + i);
+      el.style.background = "none"; el.style.border = "none"; el.style.overflow = "visible";
+    }
+  });
+}
+
+// ---------- drawing ----------
+let charW = 10.8;
+function measure() {
+  const c = document.createElement("canvas").getContext("2d");
+  c.font = "400 18px 'Geist Mono'";
+  charW = c.measureText("0000000000").width / 10;
+}
+
+function show(id, opacity, transform = "") {
+  const el = $(id);
+  el.style.opacity = opacity;
+  el.style.visibility = opacity > 0.001 ? "visible" : "hidden";
+  if (transform !== null) el.style.transform = transform;
+}
+
+function renderOpening(t) {
+  const o = fade(t, 0, 0.01, 4.3, 4.8);
+  show("opening", o);
+  if (!o) return;
+  const typed = T.word.shown(t);
+  $("wordtext").textContent = typed;
+  const caret = $("wordcaret");
+  caret.style.opacity = t < 0.35 ? 0 : blink(t, T.word.last(t), 0.45);
+  caret.style.position = "relative";
+  caret.style.display = "inline-block";
+  caret.style.marginLeft = typed ? "12px" : "0";
+  caret.style.verticalAlign = "-14px";
+  show("definition", fade(t, 2.1, 2.9, 4.0, 4.5), `translateY(${(1 - out3(prog(t, 2.1, 2.9))) * 16}px)`);
+}
+
+function renderClutter(t) {
+  const visible = t > 4.7 && t < 10.6;
+  show("clutter", visible ? 1 : 0);
+  if (!visible) return;
+  CLUTTER.forEach(([l, tp, w, h, , , appears], i) => {
+    const inP = out3(prog(t, appears, appears + 0.28));
+    // Into the caret, the last ones first.
+    const d = (CLUTTER.length - i) * 0.018;
+    const q = inOut(prog(t, 9.15 + d, 9.95 + d));
+    const cx = l + w / 2, cy = tp + h / 2;
+    const dx = (960 - cx) * q, dy = (540 - cy) * q;
+    const s = (0.94 + 0.06 * inP) * (1 - q * 0.98);
+    const el = $("cl" + i);
+    el.style.opacity = inP * (1 - q * q);
+    el.style.transform = `translate(${dx}px, ${dy + (1 - inP) * 10}px) scale(${s})`;
+  });
+}
+
+function renderBack(t) {
+  // The caret the clutter went into, alone; then the sentence.
+  const o = fade(t, 9.9, 10.15, 12.4, 12.95);
+  show("backlayer", o);
+  if (!o) return;
+  const typed = T.back.shown(t);
+  $("backtext").textContent = typed;
+  const caret = $("backcaret");
+  caret.style.position = "relative";
+  caret.style.display = "inline-block";
+  caret.style.marginLeft = typed ? "8px" : "0";
+  caret.style.verticalAlign = "-8px";
+  caret.style.opacity = blink(t, Math.max(T.back.last(t), 10.0), 0.4);
+}
+
+function renderApp(t) {
+  const o = fade(t, 12.75, 13.45, 33.3, 33.9);
+  show("app", o, `scale(${0.965 + 0.035 * out3(prog(t, 12.75, 13.6)) - 0.03 * in3(prog(t, 33.3, 33.9))})`);
+  if (!o) return;
+
+  // Theme: Null, except while ⌘K steps through the others.
+  let theme = "Null";
+  for (const [at, name] of THEME_STEPS) if (t >= at) theme = name;
+  setTheme(theme);
+
+  // Captions.
+  let cap = "", capO = 0, capY = 0;
+  for (const [a, b, text] of CAPTIONS) {
+    const f = fade(t, a, a + 0.45, b - 0.35, b);
+    if (f > 0) { cap = text; capO = f; capY = (1 - out3(prog(t, a, a + 0.45))) * 14; }
+  }
+  if ($("caption").dataset.text !== cap) { $("caption").innerHTML = cap; $("caption").dataset.text = cap; }
+  show("caption", capO, `translateY(${capY}px)`);
+
+  // Keys pressed.
+  let keysHtml = "", keysO = 0, keyScale = 1;
+  for (const [a, b, keys, alt] of KEYS) {
+    const f = fade(t, a, a + 0.12, b - 0.2, b);
+    if (f > 0) {
+      keysHtml = keys.map(k => `<span class="key">${k}</span>`).join("") + (alt ? `<span class="key-alt">${alt}</span>` : "");
+      keysO = f;
+      const press = prog(t, a + 0.12, a + 0.3);
+      keyScale = 1 - 0.07 * Math.sin(Math.PI * press);
+    }
+  }
+  if ($("keys").dataset.html !== keysHtml) { $("keys").innerHTML = keysHtml; $("keys").dataset.html = keysHtml; }
+  show("keys", keysO, `scale(${keyScale})`);
+
+  // The bars fade while typing (code and the AI prompt), and come back after.
+  const typingCode = t > T.code.start + 0.15 && t < T.code.end + 0.9;
+  const typingAsk = t > T.ask.start && t < 31.9;
+  const bars = t < T.code.start + 0.15 ? 1 : typingCode || typingAsk
+    ? 1 - 0.8 * out3(prog(t, (typingCode ? T.code.start : T.ask.start) + 0.15, (typingCode ? T.code.start : T.ask.start) + 0.6))
+    : 0.2 + 0.8 * out3(prog(t, t < 26 ? T.code.end + 0.9 : 31.9, (t < 26 ? T.code.end : 31.0) + 1.5));
+  for (const id of ["sidebar", "status"]) $(id).style.opacity = bars;
+  $("filetab").style.opacity = 0.35 + 0.65 * bars;
+
+  drawCode(t);
+  drawOverlay(t);
+
+  // The camera: closer while code is written, back for the palettes, closer for the AI.
+  const shots = [
+    [14.4, 15.9, 1, 1.3, [720, 600]], [19.7, 20.6, 1.3, 1, [720, 600]],
+    [25.9, 27.0, 1, 1.26, [760, 640]], [32.6, 33.3, 1.26, 1, [760, 640]],
+  ];
+  let zoom = 1, origin = [760, 420];
+  for (const [a, b, from, to, at] of shots) {
+    if (t >= a) { zoom = from + (to - from) * inOut(prog(t, a, b)); origin = at; }
+  }
+  const w = $("window").style;
+  w.transformOrigin = `${origin[0]}px ${origin[1]}px`;
+  w.transform = `scale(${zoom})`;
+  const scrim = clamp((zoom - 1) / 0.2);
+  $("scrim-top").style.opacity = scrim;
+  $("scrim-bottom").style.opacity = scrim;
+}
+
+function drawCode(t) {
+  const lh = 33;
+  let rows, caretLine, caretCol, scroll;
+  const aiAt = 28.75; // the change arrives
+  if (t < 22.3) {
+    // Typing the function in, on the empty line after `add`.
+    const typed = T.code.shown(t);
+    const pieces = typed.split("\n");
+    const lines = HEAD.concat(pieces);
+    caretLine = lines.length - 1;
+    caretCol = pieces[pieces.length - 1].length || 4;
+    rows = lines.concat(TAIL.slice(0, -1)).map((text, i) => ({ text, n: i + 1 }));
+    rows[caretLine].caret = true;
+    scroll = 5;
+  } else {
+    // ⌘P to @shipping, then the AI's change.
+    const base = HEAD.concat(TYPED.split("\n"), TAIL.slice(0, -1));
+    const shipLine = base.indexOf("    pub fn shipping(&self) -> Cents {");
+    const bodyLine = shipLine + 1;
+    const jump = inOut(prog(t, 22.45, 22.85));
+    scroll = 5 + (shipLine - 12 - 5) * jump;
+    rows = [];
+    const open = out3(prog(t, aiAt, aiAt + 0.45));          // the change unfolds
+    const kept = inOut(prog(t, 31.75, 32.2));               // ⇥: kept
+    const prompt = fade(t, 26.3, 26.55, 28.6, 28.9);        // the ⌘I box
+    let n = 1;
+    base.forEach((text, i) => {
+      if (i === bodyLine && open > 0) {
+        rows.push({ text, cls: "del", h: open * (1 - kept), alpha: 1 - kept });
+        ADDED.forEach((a, j) => rows.push({ text: a, cls: kept > 0.5 ? "" : "add", h: open, n: n++, fadeBg: 1 - kept, caret: j === 0 && t > aiAt }));
+        rows.push({ hint: true, h: open * (1 - kept) * 1.3 });
+        return;
+      }
+      rows.push({ text, n: n++, caret: i === shipLine && t <= aiAt });
+      if (i === shipLine && prompt > 0) rows.push({ prompt: true, h: prompt * 1.55, o: prompt });
+    });
+    caretCol = t > aiAt ? 8 : 4;
+  }
+
+  // Lay the rows out (a row can be opening: its height a fraction).
+  let y = 10 - scroll * lh, html = "", caretY = 0, caretN = 1;
+  rows.forEach((r, i) => {
+    const h = (r.h === undefined ? 1 : r.h) * lh;
+    if (h < 0.5) return;
+    const top = y;
+    y += h;
+    if (top > 780 || top + h < -40) return;
+    if (r.prompt) {
+      const ask = T.ask.shown(t);
+      const thinking = t > 28.25 && t < aiAt;
+      const inner = thinking
+        ? `<span class="star" style="opacity:${0.45 + 0.55 * Math.abs(Math.sin(t * 5))}">✦</span><span class="grow" style="color:var(--muted)">Thinking…</span>`
+        : `<span class="star">✦</span><span class="grow">${ask ? esc(ask) + `<span style="display:inline-block;width:2px;height:20px;background:var(--caret);vertical-align:-4px;margin-left:2px;opacity:${blink(t, T.ask.last(t), 0.4)}"></span>` : `<span class="ph">Describe a change, or ask a question</span>`}</span><span class="hintr">${ask ? "↵ change" : ""}</span>`;
+      html += `<div class="prompt" style="top:${top + 6}px;opacity:${r.o}">${inner}</div>`;
+      return;
+    }
+    if (r.hint) {
+      html += `<div class="hint" style="top:${top + 8}px;opacity:${clamp(h / lh)}"><span class="k">⇥</span>keep<span class="k">Esc</span>undo<span class="k">⌘I</span>adjust</div>`;
+      return;
+    }
+    const cls = [r.cls || "", r.caret ? "cur" : ""].join(" ");
+    const bg = r.fadeBg !== undefined ? `background:rgba(104,201,140,${0.12 * r.fadeBg});` : "";
+    const op = r.alpha !== undefined ? `opacity:${r.alpha};` : "";
+    html += `<div class="row ${cls}" style="top:${top}px;height:${h}px;overflow:hidden;${bg}${op}"><span class="n">${r.n || ""}</span><span class="t">${r.cls === "del" ? r.text.match(/^\s*/)[0] + `<span class="struck">${colour(r.text.trim())}</span>` : colour(r.text)}</span></div>`;
+    if (r.caret) { caretY = top; caretN = r.n; }
+  });
+  $("rows").innerHTML = html;
+
+  // The caret: typing, it stays lit; idle, it blinks.
+  const lastKey = Math.max(T.code.last(t), t > 26 ? T.ask.last(t) : 0);
+  const caret = $("codecaret");
+  const inPrompt = t > 26.3 && t < 28.9;
+  caret.style.opacity = inPrompt ? 0 : blink(t, lastKey, 0.5);
+  caret.style.left = 100 + caretCol * charW + "px";
+  caret.style.top = caretY + 4 + "px";
+
+  $("pos").textContent = `Ln ${caretN}, Col ${caretCol + 1}`;
+  $("crumbs").textContent = t > 22.6 ? "src/cart.rs › shipping" : t > T.code.start + 1.2 ? "src/cart.rs › subtotal" : "src/cart.rs › Cart";
+}
+
+function drawOverlay(t) {
+  // ⌘P: @ for a symbol of the file.
+  const p = fade(t, 21.0, 21.18, 22.25, 22.45);
+  const k = fade(t, 23.05, 23.25, 25.55, 25.8);
+  let html = "";
+  if (p > 0) {
+    const q = T.query.shown(t);
+    const hits = q.length >= 2
+      ? [["<span class='m'>ship</span>ping", "fn"], ["FREE_<span class='m'>SHIP</span>PING", "const"], ["<span class='m'>SHIP</span>PING", "const"]]
+      : [["add", "fn"], ["subtotal", "fn"], ["shipping", "fn"], ["Item", "struct"], ["Cart", "struct"]];
+    const qHtml = q ? `<span>${esc(q)}</span>` : `<span class="ph">Go to file, @ for a symbol</span>`;
+    html += `<div class="palette" style="opacity:${p};transform:translateY(${(1 - p) * -10}px)">
+      <div class="q"><span style="display:inline-block;width:2px;height:28px;background:var(--caret);margin-right:2px;opacity:${blink(t, T.query.last(t), 0.4)}"></span>${qHtml}<span class="r">↵ go</span></div>
+      ${hits.map((h, i) => `<div class="item ${i === 0 ? "on" : ""}"><span>${h[0]}</span><span class="w">${h[1]}</span></div>`).join("")}
+      <div style="height:6px"></div></div>`;
+  }
+  if (k > 0) {
+    let theme = "Null", hit = -1;
+    THEME_STEPS.forEach(([at, name], i) => { if (t >= at) theme = name; if (t >= at - 0.05 && t < at + 0.16) hit = i; });
+    const row = (label, right, on) => `<div class="item ${on ? "on" : ""}">${label}${right}</div>`;
+    html += `<div class="palette" style="opacity:${k};transform:translateY(${(1 - k) * -10}px)">
+      <div class="q"><span style="display:inline-block;width:2px;height:28px;background:var(--caret);margin-right:2px"></span><span class="ph">Quick settings and commands</span><span class="r">←→ change</span></div>
+      ${row("Theme", `<span class="val"><span class="arrow">←</span><span style="min-width:100px;text-align:center">${theme}</span><span class="arrow ${hit >= 0 ? "hit" : ""}">→</span></span>`, true)}
+      ${row("Text size", `<span class="val"><span class="arrow">−</span><span style="min-width:40px;text-align:center">16</span><span class="arrow">+</span></span>`)}
+      ${row("Line spacing", `<span class="val"><span class="arrow">←</span><span style="min-width:100px;text-align:center">Normal</span><span class="arrow">→</span></span>`)}
+      ${row("Wrap lines", `<span class="tog"></span>`)}
+      ${row("Sidebar", `<span class="tog on"></span>`)}
+      ${row("Fade bars while typing", `<span class="tog on"></span>`)}
+      ${row("AI", `<span class="tog on"></span>`)}
+      <div style="height:6px"></div></div>`;
+  }
+  $("overlay").innerHTML = html;
+}
+
+function renderSpeed(t) {
+  const o = fade(t, 34.0, 34.5, 37.3, 37.8);
+  show("speed", o);
+  if (!o) return;
+  show("speed1", fade(t, 34.0, 34.5, 37.3, 37.8), `translateY(${(1 - out3(prog(t, 34.0, 34.6))) * 18}px)`);
+  show("speed2", fade(t, 34.9, 35.4, 37.3, 37.8), `translateY(${(1 - out3(prog(t, 34.9, 35.5))) * 18}px)`);
+  const n = Math.round(42000 * out3(prog(t, 34.95, 35.9)) / 100) * 100;
+  $("count").textContent = n.toLocaleString("en-US");
+}
+
+function renderEnd(t) {
+  const o = fade(t, 37.9, 38.3, 41.35, 41.95);
+  show("end", o);
+  if (!o) return;
+  $("endcaret").style.opacity = blink(t, 38.0, 0.6);
+  show("endmark", out3(prog(t, 38.0, 38.7)), `translateY(${(1 - out3(prog(t, 38.0, 38.8))) * 20}px)`);
+  show("tagline", out3(prog(t, 38.7, 39.4)), `translateY(${(1 - out3(prog(t, 38.7, 39.4))) * 14}px)`);
+  show("facts", out3(prog(t, 39.3, 40.0)), "");
+  show("url", out3(prog(t, 39.7, 40.4)), "");
+}
+
+let measured = false;
+window.render = function (t) {
+  if (!measured) { measure(); measured = true; }
+  renderOpening(t);
+  renderClutter(t);
+  renderBack(t);
+  renderApp(t);
+  renderSpeed(t);
+  renderEnd(t);
+};
+
+buildClutter();
+setTheme("Null");
+
+// ---------- playing it in a browser ----------
+if (!navigator.userAgent.includes("NullFilm")) {
+  document.body.classList.add("player");
+  const bar = document.createElement("div");
+  bar.id = "bar"; bar.innerHTML = "<div></div>";
+  document.body.appendChild(bar);
+  const fit = () => {
+    const s = Math.min(innerWidth / 1920, (innerHeight - 8) / 1080);
+    $("stage").style.transform = `scale(${s})`;
+    $("stage").style.margin = `${(1080 * s - 1080) / 2}px ${(1920 * s - 1920) / 2}px`;
+  };
+  addEventListener("resize", fit); fit();
+  const params = new URLSearchParams(location.search);
+  let t = parseFloat(params.get("t") || "0"), playing = !params.has("t"), last = null;
+  addEventListener("keydown", e => {
+    if (e.key === " ") playing = !playing;
+    if (e.key === "ArrowRight") t = Math.min(DURATION, t + (e.shiftKey ? 0.1 : 1));
+    if (e.key === "ArrowLeft") t = Math.max(0, t - (e.shiftKey ? 0.1 : 1));
+  });
+  bar.addEventListener("click", e => { t = DURATION * e.clientX / innerWidth; });
+  document.fonts.ready.then(() => {
+    const frame = now => {
+      if (playing && last !== null) t = (t + (now - last) / 1000) % DURATION;
+      last = now;
+      window.render(t);
+      bar.firstChild.style.width = (100 * t / DURATION) + "%";
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  });
+}
+</script>
+</body>
+</html>
