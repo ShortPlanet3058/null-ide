@@ -226,7 +226,7 @@ pub fn counts(base: &str, current: &str) -> (usize, usize) {
 pub fn undo_last_commit(root: &Path) -> Result<String, String> {
     let commit = run(root, &["rev-list", "--parents", "-n", "1", "HEAD"]).map_err(|_| "There's no commit to undo.")?;
     if run(root, &["symbolic-ref", "-q", "HEAD"]).is_err() {
-        return Err("No branch is checked out: switch to one first.".into());
+        return Err("Not on a branch.".into());
     }
     let git_dir = run(root, &["rev-parse", "--absolute-git-dir"]).map(|d| PathBuf::from(d.trim()))?;
     if ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
@@ -241,7 +241,7 @@ pub fn undo_last_commit(root: &Path) -> Result<String, String> {
         _ => return Err("The last commit is a merge: undo it from the terminal.".into()),
     }
     if !run(root, &["branch", "-r", "--contains", "HEAD"])?.trim().is_empty() {
-        return Err("The last commit is pushed already: undoing it here would part from what others have.".into());
+        return Err("The last commit is already pushed, so it can't be undone here.".into());
     }
     let message = run(root, &["log", "-1", "--format=%B"])?.trim_end().to_string();
     run(root, &["reset", "-q", "--soft", "HEAD~1"])?;
@@ -633,7 +633,7 @@ pub fn branch_name(typed: &str) -> String {
 }
 
 /// What `switch_branch` says when changes here would be overwritten there.
-pub const WOULD_LOSE_CHANGES: &str = "Changes here would be lost on that branch: commit or revert them first.";
+pub const WOULD_LOSE_CHANGES: &str = "Changes here would be lost on that branch: commit them or set them aside first.";
 
 /// Sets every change since the last commit aside (new files too, only under `root`): the
 /// files go back to the last commit until `bring_back` returns the changes.
@@ -807,7 +807,7 @@ fn set_aside_at(root: &Path, index: usize, id: Option<&str>) -> Result<String, S
         return Err("Nothing is set aside.".into());
     };
     if id.is_some_and(|id| id != found.trim()) {
-        return Err("The changes set aside have changed since: look again.".into());
+        return Err("Those set-aside changes have changed: check them again.".into());
     }
     Ok(at)
 }
@@ -1027,7 +1027,7 @@ pub fn stop_joining(root: &Path, kind: Joining) -> Result<(), String> {
 pub fn finish_joining(root: &Path, kind: Joining) -> Result<Vec<PathBuf>, String> {
     // (What git is in now: a merge stopped in the terminal leaves nothing to commit.)
     if joining(root).is_none_or(|state| state.kind != kind) {
-        return Err("Git isn't waiting in that any more.".into());
+        return Err("That's already finished.".into());
     }
     if let Some((path, _)) = undecided(root).into_iter().next() {
         let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
@@ -1192,7 +1192,7 @@ pub fn web_url(remote: &str) -> Option<String> {
 pub fn line_link(path: &Path, first: usize, last: usize) -> Result<String, String> {
     let dir = path.parent().ok_or("No folder.")?;
     let remote = git(dir, &["remote", "get-url", "origin"]).ok_or("This repository has no remote called origin.")?;
-    let web = web_url(&remote).ok_or_else(|| format!("Don't know the web address of {}", remote.trim()))?;
+    let web = web_url(&remote).ok_or_else(|| format!("Couldn't tell the web address of {}.", remote.trim()))?;
     let top = git(dir, &["rev-parse", "--show-toplevel"]).ok_or("Not in a git repository.")?;
     let commit = git(dir, &["rev-parse", "HEAD"]).ok_or("Nothing committed yet.")?;
     // Through any links: a project opened from /tmp is /private/tmp to git on macOS.
@@ -1449,7 +1449,7 @@ mod tests {
         assert_eq!(sets.len(), 2);
         assert_eq!((sets[0].branch.as_str(), sets[0].message.as_str()), ("main", "Null: set aside"));
         // A place whose changes aren't the ones listed any more: left alone.
-        assert!(drop_set_aside(&repo, 0, &sets[1].id).unwrap_err().contains("changed since"));
+        assert!(drop_set_aside(&repo, 0, &sets[1].id).unwrap_err().contains("have changed"));
         assert_eq!(bring_back_at(&repo, 1, Some(&sets[1].id)).unwrap(), Vec::<PathBuf>::new());
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "first set\n");
         assert!(!repo.join("b.txt").exists());
@@ -1975,7 +1975,7 @@ mod tests {
         // A change that main's version would overwrite: git refuses, in plain words.
         std::fs::write(repo.join("a.txt"), "three\n").unwrap();
         let main = Branch { name: "main".into(), current: false, remote: false, when: String::new() };
-        assert!(switch_branch(&repo, &main).unwrap_err().contains("commit or revert"));
+        assert!(switch_branch(&repo, &main).unwrap_err().contains("commit them or set them aside"));
         revert(&repo, &repo.join("a.txt"), FileStatus::Modified).unwrap();
         switch_branch(&repo, &main).unwrap();
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\n");

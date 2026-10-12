@@ -430,7 +430,7 @@ impl Editor {
         // The lines asked about changed meanwhile (typed into, moved by an edit above, read
         // again from disk): the answer isn't written over what's there now.
         if self.buffer.slice(range.clone()) != prompt.original {
-            let failed = "The code changed while the answer came. Ask again.";
+            let failed = "The code changed before the answer arrived. Ask again.";
             self.prompt = Some(Prompting { writing: false, failed: Some(failed.into()), task: None, ..prompt });
             return cx.notify();
         }
@@ -783,7 +783,7 @@ impl Editor {
                 BlockKind::Prompt => {
                     let Some(prompt) = &self.prompt else { continue };
                     let (status, hint): (Option<String>, &str) = if prompt.writing {
-                        (Some("Writing…".into()), "esc cancel")
+                        (Some("Writing…".into()), "Esc cancel")
                     } else if let Some(failed) = &prompt.failed {
                         (None, if failed.len() > 60 { "" } else { failed.as_str() })
                     } else {
@@ -964,7 +964,7 @@ impl Editor {
                                                     .flex_none()
                                                     .pl(px(12.))
                                                     .font_weight(FontWeight::MEDIUM)
-                                                    .child(if note.done { "esc close" } else { "" }),
+                                                    .child(if note.done { "Esc close" } else { "" }),
                                             ),
                                     )
                                     .children(body),

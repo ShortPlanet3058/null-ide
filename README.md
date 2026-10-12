@@ -59,7 +59,7 @@ Getting around:
 | ⌃Tab | the tab used before this one; hold ⌃ and press Tab again to go further back (⌃⇧Tab the other way); ⌘⇧] / ⌘⇧[ go by position |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
 | right-click a tab → Move Below | the two sides one above the other (dragged, a tab offers "Open below" too); the line between them resizes |
-| one click on a file | it opens in a passing tab (its name slanted), which the next file clicked replaces; edit it or double-click it (or its tab) to keep it (Settings → Passing tabs) |
+| one click on a file | it opens in a preview tab (its name slanted), which the next file clicked replaces; edit it or double-click it (or its tab) to keep it (Settings → Preview tabs) |
 | right-click a tab → Pin Tab | it stays first, out of "Close Others" and "Close All"; its pin unpins it |
 | ⌘⇧N / ⌥⌘O | a new window / a recent project |
 | drop from the Finder | files open; on a folder in the files, they're copied there; on the terminal, their paths are typed in |
@@ -327,7 +327,7 @@ bar or Settings → Languages, into its own folder rather than the system.
 
 With a server running: ⌘R (or F2) renames a symbol everywhere, right where it's written;
 ⇧F12 lists where it's used (⌘-clicking a definition does too), ⌃⌥H where a function is
-called from (and ⌘K "Show Callees" what it calls), ⌥F12 shows a definition where you are without going there; ⌥⇧F formats the file, and
+called from (and ⌘K "Show What This Calls" what it calls), ⌥F12 shows a definition where you are without going there; ⌥⇧F formats the file, and
 "Format on save" does it on ⌘S (and "Format on paste", to pasted code, where the server formats
 parts of files); the caret's line says its problem at its end ("Problems at Line Ends" in
 ⌘K or Settings: every line's, faintly); ⌘⇧M, or the error count in the status bar, lists every

@@ -1094,7 +1094,7 @@ impl Render for ProjectSearch {
             Status::Idle => "".into(),
             Status::Searching => "Searching…".into(),
             Status::Invalid => "Invalid pattern".into(),
-            Status::Done { matches: 0, .. } => "No results".into(),
+            Status::Done { matches: 0, .. } => "No matches".into(),
             Status::Done { files, matches, truncated } => {
                 let plus = if truncated { "+" } else { "" };
                 let files = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
@@ -1212,7 +1212,7 @@ impl Render for ProjectSearch {
                                             }))
                                     })
                                     .when(!can_replace, |b| b.text_color(theme.faint))
-                                    .child("Replace all"),
+                                    .child("Replace All"),
                             ),
                     )
                     .child(

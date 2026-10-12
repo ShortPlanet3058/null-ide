@@ -176,7 +176,11 @@ impl CommitPage {
     fn check_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let short = self.commit.short.clone();
         self.ask_then(
-            (format!("Check out {short}?"), "The files go back to how they were then, on no branch (to look, or to start a branch from there). Switch to a branch to come back.", "Check Out"),
+            (
+                format!("Check out {short}?"),
+                "The files go back to that commit, on no branch. Switch to a branch to come back.",
+                "Check Out",
+            ),
             "Checked out",
             |root, id| git::check_out(root, id).map(|()| Vec::new()),
             window,
@@ -192,7 +196,7 @@ impl CommitPage {
                 "A new commit takes its changes back (Undo Last Commit takes that back in turn).",
                 "Revert",
             ),
-            "Took back",
+            "Reverted",
             git::revert_commit,
             window,
             cx,
@@ -204,10 +208,10 @@ impl CommitPage {
         self.ask_then(
             (
                 format!("Cherry-pick {short} onto this branch?"),
-                "Its changes are made again here, as a new commit.",
+                "Its changes are applied here as a new commit.",
                 "Cherry-Pick",
             ),
-            "Made again here:",
+            "Cherry-picked",
             git::cherry_pick,
             window,
             cx,
@@ -317,10 +321,10 @@ impl Render for CommitPage {
                             .text_color(theme.muted)
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme.foreground))
-                            .child("Copy Id")
+                            .child("Copy ID")
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 crate::system_clipboard::write(cx, ClipboardItem::new_string(this.commit.id.clone()));
-                                cx.emit(CommitPageEvent::Said(format!("Copied {}", this.commit.id)));
+                                cx.emit(CommitPageEvent::Said(format!("Copied {}.", this.commit.id)));
                             })),
                     ),
             );

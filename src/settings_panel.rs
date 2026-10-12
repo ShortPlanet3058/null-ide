@@ -600,7 +600,7 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Line numbers",
-                Some("In code only leaves them out of Markdown and text"),
+                Some("“In code only” hides them in Markdown and text"),
                 {
                     use crate::settings::LineNumbers;
                     Self::choices(
@@ -659,7 +659,7 @@ impl SettingsPanel {
             Self::row(
                 "Ligatures",
                 Some(
-                    "Join characters like -> and != into one symbol, with fonts that keep them in their columns (JetBrains Mono, Fira Code, Cascadia Code), not in Markdown and text",
+                    "Draws -> and != as single symbols in code, with fonts that have them (JetBrains Mono, Fira Code, Cascadia Code)",
                 ),
                 Self::toggle("ligatures", s.ligatures, &theme, cx, |s| s.ligatures = !s.ligatures),
                 &theme,
@@ -714,7 +714,7 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Indentation",
-                Some("For new files, and files that don't show their own. Files keep theirs, and .editorconfig wins"),
+                Some("For new files and files without indentation yet. .editorconfig wins"),
                 {
                     use crate::file_style::Indent;
                     Self::choices(
@@ -742,13 +742,13 @@ impl SettingsPanel {
             ),
             Self::heading("Around the code", &theme),
             Self::row(
-                "Blinking caret",
-                Some("Blinks a while once typing stops, then rests lit; off, it stays lit"),
+                "Blinking cursor",
+                Some("Blinks for a while after you stop typing, then stays lit"),
                 Self::toggle("caret-blink", s.caret_blink, &theme, cx, |s| s.caret_blink = !s.caret_blink),
                 &theme,
             ),
             Self::row(
-                "Caret",
+                "Cursor",
                 Some("A thin bar between characters, a block over one, or a line under it"),
                 {
                     use crate::settings::CaretShape;
@@ -801,7 +801,7 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Problems at line ends",
-                Some("Each line's error or warning written after it, faintly (else only the caret's line's)"),
+                Some("Each line's error or warning written after it, faintly. Off: only on the cursor's line"),
                 Self::toggle("problems-at-line-ends", s.problems_at_line_ends, &theme, cx, |s| {
                     s.problems_at_line_ends = !s.problems_at_line_ends
                 }),
@@ -809,7 +809,7 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Coloured bracket pairs",
-                Some("Brackets in colour by how deep they are, both of a pair the same"),
+                Some("Each bracket pair gets its own colour, by depth"),
                 Self::toggle("bracket-colours", s.bracket_colours, &theme, cx, |s| {
                     s.bracket_colours = !s.bracket_colours
                 }),
@@ -831,7 +831,9 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Other uses of a name",
-                Some("With the caret on a name, its other uses in the file get a soft tint; so does text selected"),
+                Some(
+                    "With the cursor on a name, its other uses in the file get a soft tint, and so does selected text",
+                ),
                 Self::toggle("symbol-marks", s.symbol_marks, &theme, cx, |s| s.symbol_marks = !s.symbol_marks),
                 &theme,
             ),
@@ -843,7 +845,7 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Who changed the line",
-                Some("At the end of the caret's line, faintly: who last changed it, when, and why. From git"),
+                Some("At the end of the cursor's line, faintly: who last changed it, when, and why. From git"),
                 Self::toggle("line-blame", s.line_blame, &theme, cx, |s| s.line_blame = !s.line_blame),
                 &theme,
             ),
@@ -892,10 +894,8 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
-                "Passing tabs",
-                Some(
-                    "A file clicked once in the files takes the place of the last one so clicked, until you edit it or double-click it",
-                ),
+                "Preview tabs",
+                Some("A file opened with one click replaces the last one, until you edit or double-click it"),
                 Self::toggle("preview-tabs", s.preview_tabs, &theme, cx, |s| s.preview_tabs = !s.preview_tabs),
                 &theme,
             ),
@@ -1145,10 +1145,10 @@ impl SettingsPanel {
         if current.uses_api_key() {
             let get = current.key_url().map(|u| format!(" · get one at {u}")).unwrap_or_default();
             let (status, label) = match self.has_key {
-                Some(true) => (format!("Saved in the keychain{get}"), "Change…"),
-                Some(false) => (format!("Not set yet{get}"), "Set API key…"),
+                Some(true) => (format!("Kept in the keychain{get}"), "Change…"),
+                Some(false) => (format!("Not set yet{get}"), "Set API Key…"),
                 // Not read yet this session (reading it can ask for permission).
-                None => (format!("Kept in the system keychain{get}"), "Set API key…"),
+                None => (format!("Kept in the keychain{get}"), "Set API Key…"),
             };
             rows.push(Self::row(
                 "API key",
@@ -1197,7 +1197,7 @@ impl SettingsPanel {
                 &theme,
             ));
         }
-        rows.push(Self::heading("Suggestions while typing", &theme));
+        rows.push(Self::heading("AI suggestions", &theme));
         rows.push(Self::row(
             "Suggest code as you type",
             Some(&format!(
@@ -1238,7 +1238,7 @@ impl SettingsPanel {
         rows.push(Self::row(
             "Ask and edit",
             Some(&format!(
-                "{} edits the code at the caret; a question there, or “Ask About This File” in {}, gets a note",
+                "{} edits or answers at the cursor; “Ask About This File” is in {}",
                 key(&crate::editor::InlineAssist, cx),
                 key(&crate::workspace::ShowCommands, cx),
             )),
@@ -1384,9 +1384,14 @@ impl SettingsPanel {
         // keys of what's focused (editor shortcuts would be missing).
         let _ = window;
         let keys_of = |s: &Shortcut| crate::palette::shortcut(s.action.as_ref(), cx);
-        rows.push(div().pt(px(8.)).text_size(px(12.)).text_color(theme.faint).child(
-            "A click on a command's keys, then the new ones: they're written to settings.json. Esc keeps them; ⌫ takes them away.",
-        ).into_any_element());
+        rows.push(
+            div()
+                .pt(px(8.))
+                .text_size(px(12.))
+                .text_color(theme.faint)
+                .child("Click a command's keys, then press new ones. Esc keeps them; ⌫ removes them.")
+                .into_any_element(),
+        );
         for category in Category::ALL {
             // Those with keys, and those that can be given some.
             let members: Vec<(usize, Option<String>)> = (0..self.shortcuts.len())
@@ -1549,8 +1554,8 @@ impl Render for SettingsPanel {
                 let set_here = crate::settings::project_keys().len();
                 let label = match set_here {
                     0 => "For this project…".to_string(),
-                    1 => "This project sets 1…".to_string(),
-                    n => format!("This project sets {n}…"),
+                    1 => "1 project setting…".to_string(),
+                    n => format!("{n} project settings…"),
                 };
                 div()
                     .id("project-json")

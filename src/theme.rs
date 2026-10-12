@@ -39,12 +39,12 @@ impl ThemeName {
     /// A few words on it, for the choosers.
     pub fn note(self) -> &'static str {
         match self {
-            ThemeName::Null => "True black, amber caret",
+            ThemeName::Null => "True black, amber cursor",
             ThemeName::Ash => "Soft charcoal for long sessions",
             ThemeName::Midnight => "Deep blue, cool accents",
             ThemeName::Moss => "Dark green-grey, calm and warm",
             ThemeName::Paper => "Light, for bright rooms",
-            ThemeName::Dune => "Warm sand, terracotta caret",
+            ThemeName::Dune => "Warm sand, terracotta cursor",
         }
     }
 }

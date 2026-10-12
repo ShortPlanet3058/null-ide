@@ -209,7 +209,7 @@ pub fn can_install(server: &Server) -> Result<(), String> {
             Err(format!("{} comes with Rust: install it from rustup.rs.", server.name))
         }
         Install::Xcode if cfg!(target_os = "macos") => {
-            Err(format!("{} comes with Xcode's command line tools: run `xcode-select --install`.", server.name))
+            Err(format!("{} comes with Xcode's command line tools: run “xcode-select --install”.", server.name))
         }
         Install::Xcode => Err(format!("Install {} with your system's package manager.", server.name)),
         _ => Ok(()),
@@ -227,7 +227,7 @@ pub fn install(server: &Server) -> Result<(), String> {
     let dir = crate::tools::data_dir().ok_or("There's no folder to install into.")?.join("servers");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
     let run = |program: &str, args: &[&str], env: &[(&str, &Path)]| -> Result<(), String> {
-        let path = crate::tools::find(program).ok_or_else(|| format!("`{program}` isn't installed."))?;
+        let path = crate::tools::find(program).ok_or_else(|| format!("“{program}” isn't installed."))?;
         let mut command = Command::new(path);
         command.args(args).current_dir(&dir).env("PATH", crate::tools::search_path());
         for (key, value) in env {

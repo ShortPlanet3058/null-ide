@@ -136,7 +136,7 @@ impl GitView {
                     window.prompt(
                         PromptLevel::Warning,
                         &format!("{name} has commits merged nowhere else."),
-                        Some("Deleted, they'd only be found again through git's reflog."),
+                        Some("If you delete it, those commits are hard to get back."),
                         &["Delete Anyway", "Cancel"],
                         cx,
                     )
@@ -294,12 +294,12 @@ impl GitView {
                             }))
                         },
                     )))
-                    .child(link(format!("merge-{name}"), "Merge in").on_click(cx.listener(
+                    .child(link(format!("merge-{name}"), "Merge In").on_click(cx.listener(
                         move |_, _: &ClickEvent, _, cx| {
                             cx.emit(GitViewEvent::Join { branch: b.clone(), rebase: false })
                         },
                     )))
-                    .child(link(format!("rebase-{name}"), "Rebase onto").on_click(cx.listener(
+                    .child(link(format!("rebase-{name}"), "Rebase Onto").on_click(cx.listener(
                         move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::Join { branch: c.clone(), rebase: true }),
                     )));
             }
@@ -363,12 +363,12 @@ impl GitView {
                                     },
                                 )))
                             })
-                            .child(link(format!("merge-{full}"), "Merge in").on_click(cx.listener(
+                            .child(link(format!("merge-{full}"), "Merge In").on_click(cx.listener(
                                 move |_, _: &ClickEvent, _, cx| {
                                     cx.emit(GitViewEvent::Join { branch: b.clone(), rebase: false })
                                 },
                             )))
-                            .child(link(format!("rebase-{full}"), "Rebase onto").on_click(cx.listener(
+                            .child(link(format!("rebase-{full}"), "Rebase Onto").on_click(cx.listener(
                                 move |_, _: &ClickEvent, _, cx| {
                                     cx.emit(GitViewEvent::Join { branch: c.clone(), rebase: true })
                                 },
@@ -400,7 +400,7 @@ impl GitView {
                         git::ago(set.time, now)
                     )),
                 ))
-                .child(link(format!("bring-back-{index}"), "Bring back").on_click(
+                .child(link(format!("bring-back-{index}"), "Bring Back").on_click(
                     cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::BringBack(brought.clone()))),
                 ))
                 .child(
@@ -457,7 +457,7 @@ impl GitView {
             .child(
                 div().flex().items_center().pr(px(16.)).child(div().flex_1().child(heading("SET ASIDE".into()))).child(
                     div().pt(px(10.)).text_size(px(ui::T_SM)).child(
-                        link("set-aside-now".into(), "Set aside changes")
+                        link("set-aside-now".into(), "Set Aside Changes")
                             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::SetAside))),
                     ),
                 ),

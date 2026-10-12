@@ -255,7 +255,7 @@ impl GitView {
                             .text_size(px(ui::T_SM))
                             .text_color(theme.caret)
                             .cursor_pointer()
-                            .child(if self.github.reading { "Asking…" } else { "Try again" })
+                            .child(if self.github.reading { "Asking…" } else { "Try Again" })
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.refresh_github(cx))),
                     )
                 })
@@ -278,7 +278,7 @@ impl GitView {
                 .mb(px(8.))
                 .text_size(px(ui::T_SM))
                 .text_color(theme.faint)
-                .child("On no branch: switch to one for its pull request.")
+                .child("Not on a branch: switch to one to see its pull request.")
                 .into_any_element()
         } else if let Some(pull) = self.github.mine.clone() {
             let number = pull.number;
@@ -338,7 +338,7 @@ impl GitView {
                     cx.notify();
                 }))
         };
-        let other_state = if self.github.closed { "Show open ones" } else { "Show closed ones" };
+        let other_state = if self.github.closed { "Show Open" } else { "Show Closed" };
         let chips = div()
             .flex()
             .flex_wrap()
@@ -587,8 +587,8 @@ fn pull_row(pull: &Pull, asked: bool, theme: &Theme) -> gpui::Div {
     }
     match pull.review.as_str() {
         "APPROVED" => said.push("approved".into()),
-        "CHANGES_REQUESTED" => said.push("changes asked".into()),
-        _ if asked => said.push("review asked of you".into()),
+        "CHANGES_REQUESTED" => said.push("changes requested".into()),
+        _ if asked => said.push("your review requested".into()),
         _ => {}
     }
     if said.is_empty() {

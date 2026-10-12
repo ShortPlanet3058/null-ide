@@ -297,7 +297,7 @@ impl GitView {
         let body = cx.new(|cx| TextInput::new("Body: what and why (optional)", cx));
         let filter = cx.new(|cx| TextInput::new("Filter: message, author, id", cx));
         let branch_name = cx.new(|cx| TextInput::new("New branch…", cx));
-        let rename_input = cx.new(|cx| TextInput::new("Its new name", cx));
+        let rename_input = cx.new(|cx| TextInput::new("New name", cx));
         let pr_title = cx.new(|cx| TextInput::new("Title", cx));
         let pr_body = cx.new(|cx| TextInput::new("What and why (optional)", cx));
         let pr_base = cx.new(|cx| TextInput::new("Into", cx));
@@ -493,7 +493,7 @@ impl GitView {
         }
         if let Some(file) = self.files.iter().find(|f| f.status == FileStatus::Conflicted) {
             let name = file.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            cx.emit(GitViewEvent::Committed(Err(format!("{name} still has conflicts: settle them first."))));
+            cx.emit(GitViewEvent::Committed(Err(format!("{name} still has conflicts: resolve them first."))));
             return;
         }
         self.committing = true;
@@ -911,7 +911,7 @@ impl GitView {
             let (name_color, note) = match file.status {
                 FileStatus::Added => (theme.git_added, " · new"),
                 FileStatus::Deleted => (theme.git_deleted, " · deleted"),
-                FileStatus::Conflicted => (theme.error, " · to settle"),
+                FileStatus::Conflicted => (theme.error, " · to resolve"),
                 FileStatus::Modified => (theme.foreground, ""),
             };
             let path = file.path.clone();

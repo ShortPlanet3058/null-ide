@@ -186,6 +186,10 @@ actions!(
         UseClaudeApi,
         UseClaudeCode,
         UseCodex,
+        UseMistral,
+        UseGroq,
+        UseGemini,
+        UseOpenRouter,
         TurnOffAi,
         SetApiKey,
     ]
@@ -1642,7 +1646,7 @@ impl Workspace {
                 command("Push", Box::new(PushBranch)),
                 command("Pull", Box::new(PullBranch)),
                 command("Switch Branch…", Box::new(SwitchBranch)),
-                command("Revert All Changes…", Box::new(RevertAllChanges)),
+                command("Discard All Changes…", Box::new(RevertAllChanges)),
             ];
             let title = match &this.branch {
                 Some(branch) => format!("Changes on {branch}"),
@@ -1768,7 +1772,10 @@ impl Workspace {
                     Ok(message) => {
                         let subject = message.lines().next().unwrap_or_default().to_string();
                         this.commit_draft = Some(message);
-                        this.show_notice(format!("Took back “{subject}”: its changes wait for the next Commit."), cx);
+                        this.show_notice(
+                            format!("Undid “{subject}”: its changes are back, ready for the next commit."),
+                            cx,
+                        );
                     }
                     Err(error) => this.show_notice(error, cx),
                 }
@@ -2013,7 +2020,7 @@ impl Workspace {
         let answer = window.prompt(
             PromptLevel::Info,
             &format!("Bring your changes along to {}?", branch.name),
-            Some("They'd be overwritten there as they are. Null sets them aside, switches, and puts them back."),
+            Some("Switching as they are would overwrite them. Null sets them aside, switches, and puts them back."),
             &["Bring Them Along", "Cancel"],
             cx,
         );
@@ -2328,11 +2335,7 @@ impl Workspace {
                 crate::system_clipboard::write(cx, item.clone());
             }
             crate::clipboard_history::remember(&item, cx);
-            let what = if whole { "The file" } else { "The selection" };
-            return self.show_notice(
-                format!("{what} is copied in its colours: it pastes as it shows here in Keynote, Pages or Mail."),
-                cx,
-            );
+            return self.show_notice("Copied with colours.".into(), cx);
         }
         let e = editor.read(cx);
         let range = e.selection.range();
@@ -2343,8 +2346,7 @@ impl Workspace {
             crate::system_clipboard::write(cx, item.clone());
         }
         crate::clipboard_history::remember(&item, cx);
-        let what = if whole { "The document" } else { "The selection" };
-        self.show_notice(format!("{what} is copied as rich text: it pastes formatted in Mail, Notes or Docs."), cx);
+        self.show_notice("Copied as rich text.".into(), cx);
     }
 
     /// Revert to Saved: the file as it was last saved, as one step ⌘Z takes back.
@@ -2559,7 +2561,7 @@ impl Workspace {
                     Ok(Some((ahead, 0))) => format!("{} to push.", commits(ahead)),
                     Ok(Some((0, behind))) => format!("{} to pull.", commits(behind)),
                     Ok(Some((ahead, behind))) => format!("{} to pull, {} to push.", commits(behind), commits(ahead)),
-                    Ok(None) => "Fetched. This branch isn't tracking one on a remote.".to_string(),
+                    Ok(None) => "Fetched. This branch isn't on the remote yet.".to_string(),
                     Err(error) => format!("Couldn't fetch: {error}"),
                 };
                 this.show_notice(notice, cx);
@@ -2679,9 +2681,9 @@ impl Workspace {
         let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Revert every change in {files}?"),
+            &format!("Discard every change in {files}?"),
             Some("They go back to the last commit. New files go to the Trash."),
-            &["Revert", "Cancel"],
+            &["Discard", "Cancel"],
             cx,
         );
         let changed = self.git_status.clone();
@@ -2704,7 +2706,7 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                let notice = if failed.is_empty() { "Reverted every change.".to_string() } else { failed.join("; ") };
+                let notice = if failed.is_empty() { "Discarded every change.".to_string() } else { failed.join("; ") };
                 this.show_notice(notice, cx);
                 // Only the files that went back: edits not yet saved in any other stay.
                 for tab in &this.tabs {
@@ -2783,7 +2785,7 @@ impl Workspace {
                 // (A new case for the same name, on a disk that ignores case, is the same file.)
                 if !from.exists() || (to != from && to.exists() && !crate::fs_ops::same_file(&from, &to)) {
                     let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    return this.show_notice(format!("Couldn't move it: {name} is taken there"), cx);
+                    return this.show_notice(format!("Couldn't move it: {name} is taken there."), cx);
                 }
                 // Moved first: if that fails (no room, no right, another disk), nothing that
                 // names it has been changed to a place it isn't.
@@ -2808,11 +2810,11 @@ impl Workspace {
                 this.lsp.read(cx).did_rename(&from, &to);
                 match changed {
                     Some((_, _, failed)) if !failed.is_empty() => {
-                        this.show_notice(format!("Renamed, but couldn't update {}", failed.join(", ")), cx)
+                        this.show_notice(format!("Renamed, but couldn't update {}.", failed.join(", ")), cx)
                     }
                     Some((_, files, _)) if files > 0 => {
                         let which = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
-                        this.show_notice(format!("Renamed, and updated {which} that named it"), cx)
+                        this.show_notice(format!("Renamed, and updated {which} that named it."), cx)
                     }
                     _ => {}
                 }
@@ -3109,7 +3111,7 @@ impl Workspace {
         let Some(ix) = self.active else { return };
         let source = self.tabs[ix].editor.clone();
         if source.read(cx).path().is_none() {
-            return self.show_notice("Save the file first to open it on both sides".into(), cx);
+            return self.show_notice("Save the file first to open it on both sides.".into(), cx);
         }
         let other = 1 - self.tabs[ix].side.min(1);
         // A new split (⌃⌥⌘→): side by side, however the last one was.
@@ -3454,7 +3456,7 @@ impl Workspace {
                         this.update_in(cx, |this, window, cx| {
                             let locations = this.location_rows(found, cx);
                             if locations.len() <= 1 {
-                                return this.show_notice(format!("{name} isn't used anywhere else"), cx);
+                                return this.show_notice(format!("{name} isn't used anywhere else."), cx);
                             }
                             let title = format!("{} uses of {name}", locations.len());
                             this.open_locations(title, locations, window, cx);
@@ -3563,11 +3565,11 @@ impl Workspace {
         let on_path = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d == dir));
         let message = match result {
             Ok(()) if on_path || dir.starts_with("/usr/local") => {
-                format!("Installed {}: try `null .` in a terminal.", target.display())
+                format!("Installed {}: try “null .” in a terminal.", target.display())
             }
             Ok(()) => {
                 format!(
-                    "Installed {}. Add {} to your PATH to use `null` from a terminal.",
+                    "Installed {}. Add {} to your PATH to use “null” from a terminal.",
                     target.display(),
                     dir.display()
                 )
@@ -3782,7 +3784,7 @@ impl Workspace {
             return;
         }
         if self.tabs.len() < 2 {
-            return self.show_notice("Open another file to see two side by side".into(), cx);
+            return self.show_notice("Open another file to see two side by side.".into(), cx);
         }
         if let Some(stacked) = stacked.filter(|_| to == 1) {
             self.stacked = stacked;
@@ -3864,7 +3866,7 @@ impl Workspace {
         let Some(from) = self.tabs.iter().position(|t| &t.editor == editor) else { return };
         let old_side = self.tabs[from].side;
         if side == 1 && old_side == 0 && self.side_tabs(0).len() == 1 && !self.is_split() {
-            return self.show_notice("Open another file to see two side by side".into(), cx);
+            return self.show_notice("Open another file to see two side by side.".into(), cx);
         }
         let active = self.active.map(|i| self.tabs[i].editor.clone());
         let target = before.map(|i| self.tabs[i].editor.clone());
@@ -3933,8 +3935,13 @@ impl Workspace {
             && let Some(message) = self.commands_running(cx)
         {
             let leave = if matches!(action, CloseAction::Quit) { "Quit" } else { "Close" };
-            let answer =
-                window.prompt(PromptLevel::Warning, &message, Some("It stops if you go on."), &[leave, "Cancel"], cx);
+            let answer = window.prompt(
+                PromptLevel::Warning,
+                &message,
+                Some(if matches!(action, CloseAction::Quit) { "Quitting stops it." } else { "Closing stops it." }),
+                &[leave, "Cancel"],
+                cx,
+            );
             cx.spawn_in(window, async move |this, cx| {
                 let Ok(choice) = answer.await else { return };
                 this.update_in(cx, |this, window, cx| {
@@ -4366,9 +4373,15 @@ impl Workspace {
         let dirty: Vec<Entity<Editor>> =
             self.tabs.iter().map(|t| t.editor.clone()).filter(|e| e.read(cx).buffer.is_dirty()).collect();
         let count = dirty.len();
-        let saved = dirty.into_iter().filter(|e| e.update(cx, |e, cx| e.save_to_disk(cx))).count();
-        if count > 1 {
-            self.show_notice(format!("Saved {saved} of {count} files"), cx);
+        let unsaved: Vec<String> = dirty
+            .into_iter()
+            .filter_map(|e| e.update(cx, |e, cx| (!e.save_to_disk(cx)).then(|| e.file_name())))
+            .collect();
+        // (All saved: nothing to say.)
+        if count > 1 && !unsaved.is_empty() {
+            let saved = count - unsaved.len();
+            let names = unsaved.join(", ");
+            self.show_notice(format!("Saved {saved} of {count} files: {names} couldn't be written."), cx);
         }
     }
 
@@ -4389,7 +4402,7 @@ impl Workspace {
             PromptLevel::Warning,
             &format!("{name} changed on disk since you started editing it."),
             Some("Saving writes your version over it. Reloading takes the one on disk, losing your edits."),
-            &["Save Mine", "Reload From Disk", "Cancel"],
+            &["Save Mine", "Reload from Disk", "Cancel"],
             cx,
         );
         cx.spawn(async move |_, cx| {
@@ -4596,7 +4609,7 @@ impl Workspace {
             (File, "New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
             (File, "Open File or Folder…".into(), Box::new(Open)),
             (File, "Open Recent…".into(), Box::new(OpenRecent)),
-            (File, "New Window…".into(), Box::new(NewWindow)),
+            (File, "Open Folder in New Window…".into(), Box::new(NewWindow)),
             (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
             (Go, "Go to File…".into(), Box::new(TogglePalette)),
             (Go, "Go to Symbol in Project…".into(), Box::new(GoToSymbolInProject)),
@@ -4611,7 +4624,11 @@ impl Workspace {
                 Box::new(ToggleLineBlame),
             ),
             (View, toggle(settings.inlay_hints, "Hide Type Hints", "Show Type Hints"), Box::new(ToggleInlayHints)),
-            (View, toggle(settings.code_lens, "Hide Code Lens", "Show Code Lens"), Box::new(ToggleCodeLens)),
+            (
+                View,
+                toggle(settings.code_lens, "Hide References and Run Links", "Show References and Run Links"),
+                Box::new(ToggleCodeLens),
+            ),
             (View, "Show Language Server Log".into(), Box::new(ShowServerLog)),
             (
                 View,
@@ -4620,7 +4637,7 @@ impl Workspace {
             ),
             (
                 View,
-                toggle(settings.problems_at_line_ends, "Problems Only on the Caret's Line", "Problems at Line Ends"),
+                toggle(settings.problems_at_line_ends, "Problems Only on the Cursor's Line", "Problems at Line Ends"),
                 Box::new(ToggleProblemsAtLineEnds),
             ),
             (
@@ -4689,18 +4706,22 @@ impl Workspace {
             (Appearance, "Actual Interface Size".into(), Box::new(ResetZoom)),
             (
                 Edit,
-                toggle(settings.autocomplete_for(language), "Turn Off Autocomplete", "Turn On Autocomplete"),
+                toggle(
+                    settings.autocomplete_for(language),
+                    "Turn Off Suggestions While Typing",
+                    "Turn On Suggestions While Typing",
+                ),
                 Box::new(ToggleAutocomplete),
             ),
             (App, "Settings…".into(), Box::new(OpenSettings)),
             (App, "Import Settings from VS Code…".into(), Box::new(ImportVsCodeSettings)),
-            (File, "Show Changes (Git)".into(), Box::new(ShowChanges)),
+            (View, "Show Changes".into(), Box::new(ShowChanges)),
             (View, toggle(self.focus_mode, "Leave Focus Mode", "Focus Mode"), Box::new(ToggleFocusMode)),
             (View, "Run Task…".into(), Box::new(RunTask)),
             (View, "Run Test at Cursor".into(), Box::new(RunTestAtCursor)),
             (View, "Debug Test at Cursor".into(), Box::new(DebugTestAtCursor)),
-            (View, "Toggle Markdown Preview".into(), Box::new(crate::editor::ToggleMarkdownPreview)),
-            (View, "Open Markdown Preview to the Side".into(), Box::new(OpenPreviewToTheSide)),
+            (View, "Markdown Preview".into(), Box::new(crate::editor::ToggleMarkdownPreview)),
+            (View, "Markdown Preview to the Side".into(), Box::new(OpenPreviewToTheSide)),
             (View, "Run Tests in File".into(), Box::new(RunTestsInFile)),
             (Go, "Start Debugging".into(), Box::new(StartDebugging)),
             (Go, "Stop Debugging".into(), Box::new(StopDebugging)),
@@ -4745,8 +4766,8 @@ impl Workspace {
             (Go, "Previous Change".into(), Box::new(crate::editor::PreviousChange)),
             (Go, "Next Conflict".into(), Box::new(crate::editor::NextConflict)),
             (Go, "Previous Conflict".into(), Box::new(crate::editor::PreviousConflict)),
-            (View, "Toggle Sidebar".into(), Box::new(ToggleSidebar)),
-            (View, "Toggle Terminal".into(), Box::new(ToggleTerminal)),
+            (View, toggle(settings.sidebar_visible, "Hide Sidebar", "Show Sidebar"), Box::new(ToggleSidebar)),
+            (View, toggle(self.terminal_open.on, "Hide Terminal", "Show Terminal"), Box::new(ToggleTerminal)),
             (
                 View,
                 toggle(self.terminal_maximized, "Restore Terminal Size", "Maximize Terminal"),
@@ -4781,8 +4802,8 @@ impl Workspace {
                 (Edit, "Replace…".into(), Box::new(DeployReplace)),
                 (Lines, "Toggle Comment".into(), Box::new(crate::editor::ToggleComment)),
                 (Lines, "Toggle Block Comment".into(), Box::new(crate::editor::ToggleBlockComment)),
-                (Lines, "Indent (Tab on a selection)".into(), Box::new(crate::editor::Indent)),
-                (Lines, "Outdent (Shift+Tab)".into(), Box::new(crate::editor::Outdent)),
+                (Lines, "Indent".into(), Box::new(crate::editor::Indent)),
+                (Lines, "Outdent".into(), Box::new(crate::editor::Outdent)),
                 (Lines, "Move Line Up".into(), Box::new(crate::editor::MoveLineUp)),
                 (Lines, "Move Line Down".into(), Box::new(crate::editor::MoveLineDown)),
                 (Lines, "Duplicate Line".into(), Box::new(crate::editor::DuplicateLineDown)),
@@ -4797,14 +4818,14 @@ impl Workspace {
                 (Lines, "Reverse Lines".into(), Box::new(crate::editor::ReverseLines)),
                 (Lines, "Remove Duplicate Lines".into(), Box::new(crate::editor::RemoveDuplicateLines)),
                 (Lines, "Trim Trailing Whitespace".into(), Box::new(crate::editor::TrimTrailingWhitespace)),
-                (Lines, "Rewrap Comment or Paragraph".into(), Box::new(crate::editor::Rewrap)),
-                (Edit, "Upper Case".into(), Box::new(crate::editor::UpperCase)),
+                (Lines, "Rewrap".into(), Box::new(crate::editor::Rewrap)),
+                (Edit, "To Upper Case".into(), Box::new(crate::editor::UpperCase)),
                 (Edit, "To snake_case".into(), Box::new(crate::editor::SnakeCase)),
                 (Edit, "To camelCase".into(), Box::new(crate::editor::CamelCase)),
                 (Edit, "To PascalCase".into(), Box::new(crate::editor::PascalCase)),
                 (Edit, "To kebab-case".into(), Box::new(crate::editor::KebabCase)),
                 (Edit, "To Title Case".into(), Box::new(crate::editor::TitleCase)),
-                (Edit, "Lower Case".into(), Box::new(crate::editor::LowerCase)),
+                (Edit, "To Lower Case".into(), Box::new(crate::editor::LowerCase)),
                 (Edit, "Increment Number or Flip Value".into(), Box::new(crate::editor::Increment)),
                 (Edit, "Decrement Number or Flip Value".into(), Box::new(crate::editor::Decrement)),
                 (Edit, "Expand Selection".into(), Box::new(crate::editor::ExpandSelection)),
@@ -4819,7 +4840,7 @@ impl Workspace {
                 (Lines, "Fold".into(), Box::new(crate::editor::Fold)),
                 (Lines, "Unfold".into(), Box::new(crate::editor::Unfold)),
                 (Lines, "Fold All".into(), Box::new(crate::editor::FoldAll)),
-                (Lines, "Fold Level 1 (the outermost blocks)".into(), Box::new(crate::editor::FoldLevel1)),
+                (Lines, "Fold Level 1".into(), Box::new(crate::editor::FoldLevel1)),
                 (Lines, "Fold Level 2".into(), Box::new(crate::editor::FoldLevel2)),
                 (Lines, "Fold Level 3".into(), Box::new(crate::editor::FoldLevel3)),
                 (Lines, "Unfold All".into(), Box::new(crate::editor::UnfoldAll)),
@@ -4836,9 +4857,9 @@ impl Workspace {
                 (Go, "Peek Definition".into(), Box::new(crate::editor::PeekDefinition)),
                 (Go, "Find References".into(), Box::new(crate::editor::FindReferences)),
                 (Go, "Show Callers".into(), Box::new(crate::editor::ShowCallers)),
-                (Go, "Show Callees (What This Calls)".into(), Box::new(crate::editor::ShowCallees)),
-                (Go, "Show Supertypes (What This Type Extends)".into(), Box::new(crate::editor::ShowSupertypes)),
-                (Go, "Show Subtypes (Types Extending This)".into(), Box::new(crate::editor::ShowSubtypes)),
+                (Go, "Show What This Calls".into(), Box::new(crate::editor::ShowCallees)),
+                (Go, "Show What This Extends".into(), Box::new(crate::editor::ShowSupertypes)),
+                (Go, "Show What Extends This".into(), Box::new(crate::editor::ShowSubtypes)),
                 (Go, "Go to Implementation".into(), Box::new(crate::editor::GoToImplementation)),
                 (Go, "Go to Type Definition".into(), Box::new(crate::editor::GoToTypeDefinition)),
                 (Go, "Show Problems".into(), Box::new(ShowProblems)),
@@ -4899,6 +4920,10 @@ impl Workspace {
                 (Ai, ai_label(ProviderId::Claude), Box::new(UseClaudeApi)),
                 (Ai, ai_label(ProviderId::ClaudeCode), Box::new(UseClaudeCode)),
                 (Ai, ai_label(ProviderId::Codex), Box::new(UseCodex)),
+                (Ai, ai_label(ProviderId::Mistral), Box::new(UseMistral)),
+                (Ai, ai_label(ProviderId::Groq), Box::new(UseGroq)),
+                (Ai, ai_label(ProviderId::Gemini), Box::new(UseGemini)),
+                (Ai, ai_label(ProviderId::OpenRouter), Box::new(UseOpenRouter)),
                 (Ai, "Set API Key…".into(), Box::new(SetApiKey)),
             ]);
             if self.active.is_some() {
@@ -5250,7 +5275,7 @@ impl Workspace {
 
     fn go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_editor().is_none() {
-            return self.show_notice("Open a file to go to one of its lines".into(), cx);
+            return self.show_notice("Open a file to go to one of its lines.".into(), cx);
         }
         self.open_palette(PaletteKind::Line, window, cx);
     }
@@ -5331,7 +5356,7 @@ impl Workspace {
         }
         rows.sort_by(|a, b| (&a.path, a.position.line).cmp(&(&b.path, b.position.line)));
         if rows.is_empty() {
-            self.show_notice("No bookmarks yet: ⌘F2 marks the caret's line".into(), cx);
+            self.show_notice("No bookmarks yet: ⌘F2 marks the cursor's line.".into(), cx);
             return;
         }
         self.open_locations("Bookmarks".into(), rows, window, cx);
@@ -5406,14 +5431,14 @@ impl Workspace {
     fn new_ai_task(&mut self, _: &NewAiTask, window: &mut Window, cx: &mut Context<Self>) {
         let provider = cx.global::<Settings>().ai.active();
         if !crate::ai::can_run_tasks(provider) {
-            return self.show_notice("Tasks need AI: choose where it comes from in Settings → AI.".into(), cx);
+            return self.show_notice("AI tasks need a provider: choose one in Settings → AI.".into(), cx);
         }
         match self.ai_task.as_ref().map(|t| &t.state) {
             Some(TaskState::Starting | TaskState::Running(_)) => {
-                return self.show_notice("A task is already running.".into(), cx);
+                return self.show_notice("An AI task is already running.".into(), cx);
             }
             Some(TaskState::Review(_)) => {
-                self.show_notice("First review what the last task changed.".into(), cx);
+                self.show_notice("First review what the last AI task changed.".into(), cx);
                 return self.review_ai_task(&ReviewAiTask, window, cx);
             }
             None => {}
@@ -5657,7 +5682,9 @@ impl Workspace {
         }
         let message = match (failed.is_empty(), left.is_empty()) {
             (true, true) => "Every file is back as it was before the task.".to_string(),
-            (true, false) => format!("Undone, but left as they are (edited by you too): {}", left.join(", ")),
+            (true, false) => {
+                format!("Undone, except {}: you edited them too, so they're left as they are.", left.join(", "))
+            }
             (false, _) => format!("Couldn't undo everything: {}", failed.join("; ")),
         };
         self.show_notice(message, cx);
@@ -5874,7 +5901,7 @@ impl Workspace {
             window.prompt(
                 PromptLevel::Info,
                 &format!("Rebase {here} onto {branch}?"),
-                Some("Its own commits are made again on top of that branch, one by one: new commits, so one already pushed would have to be pushed by force."),
+                Some(&format!("Its commits are redone one by one on top of {branch}. They become new commits, so any already pushed would need a force push.")),
                 &["Rebase", "Cancel"],
                 cx,
             )
@@ -5932,7 +5959,7 @@ impl Workspace {
         let answer = window.prompt(
             PromptLevel::Warning,
             &format!("Stop {}?", joining_name(state.kind)),
-            Some("Everything goes back to how it was before it, conflicts settled so far too."),
+            Some("Everything goes back to how it was before, including conflicts already resolved."),
             &["Stop", "Cancel"],
             cx,
         );
@@ -6047,21 +6074,17 @@ impl Workspace {
         let state = self.joining.clone()?;
         let theme = cx.global::<Theme>().clone();
         let (title, stop, finish) = match state.kind {
-            git::Joining::Merge => {
-                (format!("Merging {} into {}", state.other, state.into), "Stop the Merge", "Commit the Merge")
-            }
-            git::Joining::Rebase => {
-                (format!("Rebasing {} onto {}", state.into, state.other), "Stop the Rebase", "Continue")
-            }
+            git::Joining::Merge => (format!("Merging {} into {}", state.other, state.into), "Stop", "Commit"),
+            git::Joining::Rebase => (format!("Rebasing {} onto {}", state.into, state.other), "Stop", "Continue"),
             git::Joining::CherryPick => (format!("Cherry-picking {}", state.other), "Stop", "Commit"),
             git::Joining::Revert => (format!("Reverting {}", state.other), "Stop", "Commit"),
         };
         let left = self.to_settle.len();
         let settled = left == 0;
         let settle = match left {
-            0 => "Conflicts settled".to_string(),
-            1 => "1 file to settle".to_string(),
-            n => format!("{n} files to settle"),
+            0 => "Conflicts resolved".to_string(),
+            1 => "1 file to resolve".to_string(),
+            n => format!("{n} files to resolve"),
         };
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div()
@@ -6156,19 +6179,19 @@ impl Workspace {
         #[cfg(not(test))]
         let found = crate::vscode_import::latest();
         let Some((editor, path)) = found else {
-            return self.show_notice("No VS Code settings found on this Mac".into(), cx);
+            return self.show_notice("No VS Code settings found on this Mac.".into(), cx);
         };
         let Ok(written) = crate::settings::read_project(&path) else {
-            return self.show_notice(format!("{editor}'s settings couldn't be read"), cx);
+            return self.show_notice(format!("{editor}'s settings couldn't be read."), cx);
         };
         let here = crate::vscode_import::Here::of(cx);
         // Yours (a project's over them stays the project's).
         let Some(own) = settings::own() else {
-            return self.show_notice("Your settings.json can't be read: put it right first".into(), cx);
+            return self.show_notice("Your settings.json can't be read: put it right first.".into(), cx);
         };
         let (_, changed) = crate::vscode_import::changes(&own, &written, &here);
         if changed.is_empty() {
-            return self.show_notice(format!("Null has {editor}'s settings already"), cx);
+            return self.show_notice(format!("Null already has your {editor} settings."), cx);
         }
         let count = if changed.len() == 1 { "1 setting".to_string() } else { format!("{} settings", changed.len()) };
         let answer = window.prompt(
@@ -6435,13 +6458,13 @@ impl Workspace {
             .child(div().flex_1().min_w_0().truncate().text_color(theme.faint).child(summary))
             .when(!failed.is_empty(), |d| {
                 let (command, which) = (failed_command.join("; "), failed.clone());
-                d.child(button("tests-run-failed", "Run failed").on_click(cx.listener(
+                d.child(button("tests-run-failed", "Run Failed").on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| this.run_tests(command.clone(), which.clone(), window, cx),
                 )))
             })
             .when_some(everything, |d, command| {
                 let which = all.clone();
-                d.child(button("tests-run-all", "Run all").on_click(cx.listener(
+                d.child(button("tests-run-all", "Run All").on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| this.run_tests(command.clone(), which.clone(), window, cx),
                 )))
             });
@@ -6805,9 +6828,9 @@ impl Workspace {
         self.open_file(path, window, cx);
         let message = if cx.global::<Settings>().shown_own_theme(cx).is_none() {
             // Following the Mac, light now: yours is the dark one.
-            format!("{name}: shown when the Mac is dark (Null follows its light and dark)")
+            format!("{name}: used when the Mac is in dark mode.")
         } else {
-            format!("{name}: change a colour and save to see it")
+            format!("{name}: change a colour and save to see it.")
         };
         self.show_notice(message, cx);
     }
@@ -6979,6 +7002,22 @@ impl Workspace {
 
     fn use_codex(&mut self, _: &UseCodex, _: &mut Window, cx: &mut Context<Self>) {
         self.use_ai(ProviderId::Codex, cx);
+    }
+
+    fn use_mistral(&mut self, _: &UseMistral, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::Mistral, cx);
+    }
+
+    fn use_groq(&mut self, _: &UseGroq, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::Groq, cx);
+    }
+
+    fn use_gemini(&mut self, _: &UseGemini, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::Gemini, cx);
+    }
+
+    fn use_open_router(&mut self, _: &UseOpenRouter, _: &mut Window, cx: &mut Context<Self>) {
+        self.use_ai(ProviderId::OpenRouter, cx);
     }
 
     fn turn_off_ai(&mut self, _: &TurnOffAi, _: &mut Window, cx: &mut Context<Self>) {
@@ -7349,11 +7388,11 @@ impl Workspace {
     /// ⌥⇧⌘T: the Rust test at the caret, built and run alone under the debugger.
     fn debug_test(&mut self, _: &DebugTestAtCursor, _: &mut Window, cx: &mut Context<Self>) {
         if self.debugger.read(cx).is_active() {
-            return self.show_notice("Already debugging: stop it first (⇧F5)".into(), cx);
+            return self.show_notice("Already debugging: stop it first (⇧F5).".into(), cx);
         }
         let Some(editor) = self.active_editor().cloned() else { return };
         let Some(test) = editor.update(cx, |e, _| e.rust_test_at_caret()) else {
-            return self.show_notice("No Rust test at the caret".into(), cx);
+            return self.show_notice("No Rust test at the cursor.".into(), cx);
         };
         self.debug_rust_test(test, cx);
     }
@@ -7544,7 +7583,7 @@ impl Workspace {
         let controls: Vec<gpui::Stateful<gpui::Div>> = match &debugger.state {
             DebugState::Stopped(_) => vec![
                 button("dbg-continue", "Continue", "Continue", Box::new(StartDebugging)),
-                button("dbg-over", "Step Over", "Step over", Box::new(StepOver)),
+                button("dbg-over", "Over", "Step over", Box::new(StepOver)),
                 button("dbg-into", "Into", "Step into", Box::new(StepInto)),
                 button("dbg-out", "Out", "Step out", Box::new(StepOut)),
                 button("dbg-stop", "Stop", "Stop debugging", Box::new(StopDebugging)),
@@ -7848,7 +7887,7 @@ impl Workspace {
         let Some(editor) = self.active_editor().cloned() else { return };
         let root = self.tree.read(cx).root().to_path_buf();
         let Some(run) = editor.update(cx, |e, _| e.test_run(&root, at_caret)) else {
-            let message = if at_caret { "No test at the caret." } else { "No tests in this file." };
+            let message = if at_caret { "No test at the cursor." } else { "No tests in this file." };
             return self.show_notice(message.into(), cx);
         };
         for tab in &self.tabs {
@@ -7902,8 +7941,7 @@ impl Workspace {
         let mark = crate::markdown_html::MARK.as_bytes();
         let ours = std::fs::read(&out).is_ok_and(|bytes| bytes.windows(mark.len()).any(|w| w == mark));
         if out.exists() && !ours {
-            return self
-                .show_notice(format!("{name} is already there, and not one Null made: it's left as it is."), cx);
+            return self.show_notice(format!("{name} already exists and wasn't made by Null, so it's left alone."), cx);
         }
         let title = crate::markdown_html::title(&source)
             .unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
@@ -7935,7 +7973,8 @@ impl Workspace {
                     0 => "just now".to_string(),
                     1 => "1 minute ago".to_string(),
                     m if m < 60 => format!("{m} minutes ago"),
-                    m => format!("{} h ago", m / 60),
+                    m if m < 120 => "1 hour ago".to_string(),
+                    m => format!("{} hours ago", m / 60),
                 };
                 let lines = if lines == 1 { String::new() } else { format!("{lines} lines · ") };
                 crate::palette::Location {
@@ -8614,7 +8653,7 @@ impl Workspace {
     fn apply_fix_edit(&mut self, edit: lsp_types::WorkspaceEdit, cx: &mut Context<Self>) {
         let (_, files, failed) = self.apply_edit_to_files(edit, cx);
         if !failed.is_empty() {
-            self.show_notice(format!("Couldn't write {}", failed.join(", ")), cx);
+            self.show_notice(format!("Couldn't write {}.", failed.join(", ")), cx);
         } else if files > 1 {
             self.show_notice(format!("Changed {files} files"), cx);
         }
@@ -8626,7 +8665,7 @@ impl Workspace {
             (0, _) => "Nothing to rename".to_string(),
             (_, true) if files == 1 => format!("Renamed in {places} places"),
             (_, true) => format!("Renamed in {places} places across {files} files"),
-            (_, false) => format!("Renamed, but couldn't write {}", failed.join(", ")),
+            (_, false) => format!("Renamed, but couldn't write {}.", failed.join(", ")),
         };
         self.show_notice(message, cx);
     }
@@ -8709,7 +8748,7 @@ impl Workspace {
     /// them shows each in the editor; Esc goes back to where you were.
     fn go_to_symbol(&mut self, _: &GoToSymbol, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor().cloned() else {
-            return self.show_notice("Open a file to go to one of its functions or types".into(), cx);
+            return self.show_notice("Open a file to go to one of its functions or types.".into(), cx);
         };
         let (path, text, name) = {
             let e = editor.read(cx);
@@ -9355,7 +9394,7 @@ impl Workspace {
             items.push(at_click("Rename…", Box::new(RenameSymbol), false));
         }
         if cx.global::<Settings>().ai.active() != ProviderId::Off {
-            items.push(item("Change with AI…", Box::new(InlineAssist), true));
+            items.push(item("Edit with AI…", Box::new(InlineAssist), true));
         }
         items.push(item("Format Document", Box::new(FormatDocument), !items.last().is_some_and(|i| i.group)));
         items
@@ -9626,8 +9665,8 @@ fn position_label(editor: &Editor, line: usize, col: usize) -> String {
     // Data in columns: which one the caret's in, by its name in the first line.
     if let Some((column, name)) = editor.data_column().filter(|_| range.is_empty()) {
         return match name {
-            Some(name) => format!("{place} · {name} (column {column})"),
-            None => format!("{place} · column {column}"),
+            Some(name) => format!("{place} · {name} (field {column})"),
+            None => format!("{place} · field {column}"),
         };
     }
     if range.is_empty() {
@@ -10890,6 +10929,10 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::use_claude_api))
             .on_action(cx.listener(Self::use_claude_code))
             .on_action(cx.listener(Self::use_codex))
+            .on_action(cx.listener(Self::use_mistral))
+            .on_action(cx.listener(Self::use_groq))
+            .on_action(cx.listener(Self::use_gemini))
+            .on_action(cx.listener(Self::use_open_router))
             .on_action(cx.listener(Self::turn_off_ai))
             .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::increase_font_size))

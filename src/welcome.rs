@@ -105,7 +105,7 @@ enum Presence {
 
 const PRESENCE: [(Presence, &str, &str); 3] = [
     (Presence::Off, "Off", "No AI anywhere in Null. Turn it on later in Settings if you like."),
-    (Presence::WhenAsked, "When I ask", "⌘I to change code, questions, and tasks. Nothing while you type."),
+    (Presence::WhenAsked, "When I ask", "⌘I changes code, answers questions and runs tasks. Nothing while you type."),
     (Presence::WhileTyping, "When I ask, and while I type", "Also suggests the rest of the line as you type."),
 ];
 
@@ -514,7 +514,7 @@ impl Welcome {
                 ),
                 StepKind::Keys => (
                     "Which shortcuts do your hands know?",
-                    "Null's own keep the common VS Code ones. Change them any time in Settings.",
+                    "Null's own include the common VS Code ones. Change them any time in Settings.",
                     div()
                         .grid()
                         .grid_cols(2)

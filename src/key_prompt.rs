@@ -41,8 +41,8 @@ impl KeyPrompt {
         let key = self.input.read(cx).text().to_string();
         let label = self.provider.label();
         let message = match ai::store_api_key(self.provider, &key) {
-            Ok(()) if key.trim().is_empty() => format!("Removed the {label} key"),
-            Ok(()) => format!("Saved the {label} key in the keychain"),
+            Ok(()) if key.trim().is_empty() => format!("Removed the {label} key."),
+            Ok(()) => format!("Kept the {label} key in the keychain."),
             Err(err) => format!("Couldn't save the key: {err}"),
         };
         cx.emit(KeyPromptEvent::Finished(message));
@@ -63,7 +63,7 @@ impl Render for KeyPrompt {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<Theme>();
         let store = if cfg!(target_os = "macos") {
-            "macOS Keychain"
+            "keychain"
         } else if cfg!(target_os = "windows") {
             "Windows Credential Manager"
         } else {
@@ -106,11 +106,13 @@ impl Render for KeyPrompt {
                     .line_height(px(20.))
                     .child(self.input.clone()),
             )
-            .children(self.provider.key_url().map(|url| {
-                div().text_size(px(ui::T_SM)).text_color(theme.muted).child(format!("Get one at {url}"))
-            }))
+            .children(
+                self.provider.key_url().map(|url| {
+                    div().text_size(px(ui::T_SM)).text_color(theme.muted).child(format!("Get one at {url}"))
+                }),
+            )
             .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(format!(
-                "Stored in your {store}, never in the settings file. Leave it empty and press ↵ to remove the saved key."
+                "Kept in the {store}, never in the settings file. Leave it empty and press ↵ to remove the saved key."
             )))
     }
 }

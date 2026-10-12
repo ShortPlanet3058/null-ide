@@ -130,7 +130,7 @@ impl PaletteKind {
             PaletteKind::Locations => "Filter",
             PaletteKind::Task => "Describe the task",
             PaletteKind::Commit => "Commit message",
-            PaletteKind::Branch => "Switch to branch, or name a new one",
+            PaletteKind::Branch => "Switch to a branch, or name a new one",
             PaletteKind::Run => "Run a task, or type a command",
             PaletteKind::Projects => "Open a recent project",
             PaletteKind::Ex => ":",
@@ -756,7 +756,8 @@ impl Palette {
             // A command a quick setting stands in for: its own name finds that setting
             // ("toggle sidebar" finds Sidebar), shown once.
             if let Some(quick) = quick_for(c.action.name()) {
-                if let Some((score, _)) = fuzzy::score(&c.label, query) {
+                let also = || also_called(c.action.name()).and_then(|words| fuzzy::score(words, query));
+                if let Some((score, _)) = fuzzy::score(&c.label, query).or_else(also) {
                     match found.iter_mut().find(|(_, item, _)| *item == Item::Quick(quick)) {
                         Some(entry) => entry.0 = entry.0.max(score + 8),
                         None => found.push((score + 8, Item::Quick(quick), Vec::new())),
@@ -1746,6 +1747,9 @@ fn also_called(action: &str) -> Option<&'static str> {
         "workspace::MoveTabDown" => "split down",
         "workspace::MoveTabUp" => "split up",
         "workspace::OpenOnOtherSide" => "split",
+        // (Named Show/Hide now; VS Code's name still finds them.)
+        "workspace::ToggleSidebar" => "toggle sidebar",
+        "workspace::ToggleTerminal" => "toggle terminal",
         _ => return None,
     })
 }

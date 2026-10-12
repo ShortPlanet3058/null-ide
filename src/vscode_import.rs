@@ -179,26 +179,26 @@ pub fn changes(settings: &Settings, written: &Map<String, Value>, here: &Here) -
             continue;
         }
         let name = match key.as_str() {
-            "font_size" => "Font size",
+            "font_size" => "Text size",
             "code_font" => "Code font",
             "ligatures" => "Ligatures",
             "indent_size" => "Indent size",
             "indent_with_tabs" => "Indent with tabs",
-            "word_wrap" => "Word wrap",
+            "word_wrap" => "Wrap long lines",
             "format_on_save" => "Format on save",
             "format_on_paste" => "Format on paste",
-            "whitespace" => "Show whitespace",
+            "whitespace" => "Spaces and tabs",
             "line_numbers" => "Line numbers",
-            "caret" => "Caret",
-            "caret_blink" => "Caret blink",
-            "bracket_colours" => "Bracket colours",
+            "caret" => "Cursor",
+            "caret_blink" => "Blinking cursor",
+            "bracket_colours" => "Coloured bracket pairs",
             "indent_guides" => "Indent guides",
-            "line_guide" => "Line guide",
+            "line_guide" => "Line-length guide",
             "sticky_scroll" => "Sticky scroll",
-            "inlay_hints" => "Inlay hints",
-            "code_lens" => "Code lens",
-            "auto_close" => "Close brackets",
-            "auto_save" => "Auto save",
+            "inlay_hints" => "Type hints",
+            "code_lens" => "References and run links",
+            "auto_close" => "Close brackets and quotes",
+            "auto_save" => "Save automatically",
             "preview_tabs" => "Preview tabs",
             "hide" => "Hidden from Files",
             "languages" => "Settings by language",
@@ -250,9 +250,9 @@ mod tests {
         assert_eq!(after.indent_size, 2);
         assert_eq!(after.caret, crate::settings::CaretShape::Block);
         assert!(after.languages.keys().any(|k| k.eq_ignore_ascii_case("python")));
-        assert!(changed.contains(&"Font size: 17".to_string()), "{changed:?}");
+        assert!(changed.contains(&"Text size: 17".to_string()), "{changed:?}");
         assert!(changed.contains(&"Code font: JetBrains Mono".to_string()), "{changed:?}");
-        assert!(changed.contains(&"Auto save: when leaving".to_string()), "{changed:?}");
+        assert!(changed.contains(&"Save automatically: when leaving".to_string()), "{changed:?}");
         // Brought over again: nothing more changes.
         let (_, again) = changes(&after, &written, &here);
         assert!(again.is_empty(), "{again:?}");

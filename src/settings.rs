@@ -1065,7 +1065,10 @@ fn save_project(file: &std::path::Path, values: &JsonMap) -> Result<(), String> 
             Some(text) => text,
             None => {
                 eprintln!("null: not saving over {}, which can't be followed", file.display());
-                return Err("This project's settings are written in a way Null can't follow: nothing changed".into());
+                return Err(
+                    "This project's settings.json is laid out in a way Null can't safely edit, so nothing changed."
+                        .into(),
+                );
             }
         },
         None => serde_json::to_string_pretty(values).unwrap_or_default() + "\n",

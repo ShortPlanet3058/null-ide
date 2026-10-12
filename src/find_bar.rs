@@ -363,7 +363,7 @@ impl FindBar {
             "case" => ("Match case", Some(Box::new(ToggleCaseSensitive))),
             "word" => ("Whole word", Some(Box::new(ToggleWholeWord))),
             "regex" => ("Regular expression", Some(Box::new(ToggleRegex))),
-            "selection" => ("Only in the lines selected: click for the whole file", None),
+            "selection" => ("Only in the selected lines: click for the whole file", None),
             "previous" => ("Previous match", Some(Box::new(FindPrevious))),
             "next" => ("Next match", Some(Box::new(FindNext))),
             "close" => ("Close", Some(Box::new(CloseFind))),
@@ -444,7 +444,7 @@ impl Render for FindBar {
                 } else if search.query.text.is_empty() {
                     (false, "".into())
                 } else if search.matches.is_empty() {
-                    (false, "No results".into())
+                    (false, "No matches".into())
                 } else {
                     let total = search.matches.len();
                     let total = if total >= MAX_MATCHES { format!("{total}+") } else { total.to_string() };
@@ -583,7 +583,7 @@ impl Render for FindBar {
                     .on_click(act(|this, window, cx| this.replace_next(&ReplaceNext, window, cx))),
             )
             .child(
-                text_button("replace-all", "Replace all")
+                text_button("replace-all", "Replace All")
                     .active(|s| s.opacity(0.7))
                     .on_click(act(|this, window, cx| this.replace_all(&ReplaceAll, window, cx))),
             );

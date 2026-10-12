@@ -1006,7 +1006,7 @@ impl FileTree {
             [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             many => format!("{} items", many.len()),
         };
-        let note = if cut { format!("{what}: ⌘V in a folder moves it there") } else { format!("Copied {what}") };
+        let note = if cut { format!("{what}: ⌘V in a folder moves it there.") } else { format!("Copied {what}.") };
         cx.set_global(FileClipboard { paths, cut });
         cx.emit(FileTreeEvent::Notice(note));
     }
@@ -1198,6 +1198,8 @@ impl FileTree {
                         notice.push_str(" · ");
                     }
                     notice.push_str(&problems.join("; "));
+                } else if !notice.is_empty() {
+                    notice.push('.');
                 }
                 cx.emit(FileTreeEvent::Notice(notice));
                 cx.notify();
@@ -1221,7 +1223,7 @@ impl FileTree {
                 self.selected = self.entry_at(next).map(|e| e.path.clone());
                 window.focus(&self.focus_handle);
                 cx.emit(FileTreeEvent::Trashed(entry.path.clone()));
-                cx.emit(FileTreeEvent::Notice(format!("Moved {} to the Trash", entry.name)));
+                cx.emit(FileTreeEvent::Notice(format!("Moved {} to the Trash.", entry.name)));
                 cx.notify();
             }
             Err(message) => cx.emit(FileTreeEvent::Notice(message)),

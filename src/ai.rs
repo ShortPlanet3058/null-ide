@@ -533,7 +533,7 @@ pub(crate) fn error_message(status: u16, body: &str) -> String {
     match status {
         401 | 403 => format!("The API key was refused ({status}): {message}"),
         404 => format!("Not found ({status}). Check the model name and address: {message}"),
-        429 => format!("Rate limited ({status}). Try again in a moment: {message}"),
+        429 => format!("Too many requests just now ({status}). Try again in a moment."),
         _ => format!("The provider answered {status}: {message}"),
     }
 }
@@ -709,10 +709,10 @@ pub fn find_cli(name: &str) -> Option<std::path::PathBuf> {
 pub fn install_hint(id: ProviderId) -> Option<&'static str> {
     match id {
         ProviderId::ClaudeCode => Some(
-            "Install Claude Code with `curl -fsSL https://claude.ai/install.sh | bash`, then run `claude` once to sign in with your Claude plan.",
+            "Install Claude Code with “curl -fsSL https://claude.ai/install.sh | bash”, then run “claude” once to sign in with your Claude plan.",
         ),
         ProviderId::Codex => Some(
-            "Install Codex with `npm install -g @openai/codex`, then run `codex` once to sign in with your ChatGPT plan.",
+            "Install Codex with “npm install -g @openai/codex”, then run “codex” once to sign in with your ChatGPT plan.",
         ),
         _ => None,
     }
@@ -730,7 +730,7 @@ fn spawn_cli_in(
 ) -> Result<std::process::Child, String> {
     let id = if program == "claude" { ProviderId::ClaudeCode } else { ProviderId::Codex };
     let path = find_cli(program)
-        .ok_or_else(|| format!("`{program}` isn't installed. {}", install_hint(id).unwrap_or_default()))?;
+        .ok_or_else(|| format!("“{program}” isn't installed. {}", install_hint(id).unwrap_or_default()))?;
     // Tools installed with npm start with `#!/usr/bin/env node`: give them a PATH that finds node.
     let search_path = crate::tools::search_path();
     let mut command = Command::new(&path);
@@ -747,9 +747,9 @@ fn spawn_cli_in(
         command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(
             |e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    format!("`{program}` isn't installed, or isn't on the PATH Null was started with.")
+                    format!("“{program}” isn't installed, or isn't on the PATH Null was started with.")
                 } else {
-                    format!("Couldn't start `{program}`: {e}")
+                    format!("Couldn't start “{program}”: {e}")
                 }
             },
         )?;
@@ -773,7 +773,7 @@ fn finish_cli(program: &str, mut child: std::process::Child) -> Result<(), Strin
     }
     let detail: String =
         stderr.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-    Err(format!("`{program}` stopped with an error. Is it signed in? {detail}").trim().to_string())
+    Err(format!("“{program}” stopped with an error. Is it signed in? {detail}").trim().to_string())
 }
 
 /// The person's own Claude Code, signed in with their Claude plan. All tools are
@@ -992,7 +992,7 @@ pub fn run_task(
     } else {
         let detail: Vec<&str> = errors.lines().rev().take(3).collect();
         Err(format!(
-            "`{program}` stopped with an error. Is it signed in? {}",
+            "“{program}” stopped with an error. Is it signed in? {}",
             detail.into_iter().rev().collect::<Vec<_>>().join(" ")
         )
         .trim()
