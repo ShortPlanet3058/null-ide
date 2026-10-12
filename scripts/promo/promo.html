@@ -199,7 +199,27 @@ body.player { display: grid; place-items: center; height: 100vh; }
 </div>
 <script>
 "use strict";
-window.DURATION = 42;
+// The film's own clock runs a little faster or slower in places, so that what happens
+// lands on the music's bars (75 BPM: a bar is 3.2 s; see scripts/promo/score.swift).
+window.DURATION = 50;
+const WARP = [
+  // [film seconds, script seconds]
+  [0, 0], [12.3, 12.3],
+  [14.4, 12.75],   // the editor comes in on the music's first big beat
+  [24.06, 21.07],  // ⌘P on a bar
+  [30.46, 26.27],  // ⌘I on a bar
+  [36.86, 31.67],  // ⇥ on a bar
+  [40.06, 34.0],   // "Native…" on a bar
+  [43.26, 37.9],   // the end card on the last phrase
+  [50, 42],
+];
+function scriptTime(t) {
+  for (let i = 1; i < WARP.length; i++) {
+    const [t0, s0] = WARP[i - 1], [t1, s1] = WARP[i];
+    if (t <= t1) return s0 + (s1 - s0) * (t - t0) / (t1 - t0);
+  }
+  return WARP[WARP.length - 1][1];
+}
 
 // ---------- time helpers ----------
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
@@ -342,7 +362,7 @@ const KEYS = [
   [31.55, 32.3, ["⇥"], "Tab"],
 ];
 // ⌘K: the theme steps along, then comes back to Null.
-const THEME_STEPS = [[24.0, "Midnight"], [24.35, "Moss"], [24.7, "Dune"], [25.05, "Paper"], [25.4, "Null"]];
+const THEME_STEPS = [[23.995, "Midnight"], [24.32, "Moss"], [24.645, "Dune"], [24.97, "Paper"], [25.295, "Null"]];
 
 // ---------- the clutter: what other editors show before any code ----------
 const CLUTTER = [
@@ -413,14 +433,14 @@ function renderOpening(t) {
 }
 
 function renderClutter(t) {
-  const visible = t > 4.7 && t < 10.6;
+  const visible = t > 4.7 && t < 9.8;
   show("clutter", visible ? 1 : 0);
   if (!visible) return;
   CLUTTER.forEach(([l, tp, w, h, , , appears], i) => {
     const inP = out3(prog(t, appears, appears + 0.28));
     // Into the caret, the last ones first.
-    const d = (CLUTTER.length - i) * 0.018;
-    const q = inOut(prog(t, 9.15 + d, 9.95 + d));
+    const d = (CLUTTER.length - i) * 0.007;
+    const q = inOut(prog(t, 8.95 + d, 9.45 + d));
     const cx = l + w / 2, cy = tp + h / 2;
     const dx = (960 - cx) * q, dy = (540 - cy) * q;
     const s = (0.94 + 0.06 * inP) * (1 - q * 0.98);
@@ -430,9 +450,9 @@ function renderClutter(t) {
   });
 }
 
-function renderBack(t) {
-  // The caret the clutter went into, alone; then the sentence.
-  const o = fade(t, 9.9, 10.15, 12.4, 12.95);
+function renderBack(t, film) {
+  // The caret the clutter went into, alone; then the sentence, gone just before the beat.
+  const o = fade(film, 9.5, 9.65, 13.7, 14.3);
   show("backlayer", o);
   if (!o) return;
   const typed = T.back.shown(t);
@@ -442,7 +462,7 @@ function renderBack(t) {
   caret.style.display = "inline-block";
   caret.style.marginLeft = typed ? "8px" : "0";
   caret.style.verticalAlign = "-8px";
-  caret.style.opacity = blink(t, Math.max(T.back.last(t), 10.0), 0.4);
+  caret.style.opacity = blink(t, Math.max(T.back.last(t), 9.6), 0.4);
 }
 
 function renderApp(t) {
@@ -643,11 +663,12 @@ function renderEnd(t) {
 }
 
 let measured = false;
-window.render = function (t) {
+window.render = function (film) {
   if (!measured) { measure(); measured = true; }
+  const t = scriptTime(film);
   renderOpening(t);
   renderClutter(t);
-  renderBack(t);
+  renderBack(t, film);
   renderApp(t);
   renderSpeed(t);
   renderEnd(t);
