@@ -781,6 +781,9 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// Linux drawing its own frame: the title bar pressed, the window moved once the mouse
+    /// goes (so a double-click still maximises).
+    moving_window: bool,
     /// While AI's dot shows: a redraw soon, so it goes when AI's done (or its failure's old).
     ai_dot_watch: Option<Task<()>>,
     settings_panel: Option<(Entity<SettingsPanel>, Subscription)>,
@@ -1092,6 +1095,7 @@ impl Workspace {
             last_mouse: None,
             palette: None,
             ai_dot_watch: None,
+            moving_window: false,
             settings_panel: None,
             welcome: None,
             ready_since: None,
@@ -1640,6 +1644,55 @@ impl Workspace {
             })
             .ok();
         }));
+    }
+
+    /// The window's minimise, maximise and close, where Null draws them (not on the Mac).
+    fn window_controls(&self, window: &Window, cx: &Context<Self>) -> Option<AnyElement> {
+        if !crate::window_frame::draws_controls(window) {
+            return None;
+        }
+        let this = cx.entity().downgrade();
+        Some(crate::window_frame::controls(window, cx.global::<Theme>(), move |window, cx| {
+            let close = this.update(cx, |this, cx| this.confirm_unsaved(CloseAction::CloseWindow, window, cx));
+            if close.unwrap_or(true) {
+                window.remove_window();
+            }
+        }))
+    }
+
+    /// The title bar as Linux's window frame, where Null draws it: dragged, it moves the
+    /// window; double-clicked, maximises it; right-clicked, the system's window menu. (The
+    /// Mac and Windows do all this themselves.)
+    fn moves_window(&self, bar: gpui::Div, cx: &Context<Self>) -> gpui::Div {
+        if !cfg!(target_os = "linux") {
+            return bar;
+        }
+        bar.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, window, _| {
+                // (A tab pressed: the tab's.)
+                if window.default_prevented() || !crate::window_frame::draws_controls(window) {
+                    return;
+                }
+                if event.click_count == 2 {
+                    this.moving_window = false;
+                    window.zoom_window();
+                } else {
+                    this.moving_window = true;
+                }
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, _| {
+            if std::mem::take(&mut this.moving_window) && event.pressed_button == Some(MouseButton::Left) {
+                window.start_window_move();
+            }
+        }))
+        .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.moving_window = false))
+        .on_mouse_down(MouseButton::Right, |event: &MouseDownEvent, window, _| {
+            if !window.default_prevented() && crate::window_frame::draws_controls(window) {
+                window.show_window_menu(event.position);
+            }
+        })
     }
 
     // ---------- git ----------
@@ -9113,6 +9166,10 @@ impl Workspace {
                     .id(("tab", ix))
                     .debug_selector(|| format!("tab {name}"))
                     .group(group)
+                    // (In the title bar, where a press elsewhere moves the window: this one is the tab's.)
+                    .when(!cfg!(target_os = "macos"), |t| {
+                        t.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    })
                     .on_drag(dragged, |tab, _, _, cx| cx.new(|_| TabGhost { label: tab.label.clone() }))
                     .drag_over::<DraggedTab>({
                         let line = theme.caret;
@@ -10304,19 +10361,20 @@ impl Render for Workspace {
         let joining = self.render_joining(cx);
         let theme = cx.global::<Theme>();
 
+        // Off the Mac (Windows; Linux drawing its own frame): the window's buttons at the
+        // right, beside the bar rather than in it, where pressing moves the window.
+        let controls = self.window_controls(window, cx);
         let titlebar = div()
-            .h(px(40.))
-            .flex_none()
+            .h_full()
+            .flex_1()
+            .min_w_0()
             .flex()
             .items_center()
             // (The window's own buttons: the system's size, not the interface's.)
             .pl(gpui::px(TITLEBAR_INSET))
             .pr(px(12.))
-            .border_b_1()
-            .border_color(theme.hairline)
-            .bg(theme.surface)
-            .opacity(opacity)
             .window_control_area(WindowControlArea::Drag)
+            .map(|bar| self.moves_window(bar, cx))
             .map(|bar| match tabs_right {
                 // Each side's tabs over it: the left ones end where the right side begins.
                 Some(right) => {
@@ -10327,6 +10385,16 @@ impl Render for Workspace {
                 }
                 None => bar.child(tabs_left),
             });
+        let titlebar = div()
+            .h(px(40.))
+            .flex_none()
+            .flex()
+            .border_b_1()
+            .border_color(theme.hairline)
+            .bg(theme.surface)
+            .opacity(opacity)
+            .child(titlebar)
+            .children(controls);
 
         let sidebar_panel = div()
             .flex_none()
@@ -11012,7 +11080,20 @@ impl Render for Workspace {
             // In Focus mode, only a strip to drag the window by.
             .map(|root| {
                 if self.focus_mode {
-                    root.child(div().h(px(40.)).flex_none().window_control_area(WindowControlArea::Drag))
+                    root.child(
+                        div()
+                            .h(px(40.))
+                            .flex_none()
+                            .flex()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h_full()
+                                    .window_control_area(WindowControlArea::Drag)
+                                    .map(|bar| self.moves_window(bar, cx)),
+                            )
+                            .children(self.window_controls(window, cx)),
+                    )
                 } else {
                     root.child(titlebar)
                 }
@@ -11041,6 +11122,9 @@ impl Render for Workspace {
                 ),
             )
             .when(!self.focus_mode, |root| root.child(status))
+            // Linux drawing the frame: edges to resize by (the root's positioned for them).
+            .relative()
+            .children(crate::window_frame::resize_edges(window))
             .children(tab_menu)
             .children(text_menu)
             .children(tab_switcher)

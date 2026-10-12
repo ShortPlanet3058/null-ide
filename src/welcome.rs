@@ -363,7 +363,7 @@ impl Welcome {
             .size_full()
             .flex()
             .flex_col()
-            .child(Self::top_bar(None, &theme))
+            .child(Self::top_bar(None, &theme, window))
             .child(
                 div()
                     .flex_1()
@@ -444,21 +444,31 @@ impl Welcome {
 
     /// The top: room for the window buttons (and dragging the window), the wordmark, and
     /// how far along the setup is.
-    fn top_bar(step: Option<(usize, usize)>, theme: &Theme) -> AnyElement {
-        // On the window buttons' row, just after them.
+    fn top_bar(step: Option<(usize, usize)>, theme: &Theme, window: &Window) -> AnyElement {
+        // On the Mac, on the window buttons' row, just after them; elsewhere the buttons at
+        // the right (Null's own, off the Mac).
+        let controls = crate::window_frame::draws_controls(window)
+            .then(|| crate::window_frame::controls(window, theme, |window, _| window.remove_window()));
         div()
             .h(px(42.))
             .flex_none()
             .flex()
-            .items_center()
-            .justify_between()
-            .pl(px(92.))
-            .pr(px(28.))
-            .window_control_area(WindowControlArea::Drag)
-            .child(Self::wordmark(theme))
-            .children(step.map(|n| {
-                div().text_size(px(ui::T_SM)).text_color(theme.faint).child(format!("{} of {}", n.0 + 1, n.1))
-            }))
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pl(px(if cfg!(target_os = "macos") { 92. } else { 28. }))
+                    .pr(px(28.))
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(Self::wordmark(theme))
+                    .children(step.map(|n| {
+                        div().text_size(px(ui::T_SM)).text_color(theme.faint).child(format!("{} of {}", n.0 + 1, n.1))
+                    })),
+            )
+            .children(controls)
             .into_any_element()
     }
 
@@ -570,7 +580,7 @@ impl Welcome {
             .size_full()
             .flex()
             .flex_col()
-            .child(Self::top_bar(Some((n, count)), &theme))
+            .child(Self::top_bar(Some((n, count)), &theme, window))
             .child(
                 // (Scrolls when a step is taller than the window: AI's, with its providers.)
                 div()

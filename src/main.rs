@@ -82,6 +82,7 @@ mod ui;
 mod user_keys;
 mod vscode_import;
 mod welcome;
+mod window_frame;
 mod word_blocks;
 mod workspace;
 mod wrap;
@@ -395,6 +396,16 @@ fn open_at(
     }
 }
 
+/// What every window shares off the Mac: on Linux, its frame drawn by Null (as on the Mac
+/// and Windows, the title bar is Null's) and a name for the desktop to know its icon by.
+fn frame() -> WindowOptions {
+    WindowOptions {
+        app_id: Some("null".into()),
+        window_decorations: cfg!(target_os = "linux").then_some(gpui::WindowDecorations::Client),
+        ..Default::default()
+    }
+}
+
 /// `null --wait <file>` (git's editor): a window with that file alone, nothing of the
 /// project's session read or written; closing its tab (or the window) quits, and the one
 /// waiting goes on.
@@ -406,7 +417,7 @@ fn open_waiting_window(root: PathBuf, file: Option<PathBuf>, place: Option<(u32,
             traffic_light_position: Some(point(px(16.), px(13.))),
         }),
         window_min_size: Some(size(px(480.), px(320.))),
-        ..Default::default()
+        ..frame()
     };
     let opened = cx.open_window(options, |window, cx| {
         cx.new(|cx| {
@@ -445,7 +456,7 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
             traffic_light_position: Some(point(px(16.), px(13.))),
         }),
         window_min_size: Some(size(px(480.), px(320.))),
-        ..Default::default()
+        ..frame()
     };
     let opened = cx.open_window(options, |window, cx| {
         cx.new(|cx| {
