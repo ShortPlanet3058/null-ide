@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Several folders in one window**: Add Folder to Window…, folders dropped on the files, or
+  `null api web`. Each folder is a heading in the files; ⌘P, search, symbols and git's marks
+  cover them all; each gets its own language servers; git follows the file you're in, with a
+  picker of the folders' repositories in the Git panel. The window remembers its folders.
+
 ## 0.1.0
 
 The first release of Null: a calm, fast code editor where the screen belongs to your code,

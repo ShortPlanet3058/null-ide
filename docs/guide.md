@@ -51,6 +51,23 @@ A command is named as ⌘K lists it (or as in the code, `editor::SelectAllOccurr
 Menus and ⌘K show your keys; one that can't be understood, or that would type a character
 (`x`, a space), is named when settings.json is saved.
 
+## Several folders in one window
+
+A window can hold several folders, each a heading in the files with its own under it:
+**Add Folder to Window…** (⌘K or File) picks one or more, a folder dropped from the Finder or
+Explorer onto the files asks whether to add it or copy it in, and `null api web` opens them
+together. A heading's menu has **Remove Folder from Window** (nothing on disk changes).
+
+Across them all: ⌘P lists every folder's files (`web/app/page.tsx`), project search searches
+them, ⌘T knows their symbols, and the files show git's marks. Each folder gets its own
+language servers. Git follows the file you're in: the Git panel shows that folder's
+repository, with a picker of the others at its top, and the status bar its branch. A new
+terminal, ⌘⇧B's tasks, F5 and AI tasks work in the folder of the file at hand; tests are found
+in every folder and run in their own.
+
+The window remembers its folders: open its first one again (or pick it in Recent) and the
+others come back with it.
+
 ## Writing
 
 - **⌘.** offers the language server's quick fixes at the caret (a missing import, match

@@ -4007,7 +4007,9 @@ impl Workspace {
 
     /// "file — project" in the title bar, and the close button's unsaved dot.
     fn refresh_title(&self, window: &mut Window, cx: &App) {
-        let project = self.roots.primary().file_name().map(|n| n.to_string_lossy().into_owned());
+        // (Several folders: all their names, `api + web`.)
+        let names: Vec<String> = self.roots.all().iter().map(|r| crate::roots::ProjectRoots::name(r)).collect();
+        let project = (!names.is_empty()).then(|| names.join(" + "));
         let editor = self.active_editor().map(|e| e.read(cx));
         let title = match (editor.map(|e| e.file_name()), project) {
             (Some(file), Some(project)) => format!("{file} — {project}"),
@@ -4674,7 +4676,7 @@ impl Workspace {
     }
 
     /// The window's folders changed: everything that works across them told.
-    fn roots_changed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn roots_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let roots = self.roots.all().to_vec();
         if !roots.contains(&self.git_root) {
             self.set_git_root(self.roots.primary().to_path_buf(), cx);
@@ -4695,6 +4697,7 @@ impl Workspace {
         self.refresh_git(cx);
         self.schedule_session_save(cx);
         cx.notify();
+        cx.defer_in(window, |this, window, cx| this.refresh_title(window, cx));
     }
 
     /// Folders dropped on the files from outside: added to the window, or copied in, as the
@@ -12578,6 +12581,44 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
         workspace.read_with(cx, |w, cx| assert_eq!(w.active_editor().unwrap().read(cx).buffer.to_string(), "one\n"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Several folders: added to the window, kept in its session and back with it when its
+    /// folder opens again; removed, gone; one inside another, or the same twice, isn't added.
+    #[gpui::test]
+    fn a_window_keeps_its_folders(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("window-folders");
+        let _ = std::fs::remove_dir_all(&dir);
+        for folder in ["api/src", "web"] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+        }
+        let dir = dunce::canonicalize(&dir).unwrap();
+        let (api, web) = (dir.join("api"), dir.join("web"));
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = api.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.add_roots(vec![web.clone(), api.join("src"), web.clone()], window, cx);
+            assert_eq!(w.roots().all(), [api.clone(), web.clone()]);
+            assert_eq!(w.session(cx).roots, [web.clone()]);
+            assert_eq!(w.roots().display(&web.join("page.tsx")), Path::new("web/page.tsx").display().to_string());
+        });
+        // Its folder opened again (as from Recent): the other comes back.
+        let session = workspace.read_with(cx, |w, cx| w.session(cx));
+        let root = api.clone();
+        let (again, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        again.update_in(cx, |w, window, cx| {
+            w.restore_session(session, window, cx);
+            assert_eq!(w.roots().all(), [api.clone(), web.clone()]);
+            w.remove_root(web.clone(), window, cx);
+            assert_eq!(w.roots().all(), [api.clone()]);
+            assert!(w.session(cx).roots.is_empty());
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 
