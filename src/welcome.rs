@@ -275,7 +275,11 @@ impl Welcome {
             .font_weight(FontWeight::SEMIBOLD)
             .cursor_pointer()
             .child(label.to_string())
-            .child(div().text_size(px(ui::T_SM)).opacity(0.7).child("↵"))
+            .child(div().text_size(px(ui::T_SM)).opacity(0.7).child(if cfg!(target_os = "macos") {
+                "↵"
+            } else {
+                "Enter"
+            }))
     }
 
     /// A choice as a card: a title, a line under it.
@@ -482,11 +486,13 @@ impl Welcome {
             window.request_animation_frame();
         }
         let eased = 1. - (1. - t).powi(3);
+        let look_sub =
+            format!("Switch any time from {} or Settings.", ui::keys(&crate::workspace::ShowCommands, "⌘K", cx));
         let (title, sub, body): (&str, &str, AnyElement) = match steps[n] {
             StepKind::Look => {
                 (
                     "Choose how Null looks",
-                    "Switch any time from ⌘K or Settings.",
+                    &look_sub,
                     div()
                         .grid()
                         .grid_cols(3)
@@ -515,7 +521,11 @@ impl Welcome {
             }
             StepKind::Type => (
                 "Pick a typeface you can read all day",
-                "Each is monospaced, calm and made for code. The size changes with ⌘+ and ⌘- too.",
+                if cfg!(target_os = "macos") {
+                    "Each is monospaced, calm and made for code. The size changes with ⌘+ and ⌘- too."
+                } else {
+                    "Each is monospaced, calm and made for code. The size changes with Ctrl+Plus and Ctrl+Minus too."
+                },
                 self.type_step(&settings, &theme, cx),
             ),
             StepKind::Keys => (
@@ -609,7 +619,7 @@ impl Welcome {
                                     .text_color(theme.foreground)
                                     .child(title),
                             )
-                            .child(div().pb(px(10.)).text_size(px(15.)).text_color(theme.muted).child(sub))
+                            .child(div().pb(px(10.)).text_size(px(15.)).text_color(theme.muted).child(sub.to_string()))
                             .child(body),
                     ),
             )

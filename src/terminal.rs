@@ -408,7 +408,13 @@ impl Shell {
     pub fn start(cwd: PathBuf) -> std::io::Result<Self> {
         // Without `$SHELL` (an app started oddly), the account's own shell rather than a
         // `login` wrapper, so the shell is the process watched for its prompt.
-        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell);
+        // (On Windows: PowerShell, whatever a `$SHELL` from Git Bash says.)
+        let shell = if cfg!(windows) {
+            Some(crate::shell::windows_program())
+        } else {
+            std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell)
+        };
+        let login = if cfg!(windows) { "-NoLogo" } else { "-l" };
         let mut env = HashMap::from([
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -421,7 +427,7 @@ impl Shell {
         }
         let options = tty::Options {
             // A login shell, like a terminal app opens, so PATH and the prompt are set up.
-            shell: shell.map(|program| tty::Shell::new(program, vec!["-l".into()])),
+            shell: shell.map(|program| tty::Shell::new(program, vec![login.into()])),
             working_directory: Some(cwd.clone()),
             drain_on_exit: false,
             env,
@@ -1886,13 +1892,9 @@ fn within(paths: &[PathBuf], folder: &std::path::Path) -> Vec<PathBuf> {
 }
 
 fn shell_words(paths: &[std::path::PathBuf]) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%~".contains(c);
     paths
         .iter()
-        .map(|path| {
-            let path = path.display().to_string();
-            if path.chars().all(plain) { format!("{path} ") } else { format!("'{}' ", path.replace('\'', r"'\''")) }
-        })
+        .map(|path| format!("{} ", crate::shell::quote(&path.display().to_string(), crate::shell::kind())))
         .collect()
 }
 
@@ -1913,7 +1915,7 @@ mod tests {
         ];
         assert_eq!(
             shell_words(&within(&paths, &folder)),
-            "src/main.rs './-odd name.txt' . /elsewhere/notes.md ./~backup.txt "
+            "src/main.rs './-odd name.txt' . /elsewhere/notes.md './~backup.txt' "
         );
     }
 

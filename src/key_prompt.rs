@@ -105,8 +105,8 @@ impl Render for KeyPrompt {
                     div().text_size(px(ui::T_SM)).text_color(theme.muted).child(format!("Get one at {url}"))
                 }),
             )
-            .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(format!(
+            .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(ui::key_words(&format!(
                 "Kept in {store}, never in the settings file. Leave it empty and press ↵ to remove the saved key."
-            )))
+            ))))
     }
 }

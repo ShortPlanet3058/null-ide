@@ -223,7 +223,7 @@ fn poetry_env_name(name: &str, folder: &Path) -> String {
 
 /// What runs Python for the project's commands, as typed from its folder: its
 /// environment's (`.venv/bin/python`), else the system's `python3`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn python(root: &Path) -> String {
     python_for(root, root)
 }
@@ -234,13 +234,10 @@ pub fn python_for(root: &Path, path: &Path) -> String {
         Some(env) => {
             let python = python_in(&env);
             let relative = python.strip_prefix(root).unwrap_or(&python).to_string_lossy().into_owned();
-            if relative.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/')) {
-                relative
-            } else {
-                format!("'{}'", relative.replace('\'', r"'\''"))
-            }
+            crate::shell::quote(&relative, crate::shell::kind())
         }
-        None => "python3".into(),
+        // (On Windows `python3` is often only the Store's stand-in: `python` there.)
+        None => if cfg!(windows) { "python" } else { "python3" }.into(),
     }
 }
 
@@ -262,10 +259,17 @@ pub fn variables(root: &Path) -> Vec<(String, String)> {
 /// What a terminal's shell types to make the environment its own: its `activate`, for
 /// that shell, from where it is. None for a shell it doesn't know.
 pub fn activate_command(env: &Path, shell: &str) -> Option<String> {
-    let name = Path::new(shell).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // (`pwsh.exe` on Windows: the name without it.)
+    let name = Path::new(shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let folder = if cfg!(windows) { "Scripts" } else { "bin" };
     let script = |file: &str| {
-        let path = env.join("bin").join(file).to_string_lossy().into_owned();
-        format!("'{}'", path.replace('\'', r"'\''"))
+        let path = env.join(folder).join(file).to_string_lossy().into_owned();
+        let kind = if matches!(name.as_str(), "pwsh" | "powershell") {
+            crate::shell::Kind::PowerShell
+        } else {
+            crate::shell::Kind::Posix
+        };
+        crate::shell::quote(&path, kind)
     };
     // A space first: kept out of the shell's history (fish; zsh and bash when set to).
     Some(match name.as_str() {
@@ -274,12 +278,13 @@ pub fn activate_command(env: &Path, shell: &str) -> Option<String> {
         "fish" => format!(" source {}", script("activate.fish")),
         "csh" | "tcsh" => format!(" source {}", script("activate.csh")),
         "nu" => format!(" overlay use {}", script("activate.nu")),
-        "pwsh" => format!(" & {}", script("Activate.ps1")),
+        "pwsh" | "powershell" => format!(" & {}", script("Activate.ps1")),
         _ => return None,
     })
 }
 
-#[cfg(test)]
+// (Environments as Unix lays them out: bin/python.)
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -302,14 +307,14 @@ mod tests {
         assert!(vars[0].1.starts_with(&dir.join(".venv/bin").to_string_lossy().into_owned()));
         assert_eq!(vars[1], ("VIRTUAL_ENV".to_string(), dir.join(".venv").to_string_lossy().into_owned()));
         let activate = |env: &str, shell: &str| activate_command(Path::new(env), shell);
-        assert_eq!(activate("/p/.venv", "/bin/zsh").as_deref(), Some(" source '/p/.venv/bin/activate'"));
-        assert_eq!(activate(".venv", "/bin/zsh").as_deref(), Some(" source '.venv/bin/activate'"));
+        assert_eq!(activate("/p/.venv", "/bin/zsh").as_deref(), Some(" source /p/.venv/bin/activate"));
+        assert_eq!(activate(".venv", "/bin/zsh").as_deref(), Some(" source .venv/bin/activate"));
         assert_eq!(
             activate("/p/.venv", "/opt/homebrew/bin/fish").as_deref(),
-            Some(" source '/p/.venv/bin/activate.fish'")
+            Some(" source /p/.venv/bin/activate.fish")
         );
-        assert_eq!(activate(".venv", "/bin/sh").as_deref(), Some(" . '.venv/bin/activate'"));
-        assert_eq!(activate(".venv", "/usr/local/bin/nu").as_deref(), Some(" overlay use '.venv/bin/activate.nu'"));
+        assert_eq!(activate(".venv", "/bin/sh").as_deref(), Some(" . .venv/bin/activate"));
+        assert_eq!(activate(".venv", "/usr/local/bin/nu").as_deref(), Some(" overlay use .venv/bin/activate.nu"));
         assert_eq!(activate(".venv", "/usr/bin/xonsh"), None, "one it doesn't know: nothing typed");
         std::fs::remove_dir_all(&dir).ok();
     }

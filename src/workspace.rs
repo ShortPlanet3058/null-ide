@@ -1005,7 +1005,10 @@ impl Workspace {
                     let pattern = format!("/{}{}", names.join("/"), if *folder { "/" } else { "" });
                     match crate::settings::hide_in_project(&root, &pattern, cx) {
                         Ok(()) => this.show_notice(
-                            format!("{pattern} hidden from the files, ⌘P and search (this project's settings)"),
+                            format!(
+                                "{pattern} hidden from the files, {} and search (this project's settings)",
+                                ui::keys(&TogglePalette, "⌘P", cx)
+                            ),
                             cx,
                         ),
                         Err(message) => this.show_notice(message, cx),
@@ -2623,14 +2626,14 @@ impl Workspace {
     fn discard_changes(&mut self, path: PathBuf, status: git::FileStatus, window: &mut Window, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let detail = if status == git::FileStatus::Added {
-            "It's new since the last commit: it goes to the Trash."
+            format!("It's new since the last commit: it goes to the {}.", crate::fs_ops::TRASH)
         } else {
-            "It goes back to how it was at the last commit."
+            "It goes back to how it was at the last commit.".to_string()
         };
         let answer = window.prompt(
             PromptLevel::Warning,
             &format!("Discard the changes to {name}?"),
-            Some(detail),
+            Some(&detail),
             &["Discard", "Cancel"],
             cx,
         );
@@ -2670,7 +2673,7 @@ impl Workspace {
         let answer = window.prompt(
             PromptLevel::Warning,
             &format!("Discard every change in {files}?"),
-            Some("They go back to the last commit. New files go to the Trash."),
+            Some(&format!("They go back to the last commit. New files go to the {}.", crate::fs_ops::TRASH)),
             &["Discard", "Cancel"],
             cx,
         );
@@ -4688,7 +4691,7 @@ impl Workspace {
             (App, "Install Shell Command".into(), Box::new(InstallShellCommand)),
             (Edit, "Organise Imports".into(), Box::new(OrganizeImports)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
-            (File, "Move File to Trash…".into(), Box::new(TrashFile)),
+            (File, format!("Move File to {}…", crate::fs_ops::TRASH), Box::new(TrashFile)),
             (File, "Copy Path".into(), Box::new(CopyFilePath)),
             (File, "Copy Relative Path".into(), Box::new(CopyRelativeFilePath)),
             (File, crate::file_tree::REVEAL_LABEL.into(), Box::new(RevealFile)),
@@ -6204,7 +6207,15 @@ impl Workspace {
         #[cfg(not(test))]
         let found = crate::vscode_import::latest();
         let Some((editor, path)) = found else {
-            return self.show_notice("No VS Code settings found on this Mac.".into(), cx);
+            return self.show_notice(
+                if cfg!(target_os = "macos") {
+                    "No VS Code settings found on this Mac."
+                } else {
+                    "No VS Code settings found on this computer."
+                }
+                .into(),
+                cx,
+            );
         };
         let Ok(written) = crate::settings::read_project(&path) else {
             return self.show_notice(format!("{editor}'s settings couldn't be read."), cx);
@@ -6830,7 +6841,10 @@ impl Workspace {
         self.open_file(path, window, cx);
         let message = if cx.global::<Settings>().shown_own_theme(cx).is_none() {
             // Following the Mac, light now: yours is the dark one.
-            format!("{name}: used when the Mac is in dark mode.")
+            format!(
+                "{name}: used when {} is in dark mode.",
+                if cfg!(target_os = "macos") { "the Mac" } else { "the system" }
+            )
         } else {
             format!("{name}: change a colour and save to see it.")
         };
@@ -8077,11 +8091,15 @@ impl Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         let activate =
             (dir.starts_with(&root)).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
-                let shell = std::env::var("SHELL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(crate::terminal_watch::account_shell)
-                    .unwrap_or_default();
+                let shell = if cfg!(windows) {
+                    crate::shell::windows_program()
+                } else {
+                    std::env::var("SHELL")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .or_else(crate::terminal_watch::account_shell)
+                        .unwrap_or_default()
+                };
                 // From where the shell starts: short when it's the project's folder.
                 let env = env.strip_prefix(&dir).map(Path::to_path_buf).unwrap_or(env);
                 crate::python_env::activate_command(&env, &shell)

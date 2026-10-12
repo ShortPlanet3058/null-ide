@@ -66,6 +66,7 @@ mod servers;
 mod session;
 mod settings;
 mod settings_panel;
+mod shell;
 mod snippets;
 mod spell;
 mod svg_image;

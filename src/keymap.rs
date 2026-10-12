@@ -45,12 +45,30 @@ impl Keymap {
     /// The keys that matter most, to recognise the preset by.
     pub fn summary(self) -> &'static str {
         match self {
-            Keymap::Null => "⌘P files · ⌘K quick settings and commands · ⌘D next match · ⌥⇧↓ duplicate line",
-            Keymap::VsCode => "⌘P files · ⇧⌘P commands · ⌘D next match · ⌥⇧↓ duplicate · ⇧⌘K delete line",
-            Keymap::JetBrains => "⇧⌘O files · ⇧⌘A actions · ⌘L go to line · ⌘D duplicate · ⌘⌫ delete line",
-            Keymap::Sublime => "⌘P files · ⇧⌘P commands · ⇧⌘D duplicate · ⌃⇧K delete line · ⌃⌘↑ move line",
-            Keymap::Zed => "⌘P files · ⇧⌘P commands · ⌘D next match · ⇧⌘D duplicate · ⌃⇧K delete line",
-            Keymap::Vim => "hjkl w b e move · i a o insert · v V select · d c y p · Esc · ⌘ keys as Null's",
+            Keymap::Null => mac_or(
+                "⌘P files · ⌘K quick settings and commands · ⌘D next match · ⌥⇧↓ duplicate line",
+                "Ctrl+P files · Ctrl+K quick settings and commands · Ctrl+D next match · Alt+Shift+↓ duplicate line",
+            ),
+            Keymap::VsCode => mac_or(
+                "⌘P files · ⇧⌘P commands · ⌘D next match · ⌥⇧↓ duplicate · ⇧⌘K delete line",
+                "Ctrl+P files · Ctrl+Shift+P commands · Ctrl+D next match · Alt+Shift+↓ duplicate · Ctrl+Shift+K delete line",
+            ),
+            Keymap::JetBrains => mac_or(
+                "⇧⌘O files · ⇧⌘A actions · ⌘L go to line · ⌘D duplicate · ⌘⌫ delete line",
+                "Ctrl+Shift+O files · Ctrl+Shift+A actions · Ctrl+G go to line · Ctrl+D duplicate · Ctrl+Y delete line",
+            ),
+            Keymap::Sublime => mac_or(
+                "⌘P files · ⇧⌘P commands · ⇧⌘D duplicate · ⌃⇧K delete line · ⌃⌘↑ move line",
+                "Ctrl+P files · Ctrl+Shift+P commands · Ctrl+Shift+D duplicate · Ctrl+Shift+K delete line · Ctrl+Shift+↑ move line",
+            ),
+            Keymap::Zed => mac_or(
+                "⌘P files · ⇧⌘P commands · ⌘D next match · ⇧⌘D duplicate · ⌃⇧K delete line",
+                "Ctrl+P files · Ctrl+Shift+P commands · Ctrl+D next match · Ctrl+Shift+D duplicate · Ctrl+Shift+K delete line",
+            ),
+            Keymap::Vim => mac_or(
+                "hjkl w b e move · i a o insert · v V select · d c y p · Esc · ⌘ keys as Null's",
+                "hjkl w b e move · i a o insert · v V select · d c y p · Esc · Ctrl keys as Null's",
+            ),
         }
     }
 

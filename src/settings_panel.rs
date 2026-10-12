@@ -514,11 +514,18 @@ impl SettingsPanel {
                 div().grid().grid_cols(3).gap(px(16.)).py(px(12.)).children(cards).into_any_element()
             }),
             Self::row(
-                "Match the Mac's light and dark",
+                if cfg!(target_os = "macos") {
+                    "Match the Mac's light and dark"
+                } else {
+                    "Match the system's light and dark"
+                },
                 Some(&if s.match_appearance {
                     format!("Dark: {} · Light: {}. Pick one of each above", s.theme.label(), s.light_theme.label())
                 } else {
-                    "A dark theme in dark mode, a light one in light mode, switching as the Mac does".to_string()
+                    format!(
+                        "A dark theme in dark mode, a light one in light mode, switching as {} does",
+                        if cfg!(target_os = "macos") { "the Mac" } else { "the system" }
+                    )
                 }),
                 Self::toggle("match-appearance", s.match_appearance, &theme, cx, |s| {
                     s.match_appearance = !s.match_appearance;
@@ -774,7 +781,11 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Smart quotes and dashes",
-                Some("In Markdown and text, \"quotes\" curl as set on the Mac and -- becomes —; never in code"),
+                Some(if cfg!(target_os = "macos") {
+                    "In Markdown and text, \"quotes\" curl as set on the Mac and -- becomes —; never in code"
+                } else {
+                    "In Markdown and text, \"quotes\" become curly “ ” and -- becomes —; never in code"
+                }),
                 Self::toggle("smart-punctuation", s.smart_punctuation, &theme, cx, |s| {
                     s.smart_punctuation = !s.smart_punctuation
                 }),
@@ -873,7 +884,10 @@ impl SettingsPanel {
             Self::heading("Saving", &theme),
             Self::row(
                 "Save automatically",
-                Some("Files with a name save by themselves; ⌘S still formats first when that's on"),
+                Some(&format!(
+                    "Files with a name save by themselves; {} still formats first when that's on",
+                    ui::keys(&crate::editor::Save, "⌘S", cx)
+                )),
                 {
                     use crate::settings::AutoSave;
                     Self::choices(
@@ -1327,7 +1341,8 @@ impl SettingsPanel {
             return;
         }
         if !(m.platform || m.control || m.alt || f_key) {
-            self.key_note = Some((ix, "That key has a use: add ⌘, ⌃ or ⌥".into()));
+            let add = if cfg!(target_os = "macos") { "add ⌘, ⌃ or ⌥" } else { "add Ctrl or Alt" };
+            self.key_note = Some((ix, format!("That key has a use: {add}")));
             return;
         }
         let shown = gpui::KeyBinding::new(&typed, gpui::NoAction, None);
@@ -1368,7 +1383,11 @@ impl SettingsPanel {
             // Your own keys, over the preset's: written in settings.json.
             Self::row(
                 "Your own shortcuts",
-                Some("In settings.json: \"keys\": { \"ctrl-cmd-l\": \"select all occurrences\", \"cmd-d\": null }"),
+                Some(if cfg!(target_os = "macos") {
+                    "In settings.json: \"keys\": { \"ctrl-cmd-l\": \"select all occurrences\", \"cmd-d\": null }"
+                } else {
+                    "In settings.json: \"keys\": { \"ctrl-alt-l\": \"select all occurrences\", \"ctrl-d\": null }"
+                }),
                 Self::button("own-keys", "Edit…", &theme).on_click(cx.listener(|_, _, _, cx| {
                     cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::OpenSettingsFile)))
                 })),
@@ -1384,7 +1403,11 @@ impl SettingsPanel {
                 .pt(px(8.))
                 .text_size(px(ui::T_SM))
                 .text_color(theme.muted)
-                .child("Click a command's keys, then press new ones. Esc keeps them; ⌫ removes them.")
+                .child(if cfg!(target_os = "macos") {
+                    "Click a command's keys, then press new ones. Esc keeps them; ⌫ removes them."
+                } else {
+                    "Click a command's keys, then press new ones. Esc keeps them; Backspace removes them."
+                })
                 .into_any_element(),
         );
         for category in Category::ALL {

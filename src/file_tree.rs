@@ -326,7 +326,7 @@ impl MenuItem {
             MenuItem::Hide => "Hide from Files",
             MenuItem::DiscardChanges => "Discard Changes…",
             MenuItem::CollapseAll => "Collapse All Folders",
-            MenuItem::Trash => "Move to Trash",
+            MenuItem::Trash => fs_ops::MOVE_TO_TRASH,
             MenuItem::CopyPaths => "Copy Paths",
             MenuItem::Compare => "Compare the Two",
         }
@@ -1006,7 +1006,11 @@ impl FileTree {
             [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             many => format!("{} items", many.len()),
         };
-        let note = if cut { format!("{what}: ⌘V in a folder moves it there.") } else { format!("Copied {what}.") };
+        let note = if cut {
+            format!("{what}: {} in a folder moves it there.", crate::ui::keys(&PasteFiles, "⌘V", cx))
+        } else {
+            format!("Copied {what}.")
+        };
         cx.set_global(FileClipboard { paths, cut });
         cx.emit(FileTreeEvent::Notice(note));
     }
@@ -1138,9 +1142,9 @@ impl FileTree {
         let what = if entry.is_dir { "folder" } else { "file" };
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            &format!("Move the {what} “{}” to the Trash?", entry.name),
-            Some("You can restore it from the Trash."),
-            &["Move to Trash", "Cancel"],
+            &format!("Move the {what} “{}” to the {}?", entry.name, fs_ops::TRASH),
+            Some(&format!("You can restore it from the {}.", fs_ops::TRASH)),
+            &[fs_ops::MOVE_TO_TRASH, "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1156,9 +1160,9 @@ impl FileTree {
     fn trash_picked(&mut self, picked: Vec<Entry>, window: &mut Window, cx: &mut Context<Self>) {
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            &format!("Move these {} items to the Trash?", picked.len()),
-            Some("You can restore them from the Trash."),
-            &["Move to Trash", "Cancel"],
+            &format!("Move these {} items to the {}?", picked.len(), fs_ops::TRASH),
+            Some(&format!("You can restore them from the {}.", fs_ops::TRASH)),
+            &[fs_ops::MOVE_TO_TRASH, "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1190,8 +1194,8 @@ impl FileTree {
                 // One line says it all (a second would replace the first).
                 let mut notice = match moved {
                     0 => String::new(),
-                    1 => "Moved 1 item to the Trash".to_string(),
-                    n => format!("Moved {n} items to the Trash"),
+                    1 => format!("Moved 1 item to the {}", fs_ops::TRASH),
+                    n => format!("Moved {n} items to the {}", fs_ops::TRASH),
                 };
                 if !problems.is_empty() {
                     if !notice.is_empty() {
@@ -1223,7 +1227,7 @@ impl FileTree {
                 self.selected = self.entry_at(next).map(|e| e.path.clone());
                 window.focus(&self.focus_handle);
                 cx.emit(FileTreeEvent::Trashed(entry.path.clone()));
-                cx.emit(FileTreeEvent::Notice(format!("Moved {} to the Trash.", entry.name)));
+                cx.emit(FileTreeEvent::Notice(format!("Moved {} to the {}.", entry.name, fs_ops::TRASH)));
                 cx.notify();
             }
             Err(message) => cx.emit(FileTreeEvent::Notice(message)),
@@ -1921,7 +1925,7 @@ mod tests {
             assert_eq!(names(t), ["a.txt", "b.txt", "c.txt"]);
             t.trash(&Trash, window, cx);
         });
-        cx.simulate_prompt_answer("Move to Trash");
+        cx.simulate_prompt_answer(fs_ops::MOVE_TO_TRASH);
         cx.run_until_parked();
         assert!(!dir.join("a.txt").exists() && !dir.join("b.txt").exists() && !dir.join("c.txt").exists());
         assert!(dir.join("d.txt").exists());

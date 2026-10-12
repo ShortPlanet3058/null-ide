@@ -828,14 +828,15 @@ type DiskStamp = (u64, std::time::SystemTime);
 /// Whether the file can't be written by Null (its permissions, its owner, a read-only
 /// disk): its tab shows a lock.
 fn is_read_only(path: &Path) -> bool {
-    #[cfg(target_os = "macos")]
+    // (Asked of the system on Unix: the owner and groups count, not only the mode bits.)
+    #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
         let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
         // SAFETY: a NUL-ended path, read only for the call.
         path.exists() && unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } != 0
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     {
         std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly())
     }

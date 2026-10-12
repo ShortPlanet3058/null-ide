@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Null
+GenericName=Code Editor
+Comment=A calm, fast code editor where nothing gets in your way.
+Exec=null %F
+Icon=null
+Terminal=false
+Categories=Development;TextEditor;IDE;
+MimeType=text/plain;text/x-rust;text/x-python;text/x-csrc;text/x-chdr;text/x-c++src;text/x-go;text/markdown;application/json;application/x-yaml;inode/directory;
+StartupWMClass=null
+Keywords=editor;code;ide;text;
