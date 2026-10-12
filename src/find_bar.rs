@@ -726,7 +726,7 @@ mod tests {
             assert!(e.find_in_selection());
             assert_eq!(e.search.as_ref().unwrap().matches.len(), 3, "the three x in lines 2 and 3");
         });
-        cx.simulate_keystrokes("alt-secondary-f");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "alt-cmd-f" } else { "ctrl-h" });
         cx.simulate_input("count");
         cx.simulate_keystrokes("secondary-enter");
         e.read_with(cx, |e, _| {

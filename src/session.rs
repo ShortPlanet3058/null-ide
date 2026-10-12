@@ -372,6 +372,11 @@ mod tests {
         write(&gone, &[backup("gone.txt")]);
         let running = base.with_extension("1.json");
         write(&running, &[backup("running.txt")]);
+        // (Number 1 is running as long as its lock's held: here, by this test.)
+        let lock = lock_file(1).unwrap();
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let held = std::fs::File::create(&lock).unwrap();
+        held.try_lock().unwrap();
         let mut taken: Vec<String> = load_backups(&root).into_iter().map(|b| b.text).collect();
         taken.sort();
         assert_eq!(taken, ["gone.txt", "old.txt"]);

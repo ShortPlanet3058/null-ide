@@ -30,7 +30,16 @@ pub fn test_dir(name: &str) -> PathBuf {
 /// flashing up (git, language servers and the rest are console programs).
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     #[allow(unused_mut)]
-    let mut command = std::process::Command::new(program);
+    let mut command = std::process::Command::new(&program);
+    // Tests' repositories keep their files as written: no CRLF from Windows' git
+    // (core.autocrlf, set there by default), whatever the machine's settings.
+    #[cfg(test)]
+    if program.as_ref() == "git" {
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.autocrlf")
+            .env("GIT_CONFIG_VALUE_0", "false");
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

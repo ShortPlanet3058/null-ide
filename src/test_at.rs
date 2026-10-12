@@ -857,6 +857,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // (POSIX command lines and paths: PowerShell's are tested in `shell`.)
     fn go_python_and_js_tests() {
         let go = "package cart\n\nfunc TestTotal(t *testing.T) {\n\tt.Log(1)\n}\n\nfunc Testify() {}\n";
         let root = project("go", &[("go.mod", "module x\n"), ("cart/cart_test.go", go)]);

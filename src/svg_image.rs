@@ -34,7 +34,7 @@ pub fn draw(svg: &[u8], scale: f32, dir: Option<&std::path::Path>) -> Option<Dra
 
 /// SVG files drawn lately (or found not to draw), by path, with the time they were changed.
 #[allow(clippy::type_complexity)]
-static DRAWN: LazyLock<std::sync::Mutex<Vec<(std::path::PathBuf, std::time::SystemTime, Option<Drawn>)>>> =
+static DRAWN: LazyLock<std::sync::Mutex<Vec<(std::path::PathBuf, (std::time::SystemTime, u64), Option<Drawn>)>>> =
     LazyLock::new(Default::default);
 
 /// An image file shown: an SVG drawn here (in its colours, sharp on a Retina screen, at its
@@ -42,7 +42,8 @@ static DRAWN: LazyLock<std::sync::Mutex<Vec<(std::path::PathBuf, std::time::Syst
 pub fn image(path: &std::path::Path) -> gpui::Img {
     use gpui::Styled;
     let svg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
-    let changed = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    // (Its size too: Windows' clock can give two quick writes one time.)
+    let changed = std::fs::metadata(path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
     let (true, Some(changed)) = (svg, changed) else { return gpui::img(path.to_path_buf()) };
     let found = DRAWN
         .lock()

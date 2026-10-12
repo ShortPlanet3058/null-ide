@@ -67,7 +67,7 @@ impl Keymap {
             ),
             Keymap::Vim => mac_or(
                 "hjkl w b e move · i a o insert · v V select · d c y p · Esc · ⌘ keys as Null's",
-                "hjkl w b e move · i a o insert · v V select · d c y p · Esc · Ctrl keys as Null's",
+                "hjkl w b e move · i a o insert · v V select · d c y p · Esc · other Ctrl keys as Null's",
             ),
         }
     }

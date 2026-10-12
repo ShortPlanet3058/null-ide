@@ -1706,9 +1706,10 @@ mod tests {
         let before = panel.read_with(cx, |p, cx| p.keys_now(0, cx));
         assert!(!before.is_empty(), "Select All Occurrences has a key in the preset");
         panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
-        cx.simulate_keystrokes("ctrl-secondary-l");
+        let new = if cfg!(target_os = "macos") { "ctrl-cmd-l" } else { "ctrl-alt-l" };
+        cx.simulate_keystrokes(new);
         let keys = cx.update(|_, cx| cx.global::<Settings>().keys.clone());
-        assert_eq!(keys.get("ctrl-cmd-l"), Some(&Some("editor::SelectAllOccurrences".to_string())));
+        assert_eq!(keys.get(new), Some(&Some("editor::SelectAllOccurrences".to_string())));
         let from_it = Some("-editor::SelectAllOccurrences".to_string());
         assert!(before.iter().all(|k| keys.get(k) == Some(&from_it)), "the old keys let go: {keys:?}");
         assert_eq!(panel.read_with(cx, |p, cx| p.keys_now(0, cx)), ["ctrl-cmd-l"]);

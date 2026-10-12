@@ -372,7 +372,7 @@ mod subword_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod view_tests {
     use crate::buffer::Buffer;
     use crate::editor::{Editor, Selection};

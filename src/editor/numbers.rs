@@ -9,14 +9,17 @@ use std::ops::Range;
 
 actions!(numbers, [Increment, Decrement, IncrementByTen, DecrementByTen]);
 
+/// Up, down, up by ten, down by ten. (Off the Mac, Ctrl+Alt+↑ and ↓ add cursors, as in
+/// VS Code there: these take ⇧ too.)
+const KEYS: (&str, &str, &str, &str) = if cfg!(target_os = "macos") {
+    ("ctrl-alt-up", "ctrl-alt-down", "ctrl-alt-shift-up", "ctrl-alt-shift-down")
+} else {
+    ("ctrl-alt-shift-up", "ctrl-alt-shift-down", "ctrl-alt-shift-pageup", "ctrl-alt-shift-pagedown")
+};
+
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Editor");
-    // (Off the Mac, Ctrl+Alt+↑ and ↓ add cursors, as in VS Code there: these take ⇧ too.)
-    let (up, down, ten_up, ten_down) = if cfg!(target_os = "macos") {
-        ("ctrl-alt-up", "ctrl-alt-down", "ctrl-alt-shift-up", "ctrl-alt-shift-down")
-    } else {
-        ("ctrl-alt-shift-up", "ctrl-alt-shift-down", "ctrl-alt-shift-pageup", "ctrl-alt-shift-pagedown")
-    };
+    let (up, down, ten_up, ten_down) = KEYS;
     cx.bind_keys([
         KeyBinding::new(up, Increment, ctx),
         KeyBinding::new(down, Decrement, ctx),
@@ -321,9 +324,9 @@ mod tests {
             window.focus(&gpui::Focusable::focus_handle(e, cx));
             e.selection = Selection::caret(0);
         });
-        cx.simulate_keystrokes("ctrl-alt-up");
+        cx.simulate_keystrokes(KEYS.0);
         assert_eq!(e.read_with(cx, |e, _| (e.buffer.line_text(0), e.selection.head)), ("let n = 10;".into(), 10));
-        cx.simulate_keystrokes("ctrl-alt-shift-down ctrl-alt-shift-down");
+        cx.simulate_keystrokes(&[KEYS.3, KEYS.3].join(" "));
         assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(0)), "let n = -10;");
         e.update(cx, |e, _| e.selection = Selection::caret(e.buffer.to_string().find("true").unwrap() + 1));
         // `true` under the caret flips, though a number follows on the line.
@@ -332,20 +335,20 @@ mod tests {
             e.buffer.replace(at..at + e.buffer.line_len(1), "let on = true; // level 2");
             e.text_changed(cx);
         });
-        cx.simulate_keystrokes("ctrl-alt-down");
+        cx.simulate_keystrokes(KEYS.1);
         assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(1)), "let on = false; // level 2");
         // `10` down to `9`: the caret stays on it.
         e.update(cx, |e, _| e.selection = Selection::caret(8));
-        cx.simulate_keystrokes("ctrl-alt-up ctrl-alt-up");
+        cx.simulate_keystrokes(&[KEYS.0, KEYS.0].join(" "));
         assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(0)), "let n = -8;");
         e.update(cx, |e, _| e.selection = Selection::caret(9));
-        cx.simulate_keystrokes("ctrl-alt-shift-up");
+        cx.simulate_keystrokes(KEYS.2);
         assert_eq!(e.read_with(cx, |e, _| (e.buffer.line_text(0), e.selection.head)), ("let n = 2;".into(), 8));
         // `5` selected without its sign: `-5` steps.
-        cx.simulate_keystrokes("ctrl-alt-shift-down ctrl-alt-shift-down");
+        cx.simulate_keystrokes(&[KEYS.3, KEYS.3].join(" "));
         assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(0)), "let n = -18;");
         e.update(cx, |e, _| e.selection = Selection { anchor: 9, head: 11 });
-        cx.simulate_keystrokes("ctrl-alt-up");
+        cx.simulate_keystrokes(KEYS.0);
         assert_eq!(e.read_with(cx, |e, _| e.buffer.line_text(0)), "let n = -17;");
     }
 }

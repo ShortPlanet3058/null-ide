@@ -20,6 +20,11 @@ pub fn windows_program() -> String {
     if crate::tools::find("pwsh").is_some() { "pwsh.exe".into() } else { "powershell.exe".into() }
 }
 
+/// Run by Windows' terminal as PowerShell starts: its prompt puts the folder it's in into the
+/// window's title, whatever prompt the person has, so Null knows where the shell is.
+pub const POWERSHELL_FOLDER_IN_TITLE: &str = "$global:__NullPrompt = $function:prompt; \
+     function global:prompt { $Host.UI.RawUI.WindowTitle = $PWD.ProviderPath; & $global:__NullPrompt }";
+
 /// `word` as the shell takes it: as it is when it's plain, quoted otherwise.
 pub fn quote(word: &str, kind: Kind) -> String {
     let plain = !word.is_empty()

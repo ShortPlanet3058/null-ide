@@ -10,8 +10,13 @@ actions!(bookmarks, [ToggleBookmark, NextBookmark, PreviousBookmark]);
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-f2", ToggleBookmark, Some("Editor")),
-        KeyBinding::new("f3", NextBookmark, Some("Editor")),
-        KeyBinding::new("shift-f3", PreviousBookmark, Some("Editor")),
+        // (Off the Mac F3 finds the next match: VS Code's Bookmarks keys there.)
+        KeyBinding::new(if cfg!(target_os = "macos") { "f3" } else { "ctrl-alt-l" }, NextBookmark, Some("Editor")),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") { "shift-f3" } else { "ctrl-alt-j" },
+            PreviousBookmark,
+            Some("Editor"),
+        ),
     ]);
 }
 
@@ -155,11 +160,11 @@ mod tests {
         go(cx, 3);
         cx.simulate_keystrokes("secondary-f2");
         assert_eq!(e.read_with(cx, |e, _| e.bookmarks.clone()), vec![1, 3]);
-        cx.simulate_keystrokes("f3");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "f3" } else { "ctrl-alt-l" });
         assert_eq!(caret_line(cx), 1, "round from the last to the first");
-        cx.simulate_keystrokes("f3");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "f3" } else { "ctrl-alt-l" });
         assert_eq!(caret_line(cx), 3);
-        cx.simulate_keystrokes("shift-f3");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "shift-f3" } else { "ctrl-alt-j" });
         assert_eq!(caret_line(cx), 1);
         // A line added above moves both down; ⌘F2 again takes one away.
         e.update(cx, |e, cx| {

@@ -163,7 +163,11 @@ mod tests {
         let changes = snapshot.changes(&root);
         let summary: Vec<_> = changes
             .iter()
-            .map(|c| (c.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned(), c.kind, c.added, c.removed))
+            .map(|c| {
+                // (`/` whatever the platform's.)
+                let path = c.path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+                (path, c.kind, c.added, c.removed)
+            })
             .collect();
         assert_eq!(
             summary,

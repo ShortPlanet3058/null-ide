@@ -1379,7 +1379,7 @@ mod tests {
             let mut found = Vec::new();
             search_files(&root, &query, files, &[], None, &Default::default(), &AtomicBool::new(false), |f| {
                 if let Found::Files(files) = f {
-                    found.extend(files.into_iter().map(|f| f.relative));
+                    found.extend(files.into_iter().map(|f| f.relative.replace('\\', "/")));
                 }
             });
             found.join(" ")
@@ -1525,7 +1525,8 @@ mod tests {
         cx.simulate_input("needle");
         cx.executor().advance_clock(std::time::Duration::from_millis(500));
         cx.run_until_parked();
-        let found: Vec<String> = search.read_with(cx, |s, _| s.results.iter().map(|r| r.relative.clone()).collect());
+        let found: Vec<String> =
+            search.read_with(cx, |s, _| s.results.iter().map(|r| r.relative.replace('\\', "/")).collect());
         assert_eq!(found, ["src/a.rs"], "not lib/src");
         // A folder named like a pattern is that folder.
         search.update_in(cx, |s, window, cx| s.search_in_folder("app/[id]", window, cx));

@@ -305,7 +305,7 @@ fn typed_command(line: &str) -> &str {
             || word.starts_with("./")
             || word.starts_with("../")
             || (word.starts_with('/') && std::path::Path::new(word).is_file())
-            || (!word.contains('/') && paths.iter().any(|dir| dir.join(word).is_file()))
+            || (!word.contains('/') && paths.iter().any(|dir| on_path(dir, word)))
     };
     let mut at = 0;
     for word in typed.split_whitespace() {
@@ -316,6 +316,16 @@ fn typed_command(line: &str) -> &str {
         at = start + word.len();
     }
     typed
+}
+
+/// Whether `dir` holds program `name` (on Windows, with one of its program endings).
+fn on_path(dir: &std::path::Path, name: &str) -> bool {
+    if cfg!(windows) {
+        ["exe", "cmd", "bat", "com", "ps1"].iter().any(|ext| dir.join(format!("{name}.{ext}")).is_file())
+            || dir.join(name).is_file()
+    } else {
+        dir.join(name).is_file()
+    }
 }
 
 /// The program a typed command runs (`FOO=1 ./build.sh -v` → `build.sh`).
@@ -414,7 +424,13 @@ impl Shell {
         } else {
             std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell)
         };
-        let login = if cfg!(windows) { "-NoLogo" } else { "-l" };
+        let args: Vec<String> = if cfg!(windows) {
+            // The system can't say which folder PowerShell is in: its prompt says it, in the
+            // title (the person's own prompt, from their profile, still draws after).
+            vec!["-NoLogo".into(), "-NoExit".into(), "-Command".into(), crate::shell::POWERSHELL_FOLDER_IN_TITLE.into()]
+        } else {
+            vec!["-l".into()]
+        };
         let mut env = HashMap::from([
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -427,7 +443,7 @@ impl Shell {
         }
         let options = tty::Options {
             // A login shell, like a terminal app opens, so PATH and the prompt are set up.
-            shell: shell.map(|program| tty::Shell::new(program, vec![login.into()])),
+            shell: shell.map(|program| tty::Shell::new(program, args)),
             working_directory: Some(cwd.clone()),
             drain_on_exit: false,
             env,
@@ -836,6 +852,17 @@ impl TerminalView {
     pub fn shown_title(&self) -> Cow<'_, str> {
         match &self.folder {
             Some(folder) if self.title.trim().is_empty() => Cow::Owned(folder.display().to_string()),
+            // PowerShell's title, its folder (see `shell_folder`): short, home as `~`.
+            _ if cfg!(windows) && std::path::Path::new(self.title.trim()).is_absolute() => {
+                let title = self.title.trim();
+                match crate::tools::home_dir()
+                    .and_then(|h| std::path::Path::new(title).strip_prefix(h).ok().map(std::path::Path::to_path_buf))
+                {
+                    Some(rest) if rest.as_os_str().is_empty() => Cow::Borrowed("~"),
+                    Some(rest) => Cow::Owned(format!("~\\{}", rest.display())),
+                    None => Cow::Borrowed(title),
+                }
+            }
             _ => Cow::Borrowed(&self.title),
         }
     }
@@ -849,6 +876,11 @@ impl TerminalView {
             folder.or_else(|| self.shell_pid.and_then(crate::terminal_watch::folder_of)).filter(|f| f.is_dir())
         {
             return folder;
+        }
+        // (PowerShell's title is its folder whole: see `shell::POWERSHELL_FOLDER_IN_TITLE`.)
+        let whole = PathBuf::from(self.title.trim());
+        if whole.is_absolute() && whole.is_dir() {
+            return whole;
         }
         let shown = self.title.rsplit(':').next().map(str::trim).unwrap_or("");
         let shown = match (shown.strip_prefix("~/"), crate::tools::home_dir()) {
@@ -1904,6 +1936,7 @@ mod tests {
 
     /// Files dragged in from the files are typed as the shell's folder reaches them.
     #[test]
+    #[cfg(unix)] // (POSIX command lines and paths: PowerShell's are tested in `shell`.)
     fn dragged_files_are_typed_from_the_shell_s_folder() {
         let folder = PathBuf::from("/code/app");
         let paths = [
@@ -2038,6 +2071,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // (POSIX command lines and paths: PowerShell's are tested in `shell`.)
     fn dropped_paths_are_quoted_for_the_shell() {
         let paths = ["/Users/me/src/main.rs", "/Users/me/My Notes.md", "/tmp/it's.txt"].map(std::path::PathBuf::from);
         assert_eq!(shell_words(&paths), r"/Users/me/src/main.rs '/Users/me/My Notes.md' '/tmp/it'\''s.txt' ");

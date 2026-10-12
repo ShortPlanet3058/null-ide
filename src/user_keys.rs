@@ -55,8 +55,34 @@ fn command_named<'a>(name: &str, known: &[&'a str]) -> Option<&'a str> {
     matching.iter().find(|k| k.starts_with("editor::")).or(matching.first()).copied()
 }
 
+/// Keys as this platform reads them: off the Mac, `cmd` is Ctrl (a settings file written on
+/// a Mac means its ⌘ keys; Windows' own key isn't for shortcuts).
+fn portable(keystrokes: &str) -> String {
+    if cfg!(target_os = "macos") {
+        return keystrokes.to_string();
+    }
+    keystrokes
+        .split_whitespace()
+        .map(|stroke| {
+            let parts: Vec<&str> = stroke.split('-').collect();
+            let Some((key, modifiers)) = parts.split_last() else { return stroke.to_string() };
+            let mut kept: Vec<&str> = Vec::new();
+            for m in modifiers {
+                let m = if matches!(*m, "cmd" | "command") { "ctrl" } else { m };
+                if !kept.contains(&m) {
+                    kept.push(m);
+                }
+            }
+            kept.push(key);
+            kept.join("-")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Keys as a binding's are written (`cmd-shift-l`), however they were.
 fn as_written(keystrokes: &str) -> Option<String> {
+    let keystrokes = portable(keystrokes);
     let keys: Option<Vec<String>> =
         keystrokes.split_whitespace().map(|k| Keystroke::parse(k).ok().map(|k| k.unparse())).collect();
     keys.map(|k| k.join(" "))
@@ -96,7 +122,7 @@ pub fn bindings(
             problems.push(format!("\"{keystrokes}\" types a character: {ADD_TO_TYPING}"));
             continue;
         }
-        match KeyBinding::load(keystrokes, action, None, false, None, &gpui::DummyKeyboardMapper) {
+        match KeyBinding::load(&portable(keystrokes), action, None, false, None, &gpui::DummyKeyboardMapper) {
             Ok(binding) => bindings.push(binding),
             Err(_) => problems.push(format!("\"{keystrokes}\" isn't a shortcut (like \"cmd-shift-l\")")),
         }
@@ -132,6 +158,17 @@ pub fn register(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A settings file from a Mac: its ⌘ keys are Ctrl off the Mac.
+    #[test]
+    fn mac_keys_read_as_ctrl_elsewhere() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(portable("cmd-d"), "cmd-d");
+        } else {
+            assert_eq!(portable("cmd-shift-l"), "ctrl-shift-l");
+            assert_eq!(portable("ctrl-cmd-l cmd-k"), "ctrl-l ctrl-k");
+        }
+    }
 
     #[test]
     fn keys_that_type_are_refused() {

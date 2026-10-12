@@ -12420,7 +12420,11 @@ mod tests {
         workspace.update_in(cx, |w, window, cx| w.open_file(file.clone(), window, cx));
         let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
         // Copy "alpha", then "beta" (each its whole line), then go to the end.
-        cx.simulate_keystrokes("secondary-c down secondary-c secondary-down");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-c down cmd-c cmd-down"
+        } else {
+            "ctrl-c down ctrl-c ctrl-end"
+        });
         workspace.update_in(cx, |w, window, cx| w.paste_from_history(&PasteFromHistory, window, cx));
         cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
@@ -13042,6 +13046,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // (The Unix `null` script, run by sh; Windows' null.cmd is tested above.)
     fn the_shell_command_is_valid_and_hands_over_absolute_paths() {
         let dir = crate::tools::test_dir("cmd");
         std::fs::create_dir_all(&dir).unwrap();

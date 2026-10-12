@@ -1540,6 +1540,7 @@ mod tests {
     /// Python's server is told each folder's Python: a package's own environment, else the
     /// project's; other servers and settings, nothing (their defaults).
     #[test]
+    #[cfg(unix)] // (Environments as Unix lays them out: bin/python.)
     fn python_s_server_is_told_each_folder_s_python() {
         let root = crate::tools::test_dir("lsp-python-config");
         let _ = std::fs::remove_dir_all(&root);

@@ -5594,7 +5594,7 @@ mod tests {
             let x = layout.text_origin.x + r.x + r.shaped.x_for_index(r.shown_byte(3)) + gpui::px(2.);
             gpui::point(x, layout.text_origin.y + layout.line_height * 3.5)
         });
-        cx.simulate_click(at, gpui::Modifiers::command());
+        cx.simulate_click(at, gpui::Modifiers::secondary_key());
         assert_eq!(now(cx), "# Shop\n\n- [ ] milk\n- [x] eggs\n- [ ] Tea\n");
     }
 
