@@ -69,6 +69,8 @@ impl Keymap {
                 KeyBinding::new("secondary-shift-a", ShowCommands, workspace),
                 KeyBinding::new("secondary-1", ToggleSidebar, workspace),
                 KeyBinding::new("alt-f12", ToggleTerminal, workspace),
+                // (Over the editor's own ⌥F12 and ⌘F12: Peek Definition, Go to Implementation.)
+                KeyBinding::new("alt-f12", ToggleTerminal, editor),
                 KeyBinding::new("secondary-l", GoToLine, editor),
                 KeyBinding::new("secondary-d", DuplicateLineDown, editor),
                 KeyBinding::new("secondary-backspace", DeleteLine, editor),
@@ -78,6 +80,7 @@ impl Keymap {
                 KeyBinding::new("ctrl-secondary-g", SelectAllOccurrences, editor),
                 KeyBinding::new("secondary-b", GoToDefinition, editor),
                 KeyBinding::new("secondary-f12", crate::workspace::GoToSymbol, workspace),
+                KeyBinding::new("secondary-f12", crate::workspace::GoToSymbol, editor),
                 KeyBinding::new("secondary-alt-o", crate::workspace::GoToSymbolInProject, workspace),
                 KeyBinding::new("ctrl-shift-j", crate::editor::JoinLines, editor),
             ]

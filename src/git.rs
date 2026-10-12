@@ -1044,8 +1044,8 @@ pub fn finish_joining(root: &Path, kind: Joining) -> Result<Vec<PathBuf>, String
     let marked = conflicted.iter().filter(|p| still_marked(p)).count();
     match marked {
         0 => {}
-        1 => return Err("A file still has conflicts: ⌘. resolves each.".into()),
-        n => return Err(format!("{n} files still have conflicts: ⌘. resolves each.")),
+        1 => return Err("A file still has conflicts.".into()),
+        n => return Err(format!("{n} files still have conflicts.")),
     }
     if !conflicted.is_empty() {
         let names: Vec<String> = conflicted.iter().map(|p| p.to_string_lossy().into_owned()).collect();

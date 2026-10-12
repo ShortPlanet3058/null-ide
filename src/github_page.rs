@@ -682,7 +682,11 @@ impl Render for GitHubPage {
                 .child(
                     ui::primary_button(
                         "github-send-comment",
-                        if this.sending { "Sending…" } else { "Send ⌘↵" },
+                        if this.sending {
+                            "Sending…".to_string()
+                        } else {
+                            format!("Send {}", ui::keys(&SendComment, "⌘↵", cx))
+                        },
                         ready,
                         &theme,
                     )

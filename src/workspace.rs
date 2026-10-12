@@ -204,8 +204,9 @@ pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Workspace");
     let mut keys = vec![
         KeyBinding::new("secondary-p", TogglePalette, ctx),
-        KeyBinding::new("secondary-k", ShowCommands, ctx),
+        // (⇧⌘P for VS Code hands; ⌘K bound last, so it's the one shown.)
         KeyBinding::new("secondary-shift-p", ShowCommands, ctx),
+        KeyBinding::new("secondary-k", ShowCommands, ctx),
         KeyBinding::new("secondary-o", Open, ctx),
         KeyBinding::new("secondary-w", CloseTab, ctx),
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
@@ -1757,7 +1758,10 @@ impl Workspace {
                     Ok(conflicts) => {
                         let n = conflicts.len();
                         let files = if n == 1 { "1 file".to_string() } else { format!("{n} files") };
-                        this.show_notice(format!("Brought back, with conflicts in {files}: ⌘. resolves each."), cx);
+                        this.show_notice(
+                            format!("Brought back, with conflicts in {files}: {}.", ui::resolve_each(cx)),
+                            cx,
+                        );
                         this.open_first_conflict(conflicts, window, cx);
                     }
                     Err(error) => this.show_notice(error, cx),
@@ -1963,7 +1967,7 @@ impl Workspace {
                         } else {
                             format!("{} files", conflicts.len())
                         };
-                        format!("On {name}; your changes conflict in {files}: ⌘. resolves each.")
+                        format!("On {name}; your changes conflict in {files}: {}.", ui::resolve_each(cx))
                     }
                     Err(error) => error.clone(),
                 };
@@ -2260,7 +2264,8 @@ impl Workspace {
         if !back {
             return self.show_notice("Couldn't read the saved file: your changes are still here.".into(), cx);
         }
-        self.show_notice("Back as it was saved: ⌘Z brings your changes back.".into(), cx);
+        let undo = ui::keys(&crate::editor::Undo, "⌘Z", cx);
+        self.show_notice(format!("Back as it was saved: {undo} brings your changes back."), cx);
     }
 
     /// Organize Imports: the language server's own (sorted, the unused ones gone), for the
@@ -2473,7 +2478,7 @@ impl Workspace {
                     Ok(git::Pulled::Commits(1)) => "Pulled 1 commit.".to_string(),
                     Ok(git::Pulled::Commits(n)) => format!("Pulled {n} commits."),
                     Ok(git::Pulled::Conflicts(paths)) => {
-                        format!("Pulled, with conflicts in {}: ⌘. resolves each.", files(paths.len()))
+                        format!("Pulled, with conflicts in {}: {}.", files(paths.len()), ui::resolve_each(cx))
                     }
                     Err(error) => format!("Couldn't pull: {error}"),
                 };
@@ -5235,7 +5240,8 @@ impl Workspace {
         }
         rows.sort_by(|a, b| (&a.path, a.position.line).cmp(&(&b.path, b.position.line)));
         if rows.is_empty() {
-            self.show_notice("No bookmarks yet: ⌘F2 marks the cursor's line.".into(), cx);
+            let mark = ui::keys(&crate::editor::ToggleBookmark, "⌘F2", cx);
+            self.show_notice(format!("No bookmarks yet: {mark} marks the cursor's line."), cx);
             return;
         }
         self.open_locations("Bookmarks".into(), rows, window, cx);
@@ -5808,7 +5814,7 @@ impl Workspace {
                 let notice = match &result {
                     Ok(conflicts) if conflicts.is_empty() && rebase => format!("Rebased onto {branch}."),
                     Ok(conflicts) if conflicts.is_empty() => format!("Merged {branch} in."),
-                    Ok(conflicts) => format!("Conflicts in {}: ⌘. resolves each.", files(conflicts.len())),
+                    Ok(conflicts) => format!("Conflicts in {}: {}.", files(conflicts.len()), ui::resolve_each(cx)),
                     Err(error) if rebase => format!("Couldn't rebase: {error}"),
                     Err(error) => format!("Couldn't merge: {error}"),
                 };
@@ -5926,7 +5932,7 @@ impl Workspace {
                         git::Joining::CherryPick => format!("Cherry-picked {}.", state.other),
                         git::Joining::Revert => format!("Reverted {}.", state.other),
                     },
-                    Ok(_) => "The next commit conflicts too: ⌘. resolves each.".to_string(),
+                    Ok(_) => format!("The next commit conflicts too: {}.", ui::resolve_each(cx)),
                     Err(error) => error.clone(),
                 };
                 this.show_notice(notice, cx);
@@ -8276,6 +8282,7 @@ impl Workspace {
                 }))
         });
         let header = div()
+            .group("terminal-header")
             .h(px(28.))
             .flex_none()
             .flex()
@@ -8309,26 +8316,35 @@ impl Workspace {
                     )
                 }
             })
+            // Its buttons only when the mouse is over the header (as the files' are).
             .child(
-                icon_button("split-terminal", "icons/split.svg")
-                    .tooltip(ui::tip("Split the terminal", Some(Box::new(SplitTerminal))))
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.split_terminal(&SplitTerminal, window, cx)),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .invisible()
+                    .group_hover("terminal-header", |s| s.visible())
+                    .child(
+                        icon_button("split-terminal", "icons/split.svg")
+                            .tooltip(ui::tip("Split the terminal", Some(Box::new(SplitTerminal))))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.split_terminal(&SplitTerminal, window, cx)
+                            })),
+                    )
+                    .child(
+                        icon_button("new-terminal", "icons/plus.svg")
+                            .tooltip(ui::tip("New terminal", Some(Box::new(NewTerminal))))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.new_terminal(&NewTerminal, window, cx)
+                            })),
+                    )
+                    .child(
+                        icon_button("close-terminal", "icons/x.svg")
+                            .tooltip(ui::tip("Hide the terminal", Some(Box::new(ToggleTerminal))))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.toggle_terminal(&ToggleTerminal, window, cx)
+                            })),
                     ),
-            )
-            .child(
-                icon_button("new-terminal", "icons/plus.svg")
-                    .tooltip(ui::tip("New terminal", Some(Box::new(NewTerminal))))
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.new_terminal(&NewTerminal, window, cx)),
-                    ),
-            )
-            .child(
-                icon_button("close-terminal", "icons/x.svg")
-                    .tooltip(ui::tip("Hide the terminal", Some(Box::new(ToggleTerminal))))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.toggle_terminal(&ToggleTerminal, window, cx)
-                    })),
             );
         Some(
             div()

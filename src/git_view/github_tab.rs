@@ -497,7 +497,11 @@ impl GitView {
                     .child(
                         ui::primary_button(
                             "github-send",
-                            if self.github.sending { "Pushing…" } else { "Create ⌘↵" },
+                            if self.github.sending {
+                                "Pushing…".to_string()
+                            } else {
+                                format!("Create {}", ui::keys(&CreatePull, "⌘↵", cx))
+                            },
                             ready,
                             theme,
                         )

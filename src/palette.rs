@@ -737,7 +737,9 @@ impl Palette {
                 continue;
             }
             let recent = self.recent_commands.iter().position(|&n| n == c.action.name());
-            let boost = recent.map_or(0, |r| 12 - r.min(12) as i32);
+            // (One "Language: …" a language: below the rest, or "go" and "r" find only them.)
+            let lower = if c.label.starts_with("Language: ") { 25 } else { 0 };
+            let boost = recent.map_or(0, |r| 12 - r.min(12) as i32) - lower;
             if let Some((score, highlights)) = fuzzy::score(&c.label, query) {
                 found.push((score + boost + 5, Item::Command(i), highlights));
                 continue;

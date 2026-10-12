@@ -117,6 +117,17 @@ pub fn section_heading(text: &str, theme: &Theme) -> Div {
     div().text_size(px(T_XS)).font_weight(FontWeight::SEMIBOLD).text_color(theme.faint).child(text.to_uppercase())
 }
 
+/// The keys that run `action` now (this keymap's, or the person's own), else `fallback`:
+/// what a label or a notice names, so it's right on every platform and preset.
+pub fn keys(action: &dyn gpui::Action, fallback: &str, cx: &gpui::App) -> String {
+    crate::palette::shortcut(action, cx).unwrap_or_else(|| fallback.to_string())
+}
+
+/// "⌘. resolves each", with the keys that do.
+pub fn resolve_each(cx: &gpui::App) -> String {
+    format!("{} resolves each", keys(&crate::editor::QuickFix, "⌘.", cx))
+}
+
 /// The colour under a row (or a quiet control) the mouse is over.
 pub fn hover(theme: &Theme) -> gpui::Hsla {
     theme.hairline.opacity(0.6)

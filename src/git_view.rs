@@ -830,9 +830,9 @@ impl GitView {
         let commit_label = if self.committing {
             "Committing…".to_string()
         } else if kept == 1 {
-            "Commit 1 file ⌘↵".to_string()
+            format!("Commit 1 file {}", ui::keys(&CommitChanges, "⌘↵", cx))
         } else {
-            format!("Commit {kept} files ⌘↵")
+            format!("Commit {kept} files {}", ui::keys(&CommitChanges, "⌘↵", cx))
         };
         let message_box = ui::card(&theme)
             .key_context("GitMessage")

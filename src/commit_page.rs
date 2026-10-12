@@ -143,7 +143,7 @@ impl CommitPage {
                 Ok(conflicts) => {
                     let n = conflicts.len();
                     let files = if n == 1 { "1 file".to_string() } else { format!("{n} files") };
-                    cx.emit(CommitPageEvent::Said(format!("Conflicts in {files}: ⌘. resolves each.")));
+                    cx.emit(CommitPageEvent::Said(format!("Conflicts in {files}: {}.", ui::resolve_each(cx))));
                     cx.emit(CommitPageEvent::Changed);
                     cx.emit(CommitPageEvent::Conflicts(conflicts));
                 }
