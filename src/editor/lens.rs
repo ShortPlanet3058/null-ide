@@ -377,6 +377,6 @@ mod tests {
         assert_eq!(action_of(&imps, 7).unwrap().action, LensAction::Implementations(7));
         assert_eq!(action_of(&lens("Debug", "rust-analyzer.debugSingle", None), 0), None, "not one Null can do");
         let spaced = shell_line(&["test".into(), "it's".into()]);
-        assert_eq!(spaced, r"test 'it'\''s'");
+        assert_eq!(spaced, if cfg!(windows) { "test 'it''s'" } else { r"test 'it'\''s'" });
     }
 }

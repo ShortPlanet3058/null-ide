@@ -1925,7 +1925,7 @@ mod tests {
         let root = dir.clone();
         let (tree, cx) = cx.add_window_view(|_, cx| FileTree::new(root, cx));
         let names = |t: &FileTree| t.picked().iter().map(|e| e.name.to_string()).collect::<Vec<_>>();
-        let cmd = gpui::Modifiers { platform: true, ..Default::default() };
+        let cmd = gpui::Modifiers::secondary_key();
         let shift = gpui::Modifiers { shift: true, ..Default::default() };
         tree.update_in(cx, |t, window, cx| {
             let ix = |t: &FileTree, name: &str| {
@@ -2172,7 +2172,7 @@ mod tests {
         std::fs::write(dir.join("src/main.rs"), "").unwrap();
         std::fs::write(dir.join("README.md"), "").unwrap();
         let files = |hide: &[String]| -> Vec<String> {
-            crate::palette::list_files(&dir, hide).into_iter().map(|f| f.relative.to_string()).collect()
+            crate::palette::list_files(&dir, hide).into_iter().map(|f| f.relative.replace('\\', "/")).collect()
         };
         assert!(files(&[]).contains(&"src/main.rs".to_string()));
         assert_eq!(files(&["src/".into(), "*.toml".into()]), [".gitignore", "README.md"]);

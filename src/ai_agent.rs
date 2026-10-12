@@ -98,7 +98,7 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
                 .filter_map(Result::ok)
                 .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
                 .take(500)
-                .map(|e| e.path().strip_prefix(root).unwrap_or(e.path()).display().to_string())
+                .map(|e| slashed(e.path().strip_prefix(root).unwrap_or(e.path())))
                 .collect();
             Ok(if files.is_empty() { "No files there.".into() } else { files.join("\n") })
         }
@@ -115,7 +115,7 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
                     continue;
                 }
                 let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
-                let shown = entry.path().strip_prefix(root).unwrap_or(entry.path()).display().to_string();
+                let shown = slashed(entry.path().strip_prefix(root).unwrap_or(entry.path()));
                 for (i, line) in text.lines().enumerate().filter(|(_, l)| regex.is_match(l)) {
                     found.push(format!("{shown}:{}: {}", i + 1, line.trim()));
                 }
@@ -382,6 +382,13 @@ fn claude_loop(
         messages.push(json!({ "role": "user", "content": results }));
     }
     Err(format!("Stopped after {MAX_STEPS} steps: the task may be only partly done."))
+}
+
+/// A path inside the project as the model reads and writes them: `src/a.rs`, with `/`
+/// on Windows too.
+fn slashed(path: &Path) -> String {
+    let shown = path.display().to_string();
+    if cfg!(windows) { shown.replace('\\', "/") } else { shown }
 }
 
 #[cfg(test)]

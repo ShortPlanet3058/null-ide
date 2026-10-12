@@ -3919,7 +3919,9 @@ impl Editor {
         if was_over_scrollbar != self.over_scrollbar() {
             cx.notify();
         }
-        let over_mark = self.change_mark_at(event.position).is_some() || self.swatch_at(event.position).is_some();
+        // (A colour's square takes a click on the Mac only: its colour panel.)
+        let over_mark = self.change_mark_at(event.position).is_some()
+            || (cfg!(target_os = "macos") && self.swatch_at(event.position).is_some());
         if over_mark != self.over_change_mark {
             self.over_change_mark = over_mark;
             cx.notify();
@@ -5594,7 +5596,7 @@ mod tests {
             let x = layout.text_origin.x + r.x + r.shaped.x_for_index(r.shown_byte(3)) + gpui::px(2.);
             gpui::point(x, layout.text_origin.y + layout.line_height * 3.5)
         });
-        cx.simulate_click(at, gpui::Modifiers::command());
+        cx.simulate_click(at, gpui::Modifiers::secondary_key());
         assert_eq!(now(cx), "# Shop\n\n- [ ] milk\n- [x] eggs\n- [ ] Tea\n");
     }
 

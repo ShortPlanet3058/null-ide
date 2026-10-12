@@ -172,7 +172,7 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
     let Some(arg) = arg else {
         // Opened from the Finder (or the Dock), there's no folder to go by: the last project.
         // (From Windows' Start menu or Explorer the folder is Null's own, or System32.)
-        let home = crate::tools::home_dir();
+        let home = crate::tools::home_dir().map(|h| absolute(&h));
         let own = std::env::current_exe().ok().and_then(|e| e.parent().map(absolute));
         let system = std::env::var_os("SystemRoot").map(|r| absolute(&PathBuf::from(r)));
         let from_finder = cwd.parent().is_none()
@@ -266,10 +266,10 @@ fn main() {
     trace::mark("what to open worked out");
     // Off the Mac: a Null already running opens it instead (a waiting one is its own).
     let request = instance::Request { root: root.clone(), file: file.clone(), place };
-    if !wait && instance::hand_over(&request) {
-        return;
-    }
-    let mut handed = if wait { None } else { instance::listen() };
+    let mut handed = match instance::launch(&request, wait) {
+        instance::Launch::HandedOver => return,
+        instance::Launch::First(handed) => handed,
+    };
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
     // or by the `null` command while Null runs: opened in the window.
@@ -330,6 +330,7 @@ fn main() {
         // The Ollama Null started (see `ollama`) goes with it.
         cx.on_app_quit(|_| {
             ollama::stop();
+            instance::forget();
             async {}
         })
         .detach();

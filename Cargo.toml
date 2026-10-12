@@ -82,6 +82,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Null's icon and version built into null.exe (see build.rs). Already in the build.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 # Lets tests run real views and actions without opening windows.
 gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }

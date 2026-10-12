@@ -3527,7 +3527,10 @@ impl Workspace {
         let (dir, target, result) = if cfg!(windows) {
             let Some(dir) = crate::tools::data_dir().map(|d| d.join("bin")) else { return };
             let target = dir.join("null.cmd");
-            let result = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, cmd_script(&exe)));
+            // (And `null` beside it, a sh script, for Git Bash: git's editor among others.)
+            let result = std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&target, cmd_script(&exe)))
+                .and_then(|()| std::fs::write(dir.join("null"), git_bash_script(&exe)));
             (dir, target, result)
         } else {
             // From the app, `open -a` hands paths to the running Null; from a build, run it directly.
@@ -9238,6 +9241,11 @@ impl Workspace {
                     // (In the title bar, where a press elsewhere moves the window: this one is the tab's.)
                     .when(!cfg!(target_os = "macos"), |t| {
                         t.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                            // (Its menu, not also the system's for the title bar.)
+                            .on_mouse_up(MouseButton::Right, |_, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            })
                     })
                     .on_drag(dragged, |tab, _, _, cx| cx.new(|_| TabGhost { label: tab.label.clone() }))
                     .drag_over::<DraggedTab>({
@@ -9899,12 +9907,28 @@ fn cmd_script(exe: &Path) -> String {
          set \"wait=\"\r\n\
          if \"%~1\"==\"--wait\" set \"wait=1\"\r\n\
          if defined wait shift\r\n\
-         if \"%~1\"==\"\" (start \"\" \"{exe}\" \"%CD%\" & exit /b)\r\n\
+         if \"%~1\"==\"\" (start \"\" \"{exe}\" \"%CD%\\.\" & exit /b)\r\n\
          :next\r\n\
          if \"%~1\"==\"\" exit /b\r\n\
          if defined wait (\"{exe}\" --wait \"%~f1\") else (start \"\" \"{exe}\" \"%~f1\")\r\n\
          shift\r\n\
          goto next\r\n"
+    )
+}
+
+/// Windows' `null` for Git Bash (and git's editor, run by its sh): each path made whole and
+/// Windows' own (`cygpath`), then handed to Null as null.cmd does.
+fn git_bash_script(exe: &Path) -> String {
+    let exe = exe.display().to_string().replace('\\', "/");
+    format!(
+        "#!/bin/sh\n# Opens files and folders in Null from Git Bash: `null .`, `null a.rs:42`, `null --wait <file>`.\n\
+         wait=\n\
+         [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
+         [ $# -eq 0 ] && set -- .\n\
+         for p in \"$@\"; do\n\
+         \tw=$(cygpath -aw \"$p\" 2>/dev/null || printf '%s' \"$p\")\n\
+         \tif [ -n \"$wait\" ]; then \"{exe}\" --wait \"$w\"; else \"{exe}\" \"$w\" & fi\n\
+         done\n"
     )
 }
 
@@ -10450,6 +10474,10 @@ impl Render for Workspace {
                     ui::icon_button_for("app-menu", "icons/menu.svg", "Commands", Some(Box::new(ShowCommands)), theme)
                         .mr(px(6.))
                         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                        .on_mouse_up(MouseButton::Right, |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        })
                         .on_click(|_: &ClickEvent, window, cx| window.dispatch_action(Box::new(ShowCommands), cx)),
                 )
             })
@@ -10457,7 +10485,9 @@ impl Render for Workspace {
                 // Each side's tabs over it: the left ones end where the right side begins.
                 Some(right) => {
                     let main = f32::from(window.viewport_size().width) - sidebar_width;
-                    let left_width = (sidebar_width + main * self.split_ratio - TITLEBAR_INSET).max(80.);
+                    // (Less the commands button, off the Mac: the right tabs start at the split.)
+                    let button = if cfg!(target_os = "macos") { 0. } else { 26. };
+                    let left_width = (sidebar_width + main * self.split_ratio - TITLEBAR_INSET - button).max(80.);
                     bar.child(div().flex_none().w(gpui::px(left_width)).pr(px(8.)).child(tabs_left))
                         .child(div().flex_1().min_w_0().pl(px(8.)).child(right))
                 }
@@ -12420,7 +12450,11 @@ mod tests {
         workspace.update_in(cx, |w, window, cx| w.open_file(file.clone(), window, cx));
         let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
         // Copy "alpha", then "beta" (each its whole line), then go to the end.
-        cx.simulate_keystrokes("secondary-c down secondary-c secondary-down");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-c down cmd-c cmd-down"
+        } else {
+            "ctrl-c down ctrl-c ctrl-end"
+        });
         workspace.update_in(cx, |w, window, cx| w.paste_from_history(&PasteFromHistory, window, cx));
         cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
@@ -13037,11 +13071,22 @@ mod tests {
         let lines: Vec<&str> = script.lines().collect();
         assert_eq!(lines[0], "@echo off");
         assert!(lines.contains(&r#"if defined wait ("C:\Program Files\Null\null.exe" --wait "%~f1") else (start "" "C:\Program Files\Null\null.exe" "%~f1")"#));
-        assert!(lines.contains(&r#"if "%~1"=="" (start "" "C:\Program Files\Null\null.exe" "%CD%" & exit /b)"#));
+        assert!(lines.contains(&r#"if "%~1"=="" (start "" "C:\Program Files\Null\null.exe" "%CD%\." & exit /b)"#));
+        // Git Bash's: valid sh, Null run by its forward-slashed path.
+        let sh = git_bash_script(Path::new(r"C:\Program Files\Null\null.exe"));
+        assert!(sh.contains(r#""C:/Program Files/Null/null.exe" "$w" &"#), "{sh}");
+        #[cfg(unix)]
+        {
+            let file = crate::tools::test_dir("git-bash-null").join("null");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, &sh).unwrap();
+            assert!(crate::tools::command("sh").arg("-n").arg(&file).status().unwrap().success(), "{sh}");
+        }
         assert_eq!(lines.last(), Some(&"goto next"));
     }
 
     #[test]
+    #[cfg(unix)] // (The Unix `null` script, run by sh; Windows' null.cmd is tested above.)
     fn the_shell_command_is_valid_and_hands_over_absolute_paths() {
         let dir = crate::tools::test_dir("cmd");
         std::fs::create_dir_all(&dir).unwrap();

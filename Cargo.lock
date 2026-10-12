@@ -3819,6 +3819,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dunce",
+ "embed-resource",
  "futures",
  "gpui",
  "ignore",

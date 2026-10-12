@@ -234,7 +234,7 @@ pub fn python_for(root: &Path, path: &Path) -> String {
         Some(env) => {
             let python = python_in(&env);
             let relative = python.strip_prefix(root).unwrap_or(&python).to_string_lossy().into_owned();
-            crate::shell::quote(&relative, crate::shell::kind())
+            crate::shell::program(&relative, crate::shell::kind())
         }
         // (On Windows `python3` is often only the Store's stand-in: `python` there.)
         None => if cfg!(windows) { "python" } else { "python3" }.into(),

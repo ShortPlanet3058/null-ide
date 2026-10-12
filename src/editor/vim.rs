@@ -2758,6 +2758,8 @@ mod tests {
         assert_eq!(vim_pattern(r"\<word\>"), r"\bword\b");
     }
 
+    // (⌘ is the Mac's: elsewhere Vim has the Ctrl keys it uses, as it does there.)
+    #[cfg(target_os = "macos")]
     #[gpui::test]
     fn command_keys_stay_null_s(cx: &mut TestAppContext) {
         let (e, cx) = vim("|abc abc\n", cx);

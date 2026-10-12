@@ -11,6 +11,8 @@ data="${XDG_DATA_HOME:-$HOME/.local/share}"
 cargo build --release
 install -Dm755 target/release/null "$HOME/.local/bin/null"
 install -Dm644 packaging/null.svg "$data/icons/hicolor/scalable/apps/null.svg"
-install -Dm644 packaging/linux/null.desktop "$data/applications/null.desktop"
+# (Exec names it whole: ~/.local/bin isn't on every desktop session's PATH.)
+mkdir -p "$data/applications"
+sed "s|^Exec=null |Exec=$HOME/.local/bin/null |" packaging/linux/null.desktop > "$data/applications/null.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database "$data/applications" || true
 echo "Installed Null: ~/.local/bin/null and its menu entry"
