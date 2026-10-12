@@ -12605,7 +12605,7 @@ mod tests {
         workspace.update_in(cx, |w, window, cx| {
             w.add_roots(vec![web.clone(), api.join("src"), web.clone()], window, cx);
             assert_eq!(w.roots().all(), [api.clone(), web.clone()]);
-            assert_eq!(w.session(cx).roots, [web.clone()]);
+            assert_eq!(w.session(cx).roots, std::slice::from_ref(&web));
             assert_eq!(w.roots().display(&web.join("page.tsx")), Path::new("web/page.tsx").display().to_string());
         });
         // Its folder opened again (as from Recent): the other comes back.
@@ -12616,7 +12616,7 @@ mod tests {
             w.restore_session(session, window, cx);
             assert_eq!(w.roots().all(), [api.clone(), web.clone()]);
             w.remove_root(web.clone(), window, cx);
-            assert_eq!(w.roots().all(), [api.clone()]);
+            assert_eq!(w.roots().all(), std::slice::from_ref(&api));
             assert!(w.session(cx).roots.is_empty());
         });
         std::fs::remove_dir_all(&dir).ok();
