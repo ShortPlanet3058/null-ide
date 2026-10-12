@@ -128,6 +128,12 @@ pub fn run(cx: &mut App) {
                     }
                 }),
                 "switch" => handle.update(cx, |workspace, window, cx| workspace.switch_tab(false, true, window, cx)),
+                // `roots api web`: those folders of the project's, the window's folders.
+                "roots" => handle.update(cx, |workspace, window, cx| {
+                    let base = workspace.root(cx).to_path_buf();
+                    let paths = arg.split_whitespace().map(|a| base.join(a)).collect();
+                    workspace.qa_roots(paths, window, cx)
+                }),
                 "rows" => handle.update(cx, |workspace, _, cx| {
                     if let Some(editor) = workspace.qa_editor() {
                         let editor = editor.read(cx);

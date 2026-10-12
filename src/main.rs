@@ -60,6 +60,7 @@ mod punctuation;
 mod python_env;
 #[cfg(debug_assertions)]
 mod qa;
+mod roots;
 mod search;
 mod server_log;
 mod servers;
@@ -101,6 +102,8 @@ use workspace::Workspace;
 /// editor).
 struct Opening {
     root: PathBuf,
+    /// More folders, opened in the same window beside `root` (`null api web`).
+    others: Vec<PathBuf>,
     file: Option<PathBuf>,
     place: Option<(u32, u32)>,
     wait: bool,
@@ -131,6 +134,16 @@ fn resolve_args() -> Opening {
     if wait {
         args.remove(0);
     }
+    // Several folders (`null api web`): one window with them all.
+    if !wait && args.len() > 1 {
+        let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
+        let folders: Vec<PathBuf> = args.iter().map(|a| absolute(&cwd.join(a))).collect();
+        if folders.iter().all(|f| f.is_dir()) {
+            let mut folders = folders.into_iter();
+            let root = folders.next().unwrap_or(cwd);
+            return Opening { root, others: folders.collect(), file: None, place: None, wait: false };
+        }
+    }
     let (root, file) = resolve_path(args.first().cloned());
     // A file named with its place (`a.rs:42`) when there's no file by that whole name.
     let (file, place) = match file {
@@ -150,7 +163,7 @@ fn resolve_args() -> Opening {
         (Some(file), true) => repository_of(file),
         _ => root,
     };
-    Opening { root, file, place, wait }
+    Opening { root, others: Vec::new(), file, place, wait }
 }
 
 /// The repository `file` is in (the folder holding `.git`), else its own folder.
@@ -262,10 +275,10 @@ fn main() {
             }
         }
     });
-    let Opening { root, file, place, wait } = resolve_args();
+    let Opening { root, others, file, place, wait } = resolve_args();
     trace::mark("what to open worked out");
     // Off the Mac: a Null already running opens it instead (a waiting one is its own).
-    let request = instance::Request { root: root.clone(), file: file.clone(), place };
+    let request = instance::Request { root: root.clone(), others: others.clone(), file: file.clone(), place };
     let mut handed = match instance::launch(&request, wait) {
         instance::Launch::HandedOver => return,
         instance::Launch::First(handed) => handed,
@@ -285,6 +298,18 @@ fn main() {
             use futures::StreamExt;
             while let Some(urls) = to_open.next().await {
                 let paths: Vec<PathBuf> = urls.iter().filter_map(|u| path_from_url(u)).collect();
+                // Several folders at once (`null api web`, or dropped together on the Dock
+                // icon): one window with them all.
+                if paths.len() > 1 && paths.iter().all(|p| p.is_dir()) {
+                    let mut folders = paths.into_iter();
+                    let root = folders.next().unwrap_or_default();
+                    cx.update(|cx| {
+                        open_project_window_now(root.clone(), None, None, cx);
+                        add_folders(&root, folders.collect(), cx);
+                    })
+                    .ok();
+                    continue;
+                }
                 cx.update(|cx| {
                     let workspace = cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>());
                     if let Some(handle) = workspace {
@@ -305,7 +330,12 @@ fn main() {
             cx.spawn(async move |cx| {
                 use futures::StreamExt;
                 while let Some(request) = handed.next().await {
-                    cx.update(|cx| open_project_window_now(request.root, request.file, request.place, cx)).ok();
+                    cx.update(|cx| {
+                        let root = request.root.clone();
+                        open_project_window_now(request.root, request.file, request.place, cx);
+                        add_folders(&root, request.others, cx);
+                    })
+                    .ok();
                 }
             })
             .detach();
@@ -347,7 +377,9 @@ fn main() {
         if wait {
             open_waiting_window(root, file, place, cx);
         } else {
+            let first = root.clone();
             open_project_window_now(root, file, place, cx);
+            add_folders(&first, others, cx);
         }
         trace::mark("window opened");
         // The spell checker started once the window's up, then what's shown checked.
@@ -374,8 +406,8 @@ fn main() {
     });
 }
 
-/// The window already on project `root`, other than `except`. One project has one window:
-/// two would keep (and clear) the same backup of unsaved work.
+/// The window already on project `root` (one of its folders), other than `except`. One
+/// project has one window: two would keep (and clear) the same backup of unsaved work.
 pub(crate) fn window_on(
     root: &std::path::Path,
     except: Option<gpui::AnyWindowHandle>,
@@ -387,7 +419,17 @@ pub(crate) fn window_on(
         .into_iter()
         .filter(|w| Some(*w) != except)
         .filter_map(|w| w.downcast::<Workspace>())
-        .find(|handle| handle.read(cx).is_ok_and(|workspace| real(workspace.root(cx)) == root))
+        .find(|handle| handle.read(cx).is_ok_and(|workspace| workspace.roots().all().iter().any(|r| real(r) == root)))
+}
+
+/// `others` added to the window on `root` (just opened), beside it.
+fn add_folders(root: &std::path::Path, others: Vec<PathBuf>, cx: &mut gpui::App) {
+    if others.is_empty() {
+        return;
+    }
+    if let Some(handle) = window_on(root, None, cx) {
+        handle.update(cx, |workspace, window, cx| workspace.add_roots(others, window, cx)).ok();
+    }
 }
 
 /// Opens a window on project `root`, as it was left (and `file` in it, if given); the

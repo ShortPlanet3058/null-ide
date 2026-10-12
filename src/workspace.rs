@@ -34,6 +34,7 @@ actions!(
     [
         Open,
         OpenFolder,
+        AddFolderToWindow,
         ShowKeyboardShortcuts,
         CloseTab,
         ToggleSidebar,
@@ -740,6 +741,8 @@ const READ_IN_BACKGROUND_FROM: u64 = 64 * 1024 * 1024;
 const READ_IN_BACKGROUND_FROM: u64 = 1024 * 1024;
 
 pub struct Workspace {
+    /// The folders the window has open (the files, search, git… work across them).
+    roots: crate::roots::ProjectRoots,
     focus_handle: FocusHandle,
     tree: Entity<FileTree>,
     lsp: Entity<LspStore>,
@@ -924,7 +927,8 @@ pub struct Workspace {
     /// Changed source files waiting to be read again.
     reindex_pending: HashSet<PathBuf>,
     /// What the project's .gitignore leaves out of the index.
-    ignore_rules: ignore::gitignore::Gitignore,
+    /// Each folder's `.gitignore`: what changes there needn't be indexed or reported.
+    ignore_rules: Vec<(PathBuf, ignore::gitignore::Gitignore)>,
     /// The AI answer panel, while open.
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
     /// A short message at the bottom of the window, and when it appeared.
@@ -958,15 +962,16 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let roots = crate::roots::ProjectRoots::new(root.clone());
         let _step = crate::trace::step(|| "workspace made (its session restored)".into());
-        crate::palette::list_files_soon(root.clone(), cx);
+        crate::palette::list_files_soon(crate::roots::ProjectRoots::new(root.clone()), cx);
         let testable = Self::looks_testable(&root);
         // This project's own settings, over yours, while its window is in front.
         crate::settings::use_project(&root, cx);
         let project_search = cx.new(|cx| ProjectSearch::new(root.clone(), cx));
         let git_view = cx.new(|cx| crate::git_view::GitView::new(root.clone(), cx));
         let lsp = cx.new(|_| LspStore::new(root.clone()));
-        let ignore_rules = crate::project_index::ignore_rules(&root);
+        let ignore_rules = vec![(root.clone(), crate::project_index::ignore_rules(&root))];
         let tree = cx.new(|cx| {
             let mut tree = FileTree::new(root, cx);
             // Renaming a file can update the code that names it: the workspace sees to it.
@@ -995,8 +1000,13 @@ impl Workspace {
                 }
                 FileTreeEvent::DiscardChanges(path, status) => this.discard_changes(path.clone(), *status, window, cx),
                 FileTreeEvent::Notice(message) => this.show_notice(message.clone(), cx),
+                FileTreeEvent::FoldersDropped { paths, into } => {
+                    this.folders_dropped(paths.clone(), into.clone(), window, cx)
+                }
+                FileTreeEvent::RemoveRoot(root) => this.remove_root(root.clone(), window, cx),
                 FileTreeEvent::Hide(path, folder) => {
-                    let root = this.tree.read(cx).root().to_path_buf();
+                    // (Into the settings of the folder it's in.)
+                    let root = this.roots.root_for(path).to_path_buf();
                     let Ok(inside) = path.strip_prefix(&root) else { return };
                     // From the project's top, as .gitignore writes it: `/build/` (a folder), its
                     // names as they are (`a[1].txt` not read as a pattern).
@@ -1087,6 +1097,7 @@ impl Workspace {
         let mut workspace = Self {
             focus_handle: cx.focus_handle(),
             tree,
+            roots,
             lsp,
             project_search,
             sidebar_search: Transition::new(false),
@@ -1322,6 +1333,7 @@ impl Workspace {
         let active = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let right = self.shown_editor(1).and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         crate::session::Session {
+            roots: self.roots.all()[1..].to_vec(),
             active: active.and_then(|p| tabs.iter().position(|t| t.path == p)),
             shown_right: right.and_then(|p| tabs.iter().position(|t| t.path == p)),
             split_ratio: self.is_split().then_some(self.split_ratio),
@@ -1340,7 +1352,7 @@ impl Workspace {
         if self.waiting_for.is_some() {
             return;
         }
-        self.session(cx).save(self.tree.read(cx).root());
+        self.session(cx).save(self.roots.primary());
     }
 
     /// Saves a moment after things settle, rather than on every change.
@@ -1353,6 +1365,12 @@ impl Workspace {
 
     /// Opens the project as it was: its tabs (caret and scroll included), folders and terminal.
     pub fn restore_session(&mut self, session: crate::session::Session, window: &mut Window, cx: &mut Context<Self>) {
+        // The window's other folders first (those still there), so their folders open below.
+        let others: Vec<PathBuf> = session.roots.iter().filter(|r| r.is_dir()).cloned().collect();
+        // (Each added, whichever were already there.)
+        if others.into_iter().filter(|r| self.roots.add(r.clone())).count() > 0 {
+            self.roots_changed(window, cx);
+        }
         self.tree.update(cx, |tree, cx| tree.expand_folders(&session.expanded, cx));
         self.window_state = session.window;
         for tab in &session.tabs {
@@ -1426,11 +1444,31 @@ impl Workspace {
     }
 
     /// Finds what the project defines, for suggestions, without slowing anything down.
+    /// Each folder's `.gitignore`, read again.
+    fn read_ignore_rules(&mut self) {
+        self.ignore_rules =
+            self.roots.all().iter().map(|r| (r.clone(), crate::project_index::ignore_rules(r))).collect();
+    }
+
+    /// Whether git ignores `path` (in the folder it's in; outside them all, not).
+    fn ignored(&self, path: &Path) -> bool {
+        let Some(root) = self.roots.root_of(path) else { return false };
+        self.ignore_rules
+            .iter()
+            .find(|(r, _)| r == root)
+            .is_some_and(|(r, rules)| crate::project_index::is_ignored(rules, r, path))
+    }
+
     fn build_index(&mut self, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
-        cx.set_global(crate::project_index::ProjectContext { root: root.clone(), ..Default::default() });
+        let root = self.roots.primary().to_path_buf();
+        let roots = self.roots.all().to_vec();
+        cx.set_global(crate::project_index::ProjectContext { root, ..Default::default() });
         self.index_task = Some(cx.spawn(async move |this, cx| {
-            let definitions = cx.background_executor().spawn(async move { crate::project_index::index(&root) }).await;
+            // (Every folder of the window's, one after the other.)
+            let definitions = cx
+                .background_executor()
+                .spawn(async move { roots.iter().flat_map(|r| crate::project_index::index(r)).collect::<Vec<_>>() })
+                .await;
             this.update(cx, |this, cx| {
                 cx.global_mut::<crate::project_index::ProjectContext>().definitions = std::sync::Arc::new(definitions);
                 // Done: "still reading" no longer applies.
@@ -1447,17 +1485,12 @@ impl Workspace {
         if !cx.has_global::<crate::project_index::ProjectContext>() {
             return;
         }
-        let root = self.tree.read(cx).root().to_path_buf();
         if paths.iter().any(|p| p.file_name().is_some_and(|n| n == ".gitignore" || n == "exclude")) {
-            self.ignore_rules = crate::project_index::ignore_rules(&root);
+            self.read_ignore_rules();
         }
-        let rules = &self.ignore_rules;
-        self.reindex_pending.extend(
-            paths
-                .iter()
-                .filter(|p| crate::project_index::is_source(p) && !crate::project_index::is_ignored(rules, &root, p))
-                .cloned(),
-        );
+        let wanted: Vec<PathBuf> =
+            paths.iter().filter(|p| crate::project_index::is_source(p) && !self.ignored(p)).cloned().collect();
+        self.reindex_pending.extend(wanted);
         if self.reindex_pending.is_empty() || self.reindex_task.is_some() {
             return;
         }
@@ -1518,6 +1551,11 @@ impl Workspace {
 
     /// Watches the project folder; changes made elsewhere (terminal, git, other apps)
     /// show up in the tree and in open files.
+    /// Watches every folder of the window again (one added or removed).
+    fn watch_roots(&mut self, cx: &mut Context<Self>) {
+        self.watch(self.roots.primary().to_path_buf(), cx);
+    }
+
     fn watch(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         use notify::Watcher;
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
@@ -1531,6 +1569,10 @@ impl Workspace {
         let Ok(mut watcher) = watcher else { return };
         if watcher.watch(&root, notify::RecursiveMode::Recursive).is_err() {
             return;
+        }
+        // (The window's other folders, on the same watcher.)
+        for other in self.roots.all().iter().filter(|r| **r != root) {
+            watcher.watch(other, notify::RecursiveMode::Recursive).ok();
         }
         self._watcher = Some(watcher);
         self.watch_task = Some(cx.spawn(async move |this, cx| {
@@ -1558,7 +1600,7 @@ impl Workspace {
         self.tree.update(cx, |tree, cx| tree.refresh(&visible, cx));
         self.reindex(&visible, cx);
         // The project's settings, changed (by hand, by another app): in use as they are now.
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         // (Only when they're the ones in use: another window's in front, they wait for this one.)
         // An environment made or removed (`python -m venv .venv`): known from now.
         // (Or Poetry's, kept outside: known again when the project's Poetry files change.)
@@ -1582,16 +1624,11 @@ impl Workspace {
         }
         // What git counts: ignored files (a build's output, node_modules) change nothing it
         // says, unless git has them all the same (added by force: one it lists, or one open).
-        let root = self.tree.read(cx).root().to_path_buf();
         let open: HashSet<PathBuf> =
             self.tabs.iter().filter_map(|t| t.editor.read(cx).path().map(Path::to_path_buf)).collect();
         let counted: Vec<PathBuf> = visible
             .iter()
-            .filter(|p| {
-                !crate::project_index::is_ignored(&self.ignore_rules, &root, p)
-                    || open.contains(*p)
-                    || self.git_status.iter().any(|(listed, _)| listed == *p)
-            })
+            .filter(|p| !self.ignored(p) || open.contains(*p) || self.git_status.iter().any(|(listed, _)| listed == *p))
             .cloned()
             .collect();
         // Moves among ignored files too: a tab open on one follows it.
@@ -1606,7 +1643,7 @@ impl Workspace {
 
     /// Re-reads the branch and every open file's committed version.
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         self.branch_task = Some(cx.spawn(async move |this, cx| {
             let branch = cx.background_executor().spawn(async move { git::current_branch(&root) }).await;
             this.update(cx, |this, cx| {
@@ -1636,7 +1673,7 @@ impl Workspace {
     }
 
     fn refresh_git_status_after(&mut self, wait: Duration, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         self.git_status_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, _| this.git_status_at = Instant::now()).ok();
@@ -1752,7 +1789,7 @@ impl Workspace {
     fn review_git_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(&(_, status)) = self.git_status.iter().find(|(p, _)| p == path) else { return false };
         if status == git::FileStatus::Deleted {
-            let root = self.tree.read(cx).root().to_path_buf();
+            let root = self.roots.primary().to_path_buf();
             let message = match git::revert(&root, path, status) {
                 Ok(()) => format!("Restored {}.", path.file_name().unwrap_or_default().to_string_lossy()),
                 Err(error) => format!("Couldn't restore it: {error}"),
@@ -1789,7 +1826,7 @@ impl Workspace {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { git::undo_last_commit(&root) }).await;
             this.update(cx, |this, cx| {
@@ -1818,7 +1855,7 @@ impl Workspace {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
         self.save_named_tabs(cx);
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let files = match self.git_status.len() {
             1 => "1 file's changes".to_string(),
             n => format!("{n} files' changes"),
@@ -1849,7 +1886,7 @@ impl Workspace {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
         self.save_named_tabs(cx);
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
             let result =
                 cx.background_executor().spawn(async move { git::bring_back_at(&root, index, id.as_deref()) }).await;
@@ -1987,7 +2024,7 @@ impl Workspace {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
             let branches = cx.background_executor().spawn(async move { git::branches(&root) }).await;
             this.update_in(cx, |this, window, cx| {
@@ -2003,7 +2040,7 @@ impl Workspace {
     /// first, so git sees every change; it refuses if any would be lost.
     fn change_branch(&mut self, target: Result<git::Branch, String>, window: &mut Window, cx: &mut Context<Self>) {
         self.save_named_tabs(cx);
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let (switch_to, root_now) = (target.clone().ok(), root.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -2212,7 +2249,7 @@ impl Workspace {
                 .unwrap_or(false)
         };
         let settings = cx.global::<Settings>().ai.clone();
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         // Nothing in the field meanwhile: ↵ there must never commit a placeholder.
         const WRITING: &str = "Writing the commit message…";
         self.show_notice(WRITING.into(), cx);
@@ -2287,7 +2324,7 @@ impl Workspace {
     /// issue or a chat: where they're from, then the code fenced, its common indentation off.
     fn copy_as_code_block(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else { return };
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let e = editor.read(cx);
         let range = e.selection.range();
         let (first, _) = e.buffer.point(range.start);
@@ -2538,7 +2575,7 @@ impl Workspace {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         self.show_notice("Fetching…".into(), cx);
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -2568,7 +2605,7 @@ impl Workspace {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
         self.save_named_tabs(cx);
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         self.show_notice("Pulling…".into(), cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_executor().spawn(async move { git::pull(&root) }).await;
@@ -2604,7 +2641,7 @@ impl Workspace {
     }
 
     fn push_branch(&mut self, _: &PushBranch, _: &mut Window, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         self.show_notice("Pushing…".into(), cx);
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { git::push(&root) }).await;
@@ -2637,7 +2674,7 @@ impl Workspace {
             &["Discard", "Cancel"],
             cx,
         );
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         cx.spawn(async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
@@ -2678,7 +2715,7 @@ impl Workspace {
             cx,
         );
         let changed = self.git_status.clone();
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         cx.spawn(async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
@@ -2724,7 +2761,7 @@ impl Workspace {
         const WAIT: Duration = Duration::from_secs(2);
         let request = self.lsp.read(cx).will_rename(&from, &to);
         // Markdown's links to it (and a moved Markdown file's own), which no server keeps.
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let (old, new) = (from.clone(), to.clone());
         // Open files as they are in their tabs, saved or not.
         let open: std::collections::HashMap<PathBuf, String> = self
@@ -3510,7 +3547,7 @@ impl Workspace {
     /// Opens what the Finder or the `null` command handed over: files in tabs, a folder
     /// as the project (unless it's this one already).
     pub fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         for path in paths {
             if path == root {
                 continue;
@@ -3537,14 +3574,20 @@ impl Workspace {
             let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf);
             // (`--wait`: until the file's tab closes, as git's editor. The app gets a Null of its
             // own for it; `open` can't hand a running one a line, so the app gets the file alone.)
-            let (launch, waiting) = match &bundle {
+            // (Several folders: handed over together, for one window with them all.)
+            let (launch, waiting, all) = match &bundle {
                 Some(app) => (
                     format!("open -a \"{}\" \"$f\"", app.display()),
                     format!("open -W -n -a \"{}\" --args --wait \"$p\"", app.display()),
+                    format!("open -a \"{}\" \"$@\"", app.display()),
                 ),
-                None => (format!("\"{}\" \"$p\" &", exe.display()), format!("\"{}\" --wait \"$p\"", exe.display())),
+                None => (
+                    format!("\"{}\" \"$p\" &", exe.display()),
+                    format!("\"{}\" --wait \"$p\"", exe.display()),
+                    format!("\"{}\" \"$@\" &", exe.display()),
+                ),
             };
-            let script = shell_script(&launch, &waiting);
+            let script = shell_script(&launch, &waiting, &all);
             let home = crate::tools::home_dir().unwrap_or_default();
             let system = PathBuf::from("/usr/local/bin");
             let writable = |dir: &Path| {
@@ -3580,9 +3623,14 @@ impl Workspace {
         self.show_notice(message, cx);
     }
 
-    /// The project's folder.
-    pub fn root<'a>(&self, cx: &'a App) -> &'a Path {
-        self.tree.read(cx).root()
+    /// The window's primary folder.
+    pub fn root(&self, _: &App) -> &Path {
+        self.roots.primary()
+    }
+
+    /// The window's folders.
+    pub fn roots(&self) -> &crate::roots::ProjectRoots {
+        &self.roots
     }
 
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -3605,9 +3653,10 @@ impl Workspace {
     }
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.roots = crate::roots::ProjectRoots::new(path.clone());
         // (Its git, not the last project's: a commit shown would act there.)
         self.drop_pages(cx);
-        crate::palette::list_files_soon(path.clone(), cx);
+        crate::palette::list_files_soon(self.roots.clone(), cx);
         self.project_search.update(cx, |search, cx| search.set_root(path.clone(), cx));
         self.git_view.update(cx, |view, cx| view.set_root(path.clone(), cx));
         // Language servers work per project: restart them for the new folder.
@@ -3635,7 +3684,7 @@ impl Workspace {
         self.refresh_git(cx);
         self.watch(path.clone(), cx);
         self.tree.update(cx, |tree, cx| tree.set_root(path.clone(), cx));
-        self.ignore_rules = crate::project_index::ignore_rules(&path);
+        self.read_ignore_rules();
         self.reindex_pending.clear();
         self.build_index(cx);
         if self.sidebar_tests {
@@ -3909,7 +3958,7 @@ impl Workspace {
 
     /// "file — project" in the title bar, and the close button's unsaved dot.
     fn refresh_title(&self, window: &mut Window, cx: &App) {
-        let project = self.tree.read(cx).root().file_name().map(|n| n.to_string_lossy().into_owned());
+        let project = self.roots.primary().file_name().map(|n| n.to_string_lossy().into_owned());
         let editor = self.active_editor().map(|e| e.read(cx));
         let title = match (editor.map(|e| e.file_name()), project) {
             (Some(file), Some(project)) => format!("{file} — {project}"),
@@ -3982,7 +4031,7 @@ impl Workspace {
             && !matches!(action, CloseAction::CloseTabs(_))
             && self.waiting_for.is_none()
         {
-            let root = self.tree.read(cx).root().to_path_buf();
+            let root = self.roots.primary().to_path_buf();
             crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
             self.keeping_unsaved = true;
             self.finish_close(action, window, cx);
@@ -4038,7 +4087,7 @@ impl Workspace {
         if let Some(ix) = self.tabs.iter().position(|t| t.editor == editor) {
             self.activate(ix, window, cx);
         }
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let name = editor.read(cx).suggested_name();
         let answer = cx.prompt_for_new_path(&root, Some(&name));
         let lsp = self.lsp.clone();
@@ -4071,7 +4120,7 @@ impl Workspace {
         if !matches!(action, CloseAction::CloseTabs(_)) {
             self.backup_task = None;
             if !std::mem::take(&mut self.keeping_unsaved) {
-                crate::session::save_backups(self.tree.read(cx).root(), &[]);
+                crate::session::save_backups(self.roots.primary(), &[]);
             }
         }
         match action {
@@ -4143,7 +4192,7 @@ impl Workspace {
         if self.waiting_for.is_some() {
             return;
         }
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let unsaved = self.unsaved_files(cx);
         cx.background_executor()
             .spawn(async move { crate::session::save_backups(&root, &Self::backups_of(unsaved)) })
@@ -4156,7 +4205,7 @@ impl Workspace {
         if self.quitting || self.waiting_for.is_some() {
             return;
         }
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
     }
 
@@ -4179,7 +4228,7 @@ impl Workspace {
 
     /// After opening a project: unsaved work left from last time comes back, unsaved.
     fn restore_backups(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let backups = crate::session::load_backups(&root);
         if backups.is_empty() {
             return;
@@ -4434,7 +4483,7 @@ impl Workspace {
             .as_ref()
             .and_then(|p| p.parent())
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.tree.read(cx).root().to_path_buf());
+            .unwrap_or_else(|| self.roots.primary().to_path_buf());
         // Untitled: a name from what it holds (`Trip to Lyon.md`, `untitled.py`).
         let name = match current.as_ref().and_then(|p| p.file_name()) {
             Some(name) => name.to_string_lossy().into_owned(),
@@ -4523,6 +4572,104 @@ impl Workspace {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
             this.update_in(cx, |this, window, cx| this.open_path(path, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// The window's folders, set by a QA run (`roots api web`).
+    #[cfg(debug_assertions)]
+    pub fn qa_roots(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut paths = paths.into_iter();
+        if let Some(first) = paths.next() {
+            self.switch_project(first, window, cx);
+            self.add_roots(paths.collect(), window, cx);
+        }
+    }
+
+    /// Add Folder to Window…: one or more folders, beside those already here.
+    fn add_folder_to_window(&mut self, _: &AddFolderToWindow, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Add to Window".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            this.update_in(cx, |this, window, cx| this.add_roots(paths, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Folders added to the window: each a heading in the files, searched, watched, listed in
+    /// ⌘P. One already in the window (or inside one) changes nothing.
+    pub fn add_roots(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut added = Vec::new();
+        for path in paths {
+            let path = dunce::canonicalize(&path).unwrap_or(path);
+            if path.is_dir() && self.roots.add(path.clone()) {
+                added.push(path);
+            }
+        }
+        if added.is_empty() {
+            return self.show_notice("Already in this window.".into(), cx);
+        }
+        self.roots_changed(window, cx);
+        let names: Vec<String> = added.iter().map(|p| crate::roots::ProjectRoots::name(p)).collect();
+        self.show_notice(format!("Added {} to the window.", names.join(", ")), cx);
+    }
+
+    /// Remove Folder from Window: it goes from the files, search and the rest; nothing on
+    /// disk changes, and its open files stay open.
+    fn remove_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.roots.remove(&root) {
+            self.roots_changed(window, cx);
+        }
+    }
+
+    /// The window's folders changed: everything that works across them told.
+    fn roots_changed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let roots = self.roots.all().to_vec();
+        self.tree.update(cx, |tree, cx| tree.set_roots(roots.clone(), cx));
+        self.watch_roots(cx);
+        crate::palette::list_files_soon(self.roots.clone(), cx);
+        let roots_now = self.roots.clone();
+        self.project_search.update(cx, |search, cx| search.set_roots(roots_now, cx));
+        self.read_ignore_rules();
+        self.build_index(cx);
+        self.testable = roots.iter().any(|r| Self::looks_testable(r));
+        self.tests = None;
+        self.refresh_git(cx);
+        self.schedule_session_save(cx);
+        cx.notify();
+    }
+
+    /// Folders dropped on the files from outside: added to the window, or copied in, as the
+    /// person says.
+    fn folders_dropped(&mut self, paths: Vec<PathBuf>, into: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let folders: Vec<PathBuf> = paths.iter().filter(|p| p.is_dir()).cloned().collect();
+        let names: Vec<String> = folders.iter().map(|p| crate::roots::ProjectRoots::name(p)).collect();
+        let title = match names.as_slice() {
+            [one] => {
+                format!("Add “{one}” to this window, or copy it into “{}”?", crate::roots::ProjectRoots::name(&into))
+            }
+            _ => format!("Add these {} folders to this window, or copy them in?", names.len()),
+        };
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &title,
+            Some("Added, it shows beside the others, where it is. Copied, it goes into the folder."),
+            &["Add to Window", "Copy Here", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = answer.await else { return };
+            this.update_in(cx, |this, window, cx| match choice {
+                0 => this.add_roots(folders, window, cx),
+                1 => this.tree.update(cx, |tree, cx| tree.copy_in(&paths, &into, cx)),
+                _ => {}
+            })
+            .ok();
         })
         .detach();
     }
@@ -4633,6 +4780,7 @@ impl Workspace {
             (File, "New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
             (File, OPEN_LABEL.into(), Box::new(Open)),
             (File, "Open Folder…".into(), Box::new(OpenFolder)),
+            (File, "Add Folder to Window…".into(), Box::new(AddFolderToWindow)),
             (File, "Open Recent…".into(), Box::new(OpenRecent)),
             (File, "Open Folder in New Window…".into(), Box::new(NewWindow)),
             (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
@@ -5107,7 +5255,7 @@ impl Workspace {
             } else {
                 std::mem::take(&mut self.pending_commands)
             },
-            root: self.tree.read(cx).root().to_path_buf(),
+            roots: self.roots.clone(),
             recent_files: self.recent_files.iter().filter(|p| Some(*p) != active_path.as_ref()).cloned().collect(),
             recent_commands: self.recent_commands.clone(),
             line_count: self.active_editor().map(|e| e.read(cx).buffer.len_lines()),
@@ -5430,7 +5578,7 @@ impl Workspace {
 
     /// Project search, in folder `dir` only (from the files' menu).
     fn find_in_folder(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let folder = dir.strip_prefix(&root).unwrap_or(dir).to_string_lossy().replace('\\', "/");
         self.sidebar_search.set(true, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
@@ -5495,7 +5643,7 @@ impl Workspace {
 
     fn start_task(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         // The task reads and writes files on disk: unsaved edits go there first.
         let mut saved = 0;
         for tab in &self.tabs {
@@ -5606,7 +5754,7 @@ impl Workspace {
     fn review_ai_task(&mut self, _: &ReviewAiTask, window: &mut Window, cx: &mut Context<Self>) {
         use crate::palette::{Category, Command, Location, LocationKind};
         let Some(AiTaskRun { state: TaskState::Review(changes), title, .. }) = &self.ai_task else { return };
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let locations = changes
             .iter()
             .map(|c| Location {
@@ -5834,7 +5982,7 @@ impl Workspace {
 
     /// A commit from the history, in the place of the code.
     fn show_commit(&mut self, commit: git::LogCommit, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let page = cx.new(|cx| crate::commit_page::CommitPage::new(root, commit, cx));
         self.github_page = None;
         let subscription = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
@@ -5857,7 +6005,7 @@ impl Workspace {
 
     /// A pull request (or issue) from the GitHub tab, in the place of the code.
     fn show_github(&mut self, number: u64, issue: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let page = cx.new(|cx| crate::github_page::GitHubPage::new(root, number, issue, cx));
         let subscription = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
             use crate::github_page::GitHubPageEvent;
@@ -5947,7 +6095,7 @@ impl Workspace {
                 cx,
             )
         });
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
             if let Some(asked) = asked
                 && asked.await != Ok(0)
@@ -6004,7 +6152,7 @@ impl Workspace {
             &["Stop", "Cancel"],
             cx,
         );
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
@@ -6029,7 +6177,7 @@ impl Workspace {
     fn finish_joining(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.joining.clone() else { return };
         self.save_named_tabs(cx);
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         cx.spawn_in(window, async move |this, cx| {
             // A conflict with no markers to settle (a side deleted the file, or it isn't
             // text) is decided first: committing would keep whatever's there, unasked.
@@ -6295,7 +6443,7 @@ impl Workspace {
 
     /// Looks through the project for tests, off the main thread.
     fn find_tests(&mut self, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         self.tests_task = Some(cx.spawn(async move |this, cx| {
             let found = cx.background_executor().spawn(async move { crate::test_at::discover(&root) }).await;
             this.update(cx, |this, cx| {
@@ -6311,7 +6459,7 @@ impl Workspace {
 
     /// A file saved while the tests show: its own tests read again.
     fn tests_saved(&mut self, path: PathBuf, text: String, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         if self.tests.is_none() || !path.starts_with(&root) {
             return;
         }
@@ -6380,7 +6528,7 @@ impl Workspace {
     /// An environment may have been made or removed: looked for again.
     fn python_env_changed(&mut self, cx: &mut Context<Self>) {
         self.python_env_here = None;
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let now = crate::python_env::find(&root);
         // Another environment: Python's language server reads imports from it.
         if now != self.python_env {
@@ -6493,7 +6641,7 @@ impl Workspace {
             .enumerate()
             .flat_map(|(f, file)| std::iter::once((f, None)).chain((0..file.tests.len()).map(move |t| (f, Some(t)))))
             .collect();
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let status = self.test_status.clone();
         let list = uniform_list(
             "tests",
@@ -7194,7 +7342,7 @@ impl Workspace {
             return;
         }
         let name = ran.name.as_str();
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let real_root = dunce::canonicalize(&root).unwrap_or(root.clone());
         // Where it is, as one path (`build/../src/a.c` is `src/a.c`) written from the project's
         // folder as tabs have it, if it's a project file.
@@ -7295,7 +7443,7 @@ impl Workspace {
         self.save_named_tabs(cx);
         self.debug_panel_open = true;
         self.debugged_test = None;
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         // The project's own way, in .vscode/launch.json (its first, when it has several).
         let file = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let launches = crate::launch::read(&root, file.as_deref());
@@ -7539,7 +7687,7 @@ impl Workspace {
     }
 
     fn debug_with(&mut self, program: PathBuf, init_commands: Vec<String>, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         self.debug_in(crate::debugger::Run::new(program, root), init_commands, cx);
     }
 
@@ -7616,7 +7764,7 @@ impl Workspace {
             return None;
         }
         let theme = cx.global::<Theme>().clone();
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let status = match &debugger.state {
             DebugState::Idle => "Ended".to_string(),
             DebugState::Building => "Building…".to_string(),
@@ -7911,7 +8059,7 @@ impl Workspace {
 
     /// ⌥⌘O: projects opened lately (not this one), to switch to.
     fn open_recent(&mut self, _: &OpenRecent, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let projects: Vec<PathBuf> = crate::session::recent_projects().into_iter().filter(|p| *p != root).collect();
         if projects.is_empty() {
             return self.show_notice("No other projects opened lately.".into(), cx);
@@ -7922,7 +8070,7 @@ impl Workspace {
 
     /// ⌘⇧B: the project's tasks (the last run first), to run one in the terminal.
     fn run_task(&mut self, _: &RunTask, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let file = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let mut tasks = crate::tasks::find(&root, file.as_deref(), &cx.global::<Settings>().tasks);
         // Run lately: first, whether the project lists them or they were typed.
@@ -7944,7 +8092,7 @@ impl Workspace {
     /// open files saved first so it runs what's on screen.
     fn run_test(&mut self, at_caret: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor().cloned() else { return };
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let Some(run) = editor.update(cx, |e, _| e.test_run(&root, at_caret)) else {
             let message = if at_caret { "No test at the cursor." } else { "No tests in this file." };
             return self.show_notice(message.into(), cx);
@@ -7979,7 +8127,7 @@ impl Workspace {
 
     /// Starts a shell in the project folder, as the terminal shown.
     fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         self.add_terminal_in(root, window, cx)
     }
 
@@ -8091,7 +8239,7 @@ impl Workspace {
 
     fn add_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // In a Python project with its own environment: made the shell's, as activating does.
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let activate =
             (dir.starts_with(&root)).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
                 let shell = if cfg!(windows) {
@@ -8997,7 +9145,7 @@ impl Workspace {
     /// The project's own settings (`.null/settings.json`), made if there are none yet: any
     /// setting there is used over yours in this project.
     fn open_project_settings(&mut self, _: &OpenProjectSettings, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let path = crate::settings::project_file(&root);
         if !path.exists() {
             let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
@@ -9424,7 +9572,7 @@ impl Workspace {
     /// the project is copied next to the Markdown file first, so the link keeps working.
     fn link_dropped(&mut self, editor: Entity<Editor>, paths: &[PathBuf], at: usize, cx: &mut Context<Self>) {
         let Some(dir) = editor.read(cx).path().and_then(Path::parent).map(Path::to_path_buf) else { return };
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let mut links = Vec::new();
         for path in paths {
             let target = if path.starts_with(&root) {
@@ -9451,7 +9599,7 @@ impl Workspace {
     /// A file's path on the clipboard: in full, or from the project's folder.
     fn copy_path(&self, path: Option<&Path>, relative: bool, cx: &mut Context<Self>) {
         let Some(path) = path else { return };
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let shown = if relative { path.strip_prefix(&root).unwrap_or(path) } else { path };
         crate::system_clipboard::write(cx, gpui::ClipboardItem::new_string(shown.display().to_string()));
     }
@@ -9460,7 +9608,7 @@ impl Workspace {
     /// which then asks for its new name, or whether to trash it, as it does from there.
     fn open_file_in_tree(&mut self, rename: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.active_path(cx) else { return };
-        if !path.starts_with(self.tree.read(cx).root()) {
+        if !self.roots.contains(&path) {
             return self.show_notice("Only files in the project can be renamed or trashed here.".into(), cx);
         }
         self.show_files(&ShowFiles, window, cx);
@@ -9908,6 +10056,8 @@ fn cmd_script(exe: &Path) -> String {
          if \"%~1\"==\"--wait\" set \"wait=1\"\r\n\
          if defined wait shift\r\n\
          if \"%~1\"==\"\" (start \"\" \"{exe}\" \"%CD%\\.\" & exit /b)\r\n\
+         rem Several folders: one window with them all.\r\n\
+         if not defined wait if not \"%~2\"==\"\" if exist \"%~1\\\" (start \"\" \"{exe}\" %* & exit /b)\r\n\
          :next\r\n\
          if \"%~1\"==\"\" exit /b\r\n\
          if defined wait (\"{exe}\" --wait \"%~f1\") else (start \"\" \"{exe}\" \"%~f1\")\r\n\
@@ -9932,13 +10082,22 @@ fn git_bash_script(exe: &Path) -> String {
     )
 }
 
-fn shell_script(launch: &str, waiting: &str) -> String {
+fn shell_script(launch: &str, waiting: &str, all: &str) -> String {
     format!(
         "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`, `null a.rs:42`.\n\
          # `null --wait <file>` returns once its tab is closed (git's editor: GIT_EDITOR=\"null --wait\").\n\
+         # `null api web`: several folders, one window.\n\
          wait=\n\
          [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
+         if [ -z \"$wait\" ] && [ $# -gt 1 ]; then\n\
+         \tfolders=1; for p in \"$@\"; do [ -d \"$p\" ] || folders=; done\n\
+         \tif [ -n \"$folders\" ]; then\n\
+         \t\tn=$#; while [ \"$n\" -gt 0 ]; do p=$1; shift; case \"$p\" in /*) ;; *) p=\"$PWD/$p\" ;; esac; set -- \"$@\" \"$p\"; n=$((n - 1)); done\n\
+         \t\t{all}\n\
+         \t\texit 0\n\
+         \tfi\n\
+         fi\n\
          for p in \"$@\"; do\n\
          \tcase \"$p\" in /*) ;; *) p=\"$PWD/$p\" ;; esac\n\
          \tf=\"$p\"\n\
@@ -10110,7 +10269,7 @@ impl Render for Workspace {
             div().flex_1().min_h_0().child(self.tree.clone())
         };
 
-        let root = self.tree.read(cx).root().to_path_buf();
+        let root = self.roots.primary().to_path_buf();
         let lsp_status = self.language_status(cx);
         let conflicts = self.active_editor().map_or(0, |e| e.read(cx).conflicts_shown().len());
         // Where the caret is in the code, after the file's name: `Shop › checkout`, each
@@ -10133,7 +10292,7 @@ impl Render for Workspace {
         let (status_items, problems): (Vec<String>, (usize, usize)) = match self.active_editor().map(|e| e.read(cx)) {
             Some(editor) => {
                 let (line, col) = editor.buffer.point(editor.shown_caret(cx));
-                let path = editor.path().map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string());
+                let path = editor.path().map(|p| self.roots.display(p));
                 let problems = editor.problems(cx);
                 let count = |s| problems.iter().filter(|p| p.severity == s).count();
                 let mut path = path.map(|p| shorten_path(&p, STATUS_PATH_CHARS)).unwrap_or_else(|| "Untitled".into());
@@ -10192,7 +10351,7 @@ impl Render for Workspace {
             }
         };
         // Python with the project's own environment: which one ("Python (.venv)").
-        let root_now = self.tree.read(cx).root().to_path_buf();
+        let root_now = self.roots.primary().to_path_buf();
         let editor = self.active_editor().map(|e| e.read(cx)).filter(|e| e.preview.is_none());
         let python = editor.filter(|e| e.language_name() == "Python").and_then(|e| e.path().map(Path::to_path_buf));
         let env = python.map(|path| {
@@ -11132,6 +11291,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::turn_off_ai))
             .on_action(cx.listener(Self::turn_on_ai))
             .on_action(cx.listener(Self::open_folder))
+            .on_action(cx.listener(Self::add_folder_to_window))
             .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
@@ -13095,6 +13255,7 @@ mod tests {
         let script = shell_script(
             &format!("echo \"$p\" >> \"{}\"", log.display()),
             &format!("echo \"wait $p\" >> \"{}\"", log.display()),
+            &format!("echo \"all $*\" >> \"{}\"", log.display()),
         );
         let command = dir.join("null");
         std::fs::write(&command, script).unwrap();
@@ -13120,6 +13281,12 @@ mod tests {
         assert!(run.unwrap().success());
         let last = std::fs::read_to_string(&log).unwrap().lines().last().unwrap().to_string();
         assert!(last.starts_with("wait ") && last.ends_with("/MSG"), "{last}");
+        // Several folders: handed over together, made whole.
+        std::fs::create_dir_all(dir.join("web")).unwrap();
+        let run = crate::tools::command("sh").arg(&command).args(["notes:2026", "web"]).current_dir(&dir).status();
+        assert!(run.unwrap().success());
+        let last = std::fs::read_to_string(&log).unwrap().lines().last().unwrap().to_string();
+        assert!(last.starts_with("all /") && last.contains("/notes:2026 /") && last.ends_with("/web"), "{last}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

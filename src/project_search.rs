@@ -111,7 +111,8 @@ pub enum ProjectSearchEvent {
 
 /// Search across every file in the project. Lives in the sidebar.
 pub struct ProjectSearch {
-    root: PathBuf,
+    /// The window's folders, searched together.
+    roots: crate::roots::ProjectRoots,
     input: Entity<TextInput>,
     case_sensitive: bool,
     whole_word: bool,
@@ -159,7 +160,7 @@ impl ProjectSearch {
         let files_input = cx.new(|cx| TextInput::new("In files: *.rs, src/, !tests", cx));
         let files_subscription = cx.subscribe(&files_input, |this, _, TextInputEvent::Changed, cx| this.search(cx));
         Self {
-            root,
+            roots: crate::roots::ProjectRoots::new(root),
             input,
             case_sensitive: false,
             whole_word: false,
@@ -308,7 +309,11 @@ impl ProjectSearch {
     }
 
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        self.root = root;
+        self.set_roots(crate::roots::ProjectRoots::new(root), cx);
+    }
+
+    pub fn set_roots(&mut self, roots: crate::roots::ProjectRoots, cx: &mut Context<Self>) {
+        self.roots = roots;
         self.search(cx);
     }
 
@@ -366,7 +371,7 @@ impl ProjectSearch {
         }
         self.status = Status::Searching;
         cx.notify();
-        let root = self.root.clone();
+        let roots = self.roots.clone();
         // The files field counts only while it shows.
         let files = if self.show_replace { self.files_input.read(cx).text().to_string() } else { String::new() };
         let unsaved = cx.try_global::<UnsavedFiles>().map(|u| u.0.clone()).unwrap_or_default();
@@ -382,7 +387,7 @@ impl ProjectSearch {
             let (tx, mut rx) = futures::channel::mpsc::unbounded();
             cx.background_executor()
                 .spawn(async move {
-                    search_files(&root, &query, &files, &hide, only.as_ref(), &unsaved, &cancel, |found| {
+                    search_files(&roots, &query, &files, &hide, only.as_ref(), &unsaved, &cancel, |found| {
                         tx.unbounded_send(found).ok();
                     })
                 })
@@ -718,26 +723,42 @@ impl ProjectSearch {
 /// `report` in batches, files in order, then `Found::Done`. Stops quietly when `cancel` is set.
 #[allow(clippy::too_many_arguments)]
 fn search_files(
-    root: &Path,
+    roots: &crate::roots::ProjectRoots,
     query: &SearchQuery,
     files_wanted: &str,
     hide: &[String],
     only: Option<&std::collections::HashSet<PathBuf>>,
     unsaved: &std::collections::HashMap<PathBuf, ropey::Rope>,
     cancel: &AtomicBool,
-    mut report: impl FnMut(Found),
+    report: impl FnMut(Found),
 ) {
     let Ok(regex) = query.build() else { return };
-    let wanted = file_filter(root, files_wanted);
     let mut files: Vec<PathBuf> = match only {
         // The open files themselves: ignored by git (`.env`) or outside the project too.
-        Some(only) => only
-            .iter()
-            .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() <= MAX_FILE_SIZE))
-            .filter(|p| wanted.as_ref().is_none_or(|w| !w.matched(p, false).is_ignore()))
-            .cloned()
-            .collect(),
-        None => {
+        Some(only) => {
+            let wanted = file_filter(roots.primary(), files_wanted);
+            only.iter()
+                .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() <= MAX_FILE_SIZE))
+                .filter(|p| wanted.as_ref().is_none_or(|w| !w.matched(p, false).is_ignore()))
+                .cloned()
+                .collect()
+        }
+        // Each folder of the window, `/folder/` in the files field from its own top.
+        None => roots.all().iter().flat_map(|root| files_in(root, files_wanted, hide, cancel)).collect(),
+    };
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    files.sort();
+    search_in(roots, &files, &regex, query, unsaved, cancel, report);
+}
+
+/// The files of `root` a search looks in: `.gitignore`, the `hide` setting and the files
+/// field respected, read side by side.
+fn files_in(root: &Path, files_wanted: &str, hide: &[String], cancel: &AtomicBool) -> Vec<PathBuf> {
+    let wanted = file_filter(root, files_wanted);
+    {
+        {
             use ignore::WalkState;
             let mut walk = ignore::WalkBuilder::new(root);
             if let Some(wanted) = wanted {
@@ -770,12 +791,19 @@ fn search_files(
                 });
             found.into_inner().unwrap_or_default()
         }
-    };
-    if cancel.load(Ordering::Relaxed) {
-        return;
     }
-    files.sort();
+}
 
+/// `files` searched for `regex`, reported in batches, in order.
+fn search_in(
+    roots: &crate::roots::ProjectRoots,
+    files: &[PathBuf],
+    regex: &regex::Regex,
+    query: &SearchQuery,
+    unsaved: &std::collections::HashMap<PathBuf, ropey::Rope>,
+    cancel: &AtomicBool,
+    mut report: impl FnMut(Found),
+) {
     // Files read and searched on every core, a window of them at a time, then reported in
     // order (one by one, a project of 42,000 files took 11 s).
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -793,7 +821,7 @@ fn search_files(
             let parts: Vec<_> = paths
                 .chunks(per_core)
                 .map(|part| {
-                    let (regex, query) = (&regex, query);
+                    let (regex, query) = (regex, query);
                     s.spawn(move || {
                         part.iter()
                             .map(|path| matches_in(path, unsaved, regex, query, most, cancel))
@@ -815,7 +843,7 @@ fn search_files(
             matches.truncate(MAX_MATCHES - total);
             total += matches.len();
             if !matches.is_empty() {
-                let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
+                let relative = roots.display(path);
                 batch.push(FileResult { path: path.clone(), relative, matches, dismissed: false });
             }
             if total >= MAX_MATCHES {
@@ -1285,12 +1313,21 @@ mod tests {
             let started = Instant::now();
             let (mut files, mut lines) = (0, 0);
             let cancel = AtomicBool::new(false);
-            search_files(&root, &query, "", &[], None, &Default::default(), &cancel, |found| {
-                if let Found::Files(batch) = found {
-                    files += batch.len();
-                    lines += batch.iter().map(|f| f.matches.len()).sum::<usize>();
-                }
-            });
+            search_files(
+                &crate::roots::ProjectRoots::new(root.clone()),
+                &query,
+                "",
+                &[],
+                None,
+                &Default::default(),
+                &cancel,
+                |found| {
+                    if let Found::Files(batch) = found {
+                        files += batch.len();
+                        lines += batch.iter().map(|f| f.matches.len()).sum::<usize>();
+                    }
+                },
+            );
             println!(
                 "{text:>18}: {lines:>5} lines in {files:>5} files, {:.0} ms",
                 started.elapsed().as_secs_f64() * 1000.
@@ -1377,11 +1414,20 @@ mod tests {
         let query = SearchQuery { text: "needle".into(), ..Default::default() };
         let found = |files: &str| {
             let mut found = Vec::new();
-            search_files(&root, &query, files, &[], None, &Default::default(), &AtomicBool::new(false), |f| {
-                if let Found::Files(files) = f {
-                    found.extend(files.into_iter().map(|f| f.relative.replace('\\', "/")));
-                }
-            });
+            search_files(
+                &crate::roots::ProjectRoots::new(root.clone()),
+                &query,
+                files,
+                &[],
+                None,
+                &Default::default(),
+                &AtomicBool::new(false),
+                |f| {
+                    if let Found::Files(files) = f {
+                        found.extend(files.into_iter().map(|f| f.relative.replace('\\', "/")));
+                    }
+                },
+            );
             found.join(" ")
         };
         assert_eq!(found(""), "docs/main.rs src/main.rs src/notes.md src/ui/view.rs tests/it.rs");
@@ -1545,11 +1591,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.rs"), "// TODO: split\nfn a() {} // FIXME later\n// TODOS, todo, XXXL\n").unwrap();
         let mut lines = Vec::new();
-        search_files(&dir, &todo_query(), "", &[], None, &Default::default(), &AtomicBool::new(false), |found| {
-            if let Found::Files(files) = found {
-                lines.extend(files.into_iter().flat_map(|f| f.matches.into_iter().map(|m| m.line)));
-            }
-        });
+        search_files(
+            &crate::roots::ProjectRoots::new(dir.clone()),
+            &todo_query(),
+            "",
+            &[],
+            None,
+            &Default::default(),
+            &AtomicBool::new(false),
+            |found| {
+                if let Found::Files(files) = found {
+                    lines.extend(files.into_iter().flat_map(|f| f.matches.into_iter().map(|m| m.line)));
+                }
+            },
+        );
         lines.sort();
         assert_eq!(lines, [0, 1]);
         std::fs::remove_dir_all(&dir).ok();
@@ -1566,11 +1621,22 @@ mod tests {
         let query = SearchQuery { text: "needle".into(), ..Default::default() };
         let found = |only: Option<&std::collections::HashSet<PathBuf>>| {
             let mut names = Vec::new();
-            search_files(&dir, &query, "", &[], only, &Default::default(), &AtomicBool::new(false), |found| {
-                if let Found::Files(files) = found {
-                    names.extend(files.into_iter().map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned()));
-                }
-            });
+            search_files(
+                &crate::roots::ProjectRoots::new(dir.clone()),
+                &query,
+                "",
+                &[],
+                only,
+                &Default::default(),
+                &AtomicBool::new(false),
+                |found| {
+                    if let Found::Files(files) = found {
+                        names.extend(
+                            files.into_iter().map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned()),
+                        );
+                    }
+                },
+            );
             names
         };
         assert_eq!(found(None), ["a.txt", "b.txt", "c.txt"]);
@@ -1595,11 +1661,20 @@ mod tests {
         std::fs::write(dir.join("old.txt"), b"caf\xe9 cr\xe8me\n").unwrap();
         let query = SearchQuery { text: "crème".into(), ..Default::default() };
         let mut results = Vec::new();
-        search_files(&dir, &query, "", &[], None, &Default::default(), &AtomicBool::new(false), |found| {
-            if let Found::Files(files) = found {
-                results.extend(files)
-            }
-        });
+        search_files(
+            &crate::roots::ProjectRoots::new(dir.clone()),
+            &query,
+            "",
+            &[],
+            None,
+            &Default::default(),
+            &AtomicBool::new(false),
+            |found| {
+                if let Found::Files(files) = found {
+                    results.extend(files)
+                }
+            },
+        );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].matches[0].preview.as_ref(), "café crème");
         std::fs::remove_dir_all(&dir).ok();
@@ -1613,11 +1688,20 @@ mod tests {
         std::fs::write(dir.join("a.c"), "int a;\r\nint b\r\nint c;\r\n").unwrap();
         let query = SearchQuery { text: ";$".into(), regex: true, ..Default::default() };
         let mut lines = Vec::new();
-        search_files(&dir, &query, "", &[], None, &Default::default(), &AtomicBool::new(false), |found| {
-            if let Found::Files(files) = found {
-                lines.extend(files.into_iter().flat_map(|f| f.matches.into_iter().map(|m| m.line)));
-            }
-        });
+        search_files(
+            &crate::roots::ProjectRoots::new(dir.clone()),
+            &query,
+            "",
+            &[],
+            None,
+            &Default::default(),
+            &AtomicBool::new(false),
+            |found| {
+                if let Found::Files(files) = found {
+                    lines.extend(files.into_iter().flat_map(|f| f.matches.into_iter().map(|m| m.line)));
+                }
+            },
+        );
         assert_eq!(lines, [0, 2]);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1637,10 +1721,19 @@ mod tests {
         let query = SearchQuery { text: "alpha".into(), ..Default::default() };
         let mut results = Vec::new();
         let mut truncated = None;
-        search_files(&dir, &query, "", &[], None, &Default::default(), &AtomicBool::new(false), |found| match found {
-            Found::Files(files) => results.extend(files),
-            Found::Done { truncated: t } => truncated = Some(t),
-        });
+        search_files(
+            &crate::roots::ProjectRoots::new(dir.clone()),
+            &query,
+            "",
+            &[],
+            None,
+            &Default::default(),
+            &AtomicBool::new(false),
+            |found| match found {
+                Found::Files(files) => results.extend(files),
+                Found::Done { truncated: t } => truncated = Some(t),
+            },
+        );
         let truncated = truncated.expect("a finished search says so");
         assert!(!truncated);
         assert_eq!(results.len(), 1);
@@ -1654,7 +1747,16 @@ mod tests {
 
         // A cancelled search reports nothing.
         let mut reported = false;
-        search_files(&dir, &query, "", &[], None, &Default::default(), &AtomicBool::new(true), |_| reported = true);
+        search_files(
+            &crate::roots::ProjectRoots::new(dir.clone()),
+            &query,
+            "",
+            &[],
+            None,
+            &Default::default(),
+            &AtomicBool::new(true),
+            |_| reported = true,
+        );
         assert!(!reported);
 
         std::fs::remove_dir_all(&dir).unwrap();
