@@ -1,0 +1,83 @@
+# A version tag (v0.1.0) builds Null for the three platforms and makes a draft GitHub
+# release of them, its notes from CHANGELOG.md, to look over before publishing. A pull
+# request changing how they're packaged builds them too, without a release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: ["packaging/**", "build.rs", ".github/workflows/release.yml"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: The tag is Cargo.toml's version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" = "$GITHUB_REF_NAME"
+      # Intel and Apple silicon in one app, in a disk image.
+      - run: packaging/macos/bundle.sh --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/release/Null-*.dmg
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: powershell -File packaging\windows\package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/release/null-*.zip
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libwayland-dev libvulkan-dev \
+            libasound2-dev libudev-dev libdbus-1-dev libssl-dev zlib1g-dev
+      - run: packaging/linux/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: target/release/null-*.tar.gz
+
+  release:
+    needs: [macos, windows, linux]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # This version's part of the changelog: from its heading to the next.
+      - name: Notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="## $version" '$0 ~ "^## " { on = index($0, v) == 1; next } on' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --title "Null ${GITHUB_REF_NAME#v}" --notes-file notes.md

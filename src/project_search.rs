@@ -1532,7 +1532,8 @@ mod tests {
         search.update_in(cx, |s, window, cx| s.search_in_folder("app/[id]", window, cx));
         cx.executor().advance_clock(std::time::Duration::from_millis(500));
         cx.run_until_parked();
-        let found: Vec<String> = search.read_with(cx, |s, _| s.results.iter().map(|r| r.relative.clone()).collect());
+        let found: Vec<String> =
+            search.read_with(cx, |s, _| s.results.iter().map(|r| r.relative.replace('\\', "/")).collect());
         assert_eq!(found, ["app/[id]/page.tsx"]);
         std::fs::remove_dir_all(&dir).ok();
     }
