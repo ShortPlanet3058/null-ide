@@ -1,0 +1,122 @@
+//! Finding the command line tools Null runs (language servers, Node, the AI tools):
+//! on the PATH, then where their installers usually put them, since an app opened
+//! from the Finder doesn't get the terminal's PATH.
+
+use std::path::PathBuf;
+
+/// A folder for tests, `name` inside one of this test run's own. All runs
+/// share one parent, where the folders of runs over an hour old are swept away, so a test
+/// that fails before cleaning up leaves nothing behind for long.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn test_dir(name: &str) -> PathBuf {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    let runs = std::env::temp_dir().join("null-tests");
+    let this_run = runs.join(std::process::id().to_string());
+    SWEPT.call_once(|| {
+        // An old run's folder with this run's number holds nothing of this run's.
+        let _ = std::fs::remove_dir_all(&this_run);
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for entry in std::fs::read_dir(&runs).into_iter().flatten().flatten() {
+            let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < hour_ago);
+            if old {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    });
+    this_run.join(name)
+}
+
+/// A program to run in the background: on Windows without a console window of its own
+/// flashing up (git, language servers and the rest are console programs).
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut command = std::process::Command::new(&program);
+    // Tests' repositories keep their files as written: no CRLF from Windows' git
+    // (core.autocrlf, set there by default), whatever the machine's settings.
+    #[cfg(test)]
+    if program.as_ref() == "git" {
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.autocrlf")
+            .env("GIT_CONFIG_VALUE_0", "false");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
+/// The person's home folder: `$HOME`, or on Windows (where it's rarely set) `%USERPROFILE%`.
+pub fn home_dir() -> Option<PathBuf> {
+    let var = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    var("HOME").or_else(|| if cfg!(windows) { var("USERPROFILE") } else { None })
+}
+
+/// Where Null keeps what it installs itself (language servers), never on the system:
+/// `~/Library/Application Support/Null` on macOS, `$XDG_DATA_HOME/null` (or
+/// `~/.local/share/null`) on Linux, `%LOCALAPPDATA%\Null` on Windows.
+pub fn data_dir() -> Option<PathBuf> {
+    // For trying Null without touching the real folder.
+    if let Some(dir) = std::env::var_os("NULL_DATA_DIR").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    // Tests never touch the real folder (sessions, installed servers).
+    if cfg!(test) {
+        return Some(crate::tools::test_dir("test-data"));
+    }
+    let home = crate::tools::home_dir();
+    if cfg!(target_os = "macos") {
+        Some(home?.join("Library/Application Support/Null"))
+    } else if cfg!(windows) {
+        Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Null"))
+    } else if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        Some(PathBuf::from(xdg).join("null"))
+    } else {
+        Some(home?.join(".local/share/null"))
+    }
+}
+
+/// Folders a tool may be in, most likely first.
+pub fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> =
+        std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    if let Some(home) = crate::tools::home_dir() {
+        for dir in
+            [".local/bin", ".cargo/bin", "go/bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", "bin"]
+        {
+            dirs.push(home.join(dir));
+        }
+        // Node versions installed with nvm.
+        if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+            dirs.extend(versions.flatten().map(|v| v.path().join("bin")));
+        }
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/go/bin"].map(PathBuf::from));
+    // What Null installed itself.
+    if let Some(data) = data_dir() {
+        dirs.push(data.join("servers/node_modules/.bin"));
+        dirs.push(data.join("servers/bin"));
+    }
+    dirs
+}
+
+/// A PATH for the tools Null starts, so they find what they need in turn (node for npm packages).
+pub fn search_path() -> std::ffi::OsString {
+    std::env::join_paths(search_dirs()).unwrap_or_default()
+}
+
+/// Where `name` is installed, if it is.
+pub fn find(name: &str) -> Option<PathBuf> {
+    let names: Vec<String> = if cfg!(windows) {
+        vec![format!("{name}.exe"), format!("{name}.cmd"), name.to_string()]
+    } else {
+        vec![name.to_string()]
+    };
+    search_dirs()
+        .into_iter()
+        .flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>())
+        .find(|p| p.is_file())
+}

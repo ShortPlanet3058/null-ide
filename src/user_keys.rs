@@ -1,0 +1,258 @@
+//! Your own shortcuts, from `"keys"` in settings.json, over the preset's:
+//!
+//! ```json
+//! "keys": { "ctrl-cmd-l": "select all occurrences", "cmd-d": null, "cmd-f": "-find" }
+//! ```
+//!
+//! A command is named as Null calls it in the code (`editor::SelectAllOccurrences`), without
+//! the part before `::`, or in words, as ⌘K lists it; `null` takes a shortcut away from
+//! everything, and a command with `-` before it loses only its own use of it. They hold
+//! everywhere in the window (bound with no context, they match as deep as anything focused)
+//! and come last, so they win. A key that types something (`x`, `⇧X`, a space) can't be one:
+//! it would stop typing.
+
+use gpui::{Action, App, Global, KeyBinding, Keystroke, NoAction};
+use std::collections::BTreeMap;
+
+/// What was wrong with the shortcuts last read, for the person to see.
+#[derive(Default)]
+pub struct KeyProblems(pub Vec<String>);
+
+impl Global for KeyProblems {}
+
+/// Whether `keystrokes` start with a key that types a character: a letter, a digit, a sign
+/// or a space, with no modifier or only ⇧; on a Mac with ⌥ too (⌥Z types Â in French, ⌥⇧I
+/// an ï).
+pub(crate) fn types_something(keystrokes: &str) -> bool {
+    let Some(first) = keystrokes.split_whitespace().next().and_then(|k| Keystroke::parse(k).ok()) else {
+        return false;
+    };
+    let m = first.modifiers;
+    let plain = !(m.platform || m.control || m.function || (m.alt && !cfg!(target_os = "macos")));
+    plain && (first.key.chars().count() == 1 || first.key == "space")
+}
+
+/// What to add to a key that types, to make it a shortcut.
+pub(crate) const ADD_TO_TYPING: &str = if cfg!(target_os = "macos") { "add ⌘ or ⌃" } else { "add Ctrl or Alt" };
+
+/// A name as written, for comparing: letters and digits, in lower case.
+fn plain(name: &str) -> String {
+    name.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// The command `name` stands for, among `known` (the full names, `editor::Foo`).
+fn command_named<'a>(name: &str, known: &[&'a str]) -> Option<&'a str> {
+    if let Some(exact) = known.iter().find(|k| **k == name) {
+        return Some(exact);
+    }
+    let wanted = plain(name.rsplit("::").next().unwrap_or(name));
+    if wanted.is_empty() {
+        return None;
+    }
+    // Several with that name (`editor::Copy`, `terminal::Copy`): the editor's.
+    let matching: Vec<&'a str> =
+        known.iter().copied().filter(|k| plain(k.rsplit("::").next().unwrap_or(k)) == wanted).collect();
+    matching.iter().find(|k| k.starts_with("editor::")).or(matching.first()).copied()
+}
+
+/// Keys as this platform reads them: off the Mac, `cmd` is Ctrl (a settings file written on
+/// a Mac means its ⌘ keys; Windows' own key isn't for shortcuts).
+fn portable(keystrokes: &str) -> String {
+    if cfg!(target_os = "macos") {
+        return keystrokes.to_string();
+    }
+    keystrokes
+        .split_whitespace()
+        .map(|stroke| {
+            let parts: Vec<&str> = stroke.split('-').collect();
+            let Some((key, modifiers)) = parts.split_last() else { return stroke.to_string() };
+            let mut kept: Vec<&str> = Vec::new();
+            for m in modifiers {
+                let m = if matches!(*m, "cmd" | "command") { "ctrl" } else { m };
+                if !kept.contains(&m) {
+                    kept.push(m);
+                }
+            }
+            kept.push(key);
+            kept.join("-")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Keys as a binding's are written (`cmd-shift-l`), however they were.
+fn as_written(keystrokes: &str) -> Option<String> {
+    let keystrokes = portable(keystrokes);
+    let keys: Option<Vec<String>> =
+        keystrokes.split_whitespace().map(|k| Keystroke::parse(k).ok().map(|k| k.unparse())).collect();
+    keys.map(|k| k.join(" "))
+}
+
+/// What `keys` say: the bindings, the preset's keys taken from a command alone (the keys,
+/// as written, and the command's full name), and what couldn't be understood.
+pub fn bindings(
+    keys: &BTreeMap<String, Option<String>>,
+    cx: &App,
+) -> (Vec<KeyBinding>, Vec<(String, String)>, Vec<String>) {
+    let known = cx.all_action_names();
+    let mut bindings = Vec::new();
+    let mut taken = Vec::new();
+    let mut problems = Vec::new();
+    for (keystrokes, name) in keys {
+        // "-find": Find's use of the keys, not the keys.
+        if let Some(name) = name.as_deref().and_then(|n| n.strip_prefix('-')) {
+            match (command_named(name, known), as_written(keystrokes)) {
+                (Some(full), Some(written)) => taken.push((written, full.to_string())),
+                (None, _) => problems.push(format!("\"{keystrokes}\": no command called \"{name}\"")),
+                (_, None) => problems.push(format!("\"{keystrokes}\" isn't a shortcut (like \"cmd-shift-l\")")),
+            }
+            continue;
+        }
+        let action: Box<dyn Action> = match name {
+            None => Box::new(NoAction),
+            Some(name) => match command_named(name, known).and_then(|full| cx.build_action(full, None).ok()) {
+                Some(action) => action,
+                None => {
+                    problems.push(format!("\"{keystrokes}\": no command called \"{name}\""));
+                    continue;
+                }
+            },
+        };
+        if types_something(keystrokes) {
+            problems.push(format!("\"{keystrokes}\" types a character: {ADD_TO_TYPING}"));
+            continue;
+        }
+        match KeyBinding::load(&portable(keystrokes), action, None, false, None, &gpui::DummyKeyboardMapper) {
+            Ok(binding) => bindings.push(binding),
+            Err(_) => problems.push(format!("\"{keystrokes}\" isn't a shortcut (like \"cmd-shift-l\")")),
+        }
+    }
+    (bindings, taken, problems)
+}
+
+/// Binds your shortcuts, after every other key, and keeps what was wrong with them. The
+/// preset's keys taken from a command alone go first (bound again without them).
+pub fn register(cx: &mut App) {
+    let keys = cx.try_global::<crate::settings::Settings>().map(|s| s.keys.clone()).unwrap_or_default();
+    let (bindings, taken, problems) = bindings(&keys, cx);
+    if !taken.is_empty() {
+        let kept: Vec<KeyBinding> = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            keymap
+                .bindings()
+                .filter(|b| {
+                    let written = b.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>().join(" ");
+                    !taken.iter().any(|(keys, name)| *keys == written && b.action().name() == name)
+                })
+                .cloned()
+                .collect()
+        };
+        cx.clear_key_bindings();
+        cx.bind_keys(kept);
+    }
+    cx.bind_keys(bindings);
+    cx.set_global(KeyProblems(problems));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A settings file from a Mac: its ⌘ keys are Ctrl off the Mac.
+    #[test]
+    fn mac_keys_read_as_ctrl_elsewhere() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(portable("cmd-d"), "cmd-d");
+        } else {
+            assert_eq!(portable("cmd-shift-l"), "ctrl-shift-l");
+            assert_eq!(portable("ctrl-cmd-l cmd-k"), "ctrl-l ctrl-k");
+        }
+    }
+
+    #[test]
+    fn keys_that_type_are_refused() {
+        assert!(types_something("x") && types_something("shift-x") && types_something("space"));
+        assert!(types_something("5") && types_something("shift-/"));
+        assert!(!types_something("cmd-x") && !types_something("ctrl-x") && !types_something("alt-cmd-x"));
+        // ⌥ with a letter types on a Mac.
+        assert_eq!(types_something("alt-x"), cfg!(target_os = "macos"));
+        assert_eq!(types_something("alt-shift-i"), cfg!(target_os = "macos"));
+        assert!(!types_something("alt-up") && !types_something("ctrl-alt-z"));
+        assert!(!types_something("f5") && !types_something("escape") && !types_something("up"));
+    }
+
+    /// None of Null's own shortcuts, in any keymap, takes a key that types: ⌥Z, ⌥⇧I and the
+    /// like stay characters on a Mac.
+    #[gpui::test]
+    fn no_shortcut_takes_a_typed_character(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            for keymap in crate::keymap::Keymap::ALL {
+                crate::keymap::register(keymap, cx);
+                let bindings = cx.key_bindings();
+                for binding in bindings.borrow().bindings() {
+                    let Some(first) = binding.keystrokes().first() else { continue };
+                    if first.modifiers().alt {
+                        let keys = first.inner().unparse();
+                        assert!(!types_something(&keys), "{keys} ({}) in {}", binding.action().name(), keymap.label());
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn commands_are_found_however_they_re_named() {
+        let known = ["editor::SelectAllOccurrences", "editor::Copy", "terminal::Copy", "workspace::ToggleTerminal"];
+        assert_eq!(command_named("editor::SelectAllOccurrences", &known), Some("editor::SelectAllOccurrences"));
+        assert_eq!(command_named("SelectAllOccurrences", &known), Some("editor::SelectAllOccurrences"));
+        assert_eq!(command_named("select all occurrences", &known), Some("editor::SelectAllOccurrences"));
+        assert_eq!(command_named("Toggle Terminal", &known), Some("workspace::ToggleTerminal"));
+        assert_eq!(command_named("copy", &known), Some("editor::Copy"), "the editor's, of several");
+        assert_eq!(command_named("terminal::Copy", &known), Some("terminal::Copy"));
+        assert_eq!(command_named("launch rockets", &known), None);
+        assert_eq!(command_named("::", &known), None);
+    }
+
+    /// Your keys win over Null's, `null` takes one away, and mistakes are kept to be shown.
+    #[gpui::test]
+    fn your_own_shortcuts_win(cx: &mut gpui::TestAppContext) {
+        use crate::buffer::Buffer;
+        use crate::editor::{Editor, Selection};
+        cx.update(|cx| {
+            let keys = BTreeMap::from([
+                ("ctrl-cmd-l".to_string(), Some("select all occurrences".to_string())),
+                ("cmd-d".to_string(), None),
+                ("cmd-shift-l".to_string(), Some("-select all occurrences".to_string())),
+                ("cmd-alt-9".to_string(), Some("launch rockets".to_string())),
+                ("cmd-shiftt-x".to_string(), Some("Copy".to_string())),
+                ("x".to_string(), Some("toggle terminal".to_string())),
+            ]);
+            cx.set_global(crate::settings::Settings { keys, ..Default::default() });
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let problems = cx.update(|cx| cx.global::<KeyProblems>().0.clone());
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems[0].contains("cmd-alt-9") && problems[0].contains("launch rockets"));
+        assert!(problems[1].contains("cmd-shiftt-x"));
+        assert!(problems[2].contains("types a character"), "a plain letter would stop typing");
+        let (e, cx) =
+            cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("a b a b a\n"), Some("x.txt".into()), cx));
+        e.update_in(cx, |e, window, cx| {
+            window.focus(&gpui::Focusable::focus_handle(e, cx));
+            e.selection = Selection { anchor: 0, head: 1 };
+        });
+        // ⌘D, taken away: still one selection.
+        cx.simulate_keystrokes("secondary-d");
+        assert_eq!(e.read_with(cx, |e, _| e.extra.len()), 0);
+        // ⌘⇧L, taken from Select All Occurrences alone: it doesn't run.
+        cx.simulate_keystrokes("secondary-shift-l");
+        assert_eq!(e.read_with(cx, |e, _| e.extra.len()), 0);
+        // ⌃⌘L, yours: every `a`.
+        cx.simulate_keystrokes("ctrl-secondary-l");
+        assert_eq!(e.read_with(cx, |e, _| e.extra.len()), 2);
+    }
+}

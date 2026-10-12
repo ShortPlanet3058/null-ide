@@ -1,49 +1,99 @@
-# Null IDE
+<h1 align="center">Null</h1>
 
-**A calm, fast code editor where nothing gets in your way.**
+<p align="center"><strong>A calm, fast code editor where nothing gets in your way.</strong></p>
 
-Null is a new IDE built around one idea: the screen belongs to your code. It aims for a
-first-class, polished experience — instant, fluid, beautiful — and keeps AI within reach
-without ever making it the center of the room.
+<p align="center">
+  <a href="https://github.com/ShortPlanet3058/null-ide/releases/latest">Download</a> ·
+  <a href="docs/guide.md">Guide</a> ·
+  <a href="CHANGELOG.md">What's new</a>
+</p>
 
-> Status: **pre-alpha**. Nothing usable yet — the foundations are being laid.
+![Null with a Rust file open: the files on the left, the code on true black](docs/images/editor.png)
 
-## Principles
+Null is an editor built around one idea: the screen belongs to your code. No panels
+competing for space, no badges asking for attention: the bars fade while you type and come
+back when you look for them. Everything an IDE should do is there (language servers, git,
+a terminal, tests, a debugger), a keystroke away and out of sight until then.
 
-- **Code first.** No permanent side panels competing for space. Chrome fades while you type.
-- **AI on demand, never in charge.** Summon it inline when you want it, dismiss it with
-  `Esc`. It never edits your code without showing you a diff first.
-- **Speed is a feature.** Near-instant startup, no dropped frames, minimal input latency.
-- **Crafted details.** Motion, typography and themes (including a true-black OLED theme)
-  are treated as core features, not polish for later.
-- **Bring your own model.** Local models or your own API key — your choice.
+AI is a tool, not a co-pilot: hidden until you call it, never changing your code without
+showing you the change, and nowhere at all when it's off.
 
-## Planned stack
+## Why Null
 
-- [Rust](https://www.rust-lang.org/) + [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) for GPU-accelerated UI
-- [tree-sitter](https://tree-sitter.github.io/) for syntax and structure
-- [LSP](https://microsoft.github.io/language-server-protocol/) / [DAP](https://microsoft.github.io/debug-adapter-protocol/) for language intelligence and debugging
+- **Your code first.** One quiet window, a true-black theme that's easy on the eyes all day
+  (and five others, light ones too), type set with care.
+- **Fast.** Native and drawn on the GPU: it opens at once, big files included, and keeps up
+  with your typing on a project of tens of thousands of files.
+- **Everything, one keystroke away.** ⌘P goes to any file; ⌘K changes a setting or runs
+  any command; menus and hints always name your keys.
+- **AI when you ask.** Your Claude or ChatGPT plan, an API key (several are free), or a model
+  on your own computer, or none at all.
+- **Your hands already know it.** Keys from VS Code, JetBrains, Sublime Text or Zed, or Vim.
 
-## Platforms
+## What it does
 
-| Platform | Status |
+<table>
+<tr>
+<td width="50%"><img src="docs/images/ai.png" alt="An AI change written into the code: the old lines struck through above the new ones"></td>
+<td width="50%"><img src="docs/images/git.png" alt="The Git panel: the files changed, a message, Commit"></td>
+</tr>
+<tr>
+<td><strong>⌘I changes code where it is.</strong> Describe a change; it's written in as a diff
+to keep with ⇥ or undo with Esc. Ask about a line and the answer sits under it.</td>
+<td><strong>Git in one panel.</strong> Commit whole files or parts of them, see the history,
+switch branches, resolve conflicts in place, review pull requests.</td>
+</tr>
+</table>
+
+- **Code intelligence** for Rust, Python, TypeScript, Go, C and C++, Swift and more: the
+  language server is found, or installed for you in one click.
+- **Writing** that thinks ahead: multiple cursors, folding, rename everywhere, quick fixes,
+  snippets, Emmet, and Markdown with a live preview, tables, formulas and diagrams.
+- **Run, test and debug** without leaving the code: tasks, the test at the cursor, a
+  terminal whose errors join the problems list, breakpoints with values shown in the code.
+- **Never lose work**: unsaved changes survive a crash, every save is kept for a month, and
+  files changed on disk are never silently written over.
+
+![⌘K: the theme, text size, wrapping and more, changed right in the list](docs/images/palette.png)
+
+## Download
+
+Get the latest version from the [releases page](https://github.com/ShortPlanet3058/null-ide/releases/latest).
+
+| | |
 |---|---|
-| macOS (Intel & Apple Silicon) | Primary development target |
-| Windows 10 / 11 | Planned |
-| Linux | Planned |
+| **macOS** 11 or later, Intel and Apple silicon | Open the `.dmg` and drag Null to Applications. The first time, right-click Null and choose **Open**. |
+| **Windows** 10 and 11 | Unzip anywhere and run `null.exe`. |
+| **Linux** x86-64, X11 or Wayland | Unpack, then run `./install.sh`: Null goes in `~/.local/bin` and your applications menu. |
 
-## Workflow
+From a terminal, **Install Shell Command** (in ⌘K) adds `null`: `null .` opens the folder
+you're in, `null src/main.rs:42` a file at a line, and `null --wait` makes Null git's editor.
 
-- `main` — stable; only receives merges from `dev`.
-- `dev` — integration branch; all feature work merges here first.
-- Feature branches — branch off `dev`, named `feature/<topic>`, `fix/<topic>`, etc.,
-  and open a pull request back into `dev`.
+Null is young: used every day on the Mac, new on Windows and Linux. If something's wrong,
+please [open an issue](https://github.com/ShortPlanet3058/null-ide/issues).
+
+## First steps
+
+| Mac | Windows / Linux | |
+|---|---|---|
+| ⌘P | Ctrl+P | Go to a file |
+| ⌘K | Ctrl+K | Quick settings, and every command |
+| ⌘⇧F | Ctrl+Shift+F | Search the project |
+| ⌘I | Ctrl+I | Ask AI to change the code here (when it's on) |
+| ⌃⇧G | Ctrl+Shift+G | The changes to commit |
+| ⌘, | Ctrl+, | All settings |
+
+The [guide](docs/guide.md) has everything else.
+
+## Building it yourself
+
+Null is written in Rust with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
+With [Rust](https://rustup.rs) installed (and Xcode on the Mac), `cargo run` opens the folder
+you're in. [CONTRIBUTING.md](CONTRIBUTING.md) has the rest: Linux's libraries, packages,
+tests and how releases are made.
 
 ## License
 
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
+Null is free and open source, under either the [MIT](LICENSE-MIT) or the
+[Apache 2.0](LICENSE-APACHE) license, at your option. Its fonts are under the SIL Open Font
+License (see `assets/fonts`).

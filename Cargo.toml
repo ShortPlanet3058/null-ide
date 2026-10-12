@@ -1,0 +1,99 @@
+[package]
+name = "null-ide"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A calm, fast code editor where nothing gets in your way."
+repository = "https://github.com/ShortPlanet3058/null-ide"
+
+[[bin]]
+name = "null"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+futures = "0.3"
+# Shaders are compiled when the app starts, so building doesn't need Xcode's
+# separate Metal Toolchain download. Release builds can switch to precompiled shaders.
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+# Already in the build (0.22, through gpui's deps): pictures written into a page (a
+# notebook's charts, `data:` images in Markdown).
+base64 = "0.22"
+sha2 = "0.10"
+ignore = "0.4"
+# Already in the build through gpui: SVGs drawn here, in the right colours and sharp
+# (gpui's own path swaps red and blue, at 1×); with the pictures in them (PNG, JPEG, GIF,
+# WebP).
+image = { version = "0.25", default-features = false }
+keyring = "4"
+lsp-types = "0.97"
+notify = "8"
+regex = "1"
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+# Only \n and \r break lines, as language servers count them.
+ropey = { version = "1.6", default-features = false, features = ["cr_lines", "simd"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+memchr = "2"
+# Real paths without Windows' `\\?\` prefix (already in the build through a dependency).
+dunce = "1"
+similar = "2"
+trash = "5"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-html = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-json = "0.24"
+tree-sitter-md = "0.5"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-typescript = "0.23"
+tree-sitter-yaml = "0.7"
+unicode-segmentation = "1"
+ureq = { version = "3", features = ["json"] }
+# The date and time for snippets ($CURRENT_YEAR…). Already built for a dependency.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+url = "2"
+# Markdown's preview: formulas laid out as TeX does (RaTeX, KaTeX's fonts inside) and
+# Mermaid diagrams, drawn as SVG (by resvg, already here).
+ratex-parser = "0.1.14"
+ratex-layout = "0.1.14"
+ratex-types = "0.1.14"
+ratex-svg = { version = "0.1.14", features = ["embed-fonts"] }
+mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+
+# The Mac's own spell checker and color panel. Already built for GPUI: only the parts used are named.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std", "NSSpellChecker", "NSWorkspace",
+    "NSColorPanel", "NSColor", "NSColorSpace", "NSPanel", "NSWindow", "NSResponder", "NSApplication", "NSPasteboard", "objc2-core-foundation",
+    # (QA runs post their own clicks to their window: src/qa.rs.)
+    "NSEvent", "NSGraphicsContext",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSRange", "NSArray", "NSURL", "NSUserDefaults", "NSGeometry", "NSEnumerator"] }
+
+# Every Unix: process locks (flock), signals, permissions; on the Mac also copyfile(3), so
+# a save keeps the file's tags, extended attributes and ACLs.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Null's icon and version built into null.exe (see build.rs). Already in the build.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
+[dev-dependencies]
+# Lets tests run real views and actions without opening windows.
+gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
+
+# Debug builds keep line numbers for backtraces but not full debug info: target/ once
+# reached 77 GB of it on a small disk.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
