@@ -467,6 +467,14 @@ impl Welcome {
                     .pl(px(if cfg!(target_os = "macos") { 92. } else { 28. }))
                     .pr(px(28.))
                     .window_control_area(WindowControlArea::Drag)
+                    // (Linux, its frame drawn by Null: the bar moves the window.)
+                    .when(cfg!(target_os = "linux"), |bar| {
+                        bar.on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                            if crate::window_frame::draws_controls(window) {
+                                window.start_window_move();
+                            }
+                        })
+                    })
                     .child(Self::wordmark(theme))
                     .children(step.map(|n| {
                         div().text_size(px(ui::T_SM)).text_color(theme.faint).child(format!("{} of {}", n.0 + 1, n.1))
