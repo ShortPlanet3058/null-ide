@@ -6,15 +6,24 @@ Null is a new IDE built around one idea: the screen belongs to your code. It aim
 first-class, polished experience — instant, fluid, beautiful — and keeps AI within reach
 without ever making it the center of the room.
 
-> Status: **pre-alpha**, used daily on macOS. An editor with language servers, git, a
+> Status: **alpha** (0.1.0), used daily on macOS; new on Windows and Linux. An editor with language servers, git, a
 > terminal, tests and a debugger, syntax highlighting for Rust, Python, JavaScript,
 > TypeScript, JSON, TOML, Markdown, HTML, CSS, Go, C, C++, YAML and shell scripts (and basic
 > colouring for Swift, Kotlin, Java, C#, Dart, Ruby, PHP, Lua, SQL, Dockerfiles, Makefiles, XML,
 > and CSV/TSV by column), and AI that stays out of the way until called.
 
+## Download
+
+Each release on [GitHub](https://github.com/ShortPlanet3058/null-ide/releases) has Null for
+macOS (a disk image, Intel and Apple silicon), Windows (a zip: unzip and run `null.exe`)
+and Linux (a tarball: unpack and run `./install.sh`). What changed is in
+[CHANGELOG.md](CHANGELOG.md).
+
 ## Building
 
-Requires [Rust](https://rustup.rs) (stable) and, on macOS, Xcode.
+Requires [Rust](https://rustup.rs) (stable) and, on macOS, Xcode. On Linux, the libraries
+GPUI draws with: on Debian or Ubuntu, `sudo apt install libfontconfig-dev libxkbcommon-x11-dev
+libx11-xcb-dev libwayland-dev libvulkan-dev libasound2-dev libudev-dev libdbus-1-dev`.
 
 ```sh
 cargo run                      # open the current folder
@@ -22,12 +31,19 @@ cargo run -- path/to/folder    # open another folder
 cargo run -- path/to/file.rs   # open a file
 ```
 
-### The Mac app
+### The Mac app, and the other platforms' packages
 
 ```sh
 packaging/macos/bundle.sh             # builds target/release/Null.app
 packaging/macos/bundle.sh --install   # and copies it to /Applications
+packaging/macos/bundle.sh --release   # for every Mac, in a .dmg
+packaging/linux/install.sh            # Linux: built, into ~/.local/bin and the menu
+packaging/linux/package.sh            # Linux: the release tarball
+powershell -File packaging\windows\package.ps1   # Windows: the release zip
 ```
+
+A tag like `v0.1.0` (the version in Cargo.toml) has CI build all three and draft a GitHub
+release of them (`.github/workflows/release.yml`).
 
 The app has Null's icon, opens from the Dock and the Finder ("Open With → Null" for files
 and folders), and takes files dropped on its Dock icon. **Null › Install Shell Command**
@@ -288,9 +304,9 @@ numbers can show everywhere, only in code, or nowhere.
 
 | Platform | Status |
 |---|---|
-| macOS (Intel & Apple Silicon) | Primary development target |
-| Windows 10 / 11 | Planned |
-| Linux | Planned |
+| macOS 11+ (Intel & Apple Silicon) | Primary: used every day |
+| Windows 10 / 11 (x86-64) | Built and tested by CI; new |
+| Linux (x86-64, X11 & Wayland) | Built and tested by CI; new |
 
 ## Workflow
 
