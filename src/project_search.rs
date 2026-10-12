@@ -793,7 +793,12 @@ fn search_files(
                     })
                 })
                 .collect();
-            parts.into_iter().flat_map(|part| part.join().unwrap_or_default()).collect()
+            // (A part that failed: none in its files, each still in its place.)
+            parts
+                .into_iter()
+                .zip(paths.chunks(per_core))
+                .flat_map(|(part, its)| part.join().unwrap_or_else(|_| its.iter().map(|_| Vec::new()).collect()))
+                .collect()
         });
         for (path, mut matches) in paths.iter().zip(searched) {
             if cancel.load(Ordering::Relaxed) {
@@ -1587,6 +1592,23 @@ mod tests {
         });
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].matches[0].preview.as_ref(), "café crème");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn line_ends_found_with_windows_line_endings() {
+        let dir = crate::tools::test_dir("search-crlf");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.c"), "int a;\r\nint b\r\nint c;\r\n").unwrap();
+        let query = SearchQuery { text: ";$".into(), regex: true, ..Default::default() };
+        let mut lines = Vec::new();
+        search_files(&dir, &query, "", &[], None, &Default::default(), &AtomicBool::new(false), |found| {
+            if let Found::Files(files) = found {
+                lines.extend(files.into_iter().flat_map(|f| f.matches.into_iter().map(|m| m.line)));
+            }
+        });
+        assert_eq!(lines, [0, 2]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

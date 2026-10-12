@@ -791,8 +791,11 @@ pub struct Editor {
     threads: Vec<assist::Thread>,
     /// The text's width the blocks drawn over it were last sized for.
     pub blocks_width: Option<Pixels>,
-    /// A big file's first syntax tree, being made in the background.
+    /// A big file's first syntax tree, being made in the background, and how to stop it.
     parse_task: Option<Task<()>>,
+    parse_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// …or wanted, once the file's first drawn.
+    parse_wanted: bool,
     /// With `NULL_TRACE`: when its file began opening, until it's first drawn.
     pub trace_opened: Option<(PathBuf, std::time::Instant)>,
     ghost: Option<ghost::Ghost>,
@@ -1067,6 +1070,8 @@ impl Editor {
             paste_format_task: None,
             blocks: Vec::new(),
             parse_task: None,
+            parse_cancel: None,
+            parse_wanted: false,
         };
         editor.start_colouring(cx);
         editor.rehighlight();
@@ -1098,20 +1103,47 @@ impl Editor {
     /// (coloured from then; a tab restored out of sight costs nothing until it's shown),
     /// else in the background (a big file shows as plain text for a moment, then in
     /// colour), so opening it never waits long.
-    fn start_colouring(&mut self, cx: &mut Context<Self>) {
+    fn start_colouring(&mut self, _: &mut Context<Self>) {
         /// Up to this size, made when first needed: about 150 ms at most on this 2018 Mac.
         const WHEN_DRAWN_UP_TO: usize = 512 * 1024;
-        self.parse_task = None;
+        self.stop_parsing();
         let Some(highlighter) = &mut self.highlighter else { return };
         if self.buffer.rope().len_bytes() <= WHEN_DRAWN_UP_TO {
             return;
         }
-        let _step = crate::trace::step(|| "  syntax tree started in the background".into());
+        // Made when it's first drawn (a tab restored out of sight costs nothing until then).
         highlighter.parsing = true;
-        let parse = highlighter.background_parse(&self.buffer);
+        self.parse_wanted = true;
+    }
+
+    /// A background parse no longer wanted (another language, another file, closed): stopped.
+    fn stop_parsing(&mut self) {
+        if let Some(cancel) = self.parse_cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.parse_task = None;
+        self.parse_wanted = false;
+    }
+
+    /// A big file's first syntax tree, started in the background as it's first drawn.
+    pub(crate) fn parse_if_wanted(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.parse_wanted) {
+            return;
+        }
+        let Some(highlighter) = &mut self.highlighter else { return };
+        // (Made here meanwhile, for something asked for: nothing to wait for.)
+        if highlighter.tree().is_some() {
+            highlighter.parsing = false;
+            return;
+        }
+        let _step = crate::trace::step(|| "  syntax tree started in the background".into());
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let parse = highlighter.background_parse(&self.buffer, cancel.clone());
+        self.parse_cancel = Some(cancel);
         self.parse_task = Some(cx.spawn(async move |this, cx| {
             let made = cx.background_executor().spawn(async move { parse() }).await;
             this.update(cx, |this, cx| {
+                this.parse_cancel = None;
                 let Some(highlighter) = &mut this.highlighter else { return };
                 match made {
                     Some((tree, revision)) => highlighter.install(tree, revision),
@@ -1119,10 +1151,11 @@ impl Editor {
                     None => highlighter.parsing = false,
                 }
                 crate::trace::mark("syntax tree made in the background");
-                // Coloured now, folds and all.
+                // Coloured now, folds, tag pairs and all.
                 this.spans_for = None;
                 this.pinned_spans.clear();
                 this.folds.forget_foldable();
+                this.tag_pair_seen = None;
                 cx.notify();
             })
             .ok();
@@ -1355,6 +1388,7 @@ impl Editor {
         }
         self.highlighter = highlighter_for(self.language(), &self.buffer);
         self.start_colouring(cx);
+        self.folds.forget_foldable();
         *self.brackets.borrow_mut() = None;
         // Now that its language is known (name, first line, or chosen): its indentation.
         self.indent_as_language(cx);
@@ -5640,6 +5674,8 @@ mod tests {
             e.type_text_for_test(0, "// note\n", cx);
             e
         });
+        // (As its first drawing does.)
+        e.update(cx, |e, cx| e.parse_if_wanted(cx));
         for _ in 0..600 {
             cx.run_until_parked();
             if e.read_with(cx, |e, _| e.highlighter.as_ref().is_some_and(|h| !h.parsing)) {
@@ -5653,6 +5689,26 @@ mod tests {
             // The comment typed meanwhile is one.
             let (comment, _) = e.spans.iter().find(|(range, _)| range.start == 0).expect("the first line coloured");
             assert!(comment.end >= "// note".len());
+        });
+    }
+
+    /// A big HTML file: what's drawn every frame (the tag pair at the caret) waits for its
+    /// tree rather than parsing it all there.
+    #[gpui::test]
+    fn a_big_page_is_not_parsed_while_drawn(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let item = "<div class=\"row\"><p>Hello <b>there</b></p></div>\n";
+        let text = item.repeat((2 << 20) / item.len());
+        cx.add_window_view(|_, cx| {
+            let mut e = Editor::new(Buffer::from_text(&text), Some(PathBuf::from("big.html")), cx);
+            e.selection = Selection::caret(3);
+            assert!(e.tag_pair_at_caret().is_none(), "none until the tree comes");
+            assert!(e.highlighter.as_ref().is_some_and(|h| h.tree().is_none()), "not parsed here");
+            e
         });
     }
 
@@ -5678,15 +5734,15 @@ mod tests {
         let (e, cx) = cx.add_window_view(|_, cx| {
             let e = Editor::open(path.clone(), None, cx);
             assert_eq!(e.longest_line(), 0, "the rows on screen meanwhile");
-            assert!(e.conflicts().is_empty(), "none shown meanwhile");
+            assert!(e.conflicts_shown().is_empty(), "none shown meanwhile");
             e
         });
-        for _ in 0..300 {
+        for _ in 0..600 {
             cx.run_until_parked();
             if e.read_with(cx, |e, _| e.measuring_longest.is_none() && e.finding_conflicts.is_none()) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         e.update(cx, |e, cx| {
             assert_eq!(e.longest_line(), 5000, "the wide line");

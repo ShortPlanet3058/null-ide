@@ -133,12 +133,19 @@ impl Highlighter {
 
     /// The first tree of `buffer` as it is now, made by the returned job (off the main
     /// thread), with the revision it's of: given to `install`.
-    pub fn background_parse(&self, buffer: &Buffer) -> impl FnOnce() -> Option<(Tree, u64)> + Send + 'static {
+    /// It stops (None) once `cancel` is set.
+    pub fn background_parse(
+        &self,
+        buffer: &Buffer,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> impl FnOnce() -> Option<(Tree, u64)> + Send + 'static {
         let (rope, revision, language) = (buffer.rope().clone(), buffer.revision(), self.language);
         move || {
             let mut parser = Parser::new();
             parser.set_language(&language.grammar()).ok()?;
-            let tree = parser.parse_with_options(&mut reader(&rope), None, None)?;
+            let mut stop = |_: &tree_sitter::ParseState| cancel.load(std::sync::atomic::Ordering::Relaxed);
+            let options = tree_sitter::ParseOptions::new().progress_callback(&mut stop);
+            let tree = parser.parse_with_options(&mut reader(&rope), None, Some(options))?;
             Some((tree, revision))
         }
     }

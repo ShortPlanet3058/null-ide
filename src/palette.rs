@@ -442,10 +442,21 @@ impl Palette {
                 }
                 this.update(cx, |this, cx| {
                     let changed = !this.files_loaded || this.files != files;
+                    // The row picked stays picked (an ↵ on its way opens what was chosen).
+                    let picked = match this.selected_item() {
+                        Some(Item::File(i)) => this.files.get(i).map(|f| f.path.clone()),
+                        _ => None,
+                    };
                     this.files = files;
                     this.files_loaded = true;
                     if changed {
                         this.update_rows(cx);
+                        let again = picked.and_then(|path| {
+                            this.rows.iter().position(|r| matches!(r.item, Item::File(i) if this.files[i].path == path))
+                        });
+                        if let Some(ix) = again.filter(|&ix| ix > 0) {
+                            this.select(ix, cx);
+                        }
                     }
                 })
                 .ok();
@@ -938,6 +949,14 @@ impl Palette {
                     Item::RecentFile(i) => self.recent_files[i].path.clone(),
                     _ => unreachable!(),
                 };
+                // Gone since the files were listed (renamed, deleted, another branch): not
+                // opened as a new empty file; the list without it.
+                if let Item::File(i) = item
+                    && !path.exists()
+                {
+                    self.files.remove(i);
+                    return self.update_rows(cx);
+                }
                 // "name:42" (or "name:42:7") opens it there.
                 match split_place(&self.query).1 {
                     Some((line, column)) => cx.emit(PaletteEvent::OpenLocation(
@@ -1432,9 +1451,10 @@ static LISTED: std::sync::Mutex<Option<Listed>> = std::sync::Mutex::new(None);
 /// The project's files listed a moment after it opens (in the background), so the first
 /// ⌘P shows them at once.
 pub(crate) fn list_files_soon(root: PathBuf, cx: &mut App) {
-    let hide = cx.global::<crate::settings::Settings>().hidden_paths();
     cx.spawn(async move |cx| {
         cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+        // (The settings now: the project's own, read since it opened.)
+        let Ok(hide) = cx.update(|cx| cx.global::<crate::settings::Settings>().hidden_paths()) else { return };
         let key = (root.clone(), hide.clone());
         let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
         if let Ok(mut last) = LISTED.lock() {
@@ -1467,7 +1487,9 @@ pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
                     return WalkState::Continue;
                 }
                 let Ok(mut found) = found.lock() else { return WalkState::Quit };
-                if found.len() >= MAX_FILES {
+                // (Read side by side, the first found differ each time: some to spare, then
+                // the same ones kept, first by path.)
+                if found.len() >= MAX_FILES * 4 {
                     return WalkState::Quit;
                 }
                 found.push(FileEntry::new(entry.into_path(), root));
@@ -1476,6 +1498,7 @@ pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
         });
     let mut files = found.into_inner().unwrap_or_default();
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    files.truncate(MAX_FILES);
     files
 }
 

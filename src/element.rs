@@ -599,6 +599,7 @@ impl Element for EditorElement {
         let theme = cx.global::<Theme>().clone();
         let code_font = cx.global::<Fonts>().code.clone();
         self.editor.update(cx, |editor, cx| {
+            editor.parse_if_wanted(cx);
             if editor.trace_opened.is_some() {
                 crate::trace::mark("    its drawing begins");
             }
@@ -792,8 +793,16 @@ impl Element for EditorElement {
             let over_gutter = editor.mouse_position.is_some_and(|p| {
                 p.x >= bounds.left() && p.x < text_bounds.left() && p.y >= bounds.top() && p.y < bounds.bottom()
             });
-            let foldable: std::collections::HashSet<usize> =
-                if over_gutter { editor.fold_starts_for_gutter() } else { Default::default() };
+            let foldable: std::collections::HashSet<usize> = if over_gutter {
+                let (starts, old) = editor.fold_starts_for_gutter();
+                // (Drawn again until typing pauses, then as the text is.)
+                if old {
+                    window.request_animation_frame();
+                }
+                starts
+            } else {
+                Default::default()
+            };
 
             // Errors and warnings get a wavy underline and color their line number.
             // Hints and notes only show in the hover card, to keep the code calm; code the
@@ -877,7 +886,7 @@ impl Element for EditorElement {
                     .collect()
             };
             // A merge conflict's first line says how to resolve it, faintly.
-            let conflicts = editor.conflicts();
+            let conflicts = editor.conflicts_shown();
             let resolve_tip = (!conflicts.is_empty())
                 .then(|| crate::palette::shortcut(&crate::editor::QuickFix, cx))
                 .flatten()

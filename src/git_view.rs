@@ -617,7 +617,13 @@ impl GitView {
                     "git-history",
                     self.history_shown.len(),
                     cx.processor(|this, range: Range<usize>, _, cx| {
-                        range.filter_map(|ix| this.history_shown.get(ix).map(|&i| this.history_row(i, cx))).collect()
+                        // (Each row across the whole list: its highlight, and a click anywhere on it.)
+                        range
+                            .filter_map(|ix| {
+                                let i = *this.history_shown.get(ix)?;
+                                Some(div().w_full().child(this.history_row(i, cx)).into_any_element())
+                            })
+                            .collect()
                     }),
                 )
                 .flex_1()

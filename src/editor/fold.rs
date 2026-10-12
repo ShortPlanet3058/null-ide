@@ -173,13 +173,14 @@ impl Editor {
     /// The lines the gutter shows a fold arrow on (when the mouse is over it). While typing,
     /// those known before the last keystrokes: working them out again took 32 ms a
     /// keystroke on a big file. Once typing pauses, they're the text's own.
-    pub fn fold_starts_for_gutter(&mut self) -> std::collections::HashSet<usize> {
+    /// With true: those known before, to draw again once typing has paused.
+    pub fn fold_starts_for_gutter(&mut self) -> (std::collections::HashSet<usize>, bool) {
         const PAUSE: std::time::Duration = std::time::Duration::from_millis(400);
         let typing = self.last_edit.as_ref().is_some_and(|(_, at, _)| at.elapsed() < PAUSE);
         if typing && let Some((_, known)) = &self.folds.foldable {
-            return known.iter().map(|r| r.start).collect();
+            return (known.iter().map(|r| r.start).collect(), true);
         }
-        self.foldable().iter().map(|r| r.start).collect()
+        (self.foldable().iter().map(|r| r.start).collect(), false)
     }
 
     /// The folded regions, as (first line, last line), to save with the session.

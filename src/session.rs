@@ -85,8 +85,11 @@ impl Session {
     /// The project's last session, keeping only what still exists.
     pub fn load(root: &Path) -> Self {
         // (Measuring: a session given, as scripts/qa/trace.sh does.)
+        // (Once: another project opened since is its own.)
+        static GIVEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if crate::trace::on()
             && let Some(given) = std::env::var_os("NULL_TRACE_SESSION")
+            && !GIVEN.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
             return Self::load_file(Path::new(&given));
         }

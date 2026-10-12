@@ -174,11 +174,16 @@ impl Editor {
         }));
     }
 
-    /// The file's conflicts, found again only after the text changes.
-    pub fn conflicts(&self) -> Rc<[Conflict]> {
+    /// The file's conflicts as drawn: none while a big file's are still being looked for.
+    pub fn conflicts_shown(&self) -> Rc<[Conflict]> {
         if self.finding_conflicts.is_some() && self.conflicts.borrow().0 == u64::MAX {
             return Rc::from([]);
         }
+        self.conflicts()
+    }
+
+    /// The file's conflicts, found again only after the text changes.
+    pub fn conflicts(&self) -> Rc<[Conflict]> {
         let mut known = self.conflicts.borrow_mut();
         let revision = self.buffer.revision();
         if known.0 != revision {

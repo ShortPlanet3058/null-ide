@@ -9823,7 +9823,7 @@ impl Render for Workspace {
 
         let root = self.tree.read(cx).root().to_path_buf();
         let lsp_status = self.language_status(cx);
-        let conflicts = self.active_editor().map_or(0, |e| e.read(cx).conflicts().len());
+        let conflicts = self.active_editor().map_or(0, |e| e.read(cx).conflicts_shown().len());
         // Where the caret is in the code, after the file's name: `Shop › checkout`, each
         // with its row (a click goes there).
         let trail: Vec<(String, usize)> = self

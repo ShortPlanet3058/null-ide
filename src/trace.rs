@@ -13,7 +13,7 @@ pub fn start() {
 }
 
 pub fn on() -> bool {
-    *ON.get_or_init(|| std::env::var_os("NULL_TRACE").is_some())
+    *ON.get_or_init(|| std::env::var_os("NULL_TRACE").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// Says `what` happened, and when since the start.
