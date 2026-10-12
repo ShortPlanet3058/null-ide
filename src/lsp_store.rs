@@ -219,7 +219,7 @@ fn typescript_for(program: &Path, root: &Path) -> Option<String> {
         return None;
     }
     // `…/node_modules/.bin/typescript-language-server` → `…/node_modules/typescript-language-server/lib/cli.mjs`.
-    let real = std::fs::canonicalize(program).ok()?;
+    let real = dunce::canonicalize(program).ok()?;
     let modules = real.ancestors().find(|dir| dir.file_name().is_some_and(|n| n == "node_modules"))?;
     let tsserver = modules.join("typescript/lib/tsserver.js");
     tsserver.is_file().then(|| tsserver.display().to_string())
@@ -1420,7 +1420,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("b")).unwrap();
         std::fs::create_dir_all(root.join("a")).unwrap();
-        let made = std::process::Command::new("python3").args(["-m", "venv"]).arg(root.join("a/.venv")).status();
+        let made = crate::tools::command("python3").args(["-m", "venv"]).arg(root.join("a/.venv")).status();
         assert!(made.unwrap().success());
         let lib = std::fs::read_dir(root.join("a/.venv/lib")).unwrap().next().unwrap().unwrap().path();
         std::fs::write(lib.join("site-packages/onlya.py"), "VALUE = 1\n").unwrap();
@@ -1494,7 +1494,7 @@ mod tests {
         let root = crate::tools::test_dir("lsp-types-around");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let path = root.join("shapes.cpp");
         let text = "struct Base {};\nstruct Mid : Base {};\nstruct Leaf : Mid {};\nint main() { Leaf l; (void)l; }\n";
         std::fs::write(&path, text).unwrap();

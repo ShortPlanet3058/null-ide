@@ -556,7 +556,7 @@ mod tests {
         type_keys(cx, " id");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "<main-x id><br></main-x>"));
         for _ in 0..12 {
-            cx.simulate_keystrokes("cmd-z");
+            cx.simulate_keystrokes("secondary-z");
             e.update(cx, |e, _| {
                 let text = e.buffer.to_string();
                 let opening = text.trim_start_matches('<').split(['>', ' ']).next().unwrap_or("");

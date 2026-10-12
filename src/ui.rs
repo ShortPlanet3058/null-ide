@@ -123,6 +123,15 @@ pub fn keys(action: &dyn gpui::Action, fallback: &str, cx: &gpui::App) -> String
     crate::palette::shortcut(action, cx).unwrap_or_else(|| fallback.to_string())
 }
 
+/// A hint's key glyphs as the platform names them: the same on the Mac; elsewhere "↵ open"
+/// reads "Enter open" and "Ctrl+⌫" "Ctrl+Backspace".
+pub fn key_words(text: &str) -> String {
+    if cfg!(target_os = "macos") {
+        return text.to_string();
+    }
+    text.replace('↵', "Enter").replace('⌫', "Backspace").replace('⇥', "Tab")
+}
+
 /// "⌘. resolves each", with the keys that do.
 pub fn resolve_each(cx: &gpui::App) -> String {
     format!("{} resolves each", keys(&crate::editor::QuickFix, "⌘.", cx))

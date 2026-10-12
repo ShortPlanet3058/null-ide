@@ -151,9 +151,9 @@ mod tests {
         let caret_line = |cx: &mut gpui::VisualTestContext| e.read_with(cx, |e, _| e.caret_point().0);
         let go = |cx: &mut gpui::VisualTestContext, line: usize| e.update(cx, |e, cx| e.go_to_line(line + 1, cx));
         go(cx, 1);
-        cx.simulate_keystrokes("cmd-f2");
+        cx.simulate_keystrokes("secondary-f2");
         go(cx, 3);
-        cx.simulate_keystrokes("cmd-f2");
+        cx.simulate_keystrokes("secondary-f2");
         assert_eq!(e.read_with(cx, |e, _| e.bookmarks.clone()), vec![1, 3]);
         cx.simulate_keystrokes("f3");
         assert_eq!(caret_line(cx), 1, "round from the last to the first");
@@ -168,7 +168,7 @@ mod tests {
         });
         assert_eq!(e.read_with(cx, |e, _| e.bookmarks.clone()), vec![2, 4]);
         go(cx, 4);
-        cx.simulate_keystrokes("cmd-f2");
+        cx.simulate_keystrokes("secondary-f2");
         assert_eq!(e.read_with(cx, |e, _| e.bookmarks.clone()), vec![2]);
         assert!(e.read_with(cx, |e, _| e.is_bookmarked(2)));
         // Undo puts it back where it was then; redo, where it went.

@@ -47,15 +47,7 @@ pub(super) struct Lenses {
 
 /// Arguments joined as a shell line, each quoted when it needs to be.
 fn shell_line(args: &[String]) -> String {
-    args.iter()
-        .map(|a| {
-            let plain = !a.is_empty()
-                && a.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '@' | '+'));
-            if plain { a.clone() } else { format!("'{}'", a.replace('\'', r"'\''")) }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    crate::shell::line(args, crate::shell::kind())
 }
 
 /// What a lens's command does here: rust-analyzer's run and references commands, and any
@@ -84,22 +76,16 @@ pub fn action_of(lens: &lsp_types::CodeLens, offset: usize) -> Option<LensItem> 
                 line.push_str(&format!(" -- {}", shell_line(&after)));
             }
             // What it's run with (UPDATE_EXPECT=1 to update a test's snapshot), and where.
-            let environment: Vec<String> = args
+            let environment: Vec<(String, String)> = args
                 .get("environment")
                 .and_then(|v| v.as_object())
-                .map(|vars| {
-                    vars.iter()
-                        .filter_map(|(k, v)| Some(format!("{k}={}", shell_line(&[v.as_str()?.to_string()]))))
-                        .collect()
-                })
+                .map(|vars| vars.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
                 .unwrap_or_default();
-            if !environment.is_empty() {
-                line = format!("{} {line}", environment.join(" "));
-            }
+            line = crate::shell::with_env(&environment, &line, crate::shell::kind());
             let folder = args.get("cwd").or_else(|| args.get("workspaceRoot")).and_then(|v| v.as_str());
             if let Some(folder) = folder {
-                // In a subshell: the terminal stays where it was.
-                line = format!("(cd {} && {line})", shell_line(&[folder.to_string()]));
+                // The terminal stays where it was.
+                line = crate::shell::in_folder(folder, &line, crate::shell::kind());
             }
             LensAction::Run(line)
         }
@@ -311,6 +297,7 @@ mod tests {
 
     /// The caret's line shows its lenses; a click on one does what it says.
     #[gpui::test]
+    #[cfg(unix)] // (POSIX command lines: PowerShell's are tested in `shell`.)
     fn a_lens_is_clicked(cx: &mut gpui::TestAppContext) {
         use crate::buffer::Buffer;
         cx.update(|cx| {

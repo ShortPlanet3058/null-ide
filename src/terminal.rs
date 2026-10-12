@@ -52,7 +52,6 @@ pub fn bind_keys(cx: &mut App) {
         keys.extend([
             KeyBinding::new("ctrl-shift-c", Copy, ctx),
             KeyBinding::new("ctrl-shift-v", Paste, ctx),
-            KeyBinding::new("ctrl-shift-f", Find, ctx),
             KeyBinding::new("ctrl-up", PreviousCommand, ctx),
             KeyBinding::new("ctrl-down", NextCommand, ctx),
         ]);
@@ -60,11 +59,21 @@ pub fn bind_keys(cx: &mut App) {
         // deletes a word, Ctrl+B moves back...). Inside the terminal, give them back.
         for key in "abcdefghijklmnopqrstuvwxyz,=-0".chars() {
             keys.push(KeyBinding::new(&format!("ctrl-{key}"), NoAction {}, ctx));
-            // Ctrl+Shift+C and V stay copy and paste.
-            if key != 'c' && key != 'v' {
+            // Ctrl+Shift+C and V stay copy and paste, F find, K clear.
+            if !"cvfk".contains(key) {
                 keys.push(KeyBinding::new(&format!("ctrl-shift-{key}"), NoAction {}, ctx));
             }
         }
+        // (Bound after the loop: the later binding is the one that counts.)
+        keys.extend([
+            KeyBinding::new("ctrl-shift-f", Find, ctx),
+            KeyBinding::new("ctrl-shift-k", Clear, ctx),
+            KeyBinding::new("f3", FindNext, ctx),
+            KeyBinding::new("shift-f3", FindPrevious, ctx),
+            // Ctrl+←/→ (Ctrl+⌘ arrows' place off the Mac) move by words in the shell.
+            KeyBinding::new("ctrl-left", NoAction {}, ctx),
+            KeyBinding::new("ctrl-right", NoAction {}, ctx),
+        ]);
     }
     // In the find field: Enter and Shift+Enter step through, Escape goes back to the shell.
     let find = Some("TerminalFind");
@@ -399,7 +408,13 @@ impl Shell {
     pub fn start(cwd: PathBuf) -> std::io::Result<Self> {
         // Without `$SHELL` (an app started oddly), the account's own shell rather than a
         // `login` wrapper, so the shell is the process watched for its prompt.
-        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell);
+        // (On Windows: PowerShell, whatever a `$SHELL` from Git Bash says.)
+        let shell = if cfg!(windows) {
+            Some(crate::shell::windows_program())
+        } else {
+            std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell)
+        };
+        let login = if cfg!(windows) { "-NoLogo" } else { "-l" };
         let mut env = HashMap::from([
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -412,7 +427,7 @@ impl Shell {
         }
         let options = tty::Options {
             // A login shell, like a terminal app opens, so PATH and the prompt are set up.
-            shell: shell.map(|program| tty::Shell::new(program, vec!["-l".into()])),
+            shell: shell.map(|program| tty::Shell::new(program, vec![login.into()])),
             working_directory: Some(cwd.clone()),
             drain_on_exit: false,
             env,
@@ -836,8 +851,8 @@ impl TerminalView {
             return folder;
         }
         let shown = self.title.rsplit(':').next().map(str::trim).unwrap_or("");
-        let shown = match (shown.strip_prefix("~/"), std::env::var_os("HOME")) {
-            (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        let shown = match (shown.strip_prefix("~/"), crate::tools::home_dir()) {
+            (Some(rest), Some(home)) => home.join(rest),
             _ => PathBuf::from(shown),
         };
         if shown.is_absolute() && shown.is_dir() { shown } else { self.root.clone() }
@@ -1084,7 +1099,7 @@ impl TerminalView {
     }
 
     fn find_file(&self, path: &str) -> Option<PathBuf> {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::tools::home_dir();
         let expand = |p: &str| match (p.strip_prefix("~/"), &home) {
             (Some(rest), Some(home)) => home.join(rest),
             _ => PathBuf::from(p),
@@ -1318,13 +1333,13 @@ impl Render for TerminalView {
                 // (As they really are: /tmp and /private/tmp are one.)
                 // (Its folder as it really is, /tmp and /private/tmp being one; a link itself
                 // as it is, not what it points to.)
-                let real = |p: PathBuf| match (p.parent().and_then(|d| d.canonicalize().ok()), p.file_name()) {
+                let real = |p: PathBuf| match (p.parent().and_then(|d| dunce::canonicalize(d).ok()), p.file_name()) {
                     (Some(folder), Some(name)) => folder.join(name),
                     _ => p,
                 };
                 let paths: Vec<PathBuf> = dragged.paths().into_iter().map(real).collect();
                 let folder = this.shell_folder();
-                let paths = within(&paths, &folder.canonicalize().unwrap_or(folder));
+                let paths = within(&paths, &dunce::canonicalize(&folder).unwrap_or(folder));
                 this.write(shell_words(&paths).into_bytes());
                 window.focus(&this.focus_handle);
             }))
@@ -1877,13 +1892,9 @@ fn within(paths: &[PathBuf], folder: &std::path::Path) -> Vec<PathBuf> {
 }
 
 fn shell_words(paths: &[std::path::PathBuf]) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%~".contains(c);
     paths
         .iter()
-        .map(|path| {
-            let path = path.display().to_string();
-            if path.chars().all(plain) { format!("{path} ") } else { format!("'{}' ", path.replace('\'', r"'\''")) }
-        })
+        .map(|path| format!("{} ", crate::shell::quote(&path.display().to_string(), crate::shell::kind())))
         .collect()
 }
 
@@ -1904,7 +1915,7 @@ mod tests {
         ];
         assert_eq!(
             shell_words(&within(&paths, &folder)),
-            "src/main.rs './-odd name.txt' . /elsewhere/notes.md ./~backup.txt "
+            "src/main.rs './-odd name.txt' . /elsewhere/notes.md './~backup.txt' "
         );
     }
 

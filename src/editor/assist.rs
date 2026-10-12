@@ -840,7 +840,7 @@ impl Editor {
                                     .flex_none()
                                     .text_size(px(ui::T_XS))
                                     .text_color(if prompt.failed.is_some() { theme.error } else { theme.muted })
-                                    .child(hint.to_string()),
+                                    .child(ui::key_words(hint)),
                             )
                             .into_any_element(),
                     );

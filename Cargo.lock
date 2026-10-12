@@ -3818,6 +3818,7 @@ dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
  "chrono",
+ "dunce",
  "futures",
  "gpui",
  "ignore",

@@ -26,6 +26,26 @@ pub fn test_dir(name: &str) -> PathBuf {
     this_run.join(name)
 }
 
+/// A program to run in the background: on Windows without a console window of its own
+/// flashing up (git, language servers and the rest are console programs).
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
+/// The person's home folder: `$HOME`, or on Windows (where it's rarely set) `%USERPROFILE%`.
+pub fn home_dir() -> Option<PathBuf> {
+    let var = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    var("HOME").or_else(|| if cfg!(windows) { var("USERPROFILE") } else { None })
+}
+
 /// Where Null keeps what it installs itself (language servers), never on the system:
 /// `~/Library/Application Support/Null` on macOS, `$XDG_DATA_HOME/null` (or
 /// `~/.local/share/null`) on Linux, `%LOCALAPPDATA%\Null` on Windows.
@@ -38,7 +58,7 @@ pub fn data_dir() -> Option<PathBuf> {
     if cfg!(test) {
         return Some(crate::tools::test_dir("test-data"));
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::tools::home_dir();
     if cfg!(target_os = "macos") {
         Some(home?.join("Library/Application Support/Null"))
     } else if cfg!(windows) {
@@ -54,7 +74,7 @@ pub fn data_dir() -> Option<PathBuf> {
 pub fn search_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> =
         std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::tools::home_dir() {
         for dir in
             [".local/bin", ".cargo/bin", "go/bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", "bin"]
         {

@@ -130,7 +130,7 @@ fn anchor_at_end(before: &str) -> Option<(&str, &str)> {
 /// the project's top (`.git`). Outside a repository, only from the file's own folder: the
 /// list opens by itself, so not from any folder that happens to be above.
 fn folder_for(written: &str, dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = crate::tools::home_dir();
     let path = match (written.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => home.join(rest),
         _ => std::path::PathBuf::from(written),
@@ -713,7 +713,7 @@ mod tests {
             assert_eq!(e.buffer.to_string(), "import { useState } from \"react\";\nconst a = useState(0)\n");
             assert!(!e.in_snippet());
         });
-        cx.simulate_keystrokes("cmd-z cmd-z");
+        cx.simulate_keystrokes("secondary-z secondary-z");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "const a = useState(initial)\n"));
     }
 

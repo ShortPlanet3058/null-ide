@@ -96,7 +96,7 @@ const CHEVRON: &str = "icons/chevron-right.svg";
 /// How long a folder's arrow takes to turn when it opens or closes.
 const TURN: Duration = Duration::from_millis(160);
 /// Never worth showing in a project tree.
-const ALWAYS_HIDDEN: &[&str] = &[".git", ".DS_Store"];
+const ALWAYS_HIDDEN: &[&str] = &[".git", ".DS_Store", "Thumbs.db", "desktop.ini"];
 pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Reveal in Finder"
 } else if cfg!(target_os = "windows") {
@@ -243,6 +243,31 @@ fn runs_when_opened(path: &Path) -> bool {
     if matches!(ext.as_str(), "sh" | "command" | "tool" | "zsh" | "bash" | "app" | "pkg") {
         return true;
     }
+    // Windows runs these when they're opened (scripts too: .js and .vbs by Windows Script Host).
+    if cfg!(windows)
+        && matches!(
+            ext.as_str(),
+            "exe"
+                | "bat"
+                | "cmd"
+                | "com"
+                | "ps1"
+                | "msi"
+                | "lnk"
+                | "vbs"
+                | "vbe"
+                | "js"
+                | "jse"
+                | "wsf"
+                | "scr"
+                | "pif"
+                | "reg"
+                | "hta"
+                | "cpl"
+        )
+    {
+        return true;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -264,7 +289,7 @@ pub fn opens_in_browser(path: &Path) -> bool {
 pub fn open_in_browser(path: &Path, cx: &mut App) {
     #[cfg(target_os = "macos")]
     if let Some(browser) = default_browser() {
-        std::process::Command::new("open").arg("-a").arg(browser).arg(path).spawn().ok();
+        crate::tools::command("open").arg("-a").arg(browser).arg(path).spawn().ok();
         return;
     }
     if let Ok(url) = url::Url::from_file_path(path) {
@@ -326,7 +351,7 @@ impl MenuItem {
             MenuItem::Hide => "Hide from Files",
             MenuItem::DiscardChanges => "Discard Changes…",
             MenuItem::CollapseAll => "Collapse All Folders",
-            MenuItem::Trash => "Move to Trash",
+            MenuItem::Trash => fs_ops::MOVE_TO_TRASH,
             MenuItem::CopyPaths => "Copy Paths",
             MenuItem::Compare => "Compare the Two",
         }
@@ -596,7 +621,7 @@ impl FileTree {
             // The folders gone through, as they really are: a link back up ends the chain.
             let mut seen: Vec<PathBuf> = Vec::new();
             while expanded && !self.new_item_in(&entry.path) {
-                match entry.path.canonicalize() {
+                match dunce::canonicalize(&entry.path) {
                     Ok(real) if !seen.contains(&real) => seen.push(real),
                     _ => break,
                 }
@@ -733,7 +758,7 @@ impl FileTree {
     ) {
         let Some(entry) = self.entry_at(ix).cloned() else { return };
         // ⌘-click picks one more (or lets one go); ⇧-click, all from the one picked to here.
-        if modifiers.platform || modifiers.shift {
+        if modifiers.secondary() || modifiers.shift {
             self.menu = None;
             window.focus(&self.focus_handle);
             if modifiers.shift {
@@ -1006,7 +1031,11 @@ impl FileTree {
             [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             many => format!("{} items", many.len()),
         };
-        let note = if cut { format!("{what}: ⌘V in a folder moves it there.") } else { format!("Copied {what}.") };
+        let note = if cut {
+            format!("{what}: {} in a folder moves it there.", crate::ui::keys(&PasteFiles, "⌘V", cx))
+        } else {
+            format!("Copied {what}.")
+        };
         cx.set_global(FileClipboard { paths, cut });
         cx.emit(FileTreeEvent::Notice(note));
     }
@@ -1138,9 +1167,9 @@ impl FileTree {
         let what = if entry.is_dir { "folder" } else { "file" };
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            &format!("Move the {what} “{}” to the Trash?", entry.name),
-            Some("You can restore it from the Trash."),
-            &["Move to Trash", "Cancel"],
+            &format!("Move the {what} “{}” to the {}?", entry.name, fs_ops::TRASH),
+            Some(&format!("You can restore it from the {}.", fs_ops::TRASH)),
+            &[fs_ops::MOVE_TO_TRASH, "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1156,9 +1185,9 @@ impl FileTree {
     fn trash_picked(&mut self, picked: Vec<Entry>, window: &mut Window, cx: &mut Context<Self>) {
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            &format!("Move these {} items to the Trash?", picked.len()),
-            Some("You can restore them from the Trash."),
-            &["Move to Trash", "Cancel"],
+            &format!("Move these {} items to the {}?", picked.len(), fs_ops::TRASH),
+            Some(&format!("You can restore them from the {}.", fs_ops::TRASH)),
+            &[fs_ops::MOVE_TO_TRASH, "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1190,8 +1219,8 @@ impl FileTree {
                 // One line says it all (a second would replace the first).
                 let mut notice = match moved {
                     0 => String::new(),
-                    1 => "Moved 1 item to the Trash".to_string(),
-                    n => format!("Moved {n} items to the Trash"),
+                    1 => format!("Moved 1 item to the {}", fs_ops::TRASH),
+                    n => format!("Moved {n} items to the {}", fs_ops::TRASH),
                 };
                 if !problems.is_empty() {
                     if !notice.is_empty() {
@@ -1223,7 +1252,7 @@ impl FileTree {
                 self.selected = self.entry_at(next).map(|e| e.path.clone());
                 window.focus(&self.focus_handle);
                 cx.emit(FileTreeEvent::Trashed(entry.path.clone()));
-                cx.emit(FileTreeEvent::Notice(format!("Moved {} to the Trash.", entry.name)));
+                cx.emit(FileTreeEvent::Notice(format!("Moved {} to the {}.", entry.name, fs_ops::TRASH)));
                 cx.notify();
             }
             Err(message) => cx.emit(FileTreeEvent::Notice(message)),
@@ -1921,7 +1950,7 @@ mod tests {
             assert_eq!(names(t), ["a.txt", "b.txt", "c.txt"]);
             t.trash(&Trash, window, cx);
         });
-        cx.simulate_prompt_answer("Move to Trash");
+        cx.simulate_prompt_answer(fs_ops::MOVE_TO_TRASH);
         cx.run_until_parked();
         assert!(!dir.join("a.txt").exists() && !dir.join("b.txt").exists() && !dir.join("c.txt").exists());
         assert!(dir.join("d.txt").exists());

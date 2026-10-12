@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -32,18 +32,31 @@ pub struct DebugAdapter {
     pending: Pending,
 }
 
-/// The debugger Null drives: lldb-dap, on the PATH or (on macOS) the one with Xcode.
+/// The debugger Null drives: lldb-dap, on the PATH or (on macOS) the one with Xcode; on
+/// Linux also as distributions name it after LLVM's version (lldb-dap-18).
 pub fn find_adapter() -> Option<PathBuf> {
     crate::tools::find("lldb-dap")
-        .filter(|p| !p.starts_with("/usr/bin"))
+        // (The Mac's /usr/bin one only asks to install Xcode's tools.)
+        .filter(|p| !cfg!(target_os = "macos") || !p.starts_with("/usr/bin"))
         .or_else(|| crate::servers::xcrun_find("lldb-dap"))
         .or_else(|| crate::tools::find("lldb-vscode"))
+        .or_else(|| (14..=22).rev().find_map(|v| crate::tools::find(&format!("lldb-dap-{v}"))))
+        .or_else(|| (14..=19).rev().find_map(|v| crate::tools::find(&format!("lldb-vscode-{v}"))))
 }
+
+/// Where to get lldb-dap, as each platform has it.
+pub const GET_ADAPTER: &str = if cfg!(target_os = "macos") {
+    "Debugging needs lldb-dap, which comes with Xcode. It wasn't found."
+} else if cfg!(windows) {
+    "Debugging needs lldb-dap, which comes with LLVM (llvm.org, or “winget install LLVM.LLVM”). It wasn't found."
+} else {
+    "Debugging needs lldb-dap, which comes with LLDB (your distribution's lldb package). It wasn't found."
+};
 
 impl DebugAdapter {
     /// Starts the adapter and returns it with a stream of its events and requests.
     pub fn spawn(program: &Path, cwd: &Path) -> io::Result<(Self, mpsc::UnboundedReceiver<AdapterMessage>)> {
-        let mut child = Command::new(program)
+        let mut child = crate::tools::command(program)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

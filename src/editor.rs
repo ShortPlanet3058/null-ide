@@ -828,14 +828,15 @@ type DiskStamp = (u64, std::time::SystemTime);
 /// Whether the file can't be written by Null (its permissions, its owner, a read-only
 /// disk): its tab shows a lock.
 fn is_read_only(path: &Path) -> bool {
-    #[cfg(target_os = "macos")]
+    // (Asked of the system on Unix: the owner and groups count, not only the mode bits.)
+    #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
         let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
         // SAFETY: a NUL-ended path, read only for the call.
         path.exists() && unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } != 0
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     {
         std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly())
     }
@@ -3822,8 +3823,9 @@ impl Editor {
             let indent = self.buffer.line_text(line).chars().take_while(|c| c.is_whitespace()).count();
             return self.set_caret_point((line, indent), cx);
         }
-        // A color's square: pick another in the Mac's color panel.
-        if event.click_count == 1
+        // A color's square: pick another in the Mac's color panel (none elsewhere yet).
+        if cfg!(target_os = "macos")
+            && event.click_count == 1
             && !event.modifiers.modified()
             && let Some((start, written, color)) = self.swatch_at(event.position)
         {
@@ -5576,13 +5578,13 @@ mod tests {
             window.focus(&e.focus_handle);
             e.selection = Selection::caret(e.buffer.offset(2, 8));
         });
-        cx.simulate_keystrokes("cmd-shift-x");
+        cx.simulate_keystrokes("secondary-shift-x");
         let now = |cx: &mut gpui::VisualTestContext| e.read_with(cx, |e, _| e.buffer.to_string());
         assert_eq!(now(cx), "# Shop\n\n- [x] milk\n- eggs\nTea\n");
         e.update(cx, |e, _| assert_eq!(e.caret_point(), (2, 8), "the caret stays by its text"));
         // The three lines: the first was ticked, so it unticks and the others become tasks.
         e.update(cx, |e, _| e.selection = Selection { anchor: e.buffer.offset(2, 0), head: e.buffer.offset(5, 0) });
-        cx.simulate_keystrokes("cmd-shift-x");
+        cx.simulate_keystrokes("secondary-shift-x");
         assert_eq!(now(cx), "# Shop\n\n- [ ] milk\n- [ ] eggs\n- [ ] Tea\n");
         // ⌘-click on the second box.
         cx.run_until_parked();
@@ -5654,7 +5656,7 @@ mod tests {
         e.update_in(cx, |e, window, _| window.focus(&e.focus_handle));
         cx.simulate_keystrokes(if cfg!(target_os = "macos") { "alt-cmd-l" } else { "alt-shift-f" });
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "| a   | bb  |\n| --- | --- |\n| ccc | d   |\n"));
-        cx.simulate_keystrokes("cmd-z");
+        cx.simulate_keystrokes("secondary-z");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), text));
     }
 
@@ -5701,19 +5703,19 @@ mod tests {
             window.focus(&e.focus_handle);
             e.selection = Selection { anchor: 8, head: 13 };
         });
-        cx.simulate_keystrokes("alt-cmd-/");
+        cx.simulate_keystrokes("alt-secondary-/");
         e.update(cx, |e, _| {
             assert_eq!(e.buffer.line_text(0), "let a = /* b + c */;");
             assert_eq!(e.buffer.slice(e.selection.range()), "/* b + c */");
         });
-        cx.simulate_keystrokes("alt-cmd-/");
+        cx.simulate_keystrokes("alt-secondary-/");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), text));
         // Two whole lines.
         e.update(cx, |e, _| e.selection = Selection { anchor: 0, head: 24 });
-        cx.simulate_keystrokes("alt-cmd-/");
+        cx.simulate_keystrokes("alt-secondary-/");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "/* let a = b + c;\nlet d = 1; */\n"));
         // ⌘/ still uses line comments.
-        cx.simulate_keystrokes("cmd-z cmd-/");
+        cx.simulate_keystrokes("secondary-z secondary-/");
         e.update(cx, |e, _| assert!(e.buffer.to_string().starts_with("// let a")));
     }
 
@@ -5882,7 +5884,7 @@ mod tests {
             window.focus(&e.focus_handle);
             e.selection = Selection::caret(6);
         });
-        cx.simulate_keystrokes("cmd-e cmd-g");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-e cmd-g" } else { "ctrl-f3 f3" });
         e.update(cx, |e, _| {
             assert_eq!(e.buffer.slice(e.selection.range()), "total");
             assert_eq!(e.selection.range(), 31..36);
@@ -5909,9 +5911,9 @@ mod tests {
         let (second, second_window) = open(cx, "b.py", "x = 2\nprint(total)\n");
         let mut first_cx = gpui::VisualTestContext::from_window(first_window, cx);
         first.update(&mut first_cx, |e, _| e.selection = Selection::caret(2));
-        first_cx.simulate_keystrokes("cmd-e");
+        first_cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-e" } else { "ctrl-f3" });
         let mut second_cx = gpui::VisualTestContext::from_window(second_window, cx);
-        second_cx.simulate_keystrokes("cmd-g");
+        second_cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-g" } else { "f3" });
         second.update(&mut second_cx, |e, _| assert_eq!(e.buffer.slice(e.selection.range()), "total"));
     }
 
@@ -6006,7 +6008,7 @@ mod tests {
             gpui::ImageFormat::Png,
             png.clone(),
         )));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         let text = e.read_with(cx, |e, _| e.buffer.to_string());
         let name = text.strip_prefix("See: ![").and_then(|rest| rest.split(']').next()).unwrap_or_default().to_string();
         assert!(name.starts_with("pasted-"), "{text}");
@@ -6269,11 +6271,11 @@ mod tests {
             e.selection = Selection::caret(7);
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(cells.to_string()));
         });
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         editor.read_with(cx, |e, _| {
             assert_eq!(e.buffer.to_string(), "Prices:\n\n| Item | Qty |\n| ---- | --- |\n| Tea  | 2   |\n")
         });
-        cx.simulate_keystrokes("alt-shift-cmd-v");
+        cx.simulate_keystrokes("alt-shift-secondary-v");
         editor.read_with(cx, |e, _| assert!(e.buffer.to_string().ends_with("| Tea  | 2   |\nItem\tQty\nTea\t2\n")));
     }
 
@@ -6568,7 +6570,7 @@ mod tests {
             window.focus(&e.focus_handle);
             e.selection = Selection::caret(7);
         });
-        cx.simulate_keystrokes("cmd-. enter");
+        cx.simulate_keystrokes("secondary-. enter");
         cx.run_until_parked();
         editor.read_with(cx, |e, _| assert!(e.buffer.to_string().starts_with("I saw the cat `teh`")));
 

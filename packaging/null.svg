@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Null's icon (as packaging/macos/make-icon.swift draws it): a dark tile holding
+       nothing but an amber caret, the editor waiting for you. For Linux and Windows. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1b20"/>
+      <stop offset="1" stop-color="#09090b"/>
+    </linearGradient>
+    <filter id="glow" x="-200%" y="-50%" width="500%" height="200%">
+      <feGaussianBlur stdDeviation="45"/>
+    </filter>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+  </defs>
+  <rect x="100" y="112" width="824" height="824" rx="185" fill="#000" opacity="0.45" filter="url(#shadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184" fill="none" stroke="#fff" stroke-opacity="0.07" stroke-width="3"/>
+  <rect x="490" y="342" width="44" height="340" rx="22" fill="#f2b35b" opacity="0.55" filter="url(#glow)"/>
+  <rect x="490" y="342" width="44" height="340" rx="22" fill="#f2b35b"/>
+</svg>

@@ -1,5 +1,8 @@
 // Ranges of text are everywhere here: a list of one range is a list, not a mistake.
 #![allow(clippy::single_range_in_vec_init)]
+// A window app on Windows: no console window opening beside it (debug builds keep one,
+// for what they print).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod ai;
 mod ai_agent;
@@ -30,6 +33,7 @@ mod github;
 mod github_page;
 mod highlight;
 mod html_markdown;
+mod instance;
 mod json_format;
 mod key_prompt;
 mod keymap;
@@ -62,6 +66,7 @@ mod servers;
 mod session;
 mod settings;
 mod settings_panel;
+mod shell;
 mod snippets;
 mod spell;
 mod svg_image;
@@ -79,6 +84,7 @@ mod ui;
 mod user_keys;
 mod vscode_import;
 mod welcome;
+mod window_frame;
 mod word_blocks;
 mod workspace;
 mod wrap;
@@ -165,8 +171,14 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
     let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
     let Some(arg) = arg else {
         // Opened from the Finder (or the Dock), there's no folder to go by: the last project.
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let from_finder = cwd == Path::new("/") || Some(&cwd) == home.as_ref();
+        // (From Windows' Start menu or Explorer the folder is Null's own, or System32.)
+        let home = crate::tools::home_dir();
+        let own = std::env::current_exe().ok().and_then(|e| e.parent().map(absolute));
+        let system = std::env::var_os("SystemRoot").map(|r| absolute(&PathBuf::from(r)));
+        let from_finder = cwd.parent().is_none()
+            || Some(&cwd) == home.as_ref()
+            || Some(&cwd) == own.as_ref()
+            || system.is_some_and(|r| cwd.starts_with(r));
         if from_finder {
             if let Some(last) = session::last_project() {
                 return (last, None);
@@ -212,10 +224,10 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
 /// The path with `.`, `..` and links resolved. A file that doesn't exist yet (`null new.rs`)
 /// keeps its name, under its resolved folder.
 fn absolute(path: &Path) -> PathBuf {
-    if let Ok(path) = std::fs::canonicalize(path) {
+    if let Ok(path) = dunce::canonicalize(path) {
         return path;
     }
-    match (path.parent().and_then(|p| std::fs::canonicalize(p).ok()), path.file_name()) {
+    match (path.parent().and_then(|p| dunce::canonicalize(p).ok()), path.file_name()) {
         (Some(parent), Some(name)) => parent.join(name),
         _ => path.to_path_buf(),
     }
@@ -252,6 +264,12 @@ fn main() {
     });
     let Opening { root, file, place, wait } = resolve_args();
     trace::mark("what to open worked out");
+    // Off the Mac: a Null already running opens it instead (a waiting one is its own).
+    let request = instance::Request { root: root.clone(), file: file.clone(), place };
+    if !wait && instance::hand_over(&request) {
+        return;
+    }
+    let mut handed = if wait { None } else { instance::listen() };
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
     // or by the `null` command while Null runs: opened in the window.
@@ -282,6 +300,16 @@ fn main() {
             }
         })
         .detach();
+        // What later launches hand over (off the Mac): opened as they would have opened.
+        if let Some(mut handed) = handed.take() {
+            cx.spawn(async move |cx| {
+                use futures::StreamExt;
+                while let Some(request) = handed.next().await {
+                    cx.update(|cx| open_project_window_now(request.root, request.file, request.place, cx)).ok();
+                }
+            })
+            .detach();
+        }
         // Local history past its month goes, now and then.
         std::thread::spawn(local_history::sweep);
         settings::init(cx);
@@ -352,7 +380,7 @@ pub(crate) fn window_on(
     except: Option<gpui::AnyWindowHandle>,
     cx: &gpui::App,
 ) -> Option<gpui::WindowHandle<Workspace>> {
-    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let real = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let root = real(root);
     cx.windows()
         .into_iter()
@@ -386,6 +414,16 @@ fn open_at(
     }
 }
 
+/// What every window shares off the Mac: on Linux, its frame drawn by Null (as on the Mac
+/// and Windows, the title bar is Null's) and a name for the desktop to know its icon by.
+fn frame() -> WindowOptions {
+    WindowOptions {
+        app_id: Some("null".into()),
+        window_decorations: cfg!(target_os = "linux").then_some(gpui::WindowDecorations::Client),
+        ..Default::default()
+    }
+}
+
 /// `null --wait <file>` (git's editor): a window with that file alone, nothing of the
 /// project's session read or written; closing its tab (or the window) quits, and the one
 /// waiting goes on.
@@ -397,7 +435,7 @@ fn open_waiting_window(root: PathBuf, file: Option<PathBuf>, place: Option<(u32,
             traffic_light_position: Some(point(px(16.), px(13.))),
         }),
         window_min_size: Some(size(px(480.), px(320.))),
-        ..Default::default()
+        ..frame()
     };
     let opened = cx.open_window(options, |window, cx| {
         cx.new(|cx| {
@@ -436,7 +474,7 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
             traffic_light_position: Some(point(px(16.), px(13.))),
         }),
         window_min_size: Some(size(px(480.), px(320.))),
-        ..Default::default()
+        ..frame()
     };
     let opened = cx.open_window(options, |window, cx| {
         cx.new(|cx| {

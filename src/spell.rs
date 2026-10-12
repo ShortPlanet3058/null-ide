@@ -14,6 +14,9 @@ use std::sync::{LazyLock, Mutex};
 static READY: AtomicBool = AtomicBool::new(cfg!(test));
 
 /// The checker started (its languages found), once the window is up.
+/// Whether there's a spell checker to ask: the Mac's (Windows' and Linux's to come).
+pub const AVAILABLE: bool = cfg!(target_os = "macos");
+
 pub fn warm() {
     #[cfg(all(target_os = "macos", not(test)))]
     LazyLock::force(&mac::LANGUAGES);

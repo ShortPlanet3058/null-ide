@@ -514,11 +514,18 @@ impl SettingsPanel {
                 div().grid().grid_cols(3).gap(px(16.)).py(px(12.)).children(cards).into_any_element()
             }),
             Self::row(
-                "Match the Mac's light and dark",
+                if cfg!(target_os = "macos") {
+                    "Match the Mac's light and dark"
+                } else {
+                    "Match the system's light and dark"
+                },
                 Some(&if s.match_appearance {
                     format!("Dark: {} · Light: {}. Pick one of each above", s.theme.label(), s.light_theme.label())
                 } else {
-                    "A dark theme in dark mode, a light one in light mode, switching as the Mac does".to_string()
+                    format!(
+                        "A dark theme in dark mode, a light one in light mode, switching as {} does",
+                        if cfg!(target_os = "macos") { "the Mac" } else { "the system" }
+                    )
                 }),
                 Self::toggle("match-appearance", s.match_appearance, &theme, cx, |s| {
                     s.match_appearance = !s.match_appearance;
@@ -663,7 +670,7 @@ impl SettingsPanel {
     fn editor(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = cx.global::<Settings>().clone();
         let theme = cx.global::<Theme>().clone();
-        vec![
+        let mut rows = vec![
             Self::heading("Text", &theme),
             Self::row(
                 "Wrap long lines",
@@ -774,29 +781,40 @@ impl SettingsPanel {
             ),
             Self::row(
                 "Smart quotes and dashes",
-                Some("In Markdown and text, \"quotes\" curl as set on the Mac and -- becomes —; never in code"),
+                Some(if cfg!(target_os = "macos") {
+                    "In Markdown and text, \"quotes\" curl as set on the Mac and -- becomes —; never in code"
+                } else {
+                    "In Markdown and text, \"quotes\" become curly “ ” and -- becomes —; never in code"
+                }),
                 Self::toggle("smart-punctuation", s.smart_punctuation, &theme, cx, |s| {
                     s.smart_punctuation = !s.smart_punctuation
                 }),
                 &theme,
             ),
-            Self::row(
-                "Spelling",
-                Some(&format!(
-                    "Marks misspelled words in Markdown and text; {} on one offers corrections",
-                    ui::keys(&crate::editor::QuickFix, "⌘.", cx)
-                )),
-                Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),
-                &theme,
-            ),
-            Self::row(
-                "Spelling in comments",
-                Some("Code's comments are checked too"),
-                Self::toggle("spell-check-comments", s.spell_check_comments, &theme, cx, |s| {
-                    s.spell_check_comments = !s.spell_check_comments
-                }),
-                &theme,
-            ),
+        ];
+        // (The spell checker is the Mac's own: none to offer elsewhere yet.)
+        if crate::spell::AVAILABLE {
+            rows.extend([
+                Self::row(
+                    "Spelling",
+                    Some(&format!(
+                        "Marks misspelled words in Markdown and text; {} on one offers corrections",
+                        ui::keys(&crate::editor::QuickFix, "⌘.", cx)
+                    )),
+                    Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),
+                    &theme,
+                ),
+                Self::row(
+                    "Spelling in comments",
+                    Some("Code's comments are checked too"),
+                    Self::toggle("spell-check-comments", s.spell_check_comments, &theme, cx, |s| {
+                        s.spell_check_comments = !s.spell_check_comments
+                    }),
+                    &theme,
+                ),
+            ]);
+        }
+        rows.extend([
             Self::heading("Guides", &theme),
             Self::row(
                 "Indent guides",
@@ -873,7 +891,10 @@ impl SettingsPanel {
             Self::heading("Saving", &theme),
             Self::row(
                 "Save automatically",
-                Some("Files with a name save by themselves; ⌘S still formats first when that's on"),
+                Some(&format!(
+                    "Files with a name save by themselves; {} still formats first when that's on",
+                    ui::keys(&crate::editor::Save, "⌘S", cx)
+                )),
                 {
                     use crate::settings::AutoSave;
                     Self::choices(
@@ -914,7 +935,8 @@ impl SettingsPanel {
                 Self::toggle("keep-unsaved", s.keep_unsaved, &theme, cx, |s| s.keep_unsaved = !s.keep_unsaved),
                 &theme,
             ),
-        ]
+        ]);
+        rows
     }
 
     /// Recommended models as chips under a model field; a click fills the field.
@@ -979,14 +1001,18 @@ impl SettingsPanel {
                 ),
                 (_, Some(path)) => {
                     // Where it is, briefly: "with Xcode", "~/.cargo/bin", "installed by Null".
-                    let home = std::env::var("HOME").unwrap_or_default();
+                    let home = crate::tools::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
                     let full = path.display().to_string();
                     let shown = if full.contains("/Xcode.app/") || full.starts_with("/Library/Developer/") {
                         "with Xcode".to_string()
                     } else if crate::tools::data_dir().is_some_and(|d| path.starts_with(d)) {
                         "installed by Null".to_string()
                     } else {
-                        path.parent().map_or(full.clone(), |d| d.display().to_string()).replacen(&home, "~", 1)
+                        {
+                            let folder = path.parent().map_or(full.clone(), |d| d.display().to_string());
+                            // (No home known: the folder as it is, not "~" glued to its front.)
+                            if home.is_empty() { folder } else { folder.replacen(&home, "~", 1) }
+                        }
                     };
                     (
                         format!("{} · {shown}", server.name),
@@ -1323,7 +1349,8 @@ impl SettingsPanel {
             return;
         }
         if !(m.platform || m.control || m.alt || f_key) {
-            self.key_note = Some((ix, "That key has a use: add ⌘, ⌃ or ⌥".into()));
+            let add = if cfg!(target_os = "macos") { "add ⌘, ⌃ or ⌥" } else { "add Ctrl or Alt" };
+            self.key_note = Some((ix, format!("That key has a use: {add}")));
             return;
         }
         let shown = gpui::KeyBinding::new(&typed, gpui::NoAction, None);
@@ -1364,7 +1391,11 @@ impl SettingsPanel {
             // Your own keys, over the preset's: written in settings.json.
             Self::row(
                 "Your own shortcuts",
-                Some("In settings.json: \"keys\": { \"ctrl-cmd-l\": \"select all occurrences\", \"cmd-d\": null }"),
+                Some(if cfg!(target_os = "macos") {
+                    "In settings.json: \"keys\": { \"ctrl-cmd-l\": \"select all occurrences\", \"cmd-d\": null }"
+                } else {
+                    "In settings.json: \"keys\": { \"ctrl-alt-l\": \"select all occurrences\", \"ctrl-d\": null }"
+                }),
                 Self::button("own-keys", "Edit…", &theme).on_click(cx.listener(|_, _, _, cx| {
                     cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::OpenSettingsFile)))
                 })),
@@ -1380,7 +1411,11 @@ impl SettingsPanel {
                 .pt(px(8.))
                 .text_size(px(ui::T_SM))
                 .text_color(theme.muted)
-                .child("Click a command's keys, then press new ones. Esc keeps them; ⌫ removes them.")
+                .child(if cfg!(target_os = "macos") {
+                    "Click a command's keys, then press new ones. Esc keeps them; ⌫ removes them."
+                } else {
+                    "Click a command's keys, then press new ones. Esc keeps them; Backspace removes them."
+                })
                 .into_any_element(),
         );
         for category in Category::ALL {
@@ -1671,7 +1706,7 @@ mod tests {
         let before = panel.read_with(cx, |p, cx| p.keys_now(0, cx));
         assert!(!before.is_empty(), "Select All Occurrences has a key in the preset");
         panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
-        cx.simulate_keystrokes("ctrl-cmd-l");
+        cx.simulate_keystrokes("ctrl-secondary-l");
         let keys = cx.update(|_, cx| cx.global::<Settings>().keys.clone());
         assert_eq!(keys.get("ctrl-cmd-l"), Some(&Some("editor::SelectAllOccurrences".to_string())));
         let from_it = Some("-editor::SelectAllOccurrences".to_string());
@@ -1679,7 +1714,7 @@ mod tests {
         assert_eq!(panel.read_with(cx, |p, cx| p.keys_now(0, cx)), ["ctrl-cmd-l"]);
         // Save's ⌘S, taken: it says whose it was.
         panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
-        cx.simulate_keystrokes("cmd-s");
+        cx.simulate_keystrokes("secondary-s");
         let note = panel.read_with(cx, |p, _| p.key_note.clone().unwrap().1);
         assert!(note.contains("no longer Save"), "{note}");
         // A plain letter types: refused, nothing written.
@@ -1695,7 +1730,7 @@ mod tests {
             p.record_keys(0, window, cx);
             p.search.update(cx, |search, cx| window.focus(&search.focus_handle(cx)));
         });
-        cx.simulate_keystrokes("cmd-alt-9");
+        cx.simulate_keystrokes("secondary-alt-9");
         assert!(!cx.update(|_, cx| cx.global::<Settings>().keys.contains_key("cmd-alt-9")));
         assert!(panel.read_with(cx, |p, _| p.recording.is_none()), "no longer waiting");
         // ⌫: no keys at all.

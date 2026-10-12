@@ -33,6 +33,7 @@ actions!(
     workspace,
     [
         Open,
+        OpenFolder,
         ShowKeyboardShortcuts,
         CloseTab,
         ToggleSidebar,
@@ -240,9 +241,22 @@ pub fn bind_keys(cx: &mut App) {
         // Arrows rather than ⌘\, which takes several keys on many layouts.
         KeyBinding::new("alt-secondary-i", NewAiTask, ctx),
         KeyBinding::new("ctrl-shift-g", ReviewChanges, ctx),
-        KeyBinding::new("ctrl-secondary-right", MoveTabRight, ctx),
-        KeyBinding::new("ctrl-alt-secondary-right", OpenOnOtherSide, ctx),
-        KeyBinding::new("ctrl-secondary-left", MoveTabLeft, ctx),
+        // (Off the Mac, Ctrl+arrows move by words: Ctrl+Shift+PgUp and PgDn there.)
+        KeyBinding::new(
+            if cfg!(target_os = "macos") { "ctrl-cmd-right" } else { "ctrl-shift-pagedown" },
+            MoveTabRight,
+            ctx,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") { "ctrl-alt-cmd-right" } else { "ctrl-alt-right" },
+            OpenOnOtherSide,
+            ctx,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") { "ctrl-cmd-left" } else { "ctrl-shift-pageup" },
+            MoveTabLeft,
+            ctx,
+        ),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("ctrl-shift-`", NewTerminal, ctx),
@@ -291,7 +305,18 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-d", SplitTerminal, Some("Terminal")),
         ]);
     } else {
-        keys.extend([KeyBinding::new("alt-left", GoBack, ctx), KeyBinding::new("alt-right", GoForward, ctx)]);
+        keys.extend([
+            KeyBinding::new("alt-left", GoBack, ctx),
+            KeyBinding::new("alt-right", GoForward, ctx),
+            KeyBinding::new("ctrl-pagedown", NextTab, ctx),
+            KeyBinding::new("ctrl-pageup", PreviousTab, ctx),
+            // As in VS Code: in the terminal, another beside it.
+            KeyBinding::new("ctrl-shift-5", SplitTerminal, Some("Terminal")),
+            // The shell's own word keys (Alt+←/→ go back and forth elsewhere; Alt+Z wraps).
+            KeyBinding::new("alt-left", gpui::NoAction {}, Some("Terminal")),
+            KeyBinding::new("alt-right", gpui::NoAction {}, Some("Terminal")),
+            KeyBinding::new("alt-z", gpui::NoAction {}, Some("Terminal")),
+        ]);
     }
     cx.bind_keys(keys);
 }
@@ -474,7 +499,7 @@ fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathB
 fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
     use std::io::Read;
     use std::process::Stdio;
-    let Ok(mut child) = std::process::Command::new(program)
+    let Ok(mut child) = crate::tools::command(program)
         .args(["--list", "--exact", id])
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -583,6 +608,10 @@ const TERMINAL_SLIDE: Duration = Duration::from_millis(240);
 /// Room for the window buttons at the left of the title bar.
 /// How many characters wide Focus mode's column of text is.
 const FOCUS_COLUMNS: f32 = 100.;
+/// What Open picks: on the Mac a file or a folder in one dialog; elsewhere files (folders
+/// through Open Folder).
+pub const OPEN_LABEL: &str = if cfg!(target_os = "macos") { "Open File or Folder…" } else { "Open File…" };
+
 const TITLEBAR_INSET: f32 = if cfg!(target_os = "macos") { 84. } else { 12. };
 
 fn smoothstep(t: f32) -> f32 {
@@ -781,6 +810,9 @@ pub struct Workspace {
     chrome: Transition,
     last_mouse: Option<Point<Pixels>>,
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// Linux drawing its own frame: the title bar pressed, the window moved once the mouse
+    /// goes (so a double-click still maximises).
+    moving_window: bool,
     /// While AI's dot shows: a redraw soon, so it goes when AI's done (or its failure's old).
     ai_dot_watch: Option<Task<()>>,
     settings_panel: Option<(Entity<SettingsPanel>, Subscription)>,
@@ -973,7 +1005,10 @@ impl Workspace {
                     let pattern = format!("/{}{}", names.join("/"), if *folder { "/" } else { "" });
                     match crate::settings::hide_in_project(&root, &pattern, cx) {
                         Ok(()) => this.show_notice(
-                            format!("{pattern} hidden from the files, ⌘P and search (this project's settings)"),
+                            format!(
+                                "{pattern} hidden from the files, {} and search (this project's settings)",
+                                ui::keys(&TogglePalette, "⌘P", cx)
+                            ),
                             cx,
                         ),
                         Err(message) => this.show_notice(message, cx),
@@ -1092,6 +1127,7 @@ impl Workspace {
             last_mouse: None,
             palette: None,
             ai_dot_watch: None,
+            moving_window: false,
             settings_panel: None,
             welcome: None,
             ready_since: None,
@@ -1640,6 +1676,55 @@ impl Workspace {
             })
             .ok();
         }));
+    }
+
+    /// The window's minimise, maximise and close, where Null draws them (not on the Mac).
+    fn window_controls(&self, window: &Window, cx: &Context<Self>) -> Option<AnyElement> {
+        if !crate::window_frame::draws_controls(window) {
+            return None;
+        }
+        let this = cx.entity().downgrade();
+        Some(crate::window_frame::controls(window, cx.global::<Theme>(), move |window, cx| {
+            let close = this.update(cx, |this, cx| this.confirm_unsaved(CloseAction::CloseWindow, window, cx));
+            if close.unwrap_or(true) {
+                window.remove_window();
+            }
+        }))
+    }
+
+    /// The title bar as Linux's window frame, where Null draws it: dragged, it moves the
+    /// window; double-clicked, maximises it; right-clicked, the system's window menu. (The
+    /// Mac and Windows do all this themselves.)
+    fn moves_window(&self, bar: gpui::Div, cx: &Context<Self>) -> gpui::Div {
+        if !cfg!(target_os = "linux") {
+            return bar;
+        }
+        bar.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, window, _| {
+                // (A tab pressed: the tab's.)
+                if window.default_prevented() || !crate::window_frame::draws_controls(window) {
+                    return;
+                }
+                if event.click_count == 2 {
+                    this.moving_window = false;
+                    window.zoom_window();
+                } else {
+                    this.moving_window = true;
+                }
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, _| {
+            if std::mem::take(&mut this.moving_window) && event.pressed_button == Some(MouseButton::Left) {
+                window.start_window_move();
+            }
+        }))
+        .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.moving_window = false))
+        .on_mouse_down(MouseButton::Right, |event: &MouseDownEvent, window, _| {
+            if !window.default_prevented() && crate::window_frame::draws_controls(window) {
+                window.show_window_menu(event.position);
+            }
+        })
     }
 
     // ---------- git ----------
@@ -2541,14 +2626,14 @@ impl Workspace {
     fn discard_changes(&mut self, path: PathBuf, status: git::FileStatus, window: &mut Window, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let detail = if status == git::FileStatus::Added {
-            "It's new since the last commit: it goes to the Trash."
+            format!("It's new since the last commit: it goes to the {}.", crate::fs_ops::TRASH)
         } else {
-            "It goes back to how it was at the last commit."
+            "It goes back to how it was at the last commit.".to_string()
         };
         let answer = window.prompt(
             PromptLevel::Warning,
             &format!("Discard the changes to {name}?"),
-            Some(detail),
+            Some(&detail),
             &["Discard", "Cancel"],
             cx,
         );
@@ -2588,7 +2673,7 @@ impl Workspace {
         let answer = window.prompt(
             PromptLevel::Warning,
             &format!("Discard every change in {files}?"),
-            Some("They go back to the last commit. New files go to the Trash."),
+            Some(&format!("They go back to the last commit. New files go to the {}.", crate::fs_ops::TRASH)),
             &["Discard", "Cancel"],
             cx,
         );
@@ -3435,39 +3520,46 @@ impl Workspace {
     }
 
     /// Installs `null`, to open files and folders from a terminal: `null .`, `null a.rs`.
-    /// Into /usr/local/bin when it can write there, else ~/.local/bin.
+    /// Into /usr/local/bin when it can write there, else ~/.local/bin; on Windows a
+    /// `null.cmd` in Null's own folder.
     fn install_shell_command(&mut self, _: &InstallShellCommand, _: &mut Window, cx: &mut Context<Self>) {
         let Ok(exe) = std::env::current_exe() else { return };
-        // From the app, `open -a` hands paths to the running Null; from a build, run it directly.
-        let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf);
-        // (`--wait`: until the file's tab closes, as git's editor. The app gets a Null of its
-        // own for it; `open` can't hand a running one a line, so the app gets the file alone.)
-        let (launch, waiting) = match &bundle {
-            Some(app) => (
-                format!("open -a \"{}\" \"$f\"", app.display()),
-                format!("open -W -n -a \"{}\" --args --wait \"$p\"", app.display()),
-            ),
-            None => (format!("\"{}\" \"$p\" &", exe.display()), format!("\"{}\" --wait \"$p\"", exe.display())),
-        };
-        let script = shell_script(&launch, &waiting);
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        let system = PathBuf::from("/usr/local/bin");
-        let writable = |dir: &Path| {
-            let probe = dir.join(".null-write-test");
-            let ok = std::fs::write(&probe, "").is_ok();
-            std::fs::remove_file(&probe).ok();
-            ok
-        };
-        let dir = if writable(&system) { system } else { home.join(".local/bin") };
-        let target = dir.join("null");
-        let result = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, script)).and_then(|()| {
+        let (dir, target, result) = if cfg!(windows) {
+            let Some(dir) = crate::tools::data_dir().map(|d| d.join("bin")) else { return };
+            let target = dir.join("null.cmd");
+            let result = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, cmd_script(&exe)));
+            (dir, target, result)
+        } else {
+            // From the app, `open -a` hands paths to the running Null; from a build, run it directly.
+            let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf);
+            // (`--wait`: until the file's tab closes, as git's editor. The app gets a Null of its
+            // own for it; `open` can't hand a running one a line, so the app gets the file alone.)
+            let (launch, waiting) = match &bundle {
+                Some(app) => (
+                    format!("open -a \"{}\" \"$f\"", app.display()),
+                    format!("open -W -n -a \"{}\" --args --wait \"$p\"", app.display()),
+                ),
+                None => (format!("\"{}\" \"$p\" &", exe.display()), format!("\"{}\" --wait \"$p\"", exe.display())),
+            };
+            let script = shell_script(&launch, &waiting);
+            let home = crate::tools::home_dir().unwrap_or_default();
+            let system = PathBuf::from("/usr/local/bin");
+            let writable = |dir: &Path| {
+                let probe = dir.join(".null-write-test");
+                let ok = std::fs::write(&probe, "").is_ok();
+                std::fs::remove_file(&probe).ok();
+                ok
+            };
+            let dir = if writable(&system) { system } else { home.join(".local/bin") };
+            let target = dir.join("null");
+            let result = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, script));
             #[cfg(unix)]
-            {
+            let result = result.and_then(|()| {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
-            }
-            Ok(())
-        });
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            });
+            (dir, target, result)
+        };
         let on_path = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d == dir));
         let message = match result {
             Ok(()) if on_path || dir.starts_with("/usr/local") => {
@@ -4415,12 +4507,30 @@ impl Workspace {
         self.confirm_unsaved(CloseAction::Quit, window, cx);
     }
 
+    /// A file, or on the Mac a folder too (elsewhere the system's dialog picks one kind:
+    /// folders have Open Folder).
     fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
-            directories: true,
+            directories: cfg!(target_os = "macos"),
             multiple: false,
             prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            this.update_in(cx, |this, window, cx| this.open_path(path, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// A folder as the project, in this window.
+    fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Folder".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
@@ -4518,7 +4628,8 @@ impl Workspace {
             (File, "New File".into(), Box::new(NewUntitled)),
             (File, "New File in Project…".into(), Box::new(crate::file_tree::NewFile)),
             (File, "New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
-            (File, "Open File or Folder…".into(), Box::new(Open)),
+            (File, OPEN_LABEL.into(), Box::new(Open)),
+            (File, "Open Folder…".into(), Box::new(OpenFolder)),
             (File, "Open Recent…".into(), Box::new(OpenRecent)),
             (File, "Open Folder in New Window…".into(), Box::new(NewWindow)),
             (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
@@ -4550,13 +4661,9 @@ impl Workspace {
                 toggle(settings.problems_at_line_ends, "Problems Only on the Cursor's Line", "Problems at Line Ends"),
                 Box::new(ToggleProblemsAtLineEnds),
             ),
-            (
-                View,
-                toggle(settings.spell_check, "Hide Spelling Mistakes", "Show Spelling Mistakes"),
-                Box::new(ToggleSpellCheck),
-            ),
             (Git, "Commit…".into(), Box::new(CommitAll)),
             (Git, "Undo Last Commit".into(), Box::new(UndoLastCommit)),
+            (Git, "Discard All Changes…".into(), Box::new(RevertAllChanges)),
             (Git, "Set Changes Aside".into(), Box::new(SetChangesAside)),
             (Git, "Bring Back Changes".into(), Box::new(BringBackChanges)),
             (Git, "Push".into(), Box::new(PushBranch)),
@@ -4575,9 +4682,11 @@ impl Workspace {
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
             (Edit, "Copy as Code Block".into(), Box::new(CopyAsCodeBlock)),
+            (Edit, "Paste as Is".into(), Box::new(crate::editor::PasteAsIs)),
+            (App, "Install Shell Command".into(), Box::new(InstallShellCommand)),
             (Edit, "Organise Imports".into(), Box::new(OrganizeImports)),
             (File, "Rename File…".into(), Box::new(RenameFile)),
-            (File, "Move File to Trash…".into(), Box::new(TrashFile)),
+            (File, format!("Move File to {}…", crate::fs_ops::TRASH), Box::new(TrashFile)),
             (File, "Copy Path".into(), Box::new(CopyFilePath)),
             (File, "Copy Relative Path".into(), Box::new(CopyRelativeFilePath)),
             (File, crate::file_tree::REVEAL_LABEL.into(), Box::new(RevealFile)),
@@ -4822,6 +4931,11 @@ impl Workspace {
             ]);
         }
         // With AI switched off, nothing about it shows up.
+        // (The Mac's spell checker: none elsewhere yet.)
+        if crate::spell::AVAILABLE {
+            let label = toggle(settings.spell_check, "Hide Spelling Mistakes", "Show Spelling Mistakes");
+            commands.push((View, label, Box::new(ToggleSpellCheck)));
+        }
         // AI off: one way back in (⌘K's switch for it shows only while it's on).
         if !settings.ai.ready() {
             commands.push((Ai, "Turn On AI…".into(), Box::new(TurnOnAi)));
@@ -6093,7 +6207,15 @@ impl Workspace {
         #[cfg(not(test))]
         let found = crate::vscode_import::latest();
         let Some((editor, path)) = found else {
-            return self.show_notice("No VS Code settings found on this Mac.".into(), cx);
+            return self.show_notice(
+                if cfg!(target_os = "macos") {
+                    "No VS Code settings found on this Mac."
+                } else {
+                    "No VS Code settings found on this computer."
+                }
+                .into(),
+                cx,
+            );
         };
         let Ok(written) = crate::settings::read_project(&path) else {
             return self.show_notice(format!("{editor}'s settings couldn't be read."), cx);
@@ -6719,7 +6841,10 @@ impl Workspace {
         self.open_file(path, window, cx);
         let message = if cx.global::<Settings>().shown_own_theme(cx).is_none() {
             // Following the Mac, light now: yours is the dark one.
-            format!("{name}: used when the Mac is in dark mode.")
+            format!(
+                "{name}: used when {} is in dark mode.",
+                if cfg!(target_os = "macos") { "the Mac" } else { "the system" }
+            )
         } else {
             format!("{name}: change a colour and save to see it.")
         };
@@ -7067,7 +7192,7 @@ impl Workspace {
         }
         let name = ran.name.as_str();
         let root = self.tree.read(cx).root().to_path_buf();
-        let real_root = root.canonicalize().unwrap_or(root.clone());
+        let real_root = dunce::canonicalize(&root).unwrap_or(root.clone());
         // Where it is, as one path (`build/../src/a.c` is `src/a.c`) written from the project's
         // folder as tabs have it, if it's a project file.
         let resolve = |file: &str| {
@@ -7075,7 +7200,7 @@ impl Workspace {
             let real = [path.to_path_buf(), ran.folder.join(path), root.join(path)]
                 .into_iter()
                 .filter(|p| p.is_absolute() && p.is_file())
-                .find_map(|p| p.canonicalize().ok())?;
+                .find_map(|p| dunce::canonicalize(p).ok())?;
             Some(root.join(real.strip_prefix(&real_root).ok()?))
         };
         let reported: Vec<(PathBuf, Diagnostic)> = crate::problem_matcher::problems(&ran.output)
@@ -7271,7 +7396,7 @@ impl Workspace {
                     let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
                     // (Its messages say where each program went: a target folder set
                     // elsewhere, a workspace's.)
-                    let built = std::process::Command::new(cargo)
+                    let built = crate::tools::command(cargo)
                         .args(&cargo_args)
                         .arg("--message-format=json-render-diagnostics")
                         .current_dir(&cwd)
@@ -7361,7 +7486,7 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
-                    let built = std::process::Command::new(cargo)
+                    let built = crate::tools::command(cargo)
                         .args(["test", "--no-run", "--message-format=json-render-diagnostics"])
                         .args(&target)
                         .current_dir(&krate)
@@ -7966,11 +8091,15 @@ impl Workspace {
         let root = self.tree.read(cx).root().to_path_buf();
         let activate =
             (dir.starts_with(&root)).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
-                let shell = std::env::var("SHELL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .or_else(crate::terminal_watch::account_shell)
-                    .unwrap_or_default();
+                let shell = if cfg!(windows) {
+                    crate::shell::windows_program()
+                } else {
+                    std::env::var("SHELL")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .or_else(crate::terminal_watch::account_shell)
+                        .unwrap_or_default()
+                };
                 // From where the shell starts: short when it's the project's folder.
                 let env = env.strip_prefix(&dir).map(Path::to_path_buf).unwrap_or(env);
                 crate::python_env::activate_command(&env, &shell)
@@ -9106,6 +9235,10 @@ impl Workspace {
                     .id(("tab", ix))
                     .debug_selector(|| format!("tab {name}"))
                     .group(group)
+                    // (In the title bar, where a press elsewhere moves the window: this one is the tab's.)
+                    .when(!cfg!(target_os = "macos"), |t| {
+                        t.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    })
                     .on_drag(dragged, |tab, _, _, cx| cx.new(|_| TabGhost { label: tab.label.clone() }))
                     .drag_over::<DraggedTab>({
                         let line = theme.caret;
@@ -9754,6 +9887,27 @@ fn shorten_path(path: &str, max: usize) -> String {
 /// The `null` command: each path made absolute (created when missing, as editors do; a
 /// place after it, `a.rs:42`, isn't part of its name), then handed to Null with `launch`
 /// (or `waiting`, after `--wait`), which reads it as `$p` (`$f` without its place).
+/// Windows' `null` (null.cmd): each path made whole and handed to Null, started on its own
+/// (or, with `--wait`, run until it's closed: git's editor).
+fn cmd_script(exe: &Path) -> String {
+    let exe = exe.display();
+    format!(
+        "@echo off\r\n\
+         rem Opens files and folders in Null: null . / null src\\main.rs / null a.rs:42\r\n\
+         rem null --wait <file> returns once its tab is closed (git's editor).\r\n\
+         setlocal\r\n\
+         set \"wait=\"\r\n\
+         if \"%~1\"==\"--wait\" set \"wait=1\"\r\n\
+         if defined wait shift\r\n\
+         if \"%~1\"==\"\" (start \"\" \"{exe}\" \"%CD%\" & exit /b)\r\n\
+         :next\r\n\
+         if \"%~1\"==\"\" exit /b\r\n\
+         if defined wait (\"{exe}\" --wait \"%~f1\") else (start \"\" \"{exe}\" \"%~f1\")\r\n\
+         shift\r\n\
+         goto next\r\n"
+    )
+}
+
 fn shell_script(launch: &str, waiting: &str) -> String {
     format!(
         "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`, `null a.rs:42`.\n\
@@ -9826,7 +9980,7 @@ impl Past {
 /// Whether two paths name the same file, one maybe through a link (/tmp and /private/tmp
 /// on macOS, as git gives paths). The file itself needn't exist anymore.
 fn same_file(a: &Path, b: &Path) -> bool {
-    let real = |p: &Path| match (p.parent().and_then(|d| std::fs::canonicalize(d).ok()), p.file_name()) {
+    let real = |p: &Path| match (p.parent().and_then(|d| dunce::canonicalize(d).ok()), p.file_name()) {
         (Some(dir), Some(name)) => dir.join(name),
         _ => p.to_path_buf(),
     };
@@ -10005,7 +10159,7 @@ impl Render for Workspace {
                 }
             }
             None => {
-                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let home = crate::tools::home_dir();
                 let shown = match home.as_ref().and_then(|h| root.strip_prefix(h).ok()) {
                     Some(rest) => Path::new("~").join(rest).display().to_string(),
                     None => root.display().to_string(),
@@ -10276,19 +10430,29 @@ impl Render for Workspace {
         let joining = self.render_joining(cx);
         let theme = cx.global::<Theme>();
 
+        // Off the Mac (Windows; Linux drawing its own frame): the window's buttons at the
+        // right, beside the bar rather than in it, where pressing moves the window.
+        let controls = self.window_controls(window, cx);
         let titlebar = div()
-            .h(px(40.))
-            .flex_none()
+            .h_full()
+            .flex_1()
+            .min_w_0()
             .flex()
             .items_center()
             // (The window's own buttons: the system's size, not the interface's.)
             .pl(gpui::px(TITLEBAR_INSET))
             .pr(px(12.))
-            .border_b_1()
-            .border_color(theme.hairline)
-            .bg(theme.surface)
-            .opacity(opacity)
             .window_control_area(WindowControlArea::Drag)
+            .map(|bar| self.moves_window(bar, cx))
+            // No menu bar off the Mac: its place, every command, behind one button.
+            .when(!cfg!(target_os = "macos"), |bar| {
+                bar.child(
+                    ui::icon_button_for("app-menu", "icons/menu.svg", "Commands", Some(Box::new(ShowCommands)), theme)
+                        .mr(px(6.))
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                        .on_click(|_: &ClickEvent, window, cx| window.dispatch_action(Box::new(ShowCommands), cx)),
+                )
+            })
             .map(|bar| match tabs_right {
                 // Each side's tabs over it: the left ones end where the right side begins.
                 Some(right) => {
@@ -10299,6 +10463,16 @@ impl Render for Workspace {
                 }
                 None => bar.child(tabs_left),
             });
+        let titlebar = div()
+            .h(px(40.))
+            .flex_none()
+            .flex()
+            .border_b_1()
+            .border_color(theme.hairline)
+            .bg(theme.surface)
+            .opacity(opacity)
+            .child(titlebar)
+            .children(controls);
 
         let sidebar_panel = div()
             .flex_none()
@@ -10927,6 +11101,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::use_open_router))
             .on_action(cx.listener(Self::turn_off_ai))
             .on_action(cx.listener(Self::turn_on_ai))
+            .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
@@ -10984,7 +11159,20 @@ impl Render for Workspace {
             // In Focus mode, only a strip to drag the window by.
             .map(|root| {
                 if self.focus_mode {
-                    root.child(div().h(px(40.)).flex_none().window_control_area(WindowControlArea::Drag))
+                    root.child(
+                        div()
+                            .h(px(40.))
+                            .flex_none()
+                            .flex()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h_full()
+                                    .window_control_area(WindowControlArea::Drag)
+                                    .map(|bar| self.moves_window(bar, cx)),
+                            )
+                            .children(self.window_controls(window, cx)),
+                    )
                 } else {
                     root.child(titlebar)
                 }
@@ -11013,6 +11201,9 @@ impl Render for Workspace {
                 ),
             )
             .when(!self.focus_mode, |root| root.child(status))
+            // Linux drawing the frame: edges to resize by (the root's positioned for them).
+            .relative()
+            .children(crate::window_frame::resize_edges(window))
             .children(tab_menu)
             .children(text_menu)
             .children(tab_switcher)
@@ -11126,7 +11317,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         // As Null opens a project: by its real path (the one cargo builds with).
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let dir = dunce::canonicalize(&dir).unwrap();
         std::fs::write(
             dir.join("Cargo.toml"),
             "[package]\nname = \"twice\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
@@ -11135,7 +11326,7 @@ mod tests {
         let lib = "pub fn twice(n: i32) -> i32 {\n    n * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        let got = super::twice(21);\n        assert_eq!(got, 42);\n    }\n}\n";
         std::fs::write(dir.join("src/lib.rs"), lib).unwrap();
         std::fs::write(dir.join("tests/api.rs"), "#[test]\nfn other() {}\n").unwrap();
-        let built = std::process::Command::new("cargo")
+        let built = crate::tools::command("cargo")
             .args(["test", "--no-run", "--offline", "--message-format=json-render-diagnostics"])
             .current_dir(&dir)
             .output()
@@ -11234,7 +11425,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().map(|o| o.status.success())
+            crate::tools::command("git").arg("-C").arg(&dir).args(args).output().map(|o| o.status.success())
         };
         if !git(&["init", "-q"]).unwrap_or(false) {
             return; // No git here.
@@ -11280,7 +11471,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(workspace.read_with(cx, |w, _| w.sidebar_git), "the Git view shown");
-        let a = std::fs::canonicalize(dir.join("a.txt")).unwrap();
+        let a = dunce::canonicalize(dir.join("a.txt")).unwrap();
         workspace.update_in(cx, |w, window, cx| {
             let view = w.git_view.clone();
             w.git_view_event(&view, &crate::git_view::GitViewEvent::Open(a.clone()), window, cx)
@@ -11311,7 +11502,7 @@ mod tests {
             v.toggle_file_for_test(ix, cx);
         });
         cx.simulate_input("only b");
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes("secondary-enter");
         for _ in 0..100 {
             settle(cx);
             if view.read_with(cx, |v, _| !v.committing)
@@ -11321,7 +11512,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let committed = std::process::Command::new("git")
+        let committed = crate::tools::command("git")
             .arg("-C")
             .arg(&dir)
             .args(["show", "--name-only", "--format=%s", "HEAD"])
@@ -11363,7 +11554,7 @@ mod tests {
             assert!(!e.buffer.is_dirty());
         });
         editor.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
-        cx.simulate_keystrokes("cmd-z");
+        cx.simulate_keystrokes("secondary-z");
         editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "saved\nchanged\n", "⌘Z brings the changes back"));
         // The saved file unreadable now (Unix's permissions): the changes stay, still unsaved.
         #[cfg(unix)]
@@ -11605,7 +11796,7 @@ mod tests {
                 editor.update(cx, |e, cx| e.go_to_line(line + 1, cx));
                 window.focus(&editor.focus_handle(cx));
             });
-            cx.simulate_keystrokes("cmd-f2");
+            cx.simulate_keystrokes("secondary-f2");
         };
         mark(cx, "a.txt", 2);
         mark(cx, "b.txt", 1);
@@ -11666,14 +11857,14 @@ mod tests {
             })
         };
         // ⌘P "notes.txt:3:2": that file, line 3, column 2.
-        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_keystrokes("secondary-p");
         settle(cx);
         cx.simulate_input("notes.txt:3:2");
         cx.simulate_keystrokes("enter");
         settle(cx);
         assert_eq!(place(cx), Some(("notes.txt".into(), (2, 1))));
         // ⌘P ":2", and ⌃G "4": lines in the open file.
-        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_keystrokes("secondary-p");
         settle(cx);
         cx.simulate_input(":2");
         cx.simulate_keystrokes("enter");
@@ -11686,12 +11877,12 @@ mod tests {
         settle(cx);
         assert_eq!(place(cx).map(|(_, (line, _))| line), Some(3));
         // ⌘⇧O in lib.rs, "beta": its definition.
-        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_keystrokes("secondary-p");
         settle(cx);
         cx.simulate_input("lib.rs");
         cx.simulate_keystrokes("enter");
         settle(cx);
-        cx.simulate_keystrokes("cmd-shift-o");
+        cx.simulate_keystrokes("secondary-shift-o");
         settle(cx);
         cx.simulate_input("beta");
         cx.simulate_keystrokes("enter");
@@ -11700,7 +11891,7 @@ mod tests {
         // ⌘K "toggle sidebar": the sidebar goes.
         let visible = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| cx.global::<Settings>().sidebar_visible);
         let before = visible(cx);
-        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_keystrokes("secondary-k");
         settle(cx);
         cx.simulate_input("toggle sidebar");
         cx.simulate_keystrokes("enter");
@@ -11742,13 +11933,13 @@ mod tests {
             workspace
                 .read_with(cx, |w, cx| w.active_editor().map(|e| (e.read(cx).file_name(), e.read(cx).caret_point())))
         };
-        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_keystrokes("secondary-p");
         settle(cx);
         cx.simulate_input("a.rs");
         cx.simulate_keystrokes("enter");
         settle(cx);
         // ⌘F "alpha": the first one; ↵ the next, and the next.
-        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("secondary-f");
         settle(cx);
         cx.simulate_input("alpha");
         settle(cx);
@@ -11763,7 +11954,7 @@ mod tests {
         cx.simulate_keystrokes("escape");
         settle(cx);
         // ⌘⇧F "gamma", ↵: b.rs opens on that line.
-        cx.simulate_keystrokes("cmd-shift-f");
+        cx.simulate_keystrokes("secondary-shift-f");
         settle(cx);
         cx.simulate_input("gamma");
         settle(cx);
@@ -11775,10 +11966,10 @@ mod tests {
             let editor = w.active_editor().unwrap().focus_handle(cx);
             window.focus(&editor);
         });
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("secondary-w");
         settle(cx);
         assert_eq!(place(cx).map(|(name, _)| name), Some("a.rs".into()));
-        cx.simulate_keystrokes("cmd-shift-t");
+        cx.simulate_keystrokes("secondary-shift-t");
         settle(cx);
         assert_eq!(place(cx).map(|(name, _)| name), Some("b.rs".into()));
         std::fs::remove_dir_all(&dir).ok();
@@ -11850,7 +12041,7 @@ mod tests {
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
         cx.run_until_parked();
         // ⌘K, a click on its first quick setting (it stays open), then typing: the query.
-        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         let row = cx.debug_bounds("palette-row 0").expect("a row is drawn").center();
         cx.simulate_click(row, Default::default());
@@ -11866,7 +12057,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "Alpha alpha\n").unwrap();
         workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("secondary-f");
         cx.run_until_parked();
         cx.simulate_input("al");
         cx.run_until_parked();
@@ -11885,7 +12076,7 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         // Settings, a click on a switch, then Escape: closed.
-        cx.simulate_keystrokes("cmd-,");
+        cx.simulate_keystrokes("secondary-,");
         cx.run_until_parked();
         assert!(workspace.read_with(cx, |w, _| w.settings_panel.is_some()), "⌘, opens Settings");
         workspace.update_in(cx, |w, _, cx| {
@@ -12058,7 +12249,7 @@ mod tests {
         let dir = crate::tools::test_dir("discard-file");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+        let git = |args: &[&str]| crate::tools::command("git").arg("-C").arg(&dir).args(args).output();
         if git(&["init", "-q", "-b", "main"]).is_err() {
             return; // No git here.
         }
@@ -12100,7 +12291,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+            let out = crate::tools::command("git").arg("-C").arg(&dir).args(args).output();
             out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         };
         if git(&["init", "-q"]).is_err() {
@@ -12141,7 +12332,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes("secondary-enter");
         for _ in 0..100 {
             settle(cx);
             if git(&["log", "-1", "--format=%s"]).unwrap() == "Add b" {
@@ -12229,7 +12420,7 @@ mod tests {
         workspace.update_in(cx, |w, window, cx| w.open_file(file.clone(), window, cx));
         let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
         // Copy "alpha", then "beta" (each its whole line), then go to the end.
-        cx.simulate_keystrokes("cmd-c down cmd-c cmd-down");
+        cx.simulate_keystrokes("secondary-c down secondary-c secondary-down");
         workspace.update_in(cx, |w, window, cx| w.paste_from_history(&PasteFromHistory, window, cx));
         cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
@@ -12421,7 +12612,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+            let out = crate::tools::command("git").arg("-C").arg(&dir).args(args).output();
             out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         };
         if git(&["init", "-q", "-b", "main"]).is_err() {
@@ -12472,7 +12663,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+            let out = crate::tools::command("git").arg("-C").arg(&dir).args(args).output();
             out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         };
         if git(&["init", "-q", "-b", "main"]).is_err() {
@@ -12837,6 +13028,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Windows' null.cmd: CRLF lines, each path made whole (%~f1), Null started on its own
+    /// unless waiting.
+    #[test]
+    fn the_windows_command_starts_null_with_whole_paths() {
+        let script = cmd_script(Path::new(r"C:\Program Files\Null\null.exe"));
+        assert_eq!(script.matches("\r\n").count(), script.matches('\n').count(), "every line ends in CRLF");
+        let lines: Vec<&str> = script.lines().collect();
+        assert_eq!(lines[0], "@echo off");
+        assert!(lines.contains(&r#"if defined wait ("C:\Program Files\Null\null.exe" --wait "%~f1") else (start "" "C:\Program Files\Null\null.exe" "%~f1")"#));
+        assert!(lines.contains(&r#"if "%~1"=="" (start "" "C:\Program Files\Null\null.exe" "%CD%" & exit /b)"#));
+        assert_eq!(lines.last(), Some(&"goto next"));
+    }
+
     #[test]
     fn the_shell_command_is_valid_and_hands_over_absolute_paths() {
         let dir = crate::tools::test_dir("cmd");
@@ -12849,26 +13053,25 @@ mod tests {
         );
         let command = dir.join("null");
         std::fs::write(&command, script).unwrap();
-        let run = std::process::Command::new("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
+        let run = crate::tools::command("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         let given = std::fs::read_to_string(&log).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        let dir = dunce::canonicalize(&dir).unwrap_or(dir);
         assert!(given.lines().next().unwrap().ends_with("/new.txt"), "{given}");
         assert!(dir.join("new.txt").exists());
         assert_eq!(given.lines().count(), 2);
         // A place after the name: handed over, but no file named with it.
-        let run = std::process::Command::new("sh").arg(&command).args(["new.txt:4:2"]).current_dir(&dir).status();
+        let run = crate::tools::command("sh").arg(&command).args(["new.txt:4:2"]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         assert!(!dir.join("new.txt:4:2").exists());
         assert!(std::fs::read_to_string(&log).unwrap().lines().last().unwrap().ends_with("/new.txt:4:2"));
         // A folder with a `:2` in its name isn't cut: only a place at the end is.
         std::fs::create_dir_all(dir.join("notes:2026")).unwrap();
-        let run =
-            std::process::Command::new("sh").arg(&command).args(["notes:2026/todo.md"]).current_dir(&dir).status();
+        let run = crate::tools::command("sh").arg(&command).args(["notes:2026/todo.md"]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         assert!(dir.join("notes:2026/todo.md").exists() && !dir.join("notes").exists());
         // --wait: the other way of handing it over.
-        let run = std::process::Command::new("sh").arg(&command).args(["--wait", "MSG"]).current_dir(&dir).status();
+        let run = crate::tools::command("sh").arg(&command).args(["--wait", "MSG"]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         let last = std::fs::read_to_string(&log).unwrap().lines().last().unwrap().to_string();
         assert!(last.starts_with("wait ") && last.ends_with("/MSG"), "{last}");
@@ -13086,7 +13289,7 @@ mod tests {
         let root = crate::tools::test_dir("organize-on-save");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         // (TypeScript wants a project.)
         std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
         std::fs::write(root.join("m.ts"), "export const a = 1;\nexport const b = 2;\n").unwrap();
@@ -13178,8 +13381,8 @@ mod tests {
         let dir = crate::tools::test_dir("changes-tab");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        let dir = dunce::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| crate::tools::command("git").arg("-C").arg(&dir).args(args).output().unwrap();
         if !git(&["init", "-q"]).status.success() {
             return;
         }
@@ -13277,8 +13480,8 @@ mod tests {
         let dir = crate::tools::test_dir("history-tab");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        let dir = dunce::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| crate::tools::command("git").arg("-C").arg(&dir).args(args).output().unwrap();
         if !git(&["init", "-q"]).status.success() {
             return;
         }
@@ -13345,7 +13548,7 @@ mod tests {
             w.git_view_event(&view, &crate::git_view::GitViewEvent::ShowCommit(second), window, cx)
         });
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("secondary-w");
         cx.run_until_parked();
         workspace.read_with(cx, |w, _| {
             assert!(w.git_page.is_none());
@@ -13361,8 +13564,8 @@ mod tests {
         let dir = crate::tools::test_dir("merge-banner");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        let dir = dunce::canonicalize(&dir).unwrap();
+        let git = |args: &[&str]| crate::tools::command("git").arg("-C").arg(&dir).args(args).output().unwrap();
         if !git(&["init", "-q", "-b", "main"]).status.success() {
             return;
         }
@@ -13433,12 +13636,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let repo = std::fs::canonicalize(&repo).unwrap();
+        let repo = dunce::canonicalize(&repo).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            let out = crate::tools::command("git").arg("-C").arg(&repo).args(args).output().unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
-        if std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q", "-b", "main"]).status().is_err() {
+        if crate::tools::command("git").arg("-C").arg(&repo).args(["init", "-q", "-b", "main"]).status().is_err() {
             return;
         }
         git(&["config", "user.name", "t"]);
@@ -13643,14 +13846,14 @@ esac
         };
         let (rem, line) = state(cx);
         assert_eq!(rem, gpui::px(16.));
-        cx.simulate_keystrokes("alt-cmd-= alt-cmd-=");
+        cx.simulate_keystrokes("alt-secondary-= alt-secondary-=");
         cx.run_until_parked();
         assert_eq!(state(cx), (gpui::px(16. * 1.2), line), "the interface, not the text");
-        cx.simulate_keystrokes("alt-cmd-0");
+        cx.simulate_keystrokes("alt-secondary-0");
         cx.run_until_parked();
         assert_eq!(state(cx).0, gpui::px(16.));
         for _ in 0..10 {
-            cx.simulate_keystrokes("alt-cmd--");
+            cx.simulate_keystrokes("alt-secondary--");
         }
         cx.run_until_parked();
         assert_eq!(cx.update(|_, cx| cx.global::<Settings>().ui_zoom), crate::settings::MIN_ZOOM);
@@ -13682,7 +13885,7 @@ esac
         // From ⌘K: "spacing", then → for the next one (round to Compact after Relaxed).
         cx.update(|_, cx| crate::keymap::register(crate::keymap::Keymap::Null, cx));
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
-        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         cx.simulate_input("spacing");
         cx.executor().advance_clock(std::time::Duration::from_millis(300));
@@ -14077,11 +14280,11 @@ esac
         let shown = |cx: &mut gpui::VisualTestContext| {
             workspace.read_with(cx, |w, cx| w.active_editor().map(|e| e.read(cx).file_name()).unwrap_or_default())
         };
-        cx.simulate_keystrokes("cmd-2");
+        cx.simulate_keystrokes("secondary-2");
         assert_eq!(shown(cx), "b.txt");
-        cx.simulate_keystrokes("cmd-9");
+        cx.simulate_keystrokes("secondary-9");
         assert_eq!(shown(cx), "c.txt");
-        cx.simulate_keystrokes("cmd-1");
+        cx.simulate_keystrokes("secondary-1");
         assert_eq!(shown(cx), "a.txt");
         // Two sides joined: one again, a file open on both keeping one tab.
         workspace.update_in(cx, |w, window, cx| {
@@ -14354,7 +14557,7 @@ esac
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
         cx.dispatch_action(RenameFile);
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("plans.txt");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();

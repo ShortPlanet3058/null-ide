@@ -26,9 +26,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", AcceptGhost, ctx),
         KeyBinding::new("alt-right", AcceptGhostWord, ctx),
         KeyBinding::new("secondary-right", AcceptGhostLine, ctx),
-        // ⌥⇥ rather than ⌥] : brackets take several keys on many layouts.
-        KeyBinding::new("alt-tab", NextGhost, ctx),
-        KeyBinding::new("alt-shift-tab", PreviousGhost, ctx),
+        // ⌥⇥ rather than ⌥] : brackets take several keys on many layouts. (Off the Mac,
+        // Alt+Tab is the system's: the brackets there.)
+        KeyBinding::new(if cfg!(target_os = "macos") { "alt-tab" } else { "alt-]" }, NextGhost, ctx),
+        KeyBinding::new(if cfg!(target_os = "macos") { "alt-shift-tab" } else { "alt-[" }, PreviousGhost, ctx),
         KeyBinding::new("escape", DismissGhost, ctx),
     ]);
 }
@@ -674,7 +675,7 @@ impl Editor {
         candidates
             .into_iter()
             .filter(|p| p != path && p.is_file())
-            .filter_map(|p| p.canonicalize().ok())
+            .filter_map(|p| dunce::canonicalize(p).ok())
             .filter(|p| seen.insert(p.clone()))
             .take(RELATED_FILES)
             .filter_map(|p| {
@@ -683,7 +684,7 @@ impl Editor {
                 while !body.is_char_boundary(end) {
                     end -= 1;
                 }
-                let name = p.strip_prefix(dir.canonicalize().ok()?).unwrap_or(&p).display().to_string();
+                let name = p.strip_prefix(dunce::canonicalize(dir).ok()?).unwrap_or(&p).display().to_string();
                 Some((name, body[..end].to_string()))
             })
             .collect()

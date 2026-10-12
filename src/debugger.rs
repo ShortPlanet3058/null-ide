@@ -246,7 +246,7 @@ pub fn inline_values(lines: &[(usize, String)], locals: &[(String, String)]) -> 
 /// `String` shows its text), from the toolchain's own formatters, when they're there.
 pub fn rust_formatters() -> Option<String> {
     let rustc = crate::tools::find("rustc")?;
-    let output = std::process::Command::new(rustc).args(["--print", "sysroot"]).output().ok()?;
+    let output = crate::tools::command(rustc).args(["--print", "sysroot"]).output().ok()?;
     let sysroot = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     let script = sysroot.join("lib/rustlib/etc/lldb_lookup.py");
     script.is_file().then(|| format!("command script import \"{}\"", script.display()))
@@ -373,8 +373,7 @@ impl Debugger {
         self.program = Some(program.clone());
         let Some(adapter_path) = crate::dap::find_adapter() else {
             self.state = DebugState::Idle;
-            let message = "Debugging needs lldb-dap, which comes with Xcode. It wasn't found.\n";
-            return self.append_output(message, cx);
+            return self.append_output(&format!("{}\n", crate::dap::GET_ADAPTER), cx);
         };
         let (adapter, mut messages) = match DebugAdapter::spawn(&adapter_path, &cwd) {
             Ok(started) => started,
@@ -954,7 +953,7 @@ mod tests {
         .unwrap();
         let program = dir.join("main");
         let built =
-            std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+            crate::tools::command("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
         assert!(built.unwrap().success());
         // A log point on `total += i;`: prints each time, never stops.
         let debugger = cx.new(|_| Debugger::default());
@@ -997,11 +996,8 @@ mod tests {
         std::fs::write(&source, "#include <stdexcept>\nint main() {\n    throw std::runtime_error(\"no\");\n}\n")
             .unwrap();
         let program = dir.join("main");
-        let built = std::process::Command::new("xcrun")
-            .args(["clang++", "-g", "-O0", "-o"])
-            .arg(&program)
-            .arg(&source)
-            .status();
+        let built =
+            crate::tools::command("xcrun").args(["clang++", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
         assert!(built.unwrap().success());
         let debugger = cx.new(|_| Debugger::default());
         debugger.update(cx, |d, cx| {
@@ -1020,7 +1016,7 @@ mod tests {
         std::fs::write(&source, "fn main() {\n    let v: Vec<u8> = Vec::new();\n    println!(\"{}\", v[3]);\n}\n")
             .unwrap();
         let program = dir.join("panics");
-        let built = std::process::Command::new("rustc").args(["-g", "-o"]).arg(&program).arg(&source).status();
+        let built = crate::tools::command("rustc").args(["-g", "-o"]).arg(&program).arg(&source).status();
         assert!(built.unwrap().success());
         let debugger = cx.new(|_| Debugger::default());
         debugger.update(cx, |d, cx| {
@@ -1105,7 +1101,7 @@ int main(void) {
         .unwrap();
         let program = dir.join("main");
         let built =
-            std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+            crate::tools::command("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
         assert!(built.unwrap().success());
         let debugger = cx.new(|_| Debugger::default());
         // At `int n = p.x;` (line 4, from 0: 3).
@@ -1156,7 +1152,7 @@ int main(void) {
         .unwrap();
         let program = dir.join("main");
         let built =
-            std::process::Command::new("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
+            crate::tools::command("xcrun").args(["clang", "-g", "-O0", "-o"]).arg(&program).arg(&source).status();
         assert!(built.unwrap().success());
         let debugger = cx.new(|_| Debugger::default());
         let run = Run {
@@ -1187,7 +1183,7 @@ int main(void) {
         )
         .unwrap();
         let program = dir.join("main");
-        let built = std::process::Command::new("xcrun")
+        let built = crate::tools::command("xcrun")
             .args(["clang", "-g", "-O0", "-o"])
             .arg(&program)
             .arg(&source)

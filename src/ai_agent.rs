@@ -67,9 +67,9 @@ fn inside(root: &Path, path: &str) -> Option<PathBuf> {
     }
     let path = root.join(relative);
     // Where it really is: the deepest part that exists, links followed.
-    let real_root = root.canonicalize().ok()?;
+    let real_root = dunce::canonicalize(root).ok()?;
     let existing = path.ancestors().find(|p| p.exists())?;
-    existing.canonicalize().ok()?.starts_with(&real_root).then_some(path)
+    dunce::canonicalize(existing).ok()?.starts_with(&real_root).then_some(path)
 }
 
 fn cut(mut text: String) -> String {

@@ -408,7 +408,7 @@ mod view_tests {
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "let parse = 1;\n"));
         // ⌃⌘D, after ⌘D: the one picked let go, the next picked.
         e.update(cx, |e, _| e.selection = Selection::caret(4));
-        cx.simulate_keystrokes("ctrl-cmd-d");
+        cx.simulate_keystrokes("ctrl-secondary-d");
         e.update(cx, |e, _| assert_eq!(e.selection.range(), 4..9, "nothing picked yet: the word"));
         // A Windows file: over a line break whole; ⌃⌥⌫ at a line's start joins the lines.
         let (w, cx) =
@@ -466,7 +466,7 @@ mod view_tests {
         });
         cx.run_until_parked();
         assert!(place(cx) > 1., "out of view");
-        cx.simulate_keystrokes("cmd-j");
+        cx.simulate_keystrokes("secondary-j");
         cx.run_until_parked();
         assert!((0. ..1.).contains(&place(cx)), "in view: {}", place(cx));
         e.update(cx, |e, _| assert_eq!(e.selection, Selection::caret(e.buffer.offset(149, 0))));

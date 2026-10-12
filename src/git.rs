@@ -9,7 +9,7 @@ use std::process::Command;
 /// git, run in `dir`. Paths given to it are names, never patterns: discarding `app/[id].tsx`
 /// mustn't touch `app/d.tsx`.
 fn command(dir: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = crate::tools::command("git");
     command.arg("-C").arg(dir).env("GIT_LITERAL_PATHSPECS", "1").env("GIT_TERMINAL_PROMPT", "0");
     // Asking (status) never writes git's index: that write was seen as a change, and set
     // every open file's committed version to be read again.
@@ -525,9 +525,12 @@ fn remote_host(url: &str) -> Option<&str> {
 /// The hosts `gh` is signed in to, from its hosts.yml (its top-level keys).
 fn gh_hosts() -> Vec<String> {
     let dir = std::env::var_os("GH_CONFIG_DIR").map(PathBuf::from).or_else(|| {
+        if cfg!(windows) {
+            return std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("GitHub CLI"));
+        }
         std::env::var_os("XDG_CONFIG_HOME")
             .map(|d| PathBuf::from(d).join("gh"))
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/gh")))
+            .or_else(|| crate::tools::home_dir().map(|h| h.join(".config/gh")))
     });
     let Some(text) = dir.and_then(|d| std::fs::read_to_string(d.join("hosts.yml")).ok()) else { return Vec::new() };
     text.lines()
@@ -576,7 +579,7 @@ pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String
     }
     // What's thrown away is kept in the file's history first (git writes it, not Null).
     if path.is_file() {
-        let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let real = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         crate::local_history::keep_before_writing(&real, &[]);
     }
     run(root, &["restore", "--source=HEAD", "--staged", "--worktree", "--", &name]).map(|_| ())
@@ -1239,7 +1242,7 @@ pub fn line_link(path: &Path, first: usize, last: usize) -> Result<String, Strin
     let top = git(dir, &["rev-parse", "--show-toplevel"]).ok_or("Not in a git repository.")?;
     let commit = git(dir, &["rev-parse", "HEAD"]).ok_or("Nothing committed yet.")?;
     // Through any links: a project opened from /tmp is /private/tmp to git on macOS.
-    let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let resolve = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let (file_path, top) = (resolve(path), resolve(Path::new(top.trim())));
     let relative = file_path.strip_prefix(&top).map_err(|_| "The file isn't in the repository.")?;
     let file = relative.to_string_lossy().replace('\\', "/");
@@ -1426,7 +1429,7 @@ mod tests {
         let repo = crate::tools::test_dir("git-branching");
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
-        let repo = std::fs::canonicalize(&repo).unwrap();
+        let repo = dunce::canonicalize(&repo).unwrap();
         let run = |args: &[&str]| git(&repo, args);
         if run(&["init", "-q", "-b", "main"]).is_none() {
             return;
@@ -1505,7 +1508,7 @@ mod tests {
         let repo = crate::tools::test_dir(name);
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
-        let repo = std::fs::canonicalize(&repo).unwrap();
+        let repo = dunce::canonicalize(&repo).unwrap();
         git(&repo, &["init", "-q", "-b", "main"])?;
         git(&repo, &["config", "user.name", "t"]).unwrap();
         git(&repo, &["config", "user.email", "t@t"]).unwrap();

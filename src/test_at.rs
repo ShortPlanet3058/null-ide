@@ -73,7 +73,11 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
 /// `command` run in the package at `project`: in a subshell, so the terminal stays where it
 /// was (a `cd` typed into it would last).
 fn in_package(root: &Path, project: &Path, command: String) -> String {
-    if project == root { command } else { format!("(cd {} && {command})", quote(&relative(root, project))) }
+    if project == root {
+        command
+    } else {
+        crate::shell::in_folder(&relative(root, project), &command, crate::shell::kind())
+    }
 }
 
 /// What runs every test found, each kind once: one command, the parts after each other
@@ -671,11 +675,7 @@ fn in_dir(root: &Path, dir: &Path, make: impl Fn(&str) -> String) -> String {
 
 /// A shell word: as is when it's plain, else in single quotes.
 fn quote(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '@' | '+'));
-    if plain { word.to_string() } else { format!("'{}'", word.replace('\'', r"'\''")) }
+    crate::shell::quote(word, crate::shell::kind())
 }
 
 fn regex_escape(text: &str) -> String {
@@ -748,6 +748,7 @@ mod tests {
 
     /// A project's tests, found file by file, each with what runs it.
     #[test]
+    #[cfg(unix)] // (POSIX command lines: PowerShell's are tested in `shell`.)
     fn tests_are_found_in_a_project() {
         let rust = "fn helper() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds_up() {}\n}\n";
         let py = "class TestCart:\n    def test_total(self):\n        pass\n\nclass Helper:\n    def test_not(self):\n        pass\n\ndef test_free():\n    pass\n";
@@ -829,6 +830,7 @@ mod tests {
     /// A monorepo package with its own environment: its tests run with its Python, and
     /// not again with the project's.
     #[test]
+    #[cfg(unix)] // (POSIX command lines: PowerShell's are tested in `shell`.)
     fn a_package_s_tests_run_with_its_environment() {
         let test = "def test_one():\n    pass\n";
         let root = project(

@@ -464,7 +464,7 @@ mod real {
             "struct Point { x: i32 }\n\nfn main() {\n    let p = Point { x: 1 };\n    println!(\"{}\", p.x);\n}\n";
         let file = dir.join("src/main.rs");
         std::fs::write(&file, source).unwrap();
-        let program = std::env::var("HOME").unwrap() + "/.cargo/bin/rust-analyzer";
+        let program = crate::tools::home_dir().unwrap().join(".cargo/bin/rust-analyzer").display().to_string();
         let got = colours(&program, &dir, &file, "rust", source, &["Point", "main", "println", "p ="]);
         assert_eq!(got, [Syntax::Type, Syntax::Function, Syntax::Macro, Syntax::Plain]);
         std::fs::remove_dir_all(&dir).ok();

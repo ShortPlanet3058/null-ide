@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -556,7 +556,11 @@ fn ask_inner(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&st
     let effort = prompt.effort.filter(|e| id.efforts().contains(e)).unwrap_or(settings.effort(id));
     let model = prompt.model.clone().or_else(|| settings.model(id));
     match id {
-        ProviderId::Off => Err("AI is off. Turn it on in Settings → AI (⌘,).".into()),
+        ProviderId::Off => Err(if cfg!(target_os = "macos") {
+            "AI is off. Turn it on in Settings → AI (⌘,).".into()
+        } else {
+            "AI is off. Turn it on in Settings → AI (Ctrl+,).".into()
+        }),
         ProviderId::Claude => {
             let key = api_key(id).ok_or_else(|| missing_key(id))?;
             claude_api(&model.unwrap_or_default(), &key, effort, prompt, on_text)
@@ -775,9 +779,11 @@ pub fn find_cli(name: &str) -> Option<std::path::PathBuf> {
 /// How to get a subscription's command line tool, for when it's missing.
 pub fn install_hint(id: ProviderId) -> Option<&'static str> {
     match id {
-        ProviderId::ClaudeCode => Some(
-            "Install Claude Code with “curl -fsSL https://claude.ai/install.sh | bash”, then run “claude” once to sign in with your Claude plan.",
-        ),
+        ProviderId::ClaudeCode => Some(if cfg!(windows) {
+            "Install Claude Code with “irm https://claude.ai/install.ps1 | iex” in PowerShell, then run “claude” once to sign in with your Claude plan."
+        } else {
+            "Install Claude Code with “curl -fsSL https://claude.ai/install.sh | bash”, then run “claude” once to sign in with your Claude plan."
+        }),
         ProviderId::Codex => Some(
             "Install Codex with “npm install -g @openai/codex”, then run “codex” once to sign in with your ChatGPT plan.",
         ),
@@ -800,7 +806,7 @@ fn spawn_cli_in(
         .ok_or_else(|| format!("“{program}” isn't installed. {}", install_hint(id).unwrap_or_default()))?;
     // Tools installed with npm start with `#!/usr/bin/env node`: give them a PATH that finds node.
     let search_path = crate::tools::search_path();
-    let mut command = Command::new(&path);
+    let mut command = crate::tools::command(&path);
     command.env("PATH", search_path);
     if let Some(dir) = dir {
         command.current_dir(dir);

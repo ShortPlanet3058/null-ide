@@ -7,6 +7,7 @@
 # files: all of them written under target/, never used to build anything that runs.
 #
 #   scripts/check-platform.sh linux|windows [--all-targets]
+#   NULL_CHECK=clippy scripts/check-platform.sh windows --all-targets -- -D warnings
 #   (needs: rustup target add x86_64-unknown-linux-gnu / x86_64-pc-windows-msvc)
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
@@ -168,11 +169,11 @@ if [ "$platform" = linux ]; then
         CFLAGS_x86_64_unknown_linux_gnu="-isystem $stubs" \
         PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH="$pcs" PKG_CONFIG_LIBDIR="$pcs" \
         LIBGIT2_NO_VENDOR=1 LIBSSH2_SYS_USE_PKG_CONFIG=1 \
-        cargo check --target "$target" "$@"
+        cargo "${NULL_CHECK:-check}" --target "$target" "$@"
 else
     CC_x86_64_pc_windows_msvc=clang AR_x86_64_pc_windows_msvc="$win/lib.sh" \
         CFLAGS_x86_64_pc_windows_msvc="-isystem $win -isystem $stubs" \
         PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH="$pcs" PKG_CONFIG_LIBDIR="$pcs" \
         LIBGIT2_NO_VENDOR=1 LIBSSH2_SYS_USE_PKG_CONFIG=1 \
-        cargo check --target "$target" "$@"
+        cargo "${NULL_CHECK:-check}" --target "$target" "$@"
 fi

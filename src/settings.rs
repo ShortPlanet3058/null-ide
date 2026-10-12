@@ -766,7 +766,7 @@ impl Settings {
         } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
             PathBuf::from(xdg).join("null")
         } else {
-            PathBuf::from(std::env::var_os("HOME")?).join(".config").join("null")
+            crate::tools::home_dir()?.join(".config").join("null")
         };
         Some(dir.join("settings.json"))
     }

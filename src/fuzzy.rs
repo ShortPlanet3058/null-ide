@@ -6,7 +6,12 @@
 /// highlighting. Spaces in the query are ignored.
 /// The query as `score` reads it: lower case, without spaces.
 pub fn folded(query: &str) -> Vec<char> {
-    query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect()
+    query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).map(slash).collect()
+}
+
+/// `\` read as `/`: on Windows paths have the one, and people type the other.
+fn slash(c: char) -> char {
+    if c == '\\' { '/' } else { c }
 }
 
 /// Whether `candidate` has the (folded) query's characters in order: what `score` needs
@@ -15,7 +20,7 @@ pub fn folded(query: &str) -> Vec<char> {
 pub fn fits(candidate: &str, folded: &[char]) -> bool {
     let mut wanted = folded.iter().peekable();
     for c in candidate.chars() {
-        if wanted.peek().is_some_and(|&&w| c.to_lowercase().next() == Some(w)) {
+        if wanted.peek().is_some_and(|&&w| c.to_lowercase().next().map(slash) == Some(w)) {
             wanted.next();
         }
     }
@@ -23,12 +28,12 @@ pub fn fits(candidate: &str, folded: &[char]) -> bool {
 }
 
 pub fn score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
-    let query: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
+    let query = folded(query);
     if query.is_empty() {
         return Some((0, Vec::new()));
     }
     let chars: Vec<(usize, char)> = candidate.char_indices().collect();
-    let lower: Vec<char> = chars.iter().map(|&(_, c)| c.to_lowercase().next().unwrap_or(c)).collect();
+    let lower: Vec<char> = chars.iter().map(|&(_, c)| slash(c.to_lowercase().next().unwrap_or(c))).collect();
     let starts_word = |i: usize| match i.checked_sub(1).map(|j| chars[j].1) {
         None => true,
         Some(p) => {
@@ -79,6 +84,14 @@ pub fn score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows' `src\main.rs` found by typing `src/main`, and the other way round.
+    #[test]
+    fn either_slash_finds_a_path() {
+        assert!(score(r"src\main.rs", "src/main").is_some());
+        assert!(score("src/main.rs", r"src\main").is_some());
+        assert!(fits(r"src\main.rs", &folded("src/m")));
+    }
 
     #[test]
     fn a_quick_look_agrees_with_the_score() {

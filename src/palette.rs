@@ -1110,7 +1110,7 @@ impl Palette {
                 let path = &self.projects[i];
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let marked = highlights_in(&name, 0);
-                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let home = crate::tools::home_dir();
                 let place = match home.as_ref().and_then(|h| path.parent()?.strip_prefix(h).ok()) {
                     Some(rest) => Path::new("~").join(rest).display().to_string(),
                     None => path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
@@ -1160,7 +1160,7 @@ impl Palette {
                         ChangeKind::Changed if added == NOT_TEXT => (theme.git_modified, "not text".to_string()),
                         ChangeKind::Added => (theme.git_added, format!("new · +{added}")),
                         ChangeKind::Changed => (theme.git_modified, format!("+{added} −{removed}")),
-                        ChangeKind::Deleted => (theme.git_deleted, "deleted · ↵ restores it".to_string()),
+                        ChangeKind::Deleted => (theme.git_deleted, ui::key_words("deleted · ↵ restores it")),
                     };
                     (
                         div().size(px(5.)).rounded_full().bg(dot).into_any_element(),
@@ -1454,11 +1454,18 @@ pub fn format_keys(binding: &KeyBinding) -> String {
         .iter()
         .map(|stroke| {
             let m = stroke.modifiers();
+            let mac = cfg!(target_os = "macos");
             let key = match stroke.key() {
-                "enter" => "↵".to_string(),
-                "tab" => "⇥".to_string(),
+                // (The Mac's symbols there; names elsewhere, as their keyboards say.)
+                "enter" if mac => "↵".to_string(),
+                "tab" if mac => "⇥".to_string(),
+                "backspace" if mac => "⌫".to_string(),
+                "enter" => "Enter".to_string(),
+                "tab" => "Tab".to_string(),
+                "backspace" => "Backspace".to_string(),
                 "escape" => "Esc".to_string(),
-                "backspace" => "⌫".to_string(),
+                "pageup" => "PgUp".to_string(),
+                "pagedown" => "PgDn".to_string(),
                 "up" => "↑".to_string(),
                 "down" => "↓".to_string(),
                 "left" => "←".to_string(),
@@ -1476,7 +1483,12 @@ pub fn format_keys(binding: &KeyBinding) -> String {
                 s + &key
             } else {
                 let mut parts: Vec<&str> = Vec::new();
-                for (on, name) in [(m.control, "Ctrl"), (m.alt, "Alt"), (m.shift, "Shift"), (m.platform, "Super")] {
+                for (on, name) in [
+                    (m.control, "Ctrl"),
+                    (m.alt, "Alt"),
+                    (m.shift, "Shift"),
+                    (m.platform, if cfg!(windows) { "Win" } else { "Super" }),
+                ] {
                     if on {
                         parts.push(name);
                     }
@@ -1555,7 +1567,7 @@ impl Render for Palette {
                 )
             }
         };
-        let hint = self.hint();
+        let hint = ui::key_words(self.hint());
         let mut context = KeyContext::new_with_defaults();
         context.add("Palette");
         if matches!(self.selected_item(), Some(Item::Quick(q)) if q.is_choice()) {

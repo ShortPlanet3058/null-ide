@@ -33,7 +33,7 @@ pub(crate) fn types_something(keystrokes: &str) -> bool {
 }
 
 /// What to add to a key that types, to make it a shortcut.
-pub(crate) const ADD_TO_TYPING: &str = if cfg!(target_os = "macos") { "add ⌘ or ⌃" } else { "add ⌘, ⌃ or ⌥" };
+pub(crate) const ADD_TO_TYPING: &str = if cfg!(target_os = "macos") { "add ⌘ or ⌃" } else { "add Ctrl or Alt" };
 
 /// A name as written, for comparing: letters and digits, in lower case.
 fn plain(name: &str) -> String {
@@ -209,13 +209,13 @@ mod tests {
             e.selection = Selection { anchor: 0, head: 1 };
         });
         // ⌘D, taken away: still one selection.
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes("secondary-d");
         assert_eq!(e.read_with(cx, |e, _| e.extra.len()), 0);
         // ⌘⇧L, taken from Select All Occurrences alone: it doesn't run.
-        cx.simulate_keystrokes("cmd-shift-l");
+        cx.simulate_keystrokes("secondary-shift-l");
         assert_eq!(e.read_with(cx, |e, _| e.extra.len()), 0);
         // ⌃⌘L, yours: every `a`.
-        cx.simulate_keystrokes("ctrl-cmd-l");
+        cx.simulate_keystrokes("ctrl-secondary-l");
         assert_eq!(e.read_with(cx, |e, _| e.extra.len()), 2);
     }
 }

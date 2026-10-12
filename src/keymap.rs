@@ -45,12 +45,30 @@ impl Keymap {
     /// The keys that matter most, to recognise the preset by.
     pub fn summary(self) -> &'static str {
         match self {
-            Keymap::Null => "⌘P files · ⌘K quick settings and commands · ⌘D next match · ⌥⇧↓ duplicate line",
-            Keymap::VsCode => "⌘P files · ⇧⌘P commands · ⌘D next match · ⌥⇧↓ duplicate · ⇧⌘K delete line",
-            Keymap::JetBrains => "⇧⌘O files · ⇧⌘A actions · ⌘L go to line · ⌘D duplicate · ⌘⌫ delete line",
-            Keymap::Sublime => "⌘P files · ⇧⌘P commands · ⇧⌘D duplicate · ⌃⇧K delete line · ⌃⌘↑ move line",
-            Keymap::Zed => "⌘P files · ⇧⌘P commands · ⌘D next match · ⇧⌘D duplicate · ⌃⇧K delete line",
-            Keymap::Vim => "hjkl w b e move · i a o insert · v V select · d c y p · Esc · ⌘ keys as Null's",
+            Keymap::Null => mac_or(
+                "⌘P files · ⌘K quick settings and commands · ⌘D next match · ⌥⇧↓ duplicate line",
+                "Ctrl+P files · Ctrl+K quick settings and commands · Ctrl+D next match · Alt+Shift+↓ duplicate line",
+            ),
+            Keymap::VsCode => mac_or(
+                "⌘P files · ⇧⌘P commands · ⌘D next match · ⌥⇧↓ duplicate · ⇧⌘K delete line",
+                "Ctrl+P files · Ctrl+Shift+P commands · Ctrl+D next match · Alt+Shift+↓ duplicate · Ctrl+Shift+K delete line",
+            ),
+            Keymap::JetBrains => mac_or(
+                "⇧⌘O files · ⇧⌘A actions · ⌘L go to line · ⌘D duplicate · ⌘⌫ delete line",
+                "Ctrl+Shift+O files · Ctrl+Shift+A actions · Ctrl+G go to line · Ctrl+D duplicate · Ctrl+Y delete line",
+            ),
+            Keymap::Sublime => mac_or(
+                "⌘P files · ⇧⌘P commands · ⇧⌘D duplicate · ⌃⇧K delete line · ⌃⌘↑ move line",
+                "Ctrl+P files · Ctrl+Shift+P commands · Ctrl+Shift+D duplicate · Ctrl+Shift+K delete line · Ctrl+Shift+↑ move line",
+            ),
+            Keymap::Zed => mac_or(
+                "⌘P files · ⇧⌘P commands · ⌘D next match · ⇧⌘D duplicate · ⌃⇧K delete line",
+                "Ctrl+P files · Ctrl+Shift+P commands · Ctrl+D next match · Ctrl+Shift+D duplicate · Ctrl+Shift+K delete line",
+            ),
+            Keymap::Vim => mac_or(
+                "hjkl w b e move · i a o insert · v V select · d c y p · Esc · ⌘ keys as Null's",
+                "hjkl w b e move · i a o insert · v V select · d c y p · Esc · Ctrl keys as Null's",
+            ),
         }
     }
 
@@ -71,13 +89,14 @@ impl Keymap {
                 KeyBinding::new("alt-f12", ToggleTerminal, workspace),
                 // (Over the editor's own ⌥F12 and ⌘F12: Peek Definition, Go to Implementation.)
                 KeyBinding::new("alt-f12", ToggleTerminal, editor),
-                KeyBinding::new("secondary-l", GoToLine, editor),
+                KeyBinding::new(mac_or("cmd-l", "ctrl-g"), GoToLine, editor),
                 KeyBinding::new("secondary-d", DuplicateLineDown, editor),
-                KeyBinding::new("secondary-backspace", DeleteLine, editor),
+                // (Off the Mac, Ctrl+Backspace deletes a word: JetBrains' Ctrl+Y there.)
+                KeyBinding::new(mac_or("cmd-backspace", "ctrl-y"), DeleteLine, editor),
                 KeyBinding::new("alt-shift-up", MoveLineUp, editor),
                 KeyBinding::new("alt-shift-down", MoveLineDown, editor),
-                KeyBinding::new("ctrl-g", AddNextOccurrence, editor),
-                KeyBinding::new("ctrl-secondary-g", SelectAllOccurrences, editor),
+                KeyBinding::new(mac_or("ctrl-g", "alt-j"), AddNextOccurrence, editor),
+                KeyBinding::new(mac_or("ctrl-cmd-g", "ctrl-alt-shift-j"), SelectAllOccurrences, editor),
                 KeyBinding::new("secondary-b", GoToDefinition, editor),
                 KeyBinding::new("secondary-f12", crate::workspace::GoToSymbol, workspace),
                 KeyBinding::new("secondary-f12", crate::workspace::GoToSymbol, editor),
@@ -94,11 +113,12 @@ impl Keymap {
                 KeyBinding::new("secondary-shift-r", crate::workspace::GoToSymbolInProject, workspace),
                 KeyBinding::new("secondary-shift-d", crate::editor::DuplicateSelection, editor),
                 KeyBinding::new("ctrl-shift-k", DeleteLine, editor),
-                KeyBinding::new("ctrl-secondary-up", MoveLineUp, editor),
-                KeyBinding::new("ctrl-secondary-down", MoveLineDown, editor),
-                KeyBinding::new("ctrl-secondary-g", SelectAllOccurrences, editor),
-                KeyBinding::new("ctrl-shift-up", AddCursorAbove, editor),
-                KeyBinding::new("ctrl-shift-down", AddCursorBelow, editor),
+                // (Sublime's own keys on Windows and Linux, off the Mac.)
+                KeyBinding::new(mac_or("ctrl-cmd-up", "ctrl-shift-up"), MoveLineUp, editor),
+                KeyBinding::new(mac_or("ctrl-cmd-down", "ctrl-shift-down"), MoveLineDown, editor),
+                KeyBinding::new(mac_or("ctrl-cmd-g", "alt-f3"), SelectAllOccurrences, editor),
+                KeyBinding::new(mac_or("ctrl-shift-up", "ctrl-alt-up"), AddCursorAbove, editor),
+                KeyBinding::new(mac_or("ctrl-shift-down", "ctrl-alt-down"), AddCursorBelow, editor),
                 // Sublime goes round its bookmarks with F2 (renaming has no key there).
                 KeyBinding::new("f2", crate::editor::NextBookmark, editor),
                 KeyBinding::new("shift-f2", crate::editor::PreviousBookmark, editor),
@@ -113,6 +133,11 @@ impl Keymap {
 }
 
 /// JetBrains keys that differ between macOS and the others.
+/// `mac` on the Mac, `other` elsewhere: a preset's keys as that editor has them on each.
+fn mac_or(mac: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") { mac } else { other }
+}
+
 fn jetbrains_platform_keys() -> Vec<KeyBinding> {
     use crate::editor::{ExpandSelection, ShrinkSelection};
     use crate::workspace::{GoBack, GoForward};
@@ -251,6 +276,7 @@ mod tests {
     /// ⌘E uses the selection for find, but stays the palette for JetBrains hands.
     #[cfg(target_os = "macos")]
     #[gpui::test]
+    #[cfg(target_os = "macos")]
     fn command_e_finds_except_on_jetbrains(cx: &mut gpui::TestAppContext) {
         let first = |preset: Keymap, cx: &mut gpui::TestAppContext| {
             cx.update(|cx| {
@@ -274,7 +300,7 @@ mod tests {
             register(Keymap::JetBrains, cx);
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
-            let stroke = gpui::Keystroke::parse("cmd-d").unwrap();
+            let stroke = gpui::Keystroke::parse("secondary-d").unwrap();
             let context = [gpui::KeyContext::parse("Workspace").unwrap(), gpui::KeyContext::parse("Editor").unwrap()];
             let (bindings, _) = keymap.bindings_for_input(&[stroke], &context);
             assert_eq!(bindings.first().map(|b| b.action().name()), Some(DuplicateLineDown.name()));

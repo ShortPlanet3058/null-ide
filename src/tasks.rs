@@ -64,9 +64,7 @@ pub fn find(root: &Path, file: Option<&Path>, yours: &std::collections::BTreeMap
 
 /// `word` as the shell takes it: as it is when it's plain, in single quotes otherwise.
 fn quoted(word: &str) -> String {
-    let plain =
-        !word.is_empty() && word.chars().all(|c| c.is_alphanumeric() || "-_./=:,@%+".contains(c) || !c.is_ascii());
-    if plain { word.to_string() } else { format!("'{}'", word.replace('\'', "'\\''")) }
+    crate::shell::quote(word, crate::shell::kind())
 }
 
 /// `text` with VS Code's `${…}` filled in: the project's folder, the file being worked on,
@@ -84,8 +82,8 @@ pub(crate) fn filled(text: &str, root: &Path, file: Option<&Path>, put: fn(&str)
         let value = match name {
             "workspaceFolder" | "workspaceRoot" | "cwd" => Some(root.display().to_string()),
             "workspaceFolderBasename" => root.file_name().map(|n| n.to_string_lossy().into_owned()),
-            "pathSeparator" => Some("/".into()),
-            "userHome" => std::env::var("HOME").ok(),
+            "pathSeparator" => Some(std::path::MAIN_SEPARATOR_STR.into()),
+            "userHome" => crate::tools::home_dir().map(|h| h.display().to_string()),
             "file" => file_part(|f| Some(f.display().to_string())),
             "fileBasename" => file_part(|f| Some(f.file_name()?.to_string_lossy().into_owned())),
             "fileBasenameNoExtension" => file_part(|f| Some(f.file_stem()?.to_string_lossy().into_owned())),
@@ -180,7 +178,7 @@ fn vscode_tasks(text: &str, root: &Path, file: Option<&Path>) -> Vec<ProjectTask
                 (line, cwd)
             };
             Some(match cwd {
-                Some(dir) => format!("(cd {} && {command})", quoted(&dir.display().to_string())),
+                Some(dir) => crate::shell::in_folder(&dir.display().to_string(), &command, crate::shell::kind()),
                 None => command,
             })
         })();
@@ -226,7 +224,11 @@ fn vscode_tasks(text: &str, root: &Path, file: Option<&Path>) -> Vec<ProjectTask
         .filter(|(label, ..)| !label.is_empty())
         .filter_map(|(label, ..)| {
             let run = whole(label, &tasks, &mut Vec::new())?;
-            Some(ProjectTask { label: label.clone(), command: run.join(" && "), source: ".vscode/tasks.json" })
+            Some(ProjectTask {
+                label: label.clone(),
+                command: crate::shell::and_then(&run, crate::shell::kind()),
+                source: ".vscode/tasks.json",
+            })
         })
         .collect()
 }
@@ -282,6 +284,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)] // (POSIX command lines: PowerShell's are tested in `shell`.)
     fn vs_code_tasks_are_read() {
         let root = Path::new("/p/app");
         let file = Path::new("/p/app/src/main.py");

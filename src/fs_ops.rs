@@ -189,7 +189,7 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SAVES: AtomicU64 = AtomicU64::new(0);
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let existing = std::fs::metadata(&target).ok();
     if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "it's read-only"));
@@ -239,12 +239,12 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Whether the file's owner is the user Null runs as.
 #[cfg(unix)]
 fn owned_by_me(uid: u32) -> bool {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         // Safety: no arguments, can't fail.
         uid == unsafe { libc::geteuid() }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     {
         let _ = uid;
         true
@@ -267,6 +267,11 @@ fn copy_metadata(from: &Path, to: &Path) {
 #[cfg(not(target_os = "macos"))]
 fn copy_metadata(_: &Path, _: &Path) {}
 
+/// The Trash, as the platform calls it.
+pub const TRASH: &str = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
+/// The command that sends things there.
+pub const MOVE_TO_TRASH: &str = if cfg!(windows) { "Move to Recycle Bin" } else { "Move to Trash" };
+
 /// Moves to the Trash (or the platform's recycle bin): never deletes outright.
 #[cfg(not(test))]
 pub fn move_to_trash(path: &Path) -> Result<(), String> {
@@ -279,7 +284,7 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
         use trash::macos::{DeleteMethod, TrashContextExtMacos};
         context.set_delete_method(DeleteMethod::NsFileManager);
     }
-    context.delete(path).map_err(|e| format!("Couldn't move to the Trash: {e}"))
+    context.delete(path).map_err(|e| format!("Couldn't move to the {TRASH}: {e}"))
 }
 
 /// In tests, a folder of their own stands in for the Trash: nothing of theirs lands in
@@ -295,7 +300,7 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
         n += 1;
         to = trash.join(format!("{}-{n}", name.to_string_lossy()));
     }
-    std::fs::rename(path, &to).map_err(|e| format!("Couldn't move to the Trash: {e}"))
+    std::fs::rename(path, &to).map_err(|e| format!("Couldn't move to the {TRASH}: {e}"))
 }
 
 /// Where tests' "Trash" is.

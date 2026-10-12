@@ -21,7 +21,7 @@ fn program() -> Option<PathBuf> {
 /// gh, run in `dir`, never stopping to ask anything (there's no terminal to answer in).
 fn gh(dir: &Path) -> Result<Command, String> {
     let program = program().ok_or_else(|| MISSING.to_string())?;
-    let mut command = Command::new(program);
+    let mut command = crate::tools::command(program);
     command
         .current_dir(dir)
         .env("PATH", crate::tools::search_path())
@@ -497,7 +497,7 @@ pub fn issue_detail(dir: &Path, number: u64) -> Result<IssueDetail, String> {
 
 /// Where the pull request's branch left its base: what its changes are compared with.
 pub fn merge_base(dir: &Path, repo: &Repo, base: &str, head: &str) -> Option<String> {
-    let local = Command::new("git").arg("-C").arg(dir).args(["merge-base", base, head]).output().ok();
+    let local = crate::tools::command("git").arg("-C").arg(dir).args(["merge-base", base, head]).output().ok();
     if let Some(out) = local.filter(|o| o.status.success()) {
         return Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }

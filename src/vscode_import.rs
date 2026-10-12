@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// The editors whose settings can be brought over, and where each keeps them.
 fn settings_files() -> Vec<(&'static str, PathBuf)> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Vec::new() };
+    let Some(home) = crate::tools::home_dir() else { return Vec::new() };
     let support = if cfg!(target_os = "macos") {
         home.join("Library/Application Support")
     } else if cfg!(windows) {
@@ -39,7 +39,7 @@ pub struct Here {
 
 impl Here {
     pub fn of(cx: &gpui::App) -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::tools::home_dir();
         let vim = !cfg!(test)
             && home.is_some_and(|home| {
                 [".vscode", ".vscode-insiders", ".vscode-oss", ".cursor"].iter().any(|dir| {
