@@ -117,6 +117,140 @@ pub fn section_heading(text: &str, theme: &Theme) -> Div {
     div().text_size(px(T_XS)).font_weight(FontWeight::SEMIBOLD).text_color(theme.faint).child(text.to_uppercase())
 }
 
+/// The colour under a row (or a quiet control) the mouse is over.
+pub fn hover(theme: &Theme) -> gpui::Hsla {
+    theme.hairline.opacity(0.6)
+}
+
+/// Where content starts in the sidebar, from its edge.
+pub const INSET: f32 = 16.;
+
+/// A quiet button: a bordered label, the same everywhere (Settings, git, pages).
+pub fn button(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, theme: &Theme) -> gpui::Stateful<Div> {
+    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    div()
+        .id(id)
+        .flex_none()
+        .px(px(10.))
+        .h(px(CONTROL))
+        .flex()
+        .items_center()
+        .rounded(px(R_CONTROL))
+        .border_1()
+        .border_color(theme.line_strong)
+        .text_size(px(T_SM))
+        .text_color(theme.foreground)
+        .cursor_pointer()
+        .hover(|d| d.bg(hover(theme)))
+        .active(|d| d.opacity(0.7))
+        .child(label.into())
+}
+
+/// The one main action of a place, in the accent; dimmed and inert when it can't be done.
+pub fn primary_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    let button = div()
+        .id(id)
+        .flex_none()
+        .px(px(12.))
+        .h(px(CONTROL))
+        .flex()
+        .items_center()
+        .rounded(px(R_CONTROL))
+        .text_size(px(T_SM))
+        .child(label.into());
+    if enabled {
+        button
+            .bg(theme.caret)
+            .text_color(theme.on_accent)
+            .cursor_pointer()
+            .hover(|d| d.opacity(0.9))
+            .active(|d| d.opacity(0.7))
+    } else {
+        button.bg(theme.hairline).text_color(theme.faint)
+    }
+}
+
+/// A word that does something, without a frame (a list's own small actions).
+pub fn link(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, theme: &Theme) -> gpui::Stateful<Div> {
+    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    div()
+        .id(id)
+        .flex_none()
+        .text_color(theme.muted)
+        .cursor_pointer()
+        .hover(|d| d.text_color(theme.foreground))
+        .active(|d| d.opacity(0.7))
+        .child(label.into())
+}
+
+/// A small square button holding an icon (close, add…), with what it does on hover.
+pub fn icon_button(
+    id: impl Into<gpui::ElementId>,
+    icon: &'static str,
+    tip_label: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(20.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(R_KEY))
+        .cursor_pointer()
+        .hover(|d| d.bg(hover(theme)))
+        .active(|d| d.opacity(0.7))
+        .tooltip(tip(tip_label, None))
+        .child(gpui::svg().path(icon).size(px(12.)).text_color(theme.muted))
+}
+
+/// A text field's box (its input goes inside): one look for every field.
+pub fn field(theme: &Theme) -> Div {
+    div()
+        .h(px(FIELD))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .rounded(px(R_CONTROL))
+        .border_1()
+        .border_color(theme.hairline)
+        .bg(theme.background)
+        .text_size(px(T_MD))
+}
+
+/// A heading over a group of rows in the sidebar, at its content's edge.
+pub fn sidebar_heading(text: &str, theme: &Theme) -> Div {
+    section_heading(text, theme).px(px(INSET)).pt(px(14.)).pb(px(4.))
+}
+
+/// What a list says when it has nothing to show.
+pub fn empty_state(text: impl Into<SharedString>, theme: &Theme) -> Div {
+    div().px(px(INSET)).pt(px(12.)).text_size(px(T_SM)).text_color(theme.muted).child(text.into())
+}
+
+/// A raised card (a branch, a pull request) on the sidebar or a page.
+pub fn card(theme: &Theme) -> Div {
+    div().rounded(px(R_ROW_LG)).bg(theme.raised)
+}
+
+/// A box ticked, half-ticked (`partly`: some of it), or empty.
+pub fn checkbox(on: bool, partly: bool, theme: &Theme) -> Div {
+    let box_ = div().flex_none().size(px(14.)).rounded(px(R_KEY)).flex().items_center().justify_center();
+    if on {
+        box_.bg(theme.caret).text_color(theme.on_accent).text_size(px(10.)).child(if partly { "–" } else { "✓" })
+    } else {
+        box_.border_1().border_color(theme.line_strong)
+    }
+}
+
 /// The track of a segmented choice (theme, sidebar view…); pieces go inside it.
 pub fn segmented(theme: &Theme) -> Div {
     div().flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(R_CONTROL)).bg(theme.sunken)

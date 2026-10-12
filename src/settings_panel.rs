@@ -416,20 +416,7 @@ impl SettingsPanel {
     }
 
     fn button(id: impl Into<gpui::ElementId>, label: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .px(px(12.))
-            .h(px(ui::CONTROL))
-            .flex()
-            .items_center()
-            .rounded(px(ui::R_CONTROL))
-            .border_1()
-            .border_color(theme.line_strong)
-            .text_size(px(ui::T_MD))
-            .text_color(theme.foreground)
-            .cursor_pointer()
-            .hover(|d| d.bg(theme.hairline))
-            .child(label.to_string())
+        ui::button(id, label.to_string(), theme)
     }
 
     fn heading(text: &str, theme: &Theme) -> AnyElement {
@@ -470,7 +457,7 @@ impl SettingsPanel {
                 div()
                     .w(px(44.))
                     .text_center()
-                    .text_size(px(13.))
+                    .text_size(px(ui::T_MD))
                     .text_color(theme.foreground)
                     .child(format!("{}", s.font_size)),
             )
@@ -499,7 +486,7 @@ impl SettingsPanel {
                 div()
                     .w(px(44.))
                     .text_center()
-                    .text_size(px(13.))
+                    .text_size(px(ui::T_MD))
                     .text_color(theme.foreground)
                     .child(format!("{:.0}%", zoom * 100.)),
             )
@@ -987,7 +974,7 @@ impl SettingsPanel {
             Self::heading("Language servers", &theme),
             div()
                 .pt(px(6.))
-                .text_size(px(12.))
+                .text_size(px(ui::T_SM))
                 .text_color(theme.faint)
                 .child("Completions, errors, info on hover and go to definition. Null installs them in its own folder, never on the system.")
                 .into_any_element(),
@@ -1031,7 +1018,7 @@ impl SettingsPanel {
                             }))
                             .into_any_element()
                     } else {
-                        div().text_size(px(13.)).text_color(theme.faint).child("Not installed").into_any_element()
+                        div().text_size(px(ui::T_MD)).text_color(theme.faint).child("Not installed").into_any_element()
                     };
                     (detail, control)
                 }
@@ -1074,7 +1061,7 @@ impl SettingsPanel {
             rows.push(
                 div()
                     .pt(px(10.))
-                    .text_size(px(12.))
+                    .text_size(px(ui::T_SM))
                     .text_color(theme.muted)
                     .child("Choose where answers come from.")
                     .into_any_element(),
@@ -1101,10 +1088,10 @@ impl SettingsPanel {
                             .gap(px(10.))
                             .px(px(10.))
                             .py(px(6.))
-                            .rounded(px(9.))
+                            .rounded(px(ui::R_ROW_LG))
                             .cursor_pointer()
-                            .when(active, |d| d.bg(theme.accent_soft))
-                            .when(!active, |d| d.hover(|d| d.bg(theme.hairline.opacity(0.5))))
+                            .when(active, |d| d.bg(theme.hairline))
+                            .when(!active, |d| d.hover(|d| d.bg(ui::hover(&theme))))
                             .child(
                                 div()
                                     .size(px(14.))
@@ -1124,10 +1111,10 @@ impl SettingsPanel {
                                     .overflow_hidden()
                                     .flex()
                                     .flex_col()
-                                    .child(div().text_size(px(14.)).text_color(theme.foreground).child(id.label()))
+                                    .child(div().text_size(px(ui::T_LG)).text_color(theme.foreground).child(id.label()))
                                     .child(
                                         div()
-                                            .text_size(px(11.))
+                                            .text_size(px(ui::T_XS))
                                             .line_height(px(15.))
                                             .text_color(theme.faint)
                                             .child(id.description()),
@@ -1401,7 +1388,7 @@ impl SettingsPanel {
         rows.push(
             div()
                 .pt(px(8.))
-                .text_size(px(12.))
+                .text_size(px(ui::T_SM))
                 .text_color(theme.faint)
                 .child("Click a command's keys, then press new ones. Esc keeps them; ⌫ removes them.")
                 .into_any_element(),
@@ -1436,23 +1423,25 @@ impl SettingsPanel {
                             .rounded(px(ui::R_KEY))
                             .border_1()
                             .border_color(theme.caret)
-                            .text_size(px(12.))
+                            .text_size(px(ui::T_SM))
                             .text_color(theme.foreground)
                             .child("Press the keys…")
                             .into_any_element()
                     } else {
                         match keys {
                             Some(keys) => ui::key_cap(keys, &theme).into_any_element(),
-                            None => {
-                                div().text_size(px(12.)).text_color(theme.faint).child("Add keys").into_any_element()
-                            }
+                            None => div()
+                                .text_size(px(ui::T_SM))
+                                .text_color(theme.faint)
+                                .child("Add keys")
+                                .into_any_element(),
                         }
                     };
                     div()
                         .py(px(7.))
                         .border_b_1()
                         .border_color(theme.hairline)
-                        .text_size(px(13.))
+                        .text_size(px(ui::T_MD))
                         .child(
                             div()
                                 .flex()
@@ -1474,7 +1463,9 @@ impl SettingsPanel {
                                 ),
                         )
                         .children(
-                            note.map(|note| div().pt(px(3.)).text_size(px(12.)).text_color(theme.muted).child(note)),
+                            note.map(|note| {
+                                div().pt(px(3.)).text_size(px(ui::T_SM)).text_color(theme.muted).child(note)
+                            }),
                         )
                         .into_any_element()
                 }));
@@ -1521,7 +1512,7 @@ impl Render for SettingsPanel {
                     .px(px(10.))
                     .pt(px(6.))
                     .pb(px(14.))
-                    .text_size(px(17.))
+                    .text_size(px(ui::T_XL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
                     .child("Settings"),
@@ -1548,10 +1539,10 @@ impl Render for SettingsPanel {
                     .id(section.label())
                     .px(px(10.))
                     .py(px(6.))
-                    .rounded(px(7.))
-                    .text_size(px(14.))
+                    .rounded(px(ui::R_CONTROL))
+                    .text_size(px(ui::T_LG))
                     .cursor_pointer()
-                    .when(active, |d| d.bg(theme.accent_soft).text_color(theme.foreground))
+                    .when(active, |d| d.bg(theme.hairline).text_color(theme.foreground))
                     .when(!active, |d| d.text_color(theme.muted).hover(|d| d.text_color(theme.foreground)))
                     .child(section.label())
                     .active(|s| s.opacity(0.7))
@@ -1575,8 +1566,8 @@ impl Render for SettingsPanel {
                     .id("project-json")
                     .px(px(10.))
                     .py(px(6.))
-                    .rounded(px(7.))
-                    .text_size(px(12.))
+                    .rounded(px(ui::R_CONTROL))
+                    .text_size(px(ui::T_SM))
                     .text_color(if set_here > 0 { theme.muted } else { theme.faint })
                     .cursor_pointer()
                     .hover(|d| d.text_color(theme.foreground))
@@ -1591,8 +1582,8 @@ impl Render for SettingsPanel {
                     .id("edit-json")
                     .px(px(10.))
                     .py(px(6.))
-                    .rounded(px(7.))
-                    .text_size(px(12.))
+                    .rounded(px(ui::R_CONTROL))
+                    .text_size(px(ui::T_SM))
                     .text_color(theme.faint)
                     .cursor_pointer()
                     .hover(|d| d.text_color(theme.foreground))

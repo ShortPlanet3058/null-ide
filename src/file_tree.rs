@@ -1604,7 +1604,7 @@ impl FileTree {
                     .text_color(color)
                     .when(active, |r| r.bg(theme.accent_soft))
                     .when(selected && !active, |r| r.bg(theme.hairline))
-                    .when(!active && !selected, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                    .when(!active && !selected, |r| r.hover(|s| s.bg(ui::hover(theme))))
                     .child(marker(entry.is_dir, turn, if active { theme.foreground } else { theme.muted }, dot));
                 if editing_this(&path) {
                     let edit = self.edit.as_ref().unwrap();
@@ -1674,7 +1674,7 @@ impl FileTree {
                         .cursor_pointer()
                         .text_color(if destructive { theme.error } else { theme.foreground })
                         .when(selected, |d| d.bg(theme.accent_soft))
-                        .hover(|s| s.bg(theme.accent_soft))
+                        .hover(|s| s.bg(ui::hover(theme)))
                         .child(div().flex_1().child(item.label()))
                         .children(item.keys().map(|k| div().text_size(px(ui::T_SM)).text_color(theme.muted).child(k)))
                         .active(|s| s.opacity(0.7))
@@ -1736,7 +1736,7 @@ impl Render for FileTree {
                 .rounded(px(ui::R_KEY))
                 .cursor_pointer()
                 .group(id)
-                .hover(|s| s.bg(theme.hairline))
+                .hover(|s| s.bg(ui::hover(theme)))
                 .child(
                     svg()
                         .path(icon)

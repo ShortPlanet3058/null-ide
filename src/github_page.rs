@@ -10,7 +10,7 @@ use crate::theme::Theme;
 use crate::ui::{self, px};
 use gpui::{
     App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, PromptLevel, Subscription,
-    Task, Window, actions, div, prelude::*, svg,
+    Task, Window, actions, div, prelude::*,
 };
 use std::path::PathBuf;
 
@@ -424,8 +424,8 @@ fn markdown(text: &str, theme: &Theme, cx: &App) -> Vec<gpui::AnyElement> {
                     .my(px(4.))
                     .px(px(10.))
                     .py(px(6.))
-                    .rounded(px(ui::R_KEY))
-                    .bg(theme.surface)
+                    .rounded(px(ui::R_ROW))
+                    .bg(theme.sunken)
                     .code_font(cx)
                     .text_size(px(ui::T_SM))
                     .children(
@@ -459,17 +459,7 @@ impl Render for GitHubPage {
             .flex_col()
             .bg(theme.background)
             .text_size(px(ui::T_MD));
-        let close = div()
-            .id("close-github")
-            .flex_none()
-            .size(px(20.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(ui::R_KEY))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.hairline))
-            .child(svg().path("icons/x.svg").size(px(12.)).text_color(theme.muted))
+        let close = ui::icon_button("close-github", "icons/x.svg", "Close (Esc)", &theme)
             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(GitHubPageEvent::Close)));
         let Some(detail) = &self.detail else {
             let said = self.error.clone().unwrap_or_else(|| format!("Reading #{} from GitHub…", self.number));
@@ -493,9 +483,9 @@ impl Render for GitHubPage {
             Detail::Pull(p) => {
                 meta.push(div().code_font(cx).child(format!("{} → {}", p.pull.head, p.pull.base)).into_any_element());
                 let (checks, colour) = match p.pull.checks {
-                    Checks::Passed(n) => (format!("✓ {n} checks passed"), theme.git_added),
+                    Checks::Passed(n) => (format!("{n} checks passed"), theme.git_added),
                     Checks::Running => ("checks running".to_string(), theme.caret),
-                    Checks::Failed(n) => (format!("✕ {n} checks failed"), theme.git_deleted),
+                    Checks::Failed(n) => (format!("{n} checks failed"), theme.git_deleted),
                     Checks::None => (String::new(), theme.muted),
                 };
                 if !checks.is_empty() {
@@ -548,7 +538,7 @@ impl Render for GitHubPage {
                             .rounded(px(ui::R_ROW))
                             .cursor_pointer()
                             .when(on, |r| r.bg(theme.hairline))
-                            .when(!on, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                            .when(!on, |r| r.hover(|s| s.bg(ui::hover(&theme))))
                             .child(div().flex_1().min_w_0().truncate().text_color(colour).child(name))
                             .child(
                                 div()
@@ -556,7 +546,7 @@ impl Render for GitHubPage {
                                     .gap(px(4.))
                                     .text_size(px(ui::T_XS))
                                     .when(threads[ix] > 0, |d| {
-                                        d.child(div().text_color(theme.muted).child(format!("💬 {}", threads[ix])))
+                                        d.child(div().text_color(theme.muted).child(threads[ix].to_string()))
                                     })
                                     .when(threads[ix] == 0, |d| {
                                         d.code_font(cx)
@@ -594,21 +584,6 @@ impl Render for GitHubPage {
             _ => None,
         };
         let open = state == "OPEN";
-        let button = |id: &'static str, label: &'static str, primary: bool| {
-            div()
-                .id(id)
-                .px(px(10.))
-                .py(px(4.))
-                .rounded(px(ui::R_KEY))
-                .text_size(px(ui::T_SM))
-                .cursor_pointer()
-                .when(primary, |b| {
-                    b.bg(theme.caret).text_color(theme.background).font_weight(gpui::FontWeight::SEMIBOLD)
-                })
-                .when(!primary, |b| b.border_1().border_color(theme.hairline).hover(|s| s.bg(theme.hairline)))
-                .active(|s| s.opacity(0.7))
-                .child(label)
-        };
         let is_pull = !self.issue;
         let header = div()
             .px(px(28.))
@@ -661,18 +636,18 @@ impl Render for GitHubPage {
                     .gap(px(8.))
                     .when(is_pull && open, |d| {
                         d.child(
-                            button("pull-merge", "Merge", true)
+                            ui::primary_button("pull-merge", "Merge", true, &theme)
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.merge(window, cx))),
                         )
-                        .child(button("pull-approve", "Approve", false).on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
+                        .child(ui::button("pull-approve", "Approve", &theme).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
                                 let n = this.number;
                                 this.act(format!("Approved #{n}."), github::approve, cx)
-                            },
-                        )))
+                            }),
+                        ))
                     })
                     .when(is_pull, |d| {
-                        d.child(button("pull-checkout", "Check Out", false).on_click(cx.listener(
+                        d.child(ui::button("pull-checkout", "Check Out", &theme).on_click(cx.listener(
                             |this, _: &ClickEvent, _, cx| {
                                 let n = this.number;
                                 this.act(format!("Checked out #{n}'s branch."), github::check_out, cx)
@@ -680,15 +655,9 @@ impl Render for GitHubPage {
                         )))
                     })
                     .child(
-                        div()
-                            .id("github-open")
+                        ui::link("github-open", "Open on GitHub", &theme)
                             .px(px(6.))
-                            .py(px(4.))
                             .text_size(px(ui::T_SM))
-                            .text_color(theme.muted)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child("Open on GitHub")
                             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(&url))),
                     ),
             );
@@ -703,33 +672,28 @@ impl Render for GitHubPage {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .px(px(10.))
-                .py(px(6.))
-                .rounded(px(ui::R_ROW_LG))
-                .border_1()
-                .border_color(if this.replying.is_some() { theme.caret.opacity(0.5) } else { theme.hairline })
-                .text_size(px(ui::T_SM))
-                .child(div().flex_1().min_w_0().child(this.composer.clone()))
                 .child(
-                    div()
-                        .id("github-send-comment")
-                        .flex_none()
-                        .px(px(8.))
-                        .py(px(2.))
-                        .rounded(px(ui::R_KEY))
-                        .when(ready, |b| b.bg(theme.caret).text_color(theme.background).cursor_pointer())
-                        .when(!ready, |b| b.text_color(theme.faint))
-                        .child(if this.sending { "Sending…" } else { "Send ⌘↵" })
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send(&SendComment, window, cx))),
+                    ui::field(&theme)
+                        .flex_1()
+                        .min_w_0()
+                        .when(this.replying.is_some(), |f| f.border_color(theme.caret.opacity(0.5)))
+                        .child(div().flex_1().min_w_0().child(this.composer.clone())),
+                )
+                .child(
+                    ui::primary_button(
+                        "github-send-comment",
+                        if this.sending { "Sending…" } else { "Send ⌘↵" },
+                        ready,
+                        &theme,
+                    )
+                    .when(ready, |b| {
+                        b.on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send(&SendComment, window, cx)))
+                    }),
                 )
         };
         let card = |who: String, text: &str, cx: &App| {
-            div()
+            ui::card(&theme)
                 .p(px(12.))
-                .rounded(px(ui::R_CONTROL))
-                .border_1()
-                .border_color(theme.hairline)
-                .bg(theme.surface)
                 .child(div().pb(px(4.)).text_size(px(ui::T_XS)).text_color(theme.muted).child(who))
                 .children(markdown(text, &theme, cx))
         };
@@ -773,11 +737,11 @@ impl Render for GitHubPage {
             .rounded(px(ui::R_ROW))
             .cursor_pointer()
             .when(self.showing == Showing::Conversation, |r| r.bg(theme.hairline))
-            .when(self.showing != Showing::Conversation, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+            .when(self.showing != Showing::Conversation, |r| r.hover(|s| s.bg(ui::hover(&theme))))
             .child(div().flex_1().child("Conversation"))
             .child(div().text_size(px(ui::T_XS)).text_color(theme.muted).child(match conversation.len() {
                 0 => String::new(),
-                n => format!("💬 {n}"),
+                n => n.to_string(),
             }))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_conversation(cx)));
         page.child(header).child(

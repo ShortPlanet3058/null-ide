@@ -1,7 +1,7 @@
 //! The Branches tab: the branches on this computer and the remotes', to switch to, merge
 //! in or rebase onto; a new one started; the tags; the changes set aside, to bring back.
 
-use super::{GitView, GitViewEvent, quiet};
+use super::{GitView, GitViewEvent};
 use crate::git;
 use crate::theme::Theme;
 use crate::ui::{self, px};
@@ -193,20 +193,11 @@ impl GitView {
     pub(super) fn render_branches(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return quiet("This folder isn't a git repository.", &theme);
+            return ui::empty_state("This folder isn't a git repository.", &theme).into_any_element();
         }
-        let heading = |text: String| {
-            div().px(px(16.)).pt(px(14.)).pb(px(4.)).text_size(px(ui::T_XS)).text_color(theme.faint).child(text)
-        };
+        let heading = |text: &str| ui::sidebar_heading(text, &theme);
         // An action under the branch picked: a word to click.
-        let link = |id: String, label: &'static str| {
-            div()
-                .id(gpui::SharedString::from(id))
-                .text_color(theme.muted)
-                .cursor_pointer()
-                .hover(|s| s.text_color(theme.foreground))
-                .child(label)
-        };
+        let link = |id: String, label: &'static str| ui::link(gpui::SharedString::from(id), label, &theme);
         let row = |id: String, picked: bool| {
             div()
                 .id(gpui::SharedString::from(id))
@@ -218,7 +209,7 @@ impl GitView {
                 .rounded(px(ui::R_ROW))
                 .cursor_pointer()
                 .when(picked, |r| r.bg(theme.hairline))
-                .when(!picked, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                .when(!picked, |r| r.hover(|s| s.bg(ui::hover(&theme))))
         };
         let actions_row = || {
             div()
@@ -321,7 +312,7 @@ impl GitView {
             self.branches.remote.iter().filter_map(|r| r.split_once('/').map(|(r, _)| r)).collect();
         remotes.dedup();
         for remote in remotes {
-            remote_sections.push(heading(remote.to_uppercase()).mx(px(-6.)).into_any_element());
+            remote_sections.push(heading(remote).mx(px(-6.)).into_any_element());
             for full in self.branches.remote.iter().filter(|r| r.split_once('/').is_some_and(|(r, _)| r == remote)) {
                 let short = full.split_once('/').map_or(full.as_str(), |(_, s)| s).to_string();
                 let picked = self.picked.as_deref() == Some(full.as_str());
@@ -403,21 +394,11 @@ impl GitView {
                 .child(link(format!("bring-back-{index}"), "Bring Back").on_click(
                     cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::BringBack(brought.clone()))),
                 ))
-                .child(
-                    div()
-                        .id(("drop-set-aside", index))
-                        .size(px(16.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(ui::R_KEY))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.hairline))
-                        .child(gpui::svg().path("icons/x.svg").size(px(10.)).text_color(theme.faint))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.drop_set_aside(dropped.clone(), window, cx)
-                        })),
-                )
+                .child(ui::icon_button(("drop-set-aside", index), "icons/x.svg", "Throw Away", &theme).on_click(
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.drop_set_aside(dropped.clone(), window, cx)
+                    }),
+                ))
         });
         div()
             .id("git-branches")
@@ -427,24 +408,18 @@ impl GitView {
             .flex_col()
             .pb(px(12.))
             .child(
-                div()
+                ui::field(&theme)
                     .key_context("GitBranchName")
                     .on_action(cx.listener(Self::name_branch))
                     .mx(px(12.))
                     .mt(px(4.))
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(ui::R_ROW_LG))
-                    .border_1()
-                    .border_color(theme.hairline)
-                    .text_size(px(ui::T_SM))
                     .child(self.branch_name.clone()),
             )
-            .child(heading("THIS COMPUTER".into()))
+            .child(heading("This computer"))
             .child(div().px(px(6.)).flex().flex_col().children(local_rows))
             .children(remote_sections.into_iter().map(|e| div().px(px(6.)).child(e)))
             .when(!self.branches.tags.is_empty(), |d| {
-                d.child(heading("TAGS".into())).child(
+                d.child(heading("Tags")).child(
                     div()
                         .pl(px(31.))
                         .pr(px(16.))
@@ -455,7 +430,7 @@ impl GitView {
                 )
             })
             .child(
-                div().flex().items_center().pr(px(16.)).child(div().flex_1().child(heading("SET ASIDE".into()))).child(
+                div().flex().items_center().pr(px(16.)).child(div().flex_1().child(heading("Set aside"))).child(
                     div().pt(px(10.)).text_size(px(ui::T_SM)).child(
                         link("set-aside-now".into(), "Set Aside Changes")
                             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::SetAside))),
@@ -463,7 +438,7 @@ impl GitView {
                 ),
             )
             .when(self.branches.set_aside.is_empty(), |d| {
-                d.child(div().pl(px(31.)).text_size(px(ui::T_SM)).text_color(theme.faint).child("Nothing set aside."))
+                d.child(ui::empty_state("Nothing set aside.", &theme).pt(px(0.)))
             })
             .child(div().px(px(6.)).flex().flex_col().children(set_rows))
             .into_any_element()

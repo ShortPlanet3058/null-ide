@@ -5947,19 +5947,6 @@ impl Workspace {
             1 => "1 file to resolve".to_string(),
             n => format!("{n} files to resolve"),
         };
-        let button = |id: &'static str, label: &'static str, primary: bool| {
-            div()
-                .id(id)
-                .px(px(10.))
-                .py(px(3.))
-                .rounded(px(ui::R_KEY))
-                .cursor_pointer()
-                .when(primary, |b| b.bg(theme.caret).text_color(theme.background))
-                .when(!primary, |b| b.border_1().border_color(theme.caret.opacity(0.35)))
-                .hover(|s| s.opacity(0.85))
-                .active(|s| s.opacity(0.7))
-                .child(label)
-        };
         Some(
             div()
                 .h(px(40.))
@@ -5986,12 +5973,12 @@ impl Workspace {
                 )
                 .child(div().flex_1())
                 .child(
-                    button("joining-stop", stop, false)
+                    ui::button("joining-stop", stop, &theme)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.stop_joining(window, cx))),
                 )
                 .child(
-                    button("joining-finish", finish, settled)
-                        .when(!settled, |b| b.text_color(theme.muted))
+                    // (Still there to click with files left: it says which needs deciding.)
+                    ui::primary_button("joining-finish", finish, settled, &theme)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.finish_joining(window, cx))),
                 )
                 .into_any_element(),
@@ -6261,15 +6248,7 @@ impl Workspace {
 
     fn render_tests(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>().clone();
-        let quiet = |text: &str| {
-            div()
-                .px(px(18.))
-                .pt(px(14.))
-                .text_size(px(ui::T_MD))
-                .text_color(theme.faint)
-                .child(text.to_string())
-                .into_any_element()
-        };
+        let quiet = |text: &'static str| ui::empty_state(text, &theme).into_any_element();
         let Some(files) = self.tests.clone() else { return quiet("Looking for tests…") };
         if files.is_empty() {
             return quiet("No tests in this project (Rust, Go, Python, JavaScript, TypeScript)");
@@ -6360,7 +6339,7 @@ impl Workspace {
                                 .cursor_pointer()
                                 .invisible()
                                 .group_hover(group.clone(), |s| s.visible())
-                                .hover(|s| s.bg(theme.hairline))
+                                .hover(|s| s.bg(ui::hover(&theme)))
                                 .child(svg().path("icons/play.svg").size(px(10.)).text_color(theme.muted))
                                 .when_some(command, |d, command| {
                                     d.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -6387,7 +6366,7 @@ impl Workspace {
                                     .cursor_pointer()
                                     .text_size(px(ui::T_SM))
                                     .text_color(theme.faint)
-                                    .hover(|s| s.bg(theme.hairline.opacity(0.6)))
+                                    .hover(|s| s.bg(ui::hover(&theme)))
                                     .child(div().flex_1().min_w_0().truncate().child(shown))
                                     .child(run(file.command.clone(), which))
                                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -6417,7 +6396,7 @@ impl Workspace {
                                     .cursor_pointer()
                                     .text_size(px(ui::T_MD))
                                     .text_color(theme.muted)
-                                    .hover(|s| s.bg(theme.hairline.opacity(0.6)).text_color(theme.foreground))
+                                    .hover(|s| s.bg(ui::hover(&theme)).text_color(theme.foreground))
                                     .child(div().flex_none().size(px(7.)).rounded(px(4.)).bg(dot))
                                     // Its own name first; the class it's in (pytest's TestCart::), faint after.
                                     .child({
@@ -6522,9 +6501,7 @@ impl Workspace {
     /// the one the caret is in marked; a click goes there.
     fn render_outline(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.global::<Theme>().clone();
-        let quiet = |text: String| {
-            div().px(px(18.)).pt(px(14.)).text_size(px(ui::T_MD)).text_color(theme.faint).child(text).into_any_element()
-        };
+        let quiet = |text: String| ui::empty_state(text, &theme).into_any_element();
         let Some(editor) = self.active_editor().cloned() else {
             return quiet("Open a file to see its outline".into());
         };
@@ -6549,13 +6526,12 @@ impl Workspace {
             self.outline_followed = Some((id, ix));
             self.outline_scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
-        let filter = div()
+        let filter = ui::field(&theme)
             .key_context("OutlineFilter")
             .flex_none()
-            .mx(px(18.))
+            .mx(px(12.))
             .mt(px(10.))
             .mb(px(2.))
-            .text_size(px(ui::T_MD))
             .text_color(theme.foreground)
             .child(self.outline_filter.clone());
         let list = if shown.is_empty() {
@@ -6608,7 +6584,7 @@ impl Workspace {
                                 theme.faint
                             })
                             .when(here, |r| r.bg(theme.hairline))
-                            .when(!here, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                            .when(!here, |r| r.hover(|s| s.bg(ui::hover(&theme))))
                             // Code by its name in the code's font, the word defining it beside it;
                             // a heading as written, its depth saying its level.
                             .child(
@@ -6814,7 +6790,7 @@ impl Workspace {
                                     div()
                                         .flex_none()
                                         .text_size(px(ui::T_XS))
-                                        .text_color(if conflicts > 0 { theme.git_deleted } else { theme.caret })
+                                        .text_color(if conflicts > 0 { theme.git_deleted } else { theme.muted })
                                         .child(badge.to_string()),
                                 )
                             })
@@ -7478,21 +7454,13 @@ impl Workspace {
             }
             _ => vec![button("dbg-stop", "Stop", "Stop debugging", Box::new(StopDebugging))],
         };
-        let close = div()
-            .id("close-debug")
-            .size(px(20.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(ui::R_KEY))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.hairline))
-            .child(svg().path("icons/x.svg").size(px(12.)).text_color(theme.muted))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+        let close = ui::icon_button("close-debug", "icons/x.svg", "Close", &theme).on_click(cx.listener(
+            |this, _: &ClickEvent, _, cx| {
                 this.debugger.update(cx, |d, cx| d.stop(cx));
                 this.debug_panel_open = false;
                 cx.notify();
-            }));
+            },
+        ));
         let stopped = match &debugger.state {
             DebugState::Stopped(stop) => Some(stop.clone()),
             _ => None,
@@ -7589,7 +7557,7 @@ impl Workspace {
                             .flex()
                             .gap(px(10.))
                             .whitespace_nowrap()
-                            .child(div().text_color(theme.caret).child(watch.expression.clone()))
+                            .child(div().text_color(theme.foreground).child(watch.expression.clone()))
                             .child(
                                 div()
                                     .flex_1()
@@ -7599,15 +7567,10 @@ impl Workspace {
                                     .child(value),
                             )
                             .child(
-                                div()
-                                    .id(("dbg-unwatch", ix))
-                                    .flex_none()
-                                    .cursor_pointer()
+                                ui::icon_button(("dbg-unwatch", ix), "icons/x.svg", "Stop Watching", &theme)
+                                    .size(px(16.))
                                     .invisible()
                                     .group_hover(group, |s| s.visible())
-                                    .text_color(theme.faint)
-                                    .hover(|s| s.text_color(theme.foreground))
-                                    .child("×")
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.debugger.update(cx, |d, cx| d.remove_watch(ix, cx));
                                     })),
@@ -8229,7 +8192,7 @@ impl Workspace {
                 .rounded(px(ui::R_KEY))
                 .cursor_pointer()
                 .group(id)
-                .hover(|s| s.bg(theme.hairline))
+                .hover(|s| s.bg(ui::hover(theme)))
                 .child(
                     svg()
                         .path(icon)
@@ -9044,7 +9007,7 @@ impl Workspace {
                     .text_color(if active || resting { theme.foreground } else { theme.muted })
                     .when(active, |tab| tab.bg(theme.hairline))
                     .when(resting, |tab| tab.bg(theme.hairline.opacity(0.45)))
-                    .when(!shown, |tab| tab.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                    .when(!shown, |tab| tab.hover(|s| s.bg(ui::hover(&theme))))
                     .child(
                         div()
                             .min_w_0()
@@ -9369,7 +9332,7 @@ impl Workspace {
                         .rounded(px(ui::R_ROW))
                         .cursor_pointer()
                         .text_color(theme.foreground)
-                        .hover(|s| s.bg(theme.accent_soft))
+                        .hover(|s| s.bg(ui::hover(theme)))
                         .child(label)
                         .children(keys.map(|k| div().text_color(theme.faint).child(k)))
                         .active(|s| s.opacity(0.7))
@@ -9422,7 +9385,7 @@ impl Workspace {
                         .rounded(px(ui::R_ROW))
                         .cursor_pointer()
                         .text_color(theme.foreground)
-                        .hover(|s| s.bg(theme.accent_soft))
+                        .hover(|s| s.bg(ui::hover(theme)))
                         .child(item.label())
                         .active(|s| s.opacity(0.7))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -10217,7 +10180,7 @@ impl Render for Workspace {
             .border_t_1()
             .border_color(theme.hairline)
             .bg(theme.surface)
-            .text_size(px(12.))
+            .text_size(px(ui::T_SM))
             .text_color(theme.muted)
             .opacity(opacity)
             .children(self.branch.clone().map(|branch| {

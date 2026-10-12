@@ -1028,7 +1028,7 @@ impl Palette {
                     .when(row.show_category, |d| d.child(div().text_color(dim).child(command.category.label())))
                     .children(command.keys.clone().map(|k| ui::key_cap(k, theme)));
                 (
-                    div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
+                    div().text_size(px(ui::T_MD)).text_color(accent).child("›").into_any_element(),
                     StyledText::new(label).with_highlights(marked).into_any_element(),
                     Some(right.into_any_element()),
                 )
@@ -1059,7 +1059,7 @@ impl Palette {
                 )
             }
             Item::Line(line) => (
-                div().text_size(px(13.)).text_color(accent).child(":").into_any_element(),
+                div().text_size(px(ui::T_MD)).text_color(accent).child(":").into_any_element(),
                 div().child(format!("Go to line {line}")).into_any_element(),
                 None,
             ),
@@ -1086,7 +1086,7 @@ impl Palette {
             Item::RunTask(i) => {
                 let task = &self.tasks[i];
                 (
-                    div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
+                    div().text_size(px(ui::T_MD)).text_color(accent).child("›").into_any_element(),
                     div()
                         .code_font(cx)
                         .text_size(px(ui::T_MD))
@@ -1111,12 +1111,12 @@ impl Palette {
                 )
             }
             Item::RunTyped => (
-                div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
+                div().text_size(px(ui::T_MD)).text_color(accent).child("›").into_any_element(),
                 div().code_font(cx).text_size(px(ui::T_MD)).child(self.query.clone()).into_any_element(),
                 Some(div().text_color(dim).child("in the terminal").into_any_element()),
             ),
             Item::SearchSettings => (
-                div().text_size(px(13.)).text_color(dim).child("›").into_any_element(),
+                div().text_size(px(ui::T_MD)).text_color(dim).child("›").into_any_element(),
                 div().text_color(dim).child(format!("Search Settings for “{}”", self.query)).into_any_element(),
                 crate::palette::shortcut(&crate::workspace::OpenSettings, cx)
                     .map(|keys| div().text_color(dim).child(keys).into_any_element()),
@@ -1124,7 +1124,7 @@ impl Palette {
             Item::NewBranch => {
                 let from = self.branches.iter().find(|b| b.current).map(|b| format!("from {}", b.name));
                 (
-                    div().text_size(px(13.)).text_color(accent).child("+").into_any_element(),
+                    div().text_size(px(ui::T_MD)).text_color(accent).child("+").into_any_element(),
                     div().child(format!("Create branch “{}”", crate::git::branch_name(&self.query))).into_any_element(),
                     from.map(|f| div().text_color(dim).child(f).into_any_element()),
                 )
@@ -1193,7 +1193,7 @@ impl Palette {
                     let text = StyledText::new(location.text.clone()).with_highlights(marked);
                     // Code shows in the code font; a problem's message in the interface one.
                     let label = if location.kind == LocationKind::Reference {
-                        div().code_font(cx).text_size(px(13.)).child(text)
+                        div().code_font(cx).text_size(px(ui::T_MD)).child(text)
                     } else {
                         div().child(text)
                     };

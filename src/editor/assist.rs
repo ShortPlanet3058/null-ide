@@ -815,7 +815,7 @@ impl Editor {
                             .border_1()
                             .border_color(if prompt.writing { theme.caret.opacity(0.5) } else { theme.hairline })
                             .bg(theme.raised)
-                            .text_size(px(13.))
+                            .text_size(px(ui::T_MD))
                             .child(div().text_color(theme.caret).child("✦"))
                             .child(
                                 div()
@@ -944,7 +944,7 @@ impl Editor {
                                     .bg(theme.surface)
                                     .px(px(14.))
                                     .py(px(6.))
-                                    .text_size(px(13.))
+                                    .text_size(px(ui::T_MD))
                                     .line_height(px(20.))
                                     .text_color(theme.foreground)
                                     .child(
@@ -1002,7 +1002,7 @@ impl Editor {
                                     .px(px(12.))
                                     .py(px(6.))
                                     .font_family(cx.global::<crate::fonts::Fonts>().ui.clone())
-                                    .text_size(px(13.))
+                                    .text_size(px(ui::T_MD))
                                     .line_height(px(20.))
                                     .text_color(theme.foreground)
                                     .children(comments)

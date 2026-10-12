@@ -2,7 +2,7 @@
 //! requests and issues, and those for you (a review asked of you, an issue given you).
 //! Read through gh when the tab's shown or refreshed: never on its own.
 
-use super::{GitView, GitViewEvent, quiet};
+use super::{GitView, GitViewEvent};
 use crate::github::{self, Account, Checks, Issue, Pull};
 use crate::theme::Theme;
 use crate::ui::{self, px};
@@ -231,7 +231,7 @@ impl GitView {
     pub(super) fn render_github(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return quiet("This folder isn't a git repository.", &theme);
+            return ui::empty_state("This folder isn't a git repository.", &theme).into_any_element();
         }
         let said = match &self.github.account {
             None => Some("Asking GitHub…".to_string()),
@@ -245,18 +245,13 @@ impl GitView {
             return div()
                 .flex()
                 .flex_col()
-                .child(quiet(&said, &theme))
+                .child(ui::empty_state(said, &theme))
                 .when(retry, |d| {
                     d.child(
-                        div()
-                            .id("github-retry")
-                            .px(px(18.))
-                            .pt(px(8.))
-                            .text_size(px(ui::T_SM))
-                            .text_color(theme.caret)
-                            .cursor_pointer()
-                            .child(if self.github.reading { "Asking…" } else { "Try Again" })
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.refresh_github(cx))),
+                        div().flex().px(px(ui::INSET)).pt(px(8.)).text_size(px(ui::T_SM)).child(
+                            ui::link("github-retry", if self.github.reading { "Asking…" } else { "Try Again" }, &theme)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.refresh_github(cx))),
+                        ),
                     )
                 })
                 .into_any_element();
@@ -272,13 +267,9 @@ impl GitView {
         // The branch's pull request, or the way to make one.
         let branch = self.github.on_branch.clone();
         let mine: gpui::AnyElement = if branch.is_none() {
-            div()
-                .mx(px(18.))
-                .mt(px(4.))
-                .mb(px(8.))
-                .text_size(px(ui::T_SM))
-                .text_color(theme.faint)
-                .child("Not on a branch: switch to one to see its pull request.")
+            ui::empty_state("Not on a branch: switch to one to see its pull request.", &theme)
+                .pt(px(4.))
+                .pb(px(8.))
                 .into_any_element()
         } else if let Some(pull) = self.github.mine.clone() {
             let number = pull.number;
@@ -288,13 +279,13 @@ impl GitView {
                 .mt(px(4.))
                 .mb(px(8.))
                 .cursor_pointer()
-                .child(pull_row(&pull, false, &theme).rounded(px(ui::R_ROW_LG)).bg(theme.surface))
+                .child(ui::card(&theme).child(pull_row(&pull, false, &theme)))
                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::ShowPull(number))))
                 .into_any_element()
         } else if self.github.creating {
             self.render_create_form(&theme, cx)
         } else {
-            div()
+            ui::card(&theme)
                 .mx(px(12.))
                 .mt(px(4.))
                 .mb(px(8.))
@@ -303,8 +294,6 @@ impl GitView {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .rounded(px(ui::R_ROW_LG))
-                .bg(theme.surface)
                 .text_size(px(ui::T_SM))
                 .child(
                     div()
@@ -324,14 +313,18 @@ impl GitView {
         let for_you = self.github.review_asked.len() + self.github.assigned.len();
         let chip = |id: &'static str, label: String, which: List, cx: &mut Context<Self>| {
             let on = self.github.list == which;
-            div()
+            ui::segment(on, &theme)
                 .id(id)
-                .px(px(8.))
-                .py(px(3.))
-                .rounded(px(10.))
+                // (Three side by side: each as wide as its name, narrower when the sidebar is.)
+                .px(px(6.))
+                .flex_auto()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .cursor_pointer()
-                .when(on, |c| c.bg(theme.hairline))
-                .when(!on, |c| c.text_color(theme.muted).hover(|s| s.text_color(theme.foreground)))
+                .when(!on, |c| c.hover(|s| s.text_color(theme.foreground)))
                 .child(label)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.github.list = which;
@@ -339,31 +332,19 @@ impl GitView {
                 }))
         };
         let other_state = if self.github.closed { "Show Open" } else { "Show Closed" };
-        let chips = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(4.))
-            .px(px(12.))
-            .pb(px(8.))
-            .text_size(px(ui::T_XS))
+        let chips = ui::segmented(&theme)
+            .mx(px(12.))
+            .mb(px(8.))
             .child(chip("github-pulls", format!("Pull requests {}", self.github.pulls.len()), List::Pulls, cx))
             .child(chip("github-issues", format!("Issues {}", self.github.issues.len()), List::Issues, cx))
             .child(chip("github-for-you", format!("For you {for_you}"), List::ForYou, cx));
         let state_link = (self.github.list != List::ForYou).then(|| {
-            div()
-                .id("github-state")
-                .px(px(10.))
-                .pt(px(8.))
-                .text_size(px(ui::T_XS))
-                .text_color(theme.faint)
-                .cursor_pointer()
-                .hover(|s| s.text_color(theme.foreground))
-                .child(other_state)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            ui::link("github-state", other_state, &theme).px(px(10.)).pt(px(8.)).text_size(px(ui::T_XS)).on_click(
+                cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.github.closed = !this.github.closed;
                     this.refresh_github(cx);
-                }))
+                }),
+            )
         });
 
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
@@ -375,7 +356,7 @@ impl GitView {
                         .id(gpui::SharedString::from(format!("pull-{number}")))
                         .cursor_pointer()
                         .rounded(px(ui::R_ROW))
-                        .hover(|s| s.bg(theme.hairline.opacity(0.6)))
+                        .hover(|s| s.bg(ui::hover(&theme)))
                         .child(pull_row(pull, asked, &theme))
                         .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::ShowPull(number))))
                         .into_any_element(),
@@ -390,7 +371,7 @@ impl GitView {
                         .id(gpui::SharedString::from(format!("issue-{number}")))
                         .cursor_pointer()
                         .rounded(px(ui::R_ROW))
-                        .hover(|s| s.bg(theme.hairline.opacity(0.6)))
+                        .hover(|s| s.bg(ui::hover(&theme)))
                         .child(issue_row(issue, &theme))
                         .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::ShowIssue(number))))
                         .into_any_element(),
@@ -434,9 +415,7 @@ impl GitView {
                         d.child(div().px(px(10.)).text_size(px(ui::T_SM)).text_color(theme.error).child(error))
                     })
                     .when(rows.is_empty() && self.github.error.is_none(), |d| {
-                        d.child(
-                            div().px(px(10.)).pt(px(6.)).text_size(px(ui::T_SM)).text_color(theme.faint).child(empty),
-                        )
+                        d.child(ui::empty_state(empty, &theme).px(px(10.)).pt(px(6.)))
                     })
                     .children(rows)
                     .children(state_link),
@@ -449,14 +428,10 @@ impl GitView {
                     .px(px(16.))
                     .py(px(10.))
                     .text_size(px(ui::T_XS))
-                    .text_color(theme.faint)
+                    .text_color(theme.muted)
                     .child(div().flex_1().truncate().child(format!("Signed in as {login} (gh)")))
                     .child(
-                        div()
-                            .id("github-refresh")
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child(if self.github.reading { "Refreshing…" } else { "Refresh" })
+                        ui::link("github-refresh", if self.github.reading { "Refreshing…" } else { "Refresh" }, &theme)
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.refresh_github(cx))),
                     ),
             )
@@ -464,26 +439,20 @@ impl GitView {
     }
 
     fn render_create_form(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let field = |input: gpui::Entity<crate::text_input::TextInput>| {
-            div().py(px(4.)).border_b_1().border_color(theme.hairline).child(input)
-        };
+        let field = |input: gpui::Entity<crate::text_input::TextInput>| ui::field(theme).child(input);
         let ready = !self.pr_title.read(cx).text().trim().is_empty() && !self.github.sending;
         let draft = self.github.draft;
-        div()
+        ui::card(theme)
             .key_context("GitHubCreate")
             .on_action(cx.listener(Self::create_pull))
             .on_action(cx.listener(Self::cancel_pull))
             .mx(px(12.))
             .mt(px(4.))
             .mb(px(8.))
-            .px(px(12.))
-            .py(px(8.))
+            .p(px(10.))
             .flex()
             .flex_col()
-            .gap(px(4.))
-            .rounded(px(ui::R_ROW_LG))
-            .border_1()
-            .border_color(theme.hairline)
+            .gap(px(6.))
             .text_size(px(ui::T_SM))
             .child(field(self.pr_title.clone()))
             .child(field(self.pr_body.clone()))
@@ -492,14 +461,13 @@ impl GitView {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .py(px(4.))
                     .child(
                         div()
                             .flex_none()
                             .text_color(theme.muted)
                             .child(format!("{} →", self.github.on_branch.clone().unwrap_or_default())),
                     )
-                    .child(div().flex_1().min_w_0().code_font(cx).child(self.pr_base.clone())),
+                    .child(field(self.pr_base.clone()).flex_1().min_w_0().code_font(cx)),
             )
             .child(
                 div()
@@ -515,7 +483,7 @@ impl GitView {
                             .gap(px(6.))
                             .cursor_pointer()
                             .text_color(theme.muted)
-                            .child(super::checkbox(draft, false, theme))
+                            .child(ui::checkbox(draft, false, theme))
                             .child("Draft")
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.github.draft = !this.github.draft;
@@ -523,29 +491,23 @@ impl GitView {
                             })),
                     )
                     .child(div().flex_1())
+                    .child(ui::link("github-cancel", "Cancel", theme).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.cancel_pull(&CancelPull, window, cx)),
+                    ))
                     .child(
-                        div()
-                            .id("github-cancel")
-                            .text_color(theme.muted)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child("Cancel")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.cancel_pull(&CancelPull, window, cx)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("github-send")
-                            .px(px(10.))
-                            .py(px(3.))
-                            .rounded(px(ui::R_KEY))
-                            .when(ready, |b| b.bg(theme.caret).text_color(theme.background).cursor_pointer())
-                            .when(!ready, |b| b.bg(theme.hairline).text_color(theme.muted))
-                            .child(if self.github.sending { "Pushing…" } else { "Create ⌘↵" })
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.create_pull(&CreatePull, window, cx)
-                            })),
+                        ui::primary_button(
+                            "github-send",
+                            if self.github.sending { "Pushing…" } else { "Create ⌘↵" },
+                            ready,
+                            theme,
+                        )
+                        .when(ready, |b| {
+                            b.on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.create_pull(&CreatePull, window, cx)
+                                }),
+                            )
+                        }),
                     ),
             )
             .into_any_element()

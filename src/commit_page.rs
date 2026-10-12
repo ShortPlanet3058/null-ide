@@ -8,7 +8,7 @@ use crate::theme::Theme;
 use crate::ui::{self, px};
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, PromptLevel,
-    Task, Window, actions, div, prelude::*, svg,
+    Task, Window, actions, div, prelude::*,
 };
 use std::path::PathBuf;
 
@@ -232,20 +232,7 @@ impl Render for CommitPage {
             n => format!("{n} files"),
         };
         let body: String = self.message.split_once('\n').map(|(_, b)| b.trim().to_string()).unwrap_or_default();
-        let button = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .px(px(10.))
-                .py(px(4.))
-                .rounded(px(ui::R_KEY))
-                .border_1()
-                .border_color(theme.hairline)
-                .text_size(px(ui::T_SM))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.hairline))
-                .active(|s| s.opacity(0.7))
-                .child(label)
-        };
+        let button = |id: &'static str, label: &'static str| ui::button(id, label, &theme);
         let header = div()
             .px(px(28.))
             .pt(px(18.))
@@ -268,16 +255,7 @@ impl Render for CommitPage {
                             .child(commit.subject.clone()),
                     )
                     .child(
-                        div()
-                            .id("close-commit")
-                            .size(px(20.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(ui::R_KEY))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.hairline))
-                            .child(svg().path("icons/x.svg").size(px(12.)).text_color(theme.muted))
+                        ui::icon_button("close-commit", "icons/x.svg", "Close (Esc)", &theme)
                             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CommitPageEvent::Close))),
                     ),
             )
@@ -299,6 +277,7 @@ impl Render for CommitPage {
                 div()
                     .mt(px(6.))
                     .flex()
+                    .items_center()
                     .gap(px(8.))
                     .child(
                         button("commit-checkout", "Check Out")
@@ -312,21 +291,12 @@ impl Render for CommitPage {
                         button("commit-pick", "Cherry-Pick")
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.cherry_pick(window, cx))),
                     )
-                    .child(
-                        div()
-                            .id("commit-copy")
-                            .px(px(6.))
-                            .py(px(4.))
-                            .text_size(px(ui::T_SM))
-                            .text_color(theme.muted)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child("Copy ID")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                crate::system_clipboard::write(cx, ClipboardItem::new_string(this.commit.id.clone()));
-                                cx.emit(CommitPageEvent::Said(format!("Copied {}.", this.commit.id)));
-                            })),
-                    ),
+                    .child(ui::link("commit-copy", "Copy ID", &theme).px(px(6.)).text_size(px(ui::T_SM)).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            crate::system_clipboard::write(cx, ClipboardItem::new_string(this.commit.id.clone()));
+                            cx.emit(CommitPageEvent::Said(format!("Copied {}.", this.commit.id)));
+                        }),
+                    )),
             );
         let file_rows = self.files.iter().enumerate().map(|(ix, file)| {
             let name = std::path::Path::new(&file.path)
@@ -349,7 +319,7 @@ impl Render for CommitPage {
                 .rounded(px(ui::R_ROW))
                 .cursor_pointer()
                 .when(selected, |r| r.bg(theme.hairline))
-                .when(!selected, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                .when(!selected, |r| r.hover(|s| s.bg(ui::hover(&theme))))
                 .child(div().flex_1().min_w_0().truncate().text_color(color).child(name))
                 .child(
                     div()
