@@ -130,8 +130,10 @@ enum StepKind {
     Look,
     Type,
     Keys,
-    /// How present AI is, and (once it's on) where its answers come from.
+    /// How present AI is.
     Presence,
+    /// Where its answers come from: a step of its own, once AI is wanted.
+    Provider,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,8 +204,13 @@ impl Welcome {
         cx.notify();
     }
 
-    fn steps(_: &App) -> Vec<StepKind> {
-        vec![StepKind::Look, StepKind::Type, StepKind::Keys, StepKind::Presence]
+    /// The steps as things stand: where answers come from only once AI is on.
+    fn steps(cx: &App) -> Vec<StepKind> {
+        let mut steps = vec![StepKind::Look, StepKind::Type, StepKind::Keys, StepKind::Presence];
+        if cx.global::<Settings>().ai.enabled {
+            steps.push(StepKind::Provider);
+        }
+        steps
     }
 
     fn next(&mut self, _: &WelcomeNext, _: &mut Window, cx: &mut Context<Self>) {
@@ -457,6 +464,7 @@ impl Welcome {
             .h(px(42.))
             .flex_none()
             .flex()
+            .map(crate::window_frame::frame_bar)
             .child(
                 div()
                     .flex_1()
@@ -572,24 +580,17 @@ impl Welcome {
                             }))
                     },
                 ));
-                // Where answers come from: asked only once AI is wanted.
-                let providers = (now != Presence::Off).then(|| {
-                        div()
-                            .pt(px(10.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .child(div().text_size(px(15.)).text_color(theme.muted).child(
-                                "Where answers come from: a plan you have, an API key (free tiers included), or this computer.",
-                            ))
-                            .child(self.provider_step(&settings, &theme, cx))
-                    });
                 (
                     "How present should AI be?",
                     "It never opens a panel on its own, and never changes code without showing you the change.",
-                    div().flex().flex_col().gap(px(14.)).child(choices).children(providers).into_any_element(),
+                    choices.into_any_element(),
                 )
             }
+            StepKind::Provider => (
+                "Where should answers come from?",
+                "A plan you already have, an API key from any of these (free tiers included), or this computer.",
+                self.provider_step(&settings, &theme, cx),
+            ),
         };
         let last = n + 1 == steps.len();
         let dot = |i: usize| -> Hsla { if i == n { theme.caret } else { theme.line_strong } };

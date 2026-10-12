@@ -210,7 +210,6 @@ pub fn bind_keys(cx: &mut App) {
         // (⇧⌘P for VS Code hands; ⌘K bound last, so it's the one shown.)
         KeyBinding::new("secondary-shift-p", ShowCommands, ctx),
         KeyBinding::new("secondary-k", ShowCommands, ctx),
-        KeyBinding::new("secondary-o", Open, ctx),
         KeyBinding::new("secondary-w", CloseTab, ctx),
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
@@ -295,6 +294,7 @@ pub fn bind_keys(cx: &mut App) {
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
+            KeyBinding::new("cmd-o", Open, ctx),
             KeyBinding::new("cmd-shift-]", NextTab, ctx),
             KeyBinding::new("cmd-shift-[", PreviousTab, ctx),
             KeyBinding::new("ctrl--", GoBack, ctx),
@@ -306,6 +306,9 @@ pub fn bind_keys(cx: &mut App) {
         ]);
     } else {
         keys.extend([
+            // (The system's dialog picks files or folders, not both: Ctrl+O a folder, the
+            // project, as work starts there; a file from inside it is Ctrl+P away.)
+            KeyBinding::new("ctrl-o", OpenFolder, ctx),
             KeyBinding::new("alt-left", GoBack, ctx),
             KeyBinding::new("alt-right", GoForward, ctx),
             KeyBinding::new("ctrl-pagedown", NextTab, ctx),
@@ -9707,7 +9710,11 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(12.))
-                    .children(hint(&Open, "Open a file or folder"))
+                    .children(if cfg!(target_os = "macos") {
+                        hint(&Open, "Open a file or folder")
+                    } else {
+                        hint(&OpenFolder, "Open a folder")
+                    })
                     .children(hint(&OpenRecent, "Open a recent project"))
                     .children(hint(&TogglePalette, "Find a file"))
                     .children(hint(&ShowCommands, "Quick settings and commands")),
@@ -10497,6 +10504,7 @@ impl Render for Workspace {
             .h(px(40.))
             .flex_none()
             .flex()
+            .map(crate::window_frame::frame_bar)
             .border_b_1()
             .border_color(theme.hairline)
             .bg(theme.surface)
@@ -11194,6 +11202,7 @@ impl Render for Workspace {
                             .h(px(40.))
                             .flex_none()
                             .flex()
+                            .map(crate::window_frame::frame_bar)
                             .child(
                                 div()
                                     .flex_1()

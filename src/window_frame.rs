@@ -9,6 +9,14 @@ use gpui::{
     prelude::*, px,
 };
 
+/// The bar the window's buttons sit on (the title bar), as Windows needs it: covering what's
+/// below, so a press on it isn't taken as a click in the view (which would take the keyboard,
+/// and GPUI then counts the press as handled): Windows gets it, and moves the window, works its
+/// buttons, maximises it on a double-click, offers its snap layouts.
+pub fn frame_bar(bar: gpui::Div) -> gpui::Div {
+    if cfg!(windows) { bar.occlude() } else { bar }
+}
+
 /// Whether Null draws the window's buttons itself.
 pub fn draws_controls(window: &Window) -> bool {
     if cfg!(target_os = "macos") {
