@@ -979,14 +979,18 @@ impl SettingsPanel {
                 ),
                 (_, Some(path)) => {
                     // Where it is, briefly: "with Xcode", "~/.cargo/bin", "installed by Null".
-                    let home = std::env::var("HOME").unwrap_or_default();
+                    let home = crate::tools::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
                     let full = path.display().to_string();
                     let shown = if full.contains("/Xcode.app/") || full.starts_with("/Library/Developer/") {
                         "with Xcode".to_string()
                     } else if crate::tools::data_dir().is_some_and(|d| path.starts_with(d)) {
                         "installed by Null".to_string()
                     } else {
-                        path.parent().map_or(full.clone(), |d| d.display().to_string()).replacen(&home, "~", 1)
+                        {
+                            let folder = path.parent().map_or(full.clone(), |d| d.display().to_string());
+                            // (No home known: the folder as it is, not "~" glued to its front.)
+                            if home.is_empty() { folder } else { folder.replacen(&home, "~", 1) }
+                        }
                     };
                     (
                         format!("{} · {shown}", server.name),

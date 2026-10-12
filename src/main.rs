@@ -1,5 +1,8 @@
 // Ranges of text are everywhere here: a list of one range is a list, not a mistake.
 #![allow(clippy::single_range_in_vec_init)]
+// A window app on Windows: no console window opening beside it (debug builds keep one,
+// for what they print).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod ai;
 mod ai_agent;
@@ -165,8 +168,14 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
     let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
     let Some(arg) = arg else {
         // Opened from the Finder (or the Dock), there's no folder to go by: the last project.
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let from_finder = cwd == Path::new("/") || Some(&cwd) == home.as_ref();
+        // (From Windows' Start menu or Explorer the folder is Null's own, or System32.)
+        let home = crate::tools::home_dir();
+        let own = std::env::current_exe().ok().and_then(|e| e.parent().map(absolute));
+        let system = std::env::var_os("SystemRoot").map(|r| absolute(&PathBuf::from(r)));
+        let from_finder = cwd.parent().is_none()
+            || Some(&cwd) == home.as_ref()
+            || Some(&cwd) == own.as_ref()
+            || system.is_some_and(|r| cwd.starts_with(r));
         if from_finder {
             if let Some(last) = session::last_project() {
                 return (last, None);
@@ -212,10 +221,10 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
 /// The path with `.`, `..` and links resolved. A file that doesn't exist yet (`null new.rs`)
 /// keeps its name, under its resolved folder.
 fn absolute(path: &Path) -> PathBuf {
-    if let Ok(path) = std::fs::canonicalize(path) {
+    if let Ok(path) = dunce::canonicalize(path) {
         return path;
     }
-    match (path.parent().and_then(|p| std::fs::canonicalize(p).ok()), path.file_name()) {
+    match (path.parent().and_then(|p| dunce::canonicalize(p).ok()), path.file_name()) {
         (Some(parent), Some(name)) => parent.join(name),
         _ => path.to_path_buf(),
     }
@@ -352,7 +361,7 @@ pub(crate) fn window_on(
     except: Option<gpui::AnyWindowHandle>,
     cx: &gpui::App,
 ) -> Option<gpui::WindowHandle<Workspace>> {
-    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let real = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let root = real(root);
     cx.windows()
         .into_iter()

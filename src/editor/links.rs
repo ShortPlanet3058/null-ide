@@ -33,7 +33,7 @@ pub(super) enum Target {
 fn resolve(written: &str, dir: Option<&Path>) -> Option<PathBuf> {
     // A Markdown link's `#heading` isn't part of the file's name.
     let written = written.split('#').next().filter(|w| !w.is_empty())?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::tools::home_dir();
     let path = match (written.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => home.join(rest),
         _ => PathBuf::from(written),

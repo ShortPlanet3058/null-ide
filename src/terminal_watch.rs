@@ -183,9 +183,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_process_s_folder() {
-        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let here = dunce::canonicalize(std::env::current_dir().unwrap()).unwrap();
         let folder = folder_of(std::process::id() as i32).expect("a folder");
-        assert_eq!(folder.canonicalize().unwrap(), here);
+        assert_eq!(dunce::canonicalize(folder).unwrap(), here);
     }
 
     #[test]

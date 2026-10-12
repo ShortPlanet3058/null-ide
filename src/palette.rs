@@ -1110,7 +1110,7 @@ impl Palette {
                 let path = &self.projects[i];
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let marked = highlights_in(&name, 0);
-                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let home = crate::tools::home_dir();
                 let place = match home.as_ref().and_then(|h| path.parent()?.strip_prefix(h).ok()) {
                     Some(rest) => Path::new("~").join(rest).display().to_string(),
                     None => path.parent().map(|p| p.display().to_string()).unwrap_or_default(),

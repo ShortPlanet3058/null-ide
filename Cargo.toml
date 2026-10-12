@@ -35,6 +35,8 @@ ropey = { version = "1.6", default-features = false, features = ["cr_lines", "si
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 memchr = "2"
+# Real paths without Windows' `\\?\` prefix (already in the build through a dependency).
+dunce = "1"
 similar = "2"
 trash = "5"
 tree-sitter = "0.25"

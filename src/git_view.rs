@@ -593,7 +593,7 @@ impl GitView {
         .detach();
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn toggle_file_for_test(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.toggle_file(ix, cx);
     }

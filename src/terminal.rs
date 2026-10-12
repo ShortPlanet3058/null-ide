@@ -836,8 +836,8 @@ impl TerminalView {
             return folder;
         }
         let shown = self.title.rsplit(':').next().map(str::trim).unwrap_or("");
-        let shown = match (shown.strip_prefix("~/"), std::env::var_os("HOME")) {
-            (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        let shown = match (shown.strip_prefix("~/"), crate::tools::home_dir()) {
+            (Some(rest), Some(home)) => home.join(rest),
             _ => PathBuf::from(shown),
         };
         if shown.is_absolute() && shown.is_dir() { shown } else { self.root.clone() }
@@ -1084,7 +1084,7 @@ impl TerminalView {
     }
 
     fn find_file(&self, path: &str) -> Option<PathBuf> {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::tools::home_dir();
         let expand = |p: &str| match (p.strip_prefix("~/"), &home) {
             (Some(rest), Some(home)) => home.join(rest),
             _ => PathBuf::from(p),
@@ -1318,13 +1318,13 @@ impl Render for TerminalView {
                 // (As they really are: /tmp and /private/tmp are one.)
                 // (Its folder as it really is, /tmp and /private/tmp being one; a link itself
                 // as it is, not what it points to.)
-                let real = |p: PathBuf| match (p.parent().and_then(|d| d.canonicalize().ok()), p.file_name()) {
+                let real = |p: PathBuf| match (p.parent().and_then(|d| dunce::canonicalize(d).ok()), p.file_name()) {
                     (Some(folder), Some(name)) => folder.join(name),
                     _ => p,
                 };
                 let paths: Vec<PathBuf> = dragged.paths().into_iter().map(real).collect();
                 let folder = this.shell_folder();
-                let paths = within(&paths, &folder.canonicalize().unwrap_or(folder));
+                let paths = within(&paths, &dunce::canonicalize(&folder).unwrap_or(folder));
                 this.write(shell_words(&paths).into_bytes());
                 window.focus(&this.focus_handle);
             }))

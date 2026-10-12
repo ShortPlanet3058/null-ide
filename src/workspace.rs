@@ -3435,39 +3435,46 @@ impl Workspace {
     }
 
     /// Installs `null`, to open files and folders from a terminal: `null .`, `null a.rs`.
-    /// Into /usr/local/bin when it can write there, else ~/.local/bin.
+    /// Into /usr/local/bin when it can write there, else ~/.local/bin; on Windows a
+    /// `null.cmd` in Null's own folder.
     fn install_shell_command(&mut self, _: &InstallShellCommand, _: &mut Window, cx: &mut Context<Self>) {
         let Ok(exe) = std::env::current_exe() else { return };
-        // From the app, `open -a` hands paths to the running Null; from a build, run it directly.
-        let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf);
-        // (`--wait`: until the file's tab closes, as git's editor. The app gets a Null of its
-        // own for it; `open` can't hand a running one a line, so the app gets the file alone.)
-        let (launch, waiting) = match &bundle {
-            Some(app) => (
-                format!("open -a \"{}\" \"$f\"", app.display()),
-                format!("open -W -n -a \"{}\" --args --wait \"$p\"", app.display()),
-            ),
-            None => (format!("\"{}\" \"$p\" &", exe.display()), format!("\"{}\" --wait \"$p\"", exe.display())),
-        };
-        let script = shell_script(&launch, &waiting);
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        let system = PathBuf::from("/usr/local/bin");
-        let writable = |dir: &Path| {
-            let probe = dir.join(".null-write-test");
-            let ok = std::fs::write(&probe, "").is_ok();
-            std::fs::remove_file(&probe).ok();
-            ok
-        };
-        let dir = if writable(&system) { system } else { home.join(".local/bin") };
-        let target = dir.join("null");
-        let result = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, script)).and_then(|()| {
+        let (dir, target, result) = if cfg!(windows) {
+            let Some(dir) = crate::tools::data_dir().map(|d| d.join("bin")) else { return };
+            let target = dir.join("null.cmd");
+            let result = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, cmd_script(&exe)));
+            (dir, target, result)
+        } else {
+            // From the app, `open -a` hands paths to the running Null; from a build, run it directly.
+            let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf);
+            // (`--wait`: until the file's tab closes, as git's editor. The app gets a Null of its
+            // own for it; `open` can't hand a running one a line, so the app gets the file alone.)
+            let (launch, waiting) = match &bundle {
+                Some(app) => (
+                    format!("open -a \"{}\" \"$f\"", app.display()),
+                    format!("open -W -n -a \"{}\" --args --wait \"$p\"", app.display()),
+                ),
+                None => (format!("\"{}\" \"$p\" &", exe.display()), format!("\"{}\" --wait \"$p\"", exe.display())),
+            };
+            let script = shell_script(&launch, &waiting);
+            let home = crate::tools::home_dir().unwrap_or_default();
+            let system = PathBuf::from("/usr/local/bin");
+            let writable = |dir: &Path| {
+                let probe = dir.join(".null-write-test");
+                let ok = std::fs::write(&probe, "").is_ok();
+                std::fs::remove_file(&probe).ok();
+                ok
+            };
+            let dir = if writable(&system) { system } else { home.join(".local/bin") };
+            let target = dir.join("null");
+            let result = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, script));
             #[cfg(unix)]
-            {
+            let result = result.and_then(|()| {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
-            }
-            Ok(())
-        });
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            });
+            (dir, target, result)
+        };
         let on_path = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d == dir));
         let message = match result {
             Ok(()) if on_path || dir.starts_with("/usr/local") => {
@@ -7067,7 +7074,7 @@ impl Workspace {
         }
         let name = ran.name.as_str();
         let root = self.tree.read(cx).root().to_path_buf();
-        let real_root = root.canonicalize().unwrap_or(root.clone());
+        let real_root = dunce::canonicalize(&root).unwrap_or(root.clone());
         // Where it is, as one path (`build/../src/a.c` is `src/a.c`) written from the project's
         // folder as tabs have it, if it's a project file.
         let resolve = |file: &str| {
@@ -7075,7 +7082,7 @@ impl Workspace {
             let real = [path.to_path_buf(), ran.folder.join(path), root.join(path)]
                 .into_iter()
                 .filter(|p| p.is_absolute() && p.is_file())
-                .find_map(|p| p.canonicalize().ok())?;
+                .find_map(|p| dunce::canonicalize(p).ok())?;
             Some(root.join(real.strip_prefix(&real_root).ok()?))
         };
         let reported: Vec<(PathBuf, Diagnostic)> = crate::problem_matcher::problems(&ran.output)
@@ -9754,6 +9761,27 @@ fn shorten_path(path: &str, max: usize) -> String {
 /// The `null` command: each path made absolute (created when missing, as editors do; a
 /// place after it, `a.rs:42`, isn't part of its name), then handed to Null with `launch`
 /// (or `waiting`, after `--wait`), which reads it as `$p` (`$f` without its place).
+/// Windows' `null` (null.cmd): each path made whole and handed to Null, started on its own
+/// (or, with `--wait`, run until it's closed: git's editor).
+fn cmd_script(exe: &Path) -> String {
+    let exe = exe.display();
+    format!(
+        "@echo off\r\n\
+         rem Opens files and folders in Null: null . / null src\\main.rs / null a.rs:42\r\n\
+         rem null --wait <file> returns once its tab is closed (git's editor).\r\n\
+         setlocal\r\n\
+         set \"wait=\"\r\n\
+         if \"%~1\"==\"--wait\" set \"wait=1\"\r\n\
+         if defined wait shift\r\n\
+         if \"%~1\"==\"\" (start \"\" \"{exe}\" \"%CD%\" & exit /b)\r\n\
+         :next\r\n\
+         if \"%~1\"==\"\" exit /b\r\n\
+         if defined wait (\"{exe}\" --wait \"%~f1\") else (start \"\" \"{exe}\" \"%~f1\")\r\n\
+         shift\r\n\
+         goto next\r\n"
+    )
+}
+
 fn shell_script(launch: &str, waiting: &str) -> String {
     format!(
         "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`, `null a.rs:42`.\n\
@@ -9826,7 +9854,7 @@ impl Past {
 /// Whether two paths name the same file, one maybe through a link (/tmp and /private/tmp
 /// on macOS, as git gives paths). The file itself needn't exist anymore.
 fn same_file(a: &Path, b: &Path) -> bool {
-    let real = |p: &Path| match (p.parent().and_then(|d| std::fs::canonicalize(d).ok()), p.file_name()) {
+    let real = |p: &Path| match (p.parent().and_then(|d| dunce::canonicalize(d).ok()), p.file_name()) {
         (Some(dir), Some(name)) => dir.join(name),
         _ => p.to_path_buf(),
     };
@@ -10005,7 +10033,7 @@ impl Render for Workspace {
                 }
             }
             None => {
-                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let home = crate::tools::home_dir();
                 let shown = match home.as_ref().and_then(|h| root.strip_prefix(h).ok()) {
                     Some(rest) => Path::new("~").join(rest).display().to_string(),
                     None => root.display().to_string(),
@@ -11126,7 +11154,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         // As Null opens a project: by its real path (the one cargo builds with).
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let dir = dunce::canonicalize(&dir).unwrap();
         std::fs::write(
             dir.join("Cargo.toml"),
             "[package]\nname = \"twice\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
@@ -11280,7 +11308,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(workspace.read_with(cx, |w, _| w.sidebar_git), "the Git view shown");
-        let a = std::fs::canonicalize(dir.join("a.txt")).unwrap();
+        let a = dunce::canonicalize(dir.join("a.txt")).unwrap();
         workspace.update_in(cx, |w, window, cx| {
             let view = w.git_view.clone();
             w.git_view_event(&view, &crate::git_view::GitViewEvent::Open(a.clone()), window, cx)
@@ -12837,6 +12865,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Windows' null.cmd: CRLF lines, each path made whole (%~f1), Null started on its own
+    /// unless waiting.
+    #[test]
+    fn the_windows_command_starts_null_with_whole_paths() {
+        let script = cmd_script(Path::new(r"C:\Program Files\Null\null.exe"));
+        assert_eq!(script.matches("\r\n").count(), script.matches('\n').count(), "every line ends in CRLF");
+        let lines: Vec<&str> = script.lines().collect();
+        assert_eq!(lines[0], "@echo off");
+        assert!(lines.contains(&r#"if defined wait ("C:\Program Files\Null\null.exe" --wait "%~f1") else (start "" "C:\Program Files\Null\null.exe" "%~f1")"#));
+        assert!(lines.contains(&r#"if "%~1"=="" (start "" "C:\Program Files\Null\null.exe" "%CD%" & exit /b)"#));
+        assert_eq!(lines.last(), Some(&"goto next"));
+    }
+
     #[test]
     fn the_shell_command_is_valid_and_hands_over_absolute_paths() {
         let dir = crate::tools::test_dir("cmd");
@@ -12852,7 +12893,7 @@ mod tests {
         let run = std::process::Command::new("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         let given = std::fs::read_to_string(&log).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        let dir = dunce::canonicalize(&dir).unwrap_or(dir);
         assert!(given.lines().next().unwrap().ends_with("/new.txt"), "{given}");
         assert!(dir.join("new.txt").exists());
         assert_eq!(given.lines().count(), 2);
@@ -13086,7 +13127,7 @@ mod tests {
         let root = crate::tools::test_dir("organize-on-save");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         // (TypeScript wants a project.)
         std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
         std::fs::write(root.join("m.ts"), "export const a = 1;\nexport const b = 2;\n").unwrap();
@@ -13178,7 +13219,7 @@ mod tests {
         let dir = crate::tools::test_dir("changes-tab");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let dir = dunce::canonicalize(&dir).unwrap();
         let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
         if !git(&["init", "-q"]).status.success() {
             return;
@@ -13277,7 +13318,7 @@ mod tests {
         let dir = crate::tools::test_dir("history-tab");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let dir = dunce::canonicalize(&dir).unwrap();
         let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
         if !git(&["init", "-q"]).status.success() {
             return;
@@ -13361,7 +13402,7 @@ mod tests {
         let dir = crate::tools::test_dir("merge-banner");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(&dir).unwrap();
+        let dir = dunce::canonicalize(&dir).unwrap();
         let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
         if !git(&["init", "-q", "-b", "main"]).status.success() {
             return;
@@ -13433,7 +13474,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let repo = std::fs::canonicalize(&repo).unwrap();
+        let repo = dunce::canonicalize(&repo).unwrap();
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_string()

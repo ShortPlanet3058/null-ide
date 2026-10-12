@@ -92,7 +92,7 @@ fn poetry(root: &Path) -> Option<PathBuf> {
 /// The same, with Poetry's environments in `folder`: the one `poetry env use` chose
 /// (`envs.toml` says), else the newest Python.
 fn poetry_in(root: &Path, name: &str, folder: &Path) -> Option<PathBuf> {
-    let base = poetry_env_name(name, &root.canonicalize().ok()?);
+    let base = poetry_env_name(name, &dunce::canonicalize(root).ok()?);
     let prefix = format!("{base}-py");
     let mut found: Vec<(Vec<u32>, PathBuf)> = std::fs::read_dir(folder)
         .ok()?
@@ -169,11 +169,13 @@ fn toml_value(text: &str, section: &str, key: &str) -> Option<String> {
 /// project's `poetry.toml`, `local`; Poetry's own `config.toml`), else its cache folder.
 fn poetry_folder(local: &str) -> Option<PathBuf> {
     let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    let home = var("HOME");
+    let home = crate::tools::home_dir();
     let config_dir = var("POETRY_CONFIG_DIR").or_else(|| {
         let home = home.clone()?;
         Some(if cfg!(target_os = "macos") {
             home.join("Library/Application Support/pypoetry")
+        } else if cfg!(windows) {
+            var("APPDATA")?.join("pypoetry")
         } else {
             var("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")).join("pypoetry")
         })
@@ -191,6 +193,8 @@ fn poetry_folder(local: &str) -> Option<PathBuf> {
         let home = home.clone()?;
         Some(if cfg!(target_os = "macos") {
             home.join("Library/Caches/pypoetry")
+        } else if cfg!(windows) {
+            var("LOCALAPPDATA")?.join("pypoetry").join("Cache")
         } else {
             var("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache")).join("pypoetry")
         })
@@ -369,7 +373,7 @@ mod tests {
         let (project, envs) = (dir.join("alpha"), dir.join("virtualenvs"));
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("pyproject.toml"), pyproject).unwrap();
-        let ours = poetry_env_name("alpha", &project.canonicalize().unwrap());
+        let ours = poetry_env_name("alpha", &dunce::canonicalize(&project).unwrap());
         for env in [format!("{ours}-py3.9"), format!("{ours}-py3.12"), "alpha-AAAAAAAA-py3.13".into()] {
             std::fs::create_dir_all(envs.join(&env).join("bin")).unwrap();
             std::fs::write(envs.join(&env).join("bin/python"), "").unwrap();

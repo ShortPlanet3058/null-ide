@@ -90,7 +90,7 @@ fn keep_at(path: &Path, new: &[u8], now: i64) {
 
 /// The versions kept of the file at `path`, newest first.
 pub fn versions(path: &Path) -> Vec<Saved> {
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let Some(dir) = folder(&path) else { return Vec::new() };
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut found: Vec<Saved> = entries.filter_map(Result::ok).filter_map(|e| saved(e.path())).collect();
@@ -166,7 +166,7 @@ mod tests {
         let dir = crate::tools::test_dir("local-history");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let file = std::fs::canonicalize(&dir).unwrap().join("notes.txt");
+        let file = dunce::canonicalize(&dir).unwrap().join("notes.txt");
         let now = millis(std::time::SystemTime::now());
         let write = |text: &str, at: i64| {
             keep_at(&file, text.as_bytes(), at);

@@ -84,8 +84,8 @@ pub(crate) fn filled(text: &str, root: &Path, file: Option<&Path>, put: fn(&str)
         let value = match name {
             "workspaceFolder" | "workspaceRoot" | "cwd" => Some(root.display().to_string()),
             "workspaceFolderBasename" => root.file_name().map(|n| n.to_string_lossy().into_owned()),
-            "pathSeparator" => Some("/".into()),
-            "userHome" => std::env::var("HOME").ok(),
+            "pathSeparator" => Some(std::path::MAIN_SEPARATOR_STR.into()),
+            "userHome" => crate::tools::home_dir().map(|h| h.display().to_string()),
             "file" => file_part(|f| Some(f.display().to_string())),
             "fileBasename" => file_part(|f| Some(f.file_name()?.to_string_lossy().into_owned())),
             "fileBasenameNoExtension" => file_part(|f| Some(f.file_stem()?.to_string_lossy().into_owned())),

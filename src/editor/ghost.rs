@@ -674,7 +674,7 @@ impl Editor {
         candidates
             .into_iter()
             .filter(|p| p != path && p.is_file())
-            .filter_map(|p| p.canonicalize().ok())
+            .filter_map(|p| dunce::canonicalize(p).ok())
             .filter(|p| seen.insert(p.clone()))
             .take(RELATED_FILES)
             .filter_map(|p| {
@@ -683,7 +683,7 @@ impl Editor {
                 while !body.is_char_boundary(end) {
                     end -= 1;
                 }
-                let name = p.strip_prefix(dir.canonicalize().ok()?).unwrap_or(&p).display().to_string();
+                let name = p.strip_prefix(dunce::canonicalize(dir).ok()?).unwrap_or(&p).display().to_string();
                 Some((name, body[..end].to_string()))
             })
             .collect()

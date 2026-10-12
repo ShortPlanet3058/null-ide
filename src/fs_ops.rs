@@ -189,7 +189,7 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SAVES: AtomicU64 = AtomicU64::new(0);
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let existing = std::fs::metadata(&target).ok();
     if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "it's read-only"));

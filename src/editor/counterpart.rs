@@ -156,7 +156,10 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
         });
-        assert_eq!(found.map(|p| p.canonicalize().unwrap()), Some(dir.join("include/app.h").canonicalize().unwrap()));
+        assert_eq!(
+            found.map(|p| dunce::canonicalize(p).unwrap()),
+            Some(dunce::canonicalize(dir.join("include/app.h")).unwrap())
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

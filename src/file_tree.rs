@@ -596,7 +596,7 @@ impl FileTree {
             // The folders gone through, as they really are: a link back up ends the chain.
             let mut seen: Vec<PathBuf> = Vec::new();
             while expanded && !self.new_item_in(&entry.path) {
-                match entry.path.canonicalize() {
+                match dunce::canonicalize(&entry.path) {
                     Ok(real) if !seen.contains(&real) => seen.push(real),
                     _ => break,
                 }
