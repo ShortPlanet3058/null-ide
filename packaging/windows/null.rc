@@ -1,0 +1,31 @@
+// Null's Windows resources: its icon (for the .exe, the taskbar and Explorer) and what
+// Explorer's Properties say about it. build.rs fills in the __…__ and builds it in, on
+// Windows.
+#include <winver.h>
+
+1 ICON "__ICON__"
+
+1 VERSIONINFO
+FILEVERSION __COMMAS__
+PRODUCTVERSION __COMMAS__
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Null"
+            VALUE "FileDescription", "Null"
+            VALUE "FileVersion", "__VERSION__"
+            VALUE "ProductName", "Null"
+            VALUE "ProductVersion", "__VERSION__"
+            VALUE "OriginalFilename", "null.exe"
+            VALUE "LegalCopyright", "MIT OR Apache-2.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
