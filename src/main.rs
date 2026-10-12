@@ -74,6 +74,7 @@ mod test_at;
 mod text_input;
 mod theme;
 mod tools;
+mod trace;
 mod ui;
 mod user_keys;
 mod vscode_import;
@@ -229,17 +230,31 @@ fn window_bounds(saved: Option<session::WindowState>, cx: &App) -> WindowBounds 
 }
 
 fn main() {
+    trace::start();
+    trace::mark("main");
     crash::record();
+    // The colouring rules of the usual languages, made ready meanwhile (each took 25 ms of
+    // opening its first file).
+    std::thread::spawn(|| {
+        for name in ["Rust", "Python", "TypeScript", "TSX", "JavaScript", "JSON", "Markdown", "C", "C++", "Go"] {
+            if let Some(language) = languages::all().iter().find(|l| l.name == name) {
+                language.highlight_query();
+            }
+        }
+    });
     let Opening { root, file, place, wait } = resolve_args();
+    trace::mark("what to open worked out");
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
     // or by the `null` command while Null runs: opened in the window.
     let app = Application::new().with_assets(assets::Assets);
+    trace::mark("app made");
     let (opened, mut to_open) = futures::channel::mpsc::unbounded::<Vec<String>>();
     app.on_open_urls(move |urls| {
         opened.unbounded_send(urls).ok();
     });
     app.run(move |cx: &mut App| {
+        trace::mark("app running");
         cx.spawn(async move |cx| {
             use futures::StreamExt;
             while let Some(urls) = to_open.next().await {
@@ -291,11 +306,24 @@ fn main() {
 
         // Nothing else is open yet: the window opens now (a deferred open would wait for
         // an update that never comes, and Null would start with no window).
+        trace::mark("settings, keys and menus ready");
         if wait {
             open_waiting_window(root, file, place, cx);
         } else {
             open_project_window_now(root, file, place, cx);
         }
+        trace::mark("window opened");
+        // The spell checker started once the window's up, then what's shown checked.
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            cx.update(|cx| {
+                let _step = trace::step(|| "spell checker started".into());
+                spell::warm();
+                cx.refresh_windows();
+            })
+            .ok();
+        })
+        .detach();
         #[cfg(debug_assertions)]
         qa::run(cx);
         // (Looked at by `qa` while someone works in another app: not brought to the front

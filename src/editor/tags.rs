@@ -248,9 +248,13 @@ impl Editor {
         flavor(self.language()?.name)
     }
 
+    /// The syntax tree, unless a big file's is still being made (none until then: the
+    /// tag pair at the caret is drawn every frame).
     fn synced_tree(&mut self) -> Option<Tree> {
         let highlighter = self.highlighter.as_mut()?;
-        highlighter.sync(&self.buffer);
+        if !highlighter.ready(&self.buffer) {
+            return None;
+        }
         highlighter.tree().cloned()
     }
 

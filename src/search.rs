@@ -33,7 +33,8 @@ impl SearchQuery {
             // sit next to punctuation.
             pattern = format!(r"\b{{start-half}}(?:{pattern})\b{{end-half}}");
         }
-        RegexBuilder::new(&pattern).case_insensitive(!self.case_sensitive).multi_line(true).build()
+        // (crlf: `$` at a line's end before `\r\n` too, as in a file with Windows line endings.)
+        RegexBuilder::new(&pattern).case_insensitive(!self.case_sensitive).multi_line(true).crlf(true).build()
     }
 
     /// Byte ranges of every non-empty match in `text`, up to [`MAX_MATCHES`].

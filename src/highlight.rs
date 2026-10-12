@@ -102,10 +102,25 @@ fn resolve(name: &str) -> Option<Syntax> {
 /// changed part is parsed again, and only the lines on screen are coloured.
 pub struct Highlighter {
     query: &'static HighlightQuery,
+    language: &'static Language,
     parser: Parser,
     tree: Option<Tree>,
     /// The buffer revision the tree matches.
     revision: u64,
+    /// The first tree is being made elsewhere (a big file, in the background): until it
+    /// comes, what's drawn waits for it rather than parsing the whole file now.
+    pub parsing: bool,
+}
+
+/// Reads a rope's bytes for tree-sitter.
+fn reader<'a>(rope: &'a Rope) -> impl FnMut(usize, Point) -> &'a [u8] + 'a {
+    move |byte: usize, _: Point| -> &[u8] {
+        if byte >= rope.len_bytes() {
+            return &[];
+        }
+        let (chunk, start, _, _) = rope.chunk_at_byte(byte);
+        &chunk.as_bytes()[byte - start..]
+    }
 }
 
 impl Highlighter {
@@ -113,7 +128,46 @@ impl Highlighter {
         let query = language.highlight_query()?;
         let mut parser = Parser::new();
         parser.set_language(&language.grammar()).ok()?;
-        Some(Self { query, parser, tree: None, revision: 0 })
+        Some(Self { query, language, parser, tree: None, revision: 0, parsing: false })
+    }
+
+    /// The first tree of `buffer` as it is now, made by the returned job (off the main
+    /// thread), with the revision it's of: given to `install`.
+    /// It stops (None) once `cancel` is set.
+    pub fn background_parse(
+        &self,
+        buffer: &Buffer,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> impl FnOnce() -> Option<(Tree, u64)> + Send + 'static {
+        let (rope, revision, language) = (buffer.rope().clone(), buffer.revision(), self.language);
+        move || {
+            let mut parser = Parser::new();
+            parser.set_language(&language.grammar()).ok()?;
+            let mut stop = |_: &tree_sitter::ParseState| cancel.load(std::sync::atomic::Ordering::Relaxed);
+            let options = tree_sitter::ParseOptions::new().progress_callback(&mut stop);
+            let tree = parser.parse_with_options(&mut reader(&rope), None, Some(options))?;
+            Some((tree, revision))
+        }
+    }
+
+    /// The tree made in the background, unless one was made here meanwhile. Edits since
+    /// its revision are caught up with at the next `sync`.
+    pub fn install(&mut self, tree: Tree, revision: u64) {
+        self.parsing = false;
+        if self.tree.is_none() {
+            self.tree = Some(tree);
+            self.revision = revision;
+        }
+    }
+
+    /// For what's drawn: brought up to date (see `sync`), unless the first tree is still
+    /// being made elsewhere: false, nothing done.
+    pub fn ready(&mut self, buffer: &Buffer) -> bool {
+        if self.tree.is_none() && self.parsing {
+            return false;
+        }
+        self.sync(buffer);
+        true
     }
 
     /// Brings the tree up to date with the text: the edits since last time are applied
@@ -130,14 +184,7 @@ impl Highlighter {
             }
         }
         let rope = buffer.rope();
-        let mut read = |byte: usize, _: Point| -> &[u8] {
-            if byte >= rope.len_bytes() {
-                return &[];
-            }
-            let (chunk, start, _, _) = rope.chunk_at_byte(byte);
-            &chunk.as_bytes()[byte - start..]
-        };
-        self.tree = self.parser.parse_with_options(&mut read, old.as_ref(), None);
+        self.tree = self.parser.parse_with_options(&mut reader(rope), old.as_ref(), None);
         self.revision = buffer.revision();
     }
 

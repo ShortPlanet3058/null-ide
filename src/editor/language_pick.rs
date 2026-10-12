@@ -215,6 +215,8 @@ impl Editor {
     pub(super) fn language_changed(&mut self, cx: &mut Context<Self>) {
         self.indent_as_language(cx);
         self.highlighter = super::highlighter_for(self.language(), &self.buffer);
+        self.start_colouring(cx);
+        self.folds.forget_foldable();
         // Another grammar's brackets (or none).
         *self.brackets.borrow_mut() = None;
         self.spans.clear();

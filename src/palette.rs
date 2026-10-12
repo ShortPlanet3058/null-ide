@@ -309,6 +309,7 @@ pub struct PaletteOptions {
     pub projects: Vec<PathBuf>,
 }
 
+#[derive(Clone, PartialEq)]
 pub(crate) struct FileEntry {
     path: PathBuf,
     pub(crate) relative: String,
@@ -425,15 +426,38 @@ impl Palette {
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_rows(cx));
+        // The project's files as last listed, at once; listed again meanwhile (on a big
+        // project that took 1.4 s), and the rows updated if they've changed.
+        let mut listed = None;
         if kind == PaletteKind::Files {
             let root = options.root.clone();
             let hide = cx.global::<crate::settings::Settings>().hidden_paths();
+            let key = (root.clone(), hide.clone());
+            listed =
+                LISTED.lock().ok().and_then(|last| last.as_ref().filter(|(k, _)| *k == key).map(|(_, f)| f.clone()));
             cx.spawn(async move |this, cx| {
                 let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
+                if let Ok(mut last) = LISTED.lock() {
+                    *last = Some((key, files.clone()));
+                }
                 this.update(cx, |this, cx| {
+                    let changed = !this.files_loaded || this.files != files;
+                    // The row picked stays picked (an ↵ on its way opens what was chosen).
+                    let picked = match this.selected_item() {
+                        Some(Item::File(i)) => this.files.get(i).map(|f| f.path.clone()),
+                        _ => None,
+                    };
                     this.files = files;
                     this.files_loaded = true;
-                    this.update_rows(cx);
+                    if changed {
+                        this.update_rows(cx);
+                        let again = picked.and_then(|path| {
+                            this.rows.iter().position(|r| matches!(r.item, Item::File(i) if this.files[i].path == path))
+                        });
+                        if let Some(ix) = again.filter(|&ix| ix > 0) {
+                            this.select(ix, cx);
+                        }
+                    }
                 })
                 .ok();
             })
@@ -450,8 +474,8 @@ impl Palette {
             kind,
             input,
             commands: options.commands,
-            files: Vec::new(),
-            files_loaded: false,
+            files_loaded: listed.is_some(),
+            files: listed.unwrap_or_default(),
             recent_files,
             recent_commands: options.recent_commands,
             line_count: options.line_count,
@@ -700,33 +724,7 @@ impl Palette {
             return;
         }
         let recent: HashSet<PathBuf> = self.recent_files.iter().map(|f| f.path.clone()).collect();
-        let folded = fuzzy::folded(query);
-        let mut found: Vec<(i32, usize, Vec<usize>)> = self
-            .files
-            .iter()
-            .enumerate()
-            // A quick look first: most files don't have the letters at all (a name that
-            // matches is in the path that does).
-            .filter(|(_, f)| fuzzy::fits(&f.relative, &folded))
-            .filter_map(|(i, f)| {
-                // A match within the file name beats one spread across folders.
-                let in_name = fuzzy::score(&f.relative[f.name_start..], query)
-                    .map(|(s, h)| (s + 15, h.into_iter().map(|b| b + f.name_start).collect()));
-                let in_path = fuzzy::score(&f.relative, query);
-                let (score, highlights) = match (in_name, in_path) {
-                    (Some(a), Some(b)) => {
-                        if a.0 >= b.0 {
-                            a
-                        } else {
-                            b
-                        }
-                    }
-                    (a, b) => a.or(b)?,
-                };
-                let boost = if recent.contains(&f.path) { 10 } else { 0 };
-                Some((score + boost, i, highlights))
-            })
-            .collect();
+        let mut found = rank_files(&self.files, query, &recent);
         // Only those shown sorted (the best first), not every match.
         if found.len() > MAX_RESULTS {
             found.select_nth_unstable_by_key(MAX_RESULTS, |(score, i, _)| (std::cmp::Reverse(*score), *i));
@@ -951,6 +949,14 @@ impl Palette {
                     Item::RecentFile(i) => self.recent_files[i].path.clone(),
                     _ => unreachable!(),
                 };
+                // Gone since the files were listed (renamed, deleted, another branch): not
+                // opened as a new empty file; the list without it.
+                if let Item::File(i) = item
+                    && !path.exists()
+                {
+                    self.files.remove(i);
+                    return self.update_rows(cx);
+                }
                 // "name:42" (or "name:42:7") opens it there.
                 match split_place(&self.query).1 {
                     Some((line, column)) => cx.emit(PaletteEvent::OpenLocation(
@@ -1385,21 +1391,114 @@ impl Palette {
     }
 }
 
+/// The files matching `query`, each with its score (`recent` ones a little higher), its
+/// place in `files` and the letters matched.
+fn rank_files(files: &[FileEntry], query: &str, recent: &HashSet<PathBuf>) -> Vec<(i32, usize, Vec<usize>)> {
+    let folded = fuzzy::folded(query);
+    let rank = |(i, f): (usize, &FileEntry)| -> Option<(i32, usize, Vec<usize>)> {
+        // A quick look first: most files don't have the letters at all (a name that
+        // matches is in the path that does).
+        if !fuzzy::fits(&f.relative, &folded) {
+            return None;
+        }
+        {
+            // A match within the file name beats one spread across folders.
+            let in_name = fuzzy::score(&f.relative[f.name_start..], query)
+                .map(|(s, h)| (s + 15, h.into_iter().map(|b| b + f.name_start).collect()));
+            let in_path = fuzzy::score(&f.relative, query);
+            let (score, highlights) = match (in_name, in_path) {
+                (Some(a), Some(b)) => {
+                    if a.0 >= b.0 {
+                        a
+                    } else {
+                        b
+                    }
+                }
+                (a, b) => a.or(b)?,
+            };
+            let boost = if recent.contains(&f.path) { 10 } else { 0 };
+            Some((score + boost, i, highlights))
+        }
+    };
+    // A big project's files ranked on every core (one by one, a letter typed took up
+    // to 80 ms over 42,000 files).
+    const SIDE_BY_SIDE_FROM: usize = 4_000;
+    if files.len() < SIDE_BY_SIDE_FROM {
+        files.iter().enumerate().filter_map(rank).collect()
+    } else {
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let size = files.len().div_ceil(cores);
+        std::thread::scope(|s| {
+            let parts: Vec<_> = files
+                .chunks(size)
+                .enumerate()
+                .map(|(n, chunk)| {
+                    let rank = &rank;
+                    s.spawn(move || {
+                        chunk.iter().enumerate().filter_map(|(i, f)| rank((n * size + i, f))).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            parts.into_iter().flat_map(|part| part.join().unwrap_or_default()).collect()
+        })
+    }
+}
+
+/// The project's files as ⌘P last listed them (with the `hide` setting then).
+type Listed = ((PathBuf, Vec<String>), Vec<FileEntry>);
+static LISTED: std::sync::Mutex<Option<Listed>> = std::sync::Mutex::new(None);
+
+/// The project's files listed a moment after it opens (in the background), so the first
+/// ⌘P shows them at once.
+pub(crate) fn list_files_soon(root: PathBuf, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+        // (The settings now: the project's own, read since it opened.)
+        let Ok(hide) = cx.update(|cx| cx.global::<crate::settings::Settings>().hidden_paths()) else { return };
+        let key = (root.clone(), hide.clone());
+        let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
+        if let Ok(mut last) = LISTED.lock() {
+            // (Unless ⌘P has listed them meanwhile.)
+            if last.as_ref().is_none_or(|(k, _)| *k != key) {
+                *last = Some((key, files));
+            }
+        }
+    })
+    .detach();
+}
+
 /// Every file in the project, respecting `.gitignore` and the `hide` setting, sorted by path.
+/// Its folders are read side by side (one by one, 42,000 files took 1.4 s).
 pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
+    use ignore::WalkState;
     let hidden = crate::project_index::hidden_rules(root, hide);
-    let mut files: Vec<FileEntry> = ignore::WalkBuilder::new(root)
+    let found: std::sync::Mutex<Vec<FileEntry>> = std::sync::Mutex::new(Vec::new());
+    ignore::WalkBuilder::new(root)
         .hidden(false)
         .filter_entry(move |e| {
             e.file_name() != ".git" && !hidden.matched(e.path(), e.file_type().is_some_and(|t| t.is_dir())).is_ignore()
         })
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-        .take(MAX_FILES)
-        .map(|e| FileEntry::new(e.into_path(), root))
-        .collect();
+        .build_parallel()
+        .run(|| {
+            let found = &found;
+            Box::new(move |entry| {
+                let Ok(entry) = entry else { return WalkState::Continue };
+                if !entry.file_type().is_some_and(|t| t.is_file()) {
+                    return WalkState::Continue;
+                }
+                let Ok(mut found) = found.lock() else { return WalkState::Quit };
+                // (Read side by side, the first found differ each time: some to spare, then
+                // the same ones kept, first by path.)
+                if found.len() >= MAX_FILES * 4 {
+                    return WalkState::Quit;
+                }
+                found.push(FileEntry::new(entry.into_path(), root));
+                WalkState::Continue
+            })
+        });
+    let mut files = found.into_inner().unwrap_or_default();
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    files.truncate(MAX_FILES);
     files
 }
 
@@ -1640,6 +1739,23 @@ fn also_called(action: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// How long ⌘P takes on a big project (NULL_BENCH_DIR): listing its files, then each
+    /// letter typed. `cargo test --release -- --ignored files_on_a_big_project --nocapture`.
+    #[test]
+    #[ignore]
+    fn files_on_a_big_project() {
+        let Some(dir) = std::env::var_os("NULL_BENCH_DIR") else { return };
+        let root = std::path::PathBuf::from(dir);
+        let started = std::time::Instant::now();
+        let files = super::list_files(&root, &[]);
+        println!("listed {} files in {:.0} ms", files.len(), started.elapsed().as_secs_f64() * 1000.);
+        for query in ["l", "li", "lib", "librs", "parser", "srcmodrs", "tokio"] {
+            let started = std::time::Instant::now();
+            let found = super::rank_files(&files, query, &Default::default()).len();
+            println!("{query:>9}: {found:>6} found in {:.1} ms", started.elapsed().as_secs_f64() * 1000.);
+        }
+    }
+
     #[test]
     fn reads_a_place_after_a_file_name() {
         use super::split_place;

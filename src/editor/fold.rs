@@ -93,6 +93,13 @@ pub(super) struct Folds {
     foldable: Option<(u64, Vec<Range<usize>>)>,
 }
 
+impl Folds {
+    /// What can fold, worked out again next time (the syntax tree came).
+    pub(super) fn forget_foldable(&mut self) {
+        self.foldable = None;
+    }
+}
+
 impl Editor {
     /// The blocks around `line` (start above it, end below it), innermost first. Cheap:
     /// a walk up the syntax tree from the line.
@@ -107,7 +114,9 @@ impl Editor {
             around.reverse();
             return around;
         };
-        highlighter.sync(&self.buffer);
+        if !highlighter.ready(&self.buffer) {
+            return Vec::new();
+        }
         let mut blocks = highlighter.blocks_around(line);
         // In Markdown, sections: a long paragraph isn't a block to keep in sight.
         if self.is_markdown() {
@@ -125,7 +134,10 @@ impl Editor {
                 self.basic_syntax().is_some() && self.buffer.rope().len_bytes() <= crate::basic_syntax::MAX_BYTES;
             let mut ranges = match &mut self.highlighter {
                 Some(highlighter) => {
-                    highlighter.sync(&self.buffer);
+                    // (Not known yet: none, and asked again once the tree comes.)
+                    if !highlighter.ready(&self.buffer) {
+                        return &[];
+                    }
                     highlighter.fold_ranges()
                 }
                 None if basic => {
@@ -156,6 +168,19 @@ impl Editor {
             self.folds.foldable = Some((revision, ranges));
         }
         &self.folds.foldable.as_ref().unwrap().1
+    }
+
+    /// The lines the gutter shows a fold arrow on (when the mouse is over it). While typing,
+    /// those known before the last keystrokes: working them out again took 32 ms a
+    /// keystroke on a big file. Once typing pauses, they're the text's own.
+    /// With true: those known before, to draw again once typing has paused.
+    pub fn fold_starts_for_gutter(&mut self) -> (std::collections::HashSet<usize>, bool) {
+        const PAUSE: std::time::Duration = std::time::Duration::from_millis(400);
+        let typing = self.last_edit.as_ref().is_some_and(|(_, at, _)| at.elapsed() < PAUSE);
+        if typing && let Some((_, known)) = &self.folds.foldable {
+            return (known.iter().map(|r| r.start).collect(), true);
+        }
+        (self.foldable().iter().map(|r| r.start).collect(), false)
     }
 
     /// The folded regions, as (first line, last line), to save with the session.
