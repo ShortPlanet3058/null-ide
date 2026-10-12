@@ -1712,7 +1712,7 @@ mod tests {
         assert_eq!(keys.get(new), Some(&Some("editor::SelectAllOccurrences".to_string())));
         let from_it = Some("-editor::SelectAllOccurrences".to_string());
         assert!(before.iter().all(|k| keys.get(k) == Some(&from_it)), "the old keys let go: {keys:?}");
-        assert_eq!(panel.read_with(cx, |p, cx| p.keys_now(0, cx)), ["ctrl-cmd-l"]);
+        assert_eq!(panel.read_with(cx, |p, cx| p.keys_now(0, cx)), [new]);
         // Save's ⌘S, taken: it says whose it was.
         panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
         cx.simulate_keystrokes("secondary-s");
