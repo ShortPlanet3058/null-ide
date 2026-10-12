@@ -1410,9 +1410,17 @@ pub(crate) fn list_files_in(roots: &crate::roots::ProjectRoots, hide: &[String])
     if !roots.several() {
         return list_files_under(roots.primary(), roots, hide);
     }
-    let mut files: Vec<FileEntry> = roots.all().iter().flat_map(|root| list_files_under(root, roots, hide)).collect();
-    files.truncate(MAX_FILES);
-    files
+    // (Each folder its share of the most listed: a big first one doesn't leave the others out.)
+    let share = MAX_FILES / roots.all().len();
+    roots
+        .all()
+        .iter()
+        .flat_map(|root| {
+            let mut files = list_files_under(root, roots, hide);
+            files.truncate(share);
+            files
+        })
+        .collect()
 }
 
 /// Every file in the project, respecting `.gitignore` and the `hide` setting, sorted by path.

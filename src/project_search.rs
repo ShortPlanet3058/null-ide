@@ -744,13 +744,35 @@ fn search_files(
                 .collect()
         }
         // Each folder of the window, `/folder/` in the files field from its own top.
-        None => roots.all().iter().flat_map(|root| files_in(root, files_wanted, hide, cancel)).collect(),
+        None => roots
+            .all()
+            .iter()
+            .filter_map(|root| Some(files_in(root, &wanted_in(roots, root, files_wanted)?, hide, cancel)))
+            .flatten()
+            .collect(),
     };
     if cancel.load(Ordering::Relaxed) {
         return;
     }
     files.sort();
     search_in(roots, &files, &regex, query, unsaved, cancel, report);
+}
+
+/// The files field as it reads in `root`: with several folders, `/web/app/` (a folder's name
+/// first, as Find in Folder writes it) is `/app/` in web and keeps the others out (None).
+fn wanted_in(roots: &crate::roots::ProjectRoots, root: &Path, written: &str) -> Option<String> {
+    let term = written.trim();
+    if !roots.several() || term.contains(',') {
+        return Some(written.to_string());
+    }
+    let Some(rest) = term.strip_prefix('/') else { return Some(written.to_string()) };
+    let (first, after) = rest.split_once('/').unwrap_or((rest, ""));
+    let names: Vec<String> = roots.all().iter().map(|r| crate::roots::ProjectRoots::name(r)).collect();
+    if !names.iter().any(|n| n == first) {
+        return Some(written.to_string());
+    }
+    (crate::roots::ProjectRoots::name(root) == first)
+        .then(|| if after.is_empty() { String::new() } else { format!("/{after}") })
 }
 
 /// The files of `root` a search looks in: `.gitignore`, the `hide` setting and the files
@@ -1300,6 +1322,20 @@ impl Render for ProjectSearch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Find in Folder with several folders: `/web/app/` keeps to web's app, `/web/` to web;
+    /// anything else reads the same in each.
+    #[test]
+    fn a_folder_s_name_first_keeps_the_search_in_it() {
+        let mut roots = crate::roots::ProjectRoots::new(PathBuf::from("/code/api"));
+        roots.add(PathBuf::from("/code/web"));
+        let (api, web) = (Path::new("/code/api"), Path::new("/code/web"));
+        assert_eq!(wanted_in(&roots, web, "/web/app/").as_deref(), Some("/app/"));
+        assert_eq!(wanted_in(&roots, api, "/web/app/"), None);
+        assert_eq!(wanted_in(&roots, web, "/web/").as_deref(), Some(""));
+        assert_eq!(wanted_in(&roots, api, "/src/").as_deref(), Some("/src/"));
+        assert_eq!(wanted_in(&roots, api, "*.rs, !tests").as_deref(), Some("*.rs, !tests"));
+    }
 
     /// How long searching a big project takes (NULL_BENCH_DIR), to the end:
     /// `cargo test --release -- --ignored searching_a_big_project --nocapture`.

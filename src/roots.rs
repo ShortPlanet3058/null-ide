@@ -59,10 +59,11 @@ impl ProjectRoots {
         root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned())
     }
 
-    /// Adds `root` (a folder inside one already there, or that one, changes nothing). Whether
-    /// it was added.
+    /// Adds `root` (a folder inside one already there, or that one, changes nothing; nor
+    /// one holding the primary, which stays what the window's session is kept by). Whether it
+    /// was added.
     pub fn add(&mut self, root: PathBuf) -> bool {
-        if self.roots.iter().any(|r| root.starts_with(r)) {
+        if self.roots.iter().any(|r| root.starts_with(r)) || self.primary().starts_with(&root) {
             return false;
         }
         self.roots.retain(|r| !r.starts_with(&root));
@@ -70,9 +71,10 @@ impl ProjectRoots {
         true
     }
 
-    /// Removes `root`, unless it's the last one. Whether it was removed.
+    /// Removes `root`, unless it's the primary one (what the window's session and unsaved
+    /// work are kept by). Whether it was removed.
     pub fn remove(&mut self, root: &Path) -> bool {
-        if self.roots.len() == 1 || !self.roots.iter().any(|r| r == root) {
+        if root == self.primary() || !self.roots.iter().any(|r| r == root) {
             return false;
         }
         self.roots.retain(|r| r != root);
@@ -97,8 +99,9 @@ mod tests {
         assert_eq!(two.display(Path::new("/code/web/app.tsx")), Path::new("web/app.tsx").display().to_string());
         assert_eq!(two.display(Path::new("/tmp/x")), Path::new("/tmp/x").display().to_string());
         assert!(!two.add(p("/code/web/inner")));
-        assert!(two.add(p("/code")), "a folder holding them takes their place");
-        assert_eq!(two.all(), [p("/code")]);
-        assert!(!two.remove(Path::new("/code")), "the last one stays");
+        assert!(!two.add(p("/code")), "nor one holding the primary");
+        assert!(!two.remove(Path::new("/code/api")), "the primary stays");
+        assert!(two.remove(Path::new("/code/web")));
+        assert_eq!(two.all(), [p("/code/api")]);
     }
 }

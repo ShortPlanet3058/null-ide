@@ -245,10 +245,43 @@ impl LspStore {
 
     /// The window's folders changed: files of a new one get servers of their own as they
     /// open (those of a folder let go are left to finish with the window).
-    pub fn set_roots(&mut self, roots: Vec<PathBuf>) {
-        if !roots.is_empty() {
-            self.roots = roots;
-            self.python_roots.borrow_mut().clear();
+    pub fn set_roots(&mut self, roots: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if roots.is_empty() || roots == self.roots {
+            return;
+        }
+        // Open files whose server changes (their folder came, or went): closed with the one
+        // they had, opened with the one they go to now.
+        let before: Vec<(PathBuf, Option<ServerKey>)> =
+            self.documents.keys().map(|p| (p.clone(), config_for(p).map(|c| self.key_for(c, p)))).collect();
+        self.roots = roots;
+        self.python_roots.borrow_mut().clear();
+        for (path, was) in before {
+            let now = config_for(&path).map(|c| self.key_for(c, &path));
+            if was == now {
+                continue;
+            }
+            let Some(text) = self.documents.get(&path).cloned() else { continue };
+            if let (Some(was), Some(uri)) = (was, uri_for(&path))
+                && let Some(ServerState::Running { server }) = self.servers.get(&was)
+            {
+                server.notify::<DidCloseTextDocument>(DidCloseTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri },
+                });
+            }
+            self.open(&path, text, cx);
+        }
+        // Servers for a folder the window let go, with nothing of theirs open: stopped.
+        let gone: Vec<ServerKey> = self
+            .servers
+            .keys()
+            .filter(|(_, folder)| !self.roots.iter().any(|r| folder.starts_with(r)))
+            .cloned()
+            .collect();
+        for key in gone {
+            if let Some(ServerState::Running { server }) = self.servers.remove(&key) {
+                drop(server.request::<Shutdown>(()));
+                server.notify::<Exit>(());
+            }
         }
     }
 
