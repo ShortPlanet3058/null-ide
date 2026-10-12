@@ -602,35 +602,39 @@ impl Welcome {
             .child(Self::top_bar(Some((n, count)), &theme, window))
             .child(
                 // (Scrolls when a step is taller than the window: AI's, with its providers.)
-                div()
-                    .id("welcome-step")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .justify_center()
-                    .px(px(28.))
-                    .child(
-                        div()
-                            .my_auto()
-                            .py(px(12.))
-                            .w(px(720.))
-                            .max_w_full()
-                            .flex()
-                            .flex_col()
-                            .gap(px(14.))
-                            .opacity(0.3 + 0.7 * eased)
-                            .ml(px(14. * (1. - eased)))
-                            .child(
-                                div()
-                                    .text_size(px(30.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child(title),
-                            )
-                            .child(div().pb(px(10.)).text_size(px(15.)).text_color(theme.muted).child(sub.to_string()))
-                            .child(body),
-                    ),
+                // (Centred while it fits; taller, from its top: auto margins would lift it out of
+                // view, as on a Windows screen scaled up.)
+                div().id("welcome-step").flex_1().min_h_0().overflow_y_scroll().child(
+                    div()
+                        .min_h(gpui::relative(1.))
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .items_center()
+                        .px(px(28.))
+                        .child(
+                            div()
+                                .py(px(12.))
+                                .w(px(720.))
+                                .max_w_full()
+                                .flex()
+                                .flex_col()
+                                .gap(px(14.))
+                                .opacity(0.3 + 0.7 * eased)
+                                .ml(px(14. * (1. - eased)))
+                                .child(
+                                    div()
+                                        .text_size(px(30.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.foreground)
+                                        .child(title),
+                                )
+                                .child(
+                                    div().pb(px(10.)).text_size(px(15.)).text_color(theme.muted).child(sub.to_string()),
+                                )
+                                .child(body),
+                        ),
+                ),
             )
             .child(
                 // Lined up with the step above: same width, same edges.

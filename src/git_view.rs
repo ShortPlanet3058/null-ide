@@ -165,8 +165,8 @@ pub enum GitViewEvent {
     Open(PathBuf),
     /// Commit asked for: the open files are saved first (then `commit` runs).
     CommitAsked,
-    /// Committed (its short id), or why not.
-    Committed(Result<String, String>),
+    /// Committed (its short id), or why not; and the files that went in whole.
+    Committed(Result<String, String>, Vec<PathBuf>),
     /// A message written by AI asked for, from these files' changes.
     Draft(Vec<PathBuf>),
     Push,
@@ -531,7 +531,10 @@ impl GitView {
         }
         if let Some(file) = self.files.iter().find(|f| f.status == FileStatus::Conflicted) {
             let name = file.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            cx.emit(GitViewEvent::Committed(Err(format!("{name} still has conflicts: resolve them first."))));
+            cx.emit(GitViewEvent::Committed(
+                Err(format!("{name} still has conflicts: resolve them first.")),
+                Vec::new(),
+            ));
             return;
         }
         self.committing = true;
@@ -542,6 +545,7 @@ impl GitView {
         let root = self.root.clone();
         let kept: Vec<PathBuf> = self.files.iter().filter(|f| f.kept).map(|f| f.path.clone()).collect();
         let left_out: Vec<PathBuf> = self.files.iter().filter(|f| !f.kept).map(|f| f.path.clone()).collect();
+        let whole: Vec<PathBuf> = self.files.iter().filter(|f| f.kept && !f.partly()).map(|f| f.path.clone()).collect();
         // Each part chosen with its lines, as listed: the file saved since must still have
         // those changes, or the choices would land on others.
         type Chosen = Vec<(Range<usize>, bool)>;
@@ -585,7 +589,7 @@ impl GitView {
                     this.body.update(cx, |input, cx| input.set_text("", cx));
                     // What was left out stays left out for the next one.
                 }
-                cx.emit(GitViewEvent::Committed(result));
+                cx.emit(GitViewEvent::Committed(result, whole));
                 this.refresh(cx);
             })
             .ok();
@@ -621,7 +625,7 @@ impl GitView {
     fn render_history(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return ui::empty_state("This folder isn't a git repository", &theme).into_any_element();
+            return ui::empty_state(git::not_a_repository(), &theme).into_any_element();
         }
         let query = self.filter.read(cx).text().trim().to_lowercase();
         self.history_shown = (0..self.history.len())
@@ -823,7 +827,7 @@ impl GitView {
     fn render_changes(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return ui::empty_state("This folder isn't a git repository", &theme).into_any_element();
+            return ui::empty_state(git::not_a_repository(), &theme).into_any_element();
         }
         let ai = cx.global::<crate::settings::Settings>().ai.ready();
         let kept = self.kept_count();

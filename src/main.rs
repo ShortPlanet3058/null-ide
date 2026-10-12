@@ -175,7 +175,10 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
         let home = crate::tools::home_dir().map(|h| absolute(&h));
         let own = std::env::current_exe().ok().and_then(|e| e.parent().map(absolute));
         let system = std::env::var_os("SystemRoot").map(|r| absolute(&PathBuf::from(r)));
-        let from_finder = cwd.parent().is_none()
+        // (On Windows, null.exe started with nothing is a shortcut's or Explorer's, whatever
+        // folder it starts in: `null` from a terminal passes the folder it's in.)
+        let from_finder = cfg!(windows)
+            || cwd.parent().is_none()
             || Some(&cwd) == home.as_ref()
             || Some(&cwd) == own.as_ref()
             || system.is_some_and(|r| cwd.starts_with(r));
@@ -185,8 +188,7 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
             }
             // The very first time: not the whole disk (or home) as a project, read and
             // watched, but an empty folder of Null's own until one is opened.
-            if let Some(scratch) = tools::data_dir().map(|d| d.join("Scratch")) {
-                std::fs::create_dir_all(&scratch).ok();
+            if let Some(scratch) = session::scratch_folder() {
                 return (scratch, None);
             }
         }
@@ -305,7 +307,23 @@ fn main() {
             cx.spawn(async move |cx| {
                 use futures::StreamExt;
                 while let Some(request) = handed.next().await {
-                    cx.update(|cx| open_project_window_now(request.root, request.file, request.place, cx)).ok();
+                    cx.update(|cx| {
+                        // A file in a project a window has open: opened there.
+                        if let Some(file) = &request.file
+                            && let Some(handle) = window_holding(file, cx)
+                        {
+                            let (file, place) = (file.clone(), request.place);
+                            handle
+                                .update(cx, |workspace, window, cx| {
+                                    window.activate_window();
+                                    open_at(workspace, file, place, window, cx);
+                                })
+                                .ok();
+                            return;
+                        }
+                        open_project_window_now(request.root, request.file, request.place, cx)
+                    })
+                    .ok();
                 }
             })
             .detach();
@@ -388,6 +406,21 @@ pub(crate) fn window_on(
         .filter(|w| Some(*w) != except)
         .filter_map(|w| w.downcast::<Workspace>())
         .find(|handle| handle.read(cx).is_ok_and(|workspace| real(workspace.root(cx)) == root))
+}
+
+/// The window whose project holds `file` (the innermost, should several), if one does.
+fn window_holding(file: &std::path::Path, cx: &gpui::App) -> Option<gpui::WindowHandle<Workspace>> {
+    let real = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let file = real(file);
+    cx.windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<Workspace>())
+        .filter_map(|handle| {
+            let root = real(handle.read(cx).ok()?.root(cx));
+            file.starts_with(&root).then(|| (root.as_os_str().len(), handle))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, handle)| handle)
 }
 
 /// Opens a window on project `root`, as it was left (and `file` in it, if given); the

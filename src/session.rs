@@ -302,7 +302,22 @@ fn read_recent(file: &Path) -> Vec<PathBuf> {
     std::fs::read_to_string(file).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
 }
 
+/// An empty folder of Null's own, the window's project when no folder is open (the very
+/// first time, or a folder closed). Never a recent project.
+pub fn scratch_folder() -> Option<PathBuf> {
+    let scratch = crate::tools::data_dir()?.join("Scratch");
+    std::fs::create_dir_all(&scratch).ok()?;
+    Some(scratch)
+}
+
+pub fn is_scratch(root: &Path) -> bool {
+    crate::tools::data_dir().is_some_and(|d| root == d.join("Scratch"))
+}
+
 fn remember_recent_project(root: &Path) {
+    if is_scratch(root) {
+        return;
+    }
     if let Some(file) = recent_projects_file() {
         remember_in(&file, root);
     }
