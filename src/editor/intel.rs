@@ -831,6 +831,10 @@ impl Editor {
     }
 
     pub fn select_lsp_range(&mut self, range: lsp_types::Range, cx: &mut Context<Self>) {
+        if let Some(opening) = &mut self.opening {
+            opening.view = Some((range.start.line as usize, range.start.character as usize, None));
+            return;
+        }
         self.show_text_for_place();
         let start = self.offset_from_lsp(range.start);
         let end = self.offset_from_lsp(range.end);

@@ -796,6 +796,8 @@ pub struct Editor {
     parse_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// …or wanted, once the file's first drawn.
     parse_wanted: bool,
+    /// A very big file still being read: this is its stand-in.
+    opening: Option<Opening>,
     /// With `NULL_TRACE`: when its file began opening, until it's first drawn.
     pub trace_opened: Option<(PathBuf, std::time::Instant)>,
     ghost: Option<ghost::Ghost>,
@@ -874,6 +876,21 @@ fn longest_in_bytes(rope: &ropey::Rope) -> usize {
         current += bytes.len() - start;
     }
     longest.max(current)
+}
+
+/// A file read for opening (see `Editor::read_file`): what reading it gave, and its buffer
+/// (with its cells, for a notebook, and its fingerprint) unless it isn't text.
+pub struct ReadFile {
+    path: PathBuf,
+    read: std::io::Result<(String, crate::encoding::Encoding)>,
+    made: Option<(Option<String>, Buffer, Fingerprint)>,
+}
+
+/// A stand-in's file (see `Editor::stand_in`): its size, and where it was asked to show
+/// (line, column, and the line at the top when a session says).
+pub struct Opening {
+    pub bytes: u64,
+    pub view: Option<(usize, usize, Option<usize>)>,
 }
 
 /// Colours for a file, unless it's too big to colour as you type: a minified bundle's one
@@ -1072,6 +1089,7 @@ impl Editor {
             parse_task: None,
             parse_cancel: None,
             parse_wanted: false,
+            opening: None,
         };
         editor.start_colouring(cx);
         editor.rehighlight();
@@ -1164,12 +1182,53 @@ impl Editor {
 
     /// Opens `path`, or an empty buffer that will be saved there if it doesn't exist yet.
     pub fn open(path: PathBuf, lsp: Option<Entity<LspStore>>, cx: &mut Context<Self>) -> Self {
-        let _opening = crate::trace::step(|| format!("opened {}", path.display()));
         let began = crate::trace::on().then(|| (path.clone(), std::time::Instant::now()));
+        let read = Self::read_file(path);
+        Self::from_read(read, began, lsp, cx)
+    }
+
+    /// `path` read for opening: its text decoded and made a buffer (its fingerprint taken).
+    /// Needs nothing of the app: a very big file is read off the main thread (see
+    /// `opening`), then made an editor with `from_read`.
+    pub fn read_file(path: PathBuf) -> ReadFile {
+        let _opening = crate::trace::step(|| format!("read {}", path.display()));
         let read = {
             let _step = crate::trace::step(|| "  read and decoded".into());
             crate::encoding::read(&path)
         };
+        // An image, or a file that isn't text: shown (by `from_read`), not made a buffer.
+        let preview = crate::preview::of(&path, &read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind()));
+        let made = match (&read, preview) {
+            (Ok((text, _)), None) => {
+                // A notebook: its cells as text to write in.
+                let cells = is_notebook_path(&path).then(|| crate::notebook::to_cells_text(text)).flatten();
+                let _step = crate::trace::step(|| "  buffer made (and the file's fingerprint)".into());
+                // A big file's fingerprint taken meanwhile, on another core (46 ms of 170 MB).
+                const BESIDE_FROM: usize = 4 * 1024 * 1024;
+                let (buffer, on_disk) = if text.len() > BESIDE_FROM {
+                    std::thread::scope(|s| {
+                        let print = s.spawn(|| fingerprint(text));
+                        let buffer = Buffer::from_text(cells.as_deref().unwrap_or(text));
+                        (buffer, print.join().unwrap_or_else(|_| fingerprint(text)))
+                    })
+                } else {
+                    (Buffer::from_text(cells.as_deref().unwrap_or(text)), fingerprint(text))
+                };
+                Some((cells, buffer, on_disk))
+            }
+            _ => None,
+        };
+        ReadFile { path, read, made }
+    }
+
+    /// An editor of a file read (see `read_file`).
+    pub fn from_read(
+        read: ReadFile,
+        began: Option<(PathBuf, std::time::Instant)>,
+        lsp: Option<Entity<LspStore>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let ReadFile { path, read, made } = read;
         // An image, or a file that isn't text: shown, never edited or saved over.
         if let Some(preview) = crate::preview::of(&path, &read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind()))
         {
@@ -1179,22 +1238,7 @@ impl Editor {
             return editor;
         }
         let (text, encoding) = read.unwrap_or_default();
-        // A notebook: its cells as text to write in.
-        let cells = is_notebook_path(&path).then(|| crate::notebook::to_cells_text(&text)).flatten();
-        let (buffer, on_disk) = {
-            let _step = crate::trace::step(|| "  buffer made (and the file's fingerprint)".into());
-            // A big file's fingerprint taken meanwhile, on another core (46 ms of 170 MB).
-            const BESIDE_FROM: usize = 4 * 1024 * 1024;
-            if text.len() > BESIDE_FROM {
-                std::thread::scope(|s| {
-                    let print = s.spawn(|| fingerprint(&text));
-                    let buffer = Buffer::from_text(cells.as_deref().unwrap_or(&text));
-                    (buffer, print.join().unwrap_or_else(|_| fingerprint(&text)))
-                })
-            } else {
-                (Buffer::from_text(cells.as_deref().unwrap_or(&text)), fingerprint(&text))
-            }
-        };
+        let (cells, buffer, on_disk) = made.unwrap_or_else(|| (None, Buffer::new(), fingerprint("")));
         let mut editor = {
             let _step = crate::trace::step(|| "  editor made".into());
             Self::new(buffer, Some(path), cx)
@@ -1210,7 +1254,7 @@ impl Editor {
                 editor.choose_language(Some(kind), cx);
             }
         }
-        let _rest = crate::trace::step(|| "  fingerprint, git base, language server".into());
+        let _rest = crate::trace::step(|| "  git base, language server".into());
         editor.trace_opened = began;
         editor.on_disk = Some(on_disk);
         editor.measure_longest_line(cx);
@@ -1226,6 +1270,26 @@ impl Editor {
             editor.attach_lsp(lsp, cx);
         }
         editor
+    }
+
+    /// A very big file while it's read off the main thread: an empty, untouchable stand-in
+    /// (it says so), that its tab swaps for the editor once read. Where it was asked to
+    /// show (a line, a place in a session) is kept for that one.
+    pub fn stand_in(path: PathBuf, bytes: u64, cx: &mut Context<Self>) -> Self {
+        let mut editor = Self::new(Buffer::new(), Some(path), cx);
+        editor.view_only = true;
+        editor.opening = Some(Opening { bytes, view: None });
+        editor
+    }
+
+    /// A stand-in still reading its file (see `stand_in`).
+    pub fn is_opening(&self) -> bool {
+        self.opening.is_some()
+    }
+
+    /// Where a stand-in was asked to show, for the editor taking its place.
+    pub fn view_asked(&self) -> Option<(usize, usize, Option<usize>)> {
+        self.opening.as_ref().and_then(|o| o.view)
     }
 
     /// Picks up a change made to the file outside Null. Unsaved edits are never
@@ -1245,6 +1309,10 @@ impl Editor {
     }
 
     fn reload(&mut self, discard_edits: bool, cx: &mut Context<Self>) {
+        // (A stand-in: its file's being read already.)
+        if self.opening.is_some() {
+            return;
+        }
         if self.check_missing(cx) {
             return;
         }
@@ -1443,6 +1511,11 @@ impl Editor {
 
     /// Puts the caret at a line and column (kept within the text), and shows it.
     pub fn set_caret_point(&mut self, (line, column): (usize, usize), cx: &mut Context<Self>) {
+        // (A stand-in: there, once the file's read.)
+        if let Some(opening) = &mut self.opening {
+            opening.view = Some((line, column, None));
+            return;
+        }
         let line = line.min(self.buffer.len_lines().saturating_sub(1));
         let column = column.min(self.buffer.line_len(line));
         self.single_cursor();
@@ -3358,8 +3431,9 @@ impl Editor {
     }
 
     pub fn save_to_disk(&mut self, cx: &mut Context<Self>) -> bool {
-        // Nothing to write: what's shown is the file itself.
-        if self.preview.is_some() {
+        // Nothing to write: what's shown is the file itself (or a stand-in, its file not
+        // read yet: never written over with nothing).
+        if self.preview.is_some() || self.opening.is_some() {
             return true;
         }
         if self.path.is_none() {
@@ -4228,6 +4302,10 @@ impl Editor {
 
     /// Puts the caret and the view back as they were, without scrolling there visibly.
     pub fn restore_view(&mut self, line: usize, column: usize, top_line: usize, cx: &mut Context<Self>) {
+        if let Some(opening) = &mut self.opening {
+            opening.view = Some((line, column, Some(top_line)));
+            return;
+        }
         self.single_cursor();
         self.selection = Selection::caret(self.buffer.offset(line, column));
         self.goal_column = None;
@@ -4575,6 +4653,20 @@ impl Render for Editor {
         self.keys_back_after_writing(window, cx);
         if let Some(preview) = &self.preview {
             return self.render_preview(preview, cx);
+        }
+        if let Some(opening) = &self.opening {
+            let theme = cx.global::<Theme>();
+            let name = self.file_name();
+            let size = crate::preview::file_size(opening.bytes);
+            return div()
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.muted)
+                .child(format!("Opening {name} ({size})…"))
+                .into_any_element();
         }
         if self.reading && self.is_svg() {
             return self.render_svg(window, cx);

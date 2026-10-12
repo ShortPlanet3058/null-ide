@@ -684,6 +684,12 @@ struct Tab {
     _subscriptions: [Subscription; 2],
 }
 
+/// Files bigger than this are read in the background, a stand-in in their tab meanwhile.
+#[cfg(not(test))]
+const READ_IN_BACKGROUND_FROM: u64 = 64 * 1024 * 1024;
+#[cfg(test)]
+const READ_IN_BACKGROUND_FROM: u64 = 1024 * 1024;
+
 pub struct Workspace {
     focus_handle: FocusHandle,
     tree: Entity<FileTree>,
@@ -2957,7 +2963,16 @@ impl Workspace {
             .flatten()
             .map(|t| t.editor.clone());
         let lsp = self.lsp.clone();
-        let editor = cx.new(|cx| Editor::open(path, Some(lsp), cx));
+        // A very big file: its tab at once, a stand-in until it's read in the background (a
+        // gigabyte would hold the window still for seconds).
+        let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+        let editor = if size > READ_IN_BACKGROUND_FROM {
+            let editor = cx.new(|cx| Editor::stand_in(path.clone(), size, cx));
+            self.read_in_background(editor.clone(), path, window, cx);
+            editor
+        } else {
+            cx.new(|cx| Editor::open(path, Some(lsp), cx))
+        };
         self.add_tab_on(editor.clone(), side, window, cx);
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.editor == editor) {
             tab.passing = passing;
@@ -2967,6 +2982,64 @@ impl Workspace {
             // Only looked at: not for Reopen Closed Tab.
             self.recently_closed.pop();
         }
+    }
+
+    /// A very big file read off the main thread, then its editor in its stand-in's place
+    /// (in its tab, shown where it was, with the keyboard if it had it). Closed meanwhile:
+    /// nothing.
+    fn read_in_background(
+        &mut self,
+        stand_in: Entity<Editor>,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let began = crate::trace::on().then(|| (path.clone(), std::time::Instant::now()));
+        cx.spawn_in(window, async move |this, cx| {
+            let read = cx.background_executor().spawn(async move { Editor::read_file(path) }).await;
+            this.update_in(cx, |this, window, cx| this.swap_in(stand_in, read, began, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn swap_in(
+        &mut self,
+        stand_in: Entity<Editor>,
+        read: crate::editor::ReadFile,
+        began: Option<(PathBuf, std::time::Instant)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tabs.iter().position(|t| t.editor == stand_in) else { return };
+        let lsp = self.lsp.clone();
+        let editor = cx.new(|cx| Editor::from_read(read, began, Some(lsp), cx));
+        if let Some((line, column, top)) = stand_in.read(cx).view_asked() {
+            editor.update(cx, |e, cx| match top {
+                Some(top) => e.restore_view(line, column, top, cx),
+                None => e.set_caret_point((line, column), cx),
+            });
+        }
+        let focused = stand_in.focus_handle(cx).is_focused(window);
+        let subscriptions = self.tab_subscriptions(&editor, window, cx);
+        let tab = &mut self.tabs[ix];
+        tab.editor = editor.clone();
+        tab._subscriptions = subscriptions;
+        for shown in &mut self.shown {
+            if shown.as_ref() == Some(&stand_in) {
+                *shown = Some(editor.clone());
+            }
+        }
+        let (was, now) = (stand_in.entity_id(), editor.entity_id());
+        for used in &mut self.used {
+            if *used == was {
+                *used = now;
+            }
+        }
+        if focused {
+            window.focus(&editor.focus_handle(cx));
+        }
+        self.refresh_title(window, cx);
+        cx.notify();
     }
 
     /// The tab showing `editor` kept: no longer passing.
@@ -3052,6 +3125,10 @@ impl Workspace {
     }
 
     fn add_twin(&mut self, source: &Entity<Editor>, side: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // (Its file still being read: nothing to share yet.)
+        if source.read(cx).is_opening() {
+            return self.show_notice("It's still opening.".into(), cx);
+        }
         let lsp = self.lsp.clone();
         // An image has no text to share: the other side shows the file too.
         if source.read(cx).preview.is_some()
@@ -3152,7 +3229,34 @@ impl Workspace {
 
     fn add_tab_on(&mut self, editor: Entity<Editor>, side: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let side = side.unwrap_or_else(|| self.focused_side());
-        let subscriptions = [
+        let subscriptions = self.tab_subscriptions(&editor, window, cx);
+        // Next to the current tab when it's on the same side, else at the end of that side.
+        let ix = match self.active {
+            Some(a) if self.tabs.get(a).is_some_and(|t| t.side == side) => a + 1,
+            _ => self.side_tabs(side).last().map_or(self.tabs.len(), |&i| i + 1),
+        };
+        if let Some(a) = self.active.filter(|&a| a >= ix) {
+            self.active = Some(a + 1);
+        }
+        self.tabs.insert(
+            ix,
+            Tab { editor: editor.clone(), side, pinned: false, passing: false, _subscriptions: subscriptions },
+        );
+        // Among pinned tabs, it goes after them: shown wherever it ended up.
+        self.keep_pinned_first();
+        let ix = self.tabs.iter().position(|t| t.editor == editor).unwrap_or(ix);
+        self.activate(ix, window, cx);
+    }
+
+    /// What the workspace hears from a tab's editor.
+    fn tab_subscriptions(
+        &mut self,
+        editor: &Entity<Editor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> [Subscription; 2] {
+        let editor = editor.clone();
+        [
             cx.observe(&editor, |this, editor, cx| {
                 this.sync_preview(&editor, cx);
                 cx.notify();
@@ -3405,23 +3509,7 @@ impl Workspace {
                     }
                 }
             }),
-        ];
-        // Next to the current tab when it's on the same side, else at the end of that side.
-        let ix = match self.active {
-            Some(a) if self.tabs.get(a).is_some_and(|t| t.side == side) => a + 1,
-            _ => self.side_tabs(side).last().map_or(self.tabs.len(), |&i| i + 1),
-        };
-        if let Some(a) = self.active.filter(|&a| a >= ix) {
-            self.active = Some(a + 1);
-        }
-        self.tabs.insert(
-            ix,
-            Tab { editor: editor.clone(), side, pinned: false, passing: false, _subscriptions: subscriptions },
-        );
-        // Among pinned tabs, it goes after them: shown wherever it ended up.
-        self.keep_pinned_first();
-        let ix = self.tabs.iter().position(|t| t.editor == editor).unwrap_or(ix);
-        self.activate(ix, window, cx);
+        ]
     }
 
     /// Opens a folder as the project (its tabs replace these, after asking about unsaved
@@ -13369,6 +13457,53 @@ esac
         cx.run_until_parked();
         assert!(workspace.read_with(cx, |w, _| w.github_page.is_none()));
         *crate::github::FAKE.lock().unwrap() = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A very big file: its tab at once with a stand-in (which saves nothing over it), the
+    /// file read in the background, then its editor there, where it was asked to show.
+    #[gpui::test]
+    fn a_very_big_file_opens_in_the_background(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("read-in-background");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = "2026-10-12 INFO request served\n";
+        let text = line.repeat((2 << 20) / line.len());
+        let path = dir.join("big.log");
+        std::fs::write(&path, &text).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(path.clone(), window, cx);
+            let stand_in = w.active_editor().unwrap().clone();
+            stand_in.update(cx, |e, cx| {
+                assert!(e.is_opening());
+                // Asked to show a line meanwhile, and saved: kept for later, nothing written.
+                e.set_caret_point((1000, 4), cx);
+                assert!(e.save_to_disk(cx));
+            });
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap().len(), text.len(), "never written over");
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if workspace.read_with(cx, |w, cx| w.active_editor().is_some_and(|e| !e.read(cx).is_opening())) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.tabs.len(), 1, "in the stand-in's place");
+            let editor = w.active_editor().unwrap().read(cx);
+            assert!(!editor.is_opening());
+            assert_eq!(editor.buffer.len_chars(), text.len());
+            assert_eq!(editor.caret_point(), (1000, 4), "where it was asked to show");
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 
