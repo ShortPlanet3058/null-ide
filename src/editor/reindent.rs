@@ -86,18 +86,18 @@ mod tests {
             e.selection = Selection::caret(at(e, 1, 6));
         });
         // The whole line, with nothing selected, into the `if`.
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         e.update(cx, |e, _| e.selection = Selection::caret(at(e, 5, 0)));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         e.update(cx, |e, _| assert_eq!(e.buffer.line_text(5), "        b();"));
         // The `if` block, out to the end of the file.
         e.update(cx, |e, _| e.selection = Selection { anchor: at(e, 4, 0), head: at(e, 8, 0) });
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         e.update(cx, |e, _| e.selection = Selection::caret(e.buffer.len_chars()));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         let end = "}\nif x {\n    b();\n    y();\n}\n";
         e.update(cx, |e, _| assert!(e.buffer.to_string().ends_with(end), "{}", e.buffer.to_string()));
-        cx.simulate_keystrokes("cmd-z alt-shift-cmd-v");
+        cx.simulate_keystrokes("secondary-z alt-shift-secondary-v");
         let end = "}\n    if x {\n        b();\n        y();\n    }\n";
         e.update(cx, |e, _| assert!(e.buffer.to_string().ends_with(end), "{}", e.buffer.to_string()));
     }
@@ -122,16 +122,16 @@ mod tests {
             window.focus(&e.focus_handle(cx));
             e.selection = Selection { anchor: at(e, 3), head: at(e, 5) };
         });
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         // On the blank line between the functions.
         e.update(cx, |e, _| e.selection = Selection::caret(at(e, 2)));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         e.update(cx, |e, _| {
             assert_eq!(e.buffer.to_string(), "def a():\n    return 1\ndef b():\n    pass\n\ndef b():\n    pass\n")
         });
         // Above a top-level `def`, as whole lines.
         e.update(cx, |e, _| e.selection = Selection::caret(at(e, 2)));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         e.update(cx, |e, _| assert_eq!(e.buffer.line_text(2), "def b():"));
 
         let code = "fn a() {\n    x();\n}\n// y();\n";
@@ -141,9 +141,9 @@ mod tests {
             window.focus(&e.focus_handle(cx));
             e.selection = Selection::caret(at(e, 3) + 3);
         });
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         e.update(cx, |e, _| e.selection = Selection::caret(at(e, 2)));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "fn a() {\n    x();\n    // y();\n}\n// y();\n"));
     }
 

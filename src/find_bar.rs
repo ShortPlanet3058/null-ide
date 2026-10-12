@@ -30,21 +30,26 @@ actions!(
     ]
 );
 
+/// Find Next and Previous: ⌘G and ⇧⌘G on the Mac; F3 and Shift+F3 elsewhere (Ctrl+G goes
+/// to a line there, Ctrl+Shift+G to the changes).
+const NEXT: &str = if cfg!(target_os = "macos") { "cmd-g" } else { "f3" };
+const PREVIOUS: &str = if cfg!(target_os = "macos") { "cmd-shift-g" } else { "shift-f3" };
+
 pub fn bind_keys(cx: &mut App) {
     let editor = Some("Editor");
     let bar = Some("FindBar");
     let replace = Some("ReplaceInput");
     let mut keys = vec![
         KeyBinding::new("secondary-f", DeployFind, editor),
-        KeyBinding::new("secondary-g", FindNext, editor),
-        KeyBinding::new("secondary-shift-g", FindPrevious, editor),
+        KeyBinding::new(NEXT, FindNext, editor),
+        KeyBinding::new(PREVIOUS, FindPrevious, editor),
         KeyBinding::new("escape", CloseFind, editor),
-        KeyBinding::new("cmd-e", UseSelectionForFind, editor),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-e" } else { "ctrl-f3" }, UseSelectionForFind, editor),
         KeyBinding::new("secondary-f", DeployFind, bar),
         KeyBinding::new("enter", FindNext, bar),
-        KeyBinding::new("secondary-g", FindNext, bar),
+        KeyBinding::new(NEXT, FindNext, bar),
         KeyBinding::new("shift-enter", FindPrevious, bar),
-        KeyBinding::new("secondary-shift-g", FindPrevious, bar),
+        KeyBinding::new(PREVIOUS, FindPrevious, bar),
         KeyBinding::new("escape", CloseFind, bar),
         KeyBinding::new("alt-enter", SelectAllMatches, bar),
         KeyBinding::new("up", OlderSearch, bar),
@@ -646,13 +651,13 @@ mod tests {
             e.selection = Selection { anchor: 0, head: 0 };
         });
         let field = |cx: &mut gpui::VisualTestContext| e.read_with(cx, |e, cx| e.find_query(cx).unwrap().text);
-        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("secondary-f");
         for word in ["alpha", "beta", "alpha"] {
-            cx.simulate_keystrokes("cmd-a");
+            cx.simulate_keystrokes("secondary-a");
             cx.simulate_input(word);
             cx.simulate_keystrokes("enter");
         }
-        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("gam");
         cx.simulate_keystrokes("up");
         assert_eq!(field(cx), "alpha");
@@ -688,7 +693,7 @@ mod tests {
             window.focus(&e.focus_handle(cx));
             e.selection = Selection { anchor: 0, head: 0 };
         });
-        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("secondary-f");
         cx.simulate_input("a");
         cx.simulate_keystrokes("alt-enter");
         e.update(cx, |e, _| assert_eq!(e.extra.len(), 2, "three cursors"));
@@ -714,28 +719,28 @@ mod tests {
             window.focus(&e.focus_handle(cx));
             e.selection = Selection { anchor: 6, head: 25 };
         });
-        cx.simulate_keystrokes("cmd-f");
-        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_keystrokes("secondary-f");
+        cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("x");
         e.read_with(cx, |e, _| {
             assert!(e.find_in_selection());
             assert_eq!(e.search.as_ref().unwrap().matches.len(), 3, "the three x in lines 2 and 3");
         });
-        cx.simulate_keystrokes("alt-cmd-f");
+        cx.simulate_keystrokes("alt-secondary-f");
         cx.simulate_input("count");
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes("secondary-enter");
         e.read_with(cx, |e, _| {
             assert_eq!(e.buffer.to_string(), "x = 1\ncount = count + 1\nprint(count)\nx\n");
         });
         // Undone, in the text: the same lines again, not more (the scope comes back too).
         e.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
-        cx.simulate_keystrokes("cmd-z");
+        cx.simulate_keystrokes("secondary-z");
         e.read_with(cx, |e, _| {
             assert_eq!(e.buffer.to_string(), text);
             assert!(e.find_in_selection());
             assert_eq!(e.search.as_ref().unwrap().matches.len(), 3, "line 4's x stays outside");
         });
-        cx.simulate_keystrokes("cmd-shift-z");
+        cx.simulate_keystrokes("secondary-shift-z");
         // The whole file again: the two x left outside.
         e.update(cx, |e, cx| e.find_in_whole_file(cx));
         e.read_with(cx, |e, _| assert_eq!(e.search.as_ref().unwrap().matches.len(), 2));
@@ -757,11 +762,11 @@ mod tests {
             window.focus(&e.focus_handle(cx));
             e.selection = Selection { anchor: 0, head: 0 };
         });
-        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("secondary-f");
         cx.simulate_input("ab");
         cx.simulate_keystrokes("escape");
         e.update(cx, |e, _| assert_eq!(e.selection.range(), 0..2));
-        cx.simulate_keystrokes("cmd-g");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-g" } else { "f3" });
         e.update(cx, |e, _| assert_eq!(e.selection.range(), 3..5));
     }
 

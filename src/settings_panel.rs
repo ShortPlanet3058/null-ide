@@ -1675,7 +1675,7 @@ mod tests {
         let before = panel.read_with(cx, |p, cx| p.keys_now(0, cx));
         assert!(!before.is_empty(), "Select All Occurrences has a key in the preset");
         panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
-        cx.simulate_keystrokes("ctrl-cmd-l");
+        cx.simulate_keystrokes("ctrl-secondary-l");
         let keys = cx.update(|_, cx| cx.global::<Settings>().keys.clone());
         assert_eq!(keys.get("ctrl-cmd-l"), Some(&Some("editor::SelectAllOccurrences".to_string())));
         let from_it = Some("-editor::SelectAllOccurrences".to_string());
@@ -1683,7 +1683,7 @@ mod tests {
         assert_eq!(panel.read_with(cx, |p, cx| p.keys_now(0, cx)), ["ctrl-cmd-l"]);
         // Save's ⌘S, taken: it says whose it was.
         panel.update_in(cx, |p, window, cx| p.record_keys(0, window, cx));
-        cx.simulate_keystrokes("cmd-s");
+        cx.simulate_keystrokes("secondary-s");
         let note = panel.read_with(cx, |p, _| p.key_note.clone().unwrap().1);
         assert!(note.contains("no longer Save"), "{note}");
         // A plain letter types: refused, nothing written.
@@ -1699,7 +1699,7 @@ mod tests {
             p.record_keys(0, window, cx);
             p.search.update(cx, |search, cx| window.focus(&search.focus_handle(cx)));
         });
-        cx.simulate_keystrokes("cmd-alt-9");
+        cx.simulate_keystrokes("secondary-alt-9");
         assert!(!cx.update(|_, cx| cx.global::<Settings>().keys.contains_key("cmd-alt-9")));
         assert!(panel.read_with(cx, |p, _| p.recording.is_none()), "no longer waiting");
         // ⌫: no keys at all.

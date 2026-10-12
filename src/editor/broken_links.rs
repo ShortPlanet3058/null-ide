@@ -241,7 +241,7 @@ mod tests {
             e.selection = super::super::Selection::caret(15);
             cx.notify();
         });
-        cx.simulate_keystrokes("cmd-. enter");
+        cx.simulate_keystrokes("secondary-. enter");
         editor.read_with(cx, |e, _| assert!(e.buffer.to_string().starts_with("See [setup](docs/setup.md),")));
         std::fs::remove_dir_all(&dir).ok();
     }

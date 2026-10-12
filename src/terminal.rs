@@ -52,7 +52,6 @@ pub fn bind_keys(cx: &mut App) {
         keys.extend([
             KeyBinding::new("ctrl-shift-c", Copy, ctx),
             KeyBinding::new("ctrl-shift-v", Paste, ctx),
-            KeyBinding::new("ctrl-shift-f", Find, ctx),
             KeyBinding::new("ctrl-up", PreviousCommand, ctx),
             KeyBinding::new("ctrl-down", NextCommand, ctx),
         ]);
@@ -60,11 +59,21 @@ pub fn bind_keys(cx: &mut App) {
         // deletes a word, Ctrl+B moves back...). Inside the terminal, give them back.
         for key in "abcdefghijklmnopqrstuvwxyz,=-0".chars() {
             keys.push(KeyBinding::new(&format!("ctrl-{key}"), NoAction {}, ctx));
-            // Ctrl+Shift+C and V stay copy and paste.
-            if key != 'c' && key != 'v' {
+            // Ctrl+Shift+C and V stay copy and paste, F find, K clear.
+            if !"cvfk".contains(key) {
                 keys.push(KeyBinding::new(&format!("ctrl-shift-{key}"), NoAction {}, ctx));
             }
         }
+        // (Bound after the loop: the later binding is the one that counts.)
+        keys.extend([
+            KeyBinding::new("ctrl-shift-f", Find, ctx),
+            KeyBinding::new("ctrl-shift-k", Clear, ctx),
+            KeyBinding::new("f3", FindNext, ctx),
+            KeyBinding::new("shift-f3", FindPrevious, ctx),
+            // Ctrl+←/→ (Ctrl+⌘ arrows' place off the Mac) move by words in the shell.
+            KeyBinding::new("ctrl-left", NoAction {}, ctx),
+            KeyBinding::new("ctrl-right", NoAction {}, ctx),
+        ]);
     }
     // In the find field: Enter and Shift+Enter step through, Escape goes back to the shell.
     let find = Some("TerminalFind");

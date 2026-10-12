@@ -713,7 +713,7 @@ mod tests {
             assert_eq!(e.buffer.to_string(), "import { useState } from \"react\";\nconst a = useState(0)\n");
             assert!(!e.in_snippet());
         });
-        cx.simulate_keystrokes("cmd-z cmd-z");
+        cx.simulate_keystrokes("secondary-z secondary-z");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), "const a = useState(initial)\n"));
     }
 

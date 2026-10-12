@@ -679,7 +679,7 @@ mod tests {
         e.read_with(cx, |e, _| {
             assert_eq!(e.buffer.to_string(), "{\n    \"a\": [\n        1,\n        2\n    ],\n    \"b\": {}\n}\n");
         });
-        cx.simulate_keystrokes("cmd-z");
+        cx.simulate_keystrokes("secondary-z");
         e.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), text, "one undo"));
         e.update(cx, |e, cx| {
             let end = e.buffer.len_chars();

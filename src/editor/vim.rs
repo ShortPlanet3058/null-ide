@@ -2762,7 +2762,7 @@ mod tests {
     fn command_keys_stay_null_s(cx: &mut TestAppContext) {
         let (e, cx) = vim("|abc abc\n", cx);
         // ⌘D: Null's next match, in Normal mode too.
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes("secondary-d");
         assert_eq!(e.read_with(cx, |e, _| e.buffer.slice(e.selection.range())), "abc");
         cx.simulate_keystrokes("escape");
         // The keymap off: letters type again.

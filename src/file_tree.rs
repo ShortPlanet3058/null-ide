@@ -733,7 +733,7 @@ impl FileTree {
     ) {
         let Some(entry) = self.entry_at(ix).cloned() else { return };
         // ⌘-click picks one more (or lets one go); ⇧-click, all from the one picked to here.
-        if modifiers.platform || modifiers.shift {
+        if modifiers.secondary() || modifiers.shift {
             self.menu = None;
             window.focus(&self.focus_handle);
             if modifiers.shift {

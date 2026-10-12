@@ -11,11 +11,17 @@ actions!(numbers, [Increment, Decrement, IncrementByTen, DecrementByTen]);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Editor");
+    // (Off the Mac, Ctrl+Alt+↑ and ↓ add cursors, as in VS Code there: these take ⇧ too.)
+    let (up, down, ten_up, ten_down) = if cfg!(target_os = "macos") {
+        ("ctrl-alt-up", "ctrl-alt-down", "ctrl-alt-shift-up", "ctrl-alt-shift-down")
+    } else {
+        ("ctrl-alt-shift-up", "ctrl-alt-shift-down", "ctrl-alt-shift-pageup", "ctrl-alt-shift-pagedown")
+    };
     cx.bind_keys([
-        KeyBinding::new("ctrl-alt-up", Increment, ctx),
-        KeyBinding::new("ctrl-alt-down", Decrement, ctx),
-        KeyBinding::new("ctrl-alt-shift-up", IncrementByTen, ctx),
-        KeyBinding::new("ctrl-alt-shift-down", DecrementByTen, ctx),
+        KeyBinding::new(up, Increment, ctx),
+        KeyBinding::new(down, Decrement, ctx),
+        KeyBinding::new(ten_up, IncrementByTen, ctx),
+        KeyBinding::new(ten_down, DecrementByTen, ctx),
     ]);
 }
 

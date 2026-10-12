@@ -26,9 +26,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", AcceptGhost, ctx),
         KeyBinding::new("alt-right", AcceptGhostWord, ctx),
         KeyBinding::new("secondary-right", AcceptGhostLine, ctx),
-        // ⌥⇥ rather than ⌥] : brackets take several keys on many layouts.
-        KeyBinding::new("alt-tab", NextGhost, ctx),
-        KeyBinding::new("alt-shift-tab", PreviousGhost, ctx),
+        // ⌥⇥ rather than ⌥] : brackets take several keys on many layouts. (Off the Mac,
+        // Alt+Tab is the system's: the brackets there.)
+        KeyBinding::new(if cfg!(target_os = "macos") { "alt-tab" } else { "alt-]" }, NextGhost, ctx),
+        KeyBinding::new(if cfg!(target_os = "macos") { "alt-shift-tab" } else { "alt-[" }, PreviousGhost, ctx),
         KeyBinding::new("escape", DismissGhost, ctx),
     ]);
 }

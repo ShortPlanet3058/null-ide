@@ -76,11 +76,11 @@ fn depths(regions: &[Range<usize>]) -> Vec<usize> {
 
 pub fn bind_keys(cx: &mut App) {
     let editor = Some("Editor");
-    // As in Xcode: arrows, so they work on every keyboard layout (unlike ⌘[ and ⌘]).
-    cx.bind_keys([
-        KeyBinding::new("alt-secondary-left", Fold, editor),
-        KeyBinding::new("alt-secondary-right", Unfold, editor),
-    ]);
+    // As in Xcode: arrows, so they work on every keyboard layout (unlike ⌘[ and ⌘]). Off
+    // the Mac, Ctrl+Alt+arrows are taken (tabs to the other side): VS Code's keys there.
+    let (fold, unfold) =
+        if cfg!(target_os = "macos") { ("alt-cmd-left", "alt-cmd-right") } else { ("ctrl-shift-[", "ctrl-shift-]") };
+    cx.bind_keys([KeyBinding::new(fold, Fold, editor), KeyBinding::new(unfold, Unfold, editor)]);
 }
 
 #[derive(Default)]

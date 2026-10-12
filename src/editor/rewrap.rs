@@ -308,7 +308,7 @@ mod tests {
             assert_eq!(e.buffer.to_string(), format!("{first}\n\nshort lines\n"));
             assert_eq!(e.buffer.slice(e.selection.range()), format!("{first}\n\nshort lines"));
         });
-        cx.simulate_keystrokes("cmd-z cmd-z");
+        cx.simulate_keystrokes("secondary-z secondary-z");
         e.update(cx, |e, _| assert_eq!(e.buffer.to_string(), text));
     }
 

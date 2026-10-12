@@ -241,9 +241,22 @@ pub fn bind_keys(cx: &mut App) {
         // Arrows rather than ⌘\, which takes several keys on many layouts.
         KeyBinding::new("alt-secondary-i", NewAiTask, ctx),
         KeyBinding::new("ctrl-shift-g", ReviewChanges, ctx),
-        KeyBinding::new("ctrl-secondary-right", MoveTabRight, ctx),
-        KeyBinding::new("ctrl-alt-secondary-right", OpenOnOtherSide, ctx),
-        KeyBinding::new("ctrl-secondary-left", MoveTabLeft, ctx),
+        // (Off the Mac, Ctrl+arrows move by words: Ctrl+Shift+PgUp and PgDn there.)
+        KeyBinding::new(
+            if cfg!(target_os = "macos") { "ctrl-cmd-right" } else { "ctrl-shift-pagedown" },
+            MoveTabRight,
+            ctx,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") { "ctrl-alt-cmd-right" } else { "ctrl-alt-right" },
+            OpenOnOtherSide,
+            ctx,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") { "ctrl-cmd-left" } else { "ctrl-shift-pageup" },
+            MoveTabLeft,
+            ctx,
+        ),
         KeyBinding::new("secondary-shift-e", ShowFiles, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("ctrl-shift-`", NewTerminal, ctx),
@@ -292,7 +305,18 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-d", SplitTerminal, Some("Terminal")),
         ]);
     } else {
-        keys.extend([KeyBinding::new("alt-left", GoBack, ctx), KeyBinding::new("alt-right", GoForward, ctx)]);
+        keys.extend([
+            KeyBinding::new("alt-left", GoBack, ctx),
+            KeyBinding::new("alt-right", GoForward, ctx),
+            KeyBinding::new("ctrl-pagedown", NextTab, ctx),
+            KeyBinding::new("ctrl-pageup", PreviousTab, ctx),
+            // As in VS Code: in the terminal, another beside it.
+            KeyBinding::new("ctrl-shift-5", SplitTerminal, Some("Terminal")),
+            // The shell's own word keys (Alt+←/→ go back and forth elsewhere; Alt+Z wraps).
+            KeyBinding::new("alt-left", gpui::NoAction {}, Some("Terminal")),
+            KeyBinding::new("alt-right", gpui::NoAction {}, Some("Terminal")),
+            KeyBinding::new("alt-z", gpui::NoAction {}, Some("Terminal")),
+        ]);
     }
     cx.bind_keys(keys);
 }
@@ -11460,7 +11484,7 @@ mod tests {
             v.toggle_file_for_test(ix, cx);
         });
         cx.simulate_input("only b");
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes("secondary-enter");
         for _ in 0..100 {
             settle(cx);
             if view.read_with(cx, |v, _| !v.committing)
@@ -11512,7 +11536,7 @@ mod tests {
             assert!(!e.buffer.is_dirty());
         });
         editor.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
-        cx.simulate_keystrokes("cmd-z");
+        cx.simulate_keystrokes("secondary-z");
         editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "saved\nchanged\n", "⌘Z brings the changes back"));
         // The saved file unreadable now (Unix's permissions): the changes stay, still unsaved.
         #[cfg(unix)]
@@ -11754,7 +11778,7 @@ mod tests {
                 editor.update(cx, |e, cx| e.go_to_line(line + 1, cx));
                 window.focus(&editor.focus_handle(cx));
             });
-            cx.simulate_keystrokes("cmd-f2");
+            cx.simulate_keystrokes("secondary-f2");
         };
         mark(cx, "a.txt", 2);
         mark(cx, "b.txt", 1);
@@ -11815,14 +11839,14 @@ mod tests {
             })
         };
         // ⌘P "notes.txt:3:2": that file, line 3, column 2.
-        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_keystrokes("secondary-p");
         settle(cx);
         cx.simulate_input("notes.txt:3:2");
         cx.simulate_keystrokes("enter");
         settle(cx);
         assert_eq!(place(cx), Some(("notes.txt".into(), (2, 1))));
         // ⌘P ":2", and ⌃G "4": lines in the open file.
-        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_keystrokes("secondary-p");
         settle(cx);
         cx.simulate_input(":2");
         cx.simulate_keystrokes("enter");
@@ -11835,12 +11859,12 @@ mod tests {
         settle(cx);
         assert_eq!(place(cx).map(|(_, (line, _))| line), Some(3));
         // ⌘⇧O in lib.rs, "beta": its definition.
-        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_keystrokes("secondary-p");
         settle(cx);
         cx.simulate_input("lib.rs");
         cx.simulate_keystrokes("enter");
         settle(cx);
-        cx.simulate_keystrokes("cmd-shift-o");
+        cx.simulate_keystrokes("secondary-shift-o");
         settle(cx);
         cx.simulate_input("beta");
         cx.simulate_keystrokes("enter");
@@ -11849,7 +11873,7 @@ mod tests {
         // ⌘K "toggle sidebar": the sidebar goes.
         let visible = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| cx.global::<Settings>().sidebar_visible);
         let before = visible(cx);
-        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_keystrokes("secondary-k");
         settle(cx);
         cx.simulate_input("toggle sidebar");
         cx.simulate_keystrokes("enter");
@@ -11891,13 +11915,13 @@ mod tests {
             workspace
                 .read_with(cx, |w, cx| w.active_editor().map(|e| (e.read(cx).file_name(), e.read(cx).caret_point())))
         };
-        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_keystrokes("secondary-p");
         settle(cx);
         cx.simulate_input("a.rs");
         cx.simulate_keystrokes("enter");
         settle(cx);
         // ⌘F "alpha": the first one; ↵ the next, and the next.
-        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("secondary-f");
         settle(cx);
         cx.simulate_input("alpha");
         settle(cx);
@@ -11912,7 +11936,7 @@ mod tests {
         cx.simulate_keystrokes("escape");
         settle(cx);
         // ⌘⇧F "gamma", ↵: b.rs opens on that line.
-        cx.simulate_keystrokes("cmd-shift-f");
+        cx.simulate_keystrokes("secondary-shift-f");
         settle(cx);
         cx.simulate_input("gamma");
         settle(cx);
@@ -11924,10 +11948,10 @@ mod tests {
             let editor = w.active_editor().unwrap().focus_handle(cx);
             window.focus(&editor);
         });
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("secondary-w");
         settle(cx);
         assert_eq!(place(cx).map(|(name, _)| name), Some("a.rs".into()));
-        cx.simulate_keystrokes("cmd-shift-t");
+        cx.simulate_keystrokes("secondary-shift-t");
         settle(cx);
         assert_eq!(place(cx).map(|(name, _)| name), Some("b.rs".into()));
         std::fs::remove_dir_all(&dir).ok();
@@ -11999,7 +12023,7 @@ mod tests {
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
         cx.run_until_parked();
         // ⌘K, a click on its first quick setting (it stays open), then typing: the query.
-        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         let row = cx.debug_bounds("palette-row 0").expect("a row is drawn").center();
         cx.simulate_click(row, Default::default());
@@ -12015,7 +12039,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "Alpha alpha\n").unwrap();
         workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("secondary-f");
         cx.run_until_parked();
         cx.simulate_input("al");
         cx.run_until_parked();
@@ -12034,7 +12058,7 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         // Settings, a click on a switch, then Escape: closed.
-        cx.simulate_keystrokes("cmd-,");
+        cx.simulate_keystrokes("secondary-,");
         cx.run_until_parked();
         assert!(workspace.read_with(cx, |w, _| w.settings_panel.is_some()), "⌘, opens Settings");
         workspace.update_in(cx, |w, _, cx| {
@@ -12290,7 +12314,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes("secondary-enter");
         for _ in 0..100 {
             settle(cx);
             if git(&["log", "-1", "--format=%s"]).unwrap() == "Add b" {
@@ -12378,7 +12402,7 @@ mod tests {
         workspace.update_in(cx, |w, window, cx| w.open_file(file.clone(), window, cx));
         let editor = workspace.read_with(cx, |w, _| w.active_editor().unwrap().clone());
         // Copy "alpha", then "beta" (each its whole line), then go to the end.
-        cx.simulate_keystrokes("cmd-c down cmd-c cmd-down");
+        cx.simulate_keystrokes("secondary-c down secondary-c secondary-down");
         workspace.update_in(cx, |w, window, cx| w.paste_from_history(&PasteFromHistory, window, cx));
         cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
@@ -13506,7 +13530,7 @@ mod tests {
             w.git_view_event(&view, &crate::git_view::GitViewEvent::ShowCommit(second), window, cx)
         });
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("secondary-w");
         cx.run_until_parked();
         workspace.read_with(cx, |w, _| {
             assert!(w.git_page.is_none());
@@ -13804,14 +13828,14 @@ esac
         };
         let (rem, line) = state(cx);
         assert_eq!(rem, gpui::px(16.));
-        cx.simulate_keystrokes("alt-cmd-= alt-cmd-=");
+        cx.simulate_keystrokes("alt-secondary-= alt-secondary-=");
         cx.run_until_parked();
         assert_eq!(state(cx), (gpui::px(16. * 1.2), line), "the interface, not the text");
-        cx.simulate_keystrokes("alt-cmd-0");
+        cx.simulate_keystrokes("alt-secondary-0");
         cx.run_until_parked();
         assert_eq!(state(cx).0, gpui::px(16.));
         for _ in 0..10 {
-            cx.simulate_keystrokes("alt-cmd--");
+            cx.simulate_keystrokes("alt-secondary--");
         }
         cx.run_until_parked();
         assert_eq!(cx.update(|_, cx| cx.global::<Settings>().ui_zoom), crate::settings::MIN_ZOOM);
@@ -13843,7 +13867,7 @@ esac
         // From ⌘K: "spacing", then → for the next one (round to Compact after Relaxed).
         cx.update(|_, cx| crate::keymap::register(crate::keymap::Keymap::Null, cx));
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
-        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         cx.simulate_input("spacing");
         cx.executor().advance_clock(std::time::Duration::from_millis(300));
@@ -14238,11 +14262,11 @@ esac
         let shown = |cx: &mut gpui::VisualTestContext| {
             workspace.read_with(cx, |w, cx| w.active_editor().map(|e| e.read(cx).file_name()).unwrap_or_default())
         };
-        cx.simulate_keystrokes("cmd-2");
+        cx.simulate_keystrokes("secondary-2");
         assert_eq!(shown(cx), "b.txt");
-        cx.simulate_keystrokes("cmd-9");
+        cx.simulate_keystrokes("secondary-9");
         assert_eq!(shown(cx), "c.txt");
-        cx.simulate_keystrokes("cmd-1");
+        cx.simulate_keystrokes("secondary-1");
         assert_eq!(shown(cx), "a.txt");
         // Two sides joined: one again, a file open on both keeping one tab.
         workspace.update_in(cx, |w, window, cx| {
@@ -14515,7 +14539,7 @@ esac
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
         cx.dispatch_action(RenameFile);
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("plans.txt");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();

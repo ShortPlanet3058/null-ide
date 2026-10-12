@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 actions!(editor, [SwitchSourceHeader]);
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-secondary-up", SwitchSourceHeader, Some("Editor"))]);
+    // (Off the Mac, Ctrl+↑ scrolls: Alt+O there, as VS Code's C++ has it.)
+    let key = if cfg!(target_os = "macos") { "ctrl-cmd-up" } else { "alt-o" };
+    cx.bind_keys([KeyBinding::new(key, SwitchSourceHeader, Some("Editor"))]);
 }
 
 /// How long clangd is waited for before looking beside the file.
