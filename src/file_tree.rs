@@ -96,7 +96,7 @@ const CHEVRON: &str = "icons/chevron-right.svg";
 /// How long a folder's arrow takes to turn when it opens or closes.
 const TURN: Duration = Duration::from_millis(160);
 /// Never worth showing in a project tree.
-const ALWAYS_HIDDEN: &[&str] = &[".git", ".DS_Store"];
+const ALWAYS_HIDDEN: &[&str] = &[".git", ".DS_Store", "Thumbs.db", "desktop.ini"];
 pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
     "Reveal in Finder"
 } else if cfg!(target_os = "windows") {
@@ -241,6 +241,31 @@ fn terminal_dir(target: Option<(&Path, bool)>, root: &Path) -> PathBuf {
 fn runs_when_opened(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if matches!(ext.as_str(), "sh" | "command" | "tool" | "zsh" | "bash" | "app" | "pkg") {
+        return true;
+    }
+    // Windows runs these when they're opened (scripts too: .js and .vbs by Windows Script Host).
+    if cfg!(windows)
+        && matches!(
+            ext.as_str(),
+            "exe"
+                | "bat"
+                | "cmd"
+                | "com"
+                | "ps1"
+                | "msi"
+                | "lnk"
+                | "vbs"
+                | "vbe"
+                | "js"
+                | "jse"
+                | "wsf"
+                | "scr"
+                | "pif"
+                | "reg"
+                | "hta"
+                | "cpl"
+        )
+    {
         return true;
     }
     #[cfg(unix)]

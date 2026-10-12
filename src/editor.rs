@@ -3823,8 +3823,9 @@ impl Editor {
             let indent = self.buffer.line_text(line).chars().take_while(|c| c.is_whitespace()).count();
             return self.set_caret_point((line, indent), cx);
         }
-        // A color's square: pick another in the Mac's color panel.
-        if event.click_count == 1
+        // A color's square: pick another in the Mac's color panel (none elsewhere yet).
+        if cfg!(target_os = "macos")
+            && event.click_count == 1
             && !event.modifiers.modified()
             && let Some((start, written, color)) = self.swatch_at(event.position)
         {

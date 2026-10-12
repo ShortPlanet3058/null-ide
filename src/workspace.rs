@@ -4661,11 +4661,6 @@ impl Workspace {
                 toggle(settings.problems_at_line_ends, "Problems Only on the Cursor's Line", "Problems at Line Ends"),
                 Box::new(ToggleProblemsAtLineEnds),
             ),
-            (
-                View,
-                toggle(settings.spell_check, "Hide Spelling Mistakes", "Show Spelling Mistakes"),
-                Box::new(ToggleSpellCheck),
-            ),
             (Git, "Commit…".into(), Box::new(CommitAll)),
             (Git, "Undo Last Commit".into(), Box::new(UndoLastCommit)),
             (Git, "Discard All Changes…".into(), Box::new(RevertAllChanges)),
@@ -4936,6 +4931,11 @@ impl Workspace {
             ]);
         }
         // With AI switched off, nothing about it shows up.
+        // (The Mac's spell checker: none elsewhere yet.)
+        if crate::spell::AVAILABLE {
+            let label = toggle(settings.spell_check, "Hide Spelling Mistakes", "Show Spelling Mistakes");
+            commands.push((View, label, Box::new(ToggleSpellCheck)));
+        }
         // AI off: one way back in (⌘K's switch for it shows only while it's on).
         if !settings.ai.ready() {
             commands.push((Ai, "Turn On AI…".into(), Box::new(TurnOnAi)));

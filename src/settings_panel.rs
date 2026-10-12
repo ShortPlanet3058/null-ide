@@ -670,7 +670,7 @@ impl SettingsPanel {
     fn editor(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = cx.global::<Settings>().clone();
         let theme = cx.global::<Theme>().clone();
-        vec![
+        let mut rows = vec![
             Self::heading("Text", &theme),
             Self::row(
                 "Wrap long lines",
@@ -791,23 +791,30 @@ impl SettingsPanel {
                 }),
                 &theme,
             ),
-            Self::row(
-                "Spelling",
-                Some(&format!(
-                    "Marks misspelled words in Markdown and text; {} on one offers corrections",
-                    ui::keys(&crate::editor::QuickFix, "⌘.", cx)
-                )),
-                Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),
-                &theme,
-            ),
-            Self::row(
-                "Spelling in comments",
-                Some("Code's comments are checked too"),
-                Self::toggle("spell-check-comments", s.spell_check_comments, &theme, cx, |s| {
-                    s.spell_check_comments = !s.spell_check_comments
-                }),
-                &theme,
-            ),
+        ];
+        // (The spell checker is the Mac's own: none to offer elsewhere yet.)
+        if crate::spell::AVAILABLE {
+            rows.extend([
+                Self::row(
+                    "Spelling",
+                    Some(&format!(
+                        "Marks misspelled words in Markdown and text; {} on one offers corrections",
+                        ui::keys(&crate::editor::QuickFix, "⌘.", cx)
+                    )),
+                    Self::toggle("spell-check", s.spell_check, &theme, cx, |s| s.spell_check = !s.spell_check),
+                    &theme,
+                ),
+                Self::row(
+                    "Spelling in comments",
+                    Some("Code's comments are checked too"),
+                    Self::toggle("spell-check-comments", s.spell_check_comments, &theme, cx, |s| {
+                        s.spell_check_comments = !s.spell_check_comments
+                    }),
+                    &theme,
+                ),
+            ]);
+        }
+        rows.extend([
             Self::heading("Guides", &theme),
             Self::row(
                 "Indent guides",
@@ -928,7 +935,8 @@ impl SettingsPanel {
                 Self::toggle("keep-unsaved", s.keep_unsaved, &theme, cx, |s| s.keep_unsaved = !s.keep_unsaved),
                 &theme,
             ),
-        ]
+        ]);
+        rows
     }
 
     /// Recommended models as chips under a model field; a click fills the field.
