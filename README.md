@@ -59,7 +59,7 @@ Getting around:
 | ⌃Tab | the tab used before this one; hold ⌃ and press Tab again to go further back (⌃⇧Tab the other way); ⌘⇧] / ⌘⇧[ go by position |
 | ⌃⌘→ / ⌃⌘← | move the tab to the right or left side (split view) |
 | right-click a tab → Move Below | the two sides one above the other (dragged, a tab offers "Open below" too); the line between them resizes |
-| one click on a file | it opens in a passing tab (its name slanted), which the next file clicked replaces; edit it or double-click it (or its tab) to keep it (Settings → Passing tabs) |
+| one click on a file | it opens in a preview tab (its name slanted), which the next file clicked replaces; edit it or double-click it (or its tab) to keep it (Settings → Preview tabs) |
 | right-click a tab → Pin Tab | it stays first, out of "Close Others" and "Close All"; its pin unpins it |
 | ⌘⇧N / ⌥⌘O | a new window / a recent project |
 | drop from the Finder | files open; on a folder in the files, they're copied there; on the terminal, their paths are typed in |
@@ -229,11 +229,11 @@ numbers can show everywhere, only in code, or nowhere.
 
 ## Git
 
-- **⌃⇧G** lists what changed since the last commit; each file opens with its changes to
-  keep or take back one by one.
-- **Commit** lists the files under the message: ⇥ leaves one out; with AI on, ⌘I writes the
-  message from the changes. **Undo Last Commit** takes it back (not once pushed), its
-  message waiting for the next. **Set Changes Aside** and **Bring Back Changes** stash and
+- **⌃⇧G** opens the Git panel at what changed since the last commit; each file opens with
+  its changes to keep or discard one by one.
+- **Commit…** puts the keyboard in the panel's message: tick files (or parts of them) in or
+  out; with AI ready, **Draft** writes the message from the changes. **Undo Last Commit**
+  takes it back (not once pushed), its message back in the field for the next. **Set Changes Aside** and **Bring Back Changes** stash and
   return them. **Push**, **Pull** and **Fetch**;
   ↑ and ↓ beside the branch count what's to push and pull (as last fetched: Null never
   goes to the network on its own). Switch or start a branch from the status bar.
@@ -327,7 +327,7 @@ bar or Settings → Languages, into its own folder rather than the system.
 
 With a server running: ⌘R (or F2) renames a symbol everywhere, right where it's written;
 ⇧F12 lists where it's used (⌘-clicking a definition does too), ⌃⌥H where a function is
-called from (and ⌘K "Show Callees" what it calls), ⌥F12 shows a definition where you are without going there; ⌥⇧F formats the file, and
+called from (and ⌘K "Show What This Calls" what it calls), ⌥F12 shows a definition where you are without going there; ⌥⇧F formats the file, and
 "Format on save" does it on ⌘S (and "Format on paste", to pasted code, where the server formats
 parts of files); the caret's line says its problem at its end ("Problems at Line Ends" in
 ⌘K or Settings: every line's, faintly); ⌘⇧M, or the error count in the status bar, lists every

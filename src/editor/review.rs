@@ -35,6 +35,8 @@ pub(super) struct Review {
     pub hunks: Vec<Hunk>,
     /// The buffer revision `hunks` was worked out for.
     revision: u64,
+    /// An AI task's changes (Esc undoes them), not the file's own (Esc discards them).
+    pub of_ai: bool,
 }
 
 /// The changes between two texts, by lines.
@@ -160,7 +162,7 @@ impl Editor {
             },
             _ => before,
         };
-        self.review = Some(Review { base: before, hunks: Vec::new(), revision: u64::MAX });
+        self.review = Some(Review { base: before, hunks: Vec::new(), revision: u64::MAX, of_ai: false });
         self.refresh_review();
         if self.review.as_ref().is_some_and(|r| r.hunks.is_empty()) {
             self.review = None;
@@ -168,6 +170,15 @@ impl Editor {
         self.go_to_hunk(0, cx);
         self.rebuild_blocks();
         cx.notify();
+    }
+
+    /// [`Self::start_review`] for what an AI task changed.
+    pub fn start_ai_review(&mut self, before: String, cx: &mut Context<Self>) {
+        self.start_review(before, cx);
+        if let Some(review) = &mut self.review {
+            review.of_ai = true;
+            self.rebuild_blocks();
+        }
     }
 
     /// What a review compares against (the text before the changes).

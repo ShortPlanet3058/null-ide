@@ -482,7 +482,7 @@ impl ProjectSearch {
                     .gap(px(8.))
                     .rounded(px(ui::R_ROW))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.hairline))
+                    .hover(|s| s.bg(ui::hover(&theme)))
                     .text_size(px(ui::T_MD))
                     .text_color(theme.muted)
                     .child(div().min_w_0().truncate().code_font(cx).child(query.text.clone()))
@@ -527,8 +527,8 @@ impl ProjectSearch {
             .pr(px(6.))
             .whitespace_nowrap()
             .cursor_pointer()
-            .when(self.selected == Some(ix), |r| r.bg(theme.accent_soft))
-            .hover(|s| s.bg(theme.hairline));
+            .when(self.selected == Some(ix), |r| r.bg(theme.hairline))
+            .when(self.selected != Some(ix), |r| r.hover(|s| s.bg(ui::hover(theme))));
         match self.rows[ix] {
             Row::File(f) => {
                 let group: SharedString = format!("file-{ix}").into();
@@ -561,7 +561,7 @@ impl ProjectSearch {
                             }),
                         ))
                     })
-                    .child(self.row_button(("dismiss-file", ix), "✕", group, cx).on_click(cx.listener(
+                    .child(self.dismiss_button(("dismiss-file", ix), group, cx).on_click(cx.listener(
                         move |this, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
                             this.dismiss(f, None, cx)
@@ -629,7 +629,7 @@ impl ProjectSearch {
                             }),
                         ))
                     })
-                    .child(self.row_button(("dismiss-match", ix), "✕", group, cx).on_click(cx.listener(
+                    .child(self.dismiss_button(("dismiss-match", ix), group, cx).on_click(cx.listener(
                         move |this, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
                             this.dismiss(f, Some(m), cx)
@@ -640,6 +640,14 @@ impl ProjectSearch {
                     .into_any_element()
             }
         }
+    }
+
+    /// The ✕ on a result row, shown while the row is hovered.
+    fn dismiss_button(&self, id: (&'static str, usize), group: SharedString, cx: &App) -> gpui::Stateful<gpui::Div> {
+        ui::icon_button(id, "icons/x.svg", "Remove from results", cx.global::<Theme>())
+            .size(px(18.))
+            .invisible()
+            .group_hover(group, |s| s.visible())
     }
 
     /// A small button on a result row, shown while the row is hovered.
@@ -660,7 +668,7 @@ impl ProjectSearch {
             .text_color(theme.muted)
             .invisible()
             .group_hover(group, |s| s.visible())
-            .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
+            .hover(|s| s.bg(ui::hover(theme)).text_color(theme.foreground))
             .child(label)
             .active(|s| s.opacity(0.7))
     }
@@ -694,7 +702,7 @@ impl ProjectSearch {
             .text_size(px(ui::T_SM))
             .text_color(if on { theme.caret } else { theme.muted })
             .when(on, |b| b.bg(theme.accent_soft))
-            .when(!on, |b| b.hover(|s| s.bg(theme.hairline).text_color(theme.foreground)))
+            .when(!on, |b| b.hover(|s| s.bg(ui::hover(theme)).text_color(theme.foreground)))
             .child(label)
             .active(|s| s.opacity(0.7))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1094,7 +1102,7 @@ impl Render for ProjectSearch {
             Status::Idle => "".into(),
             Status::Searching => "Searching…".into(),
             Status::Invalid => "Invalid pattern".into(),
-            Status::Done { matches: 0, .. } => "No results".into(),
+            Status::Done { matches: 0, .. } => "No matches".into(),
             Status::Done { files, matches, truncated } => {
                 let plus = if truncated { "+" } else { "" };
                 let files = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
@@ -1136,7 +1144,7 @@ impl Render for ProjectSearch {
                             .justify_center()
                             .rounded(px(ui::R_KEY))
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.hairline))
+                            .hover(|s| s.bg(ui::hover(theme)))
                             .child(
                                 gpui::svg()
                                     .path("icons/chevron-right.svg")
@@ -1205,14 +1213,14 @@ impl Render for ProjectSearch {
                                     .when(can_replace, |b| {
                                         b.cursor_pointer()
                                             .text_color(theme.foreground)
-                                            .hover(|s| s.bg(theme.hairline))
+                                            .hover(|s| s.bg(ui::hover(theme)))
                                             .active(|s| s.opacity(0.7))
                                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                                 this.replace_all(&ReplaceAllResults, window, cx)
                                             }))
                                     })
                                     .when(!can_replace, |b| b.text_color(theme.faint))
-                                    .child("Replace all"),
+                                    .child("Replace All"),
                             ),
                     )
                     .child(

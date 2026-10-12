@@ -8,7 +8,7 @@ use crate::theme::Theme;
 use crate::ui::{self, px};
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, PromptLevel,
-    Task, Window, actions, div, prelude::*, svg,
+    Task, Window, actions, div, prelude::*,
 };
 use std::path::PathBuf;
 
@@ -143,7 +143,7 @@ impl CommitPage {
                 Ok(conflicts) => {
                     let n = conflicts.len();
                     let files = if n == 1 { "1 file".to_string() } else { format!("{n} files") };
-                    cx.emit(CommitPageEvent::Said(format!("Conflicts in {files}: ⌘. resolves each.")));
+                    cx.emit(CommitPageEvent::Said(format!("Conflicts in {files}: {}.", ui::resolve_each(cx))));
                     cx.emit(CommitPageEvent::Changed);
                     cx.emit(CommitPageEvent::Conflicts(conflicts));
                 }
@@ -176,7 +176,11 @@ impl CommitPage {
     fn check_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let short = self.commit.short.clone();
         self.ask_then(
-            (format!("Check out {short}?"), "The files go back to how they were then, on no branch (to look, or to start a branch from there). Switch to a branch to come back.", "Check Out"),
+            (
+                format!("Check out {short}?"),
+                "The files go back to that commit, on no branch. Switch to a branch to come back.",
+                "Check Out",
+            ),
             "Checked out",
             |root, id| git::check_out(root, id).map(|()| Vec::new()),
             window,
@@ -192,7 +196,7 @@ impl CommitPage {
                 "A new commit takes its changes back (Undo Last Commit takes that back in turn).",
                 "Revert",
             ),
-            "Took back",
+            "Reverted",
             git::revert_commit,
             window,
             cx,
@@ -204,10 +208,10 @@ impl CommitPage {
         self.ask_then(
             (
                 format!("Cherry-pick {short} onto this branch?"),
-                "Its changes are made again here, as a new commit.",
+                "Its changes are applied here as a new commit.",
                 "Cherry-Pick",
             ),
-            "Made again here:",
+            "Cherry-picked",
             git::cherry_pick,
             window,
             cx,
@@ -228,20 +232,7 @@ impl Render for CommitPage {
             n => format!("{n} files"),
         };
         let body: String = self.message.split_once('\n').map(|(_, b)| b.trim().to_string()).unwrap_or_default();
-        let button = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .px(px(10.))
-                .py(px(4.))
-                .rounded(px(ui::R_KEY))
-                .border_1()
-                .border_color(theme.hairline)
-                .text_size(px(ui::T_SM))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.hairline))
-                .active(|s| s.opacity(0.7))
-                .child(label)
-        };
+        let button = |id: &'static str, label: &'static str| ui::button(id, label, &theme);
         let header = div()
             .px(px(28.))
             .pt(px(18.))
@@ -264,17 +255,14 @@ impl Render for CommitPage {
                             .child(commit.subject.clone()),
                     )
                     .child(
-                        div()
-                            .id("close-commit")
-                            .size(px(20.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(ui::R_KEY))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.hairline))
-                            .child(svg().path("icons/x.svg").size(px(12.)).text_color(theme.muted))
-                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CommitPageEvent::Close))),
+                        ui::icon_button_for(
+                            "close-commit",
+                            "icons/x.svg",
+                            "Close",
+                            Some(Box::new(CloseCommit)),
+                            &theme,
+                        )
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CommitPageEvent::Close))),
                     ),
             )
             .child(
@@ -295,6 +283,7 @@ impl Render for CommitPage {
                 div()
                     .mt(px(6.))
                     .flex()
+                    .items_center()
                     .gap(px(8.))
                     .child(
                         button("commit-checkout", "Check Out")
@@ -308,21 +297,12 @@ impl Render for CommitPage {
                         button("commit-pick", "Cherry-Pick")
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.cherry_pick(window, cx))),
                     )
-                    .child(
-                        div()
-                            .id("commit-copy")
-                            .px(px(6.))
-                            .py(px(4.))
-                            .text_size(px(ui::T_SM))
-                            .text_color(theme.muted)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child("Copy Id")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                crate::system_clipboard::write(cx, ClipboardItem::new_string(this.commit.id.clone()));
-                                cx.emit(CommitPageEvent::Said(format!("Copied {}", this.commit.id)));
-                            })),
-                    ),
+                    .child(ui::link("commit-copy", "Copy ID", &theme).px(px(6.)).text_size(px(ui::T_SM)).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            crate::system_clipboard::write(cx, ClipboardItem::new_string(this.commit.id.clone()));
+                            cx.emit(CommitPageEvent::Said(format!("Copied {}.", this.commit.id)));
+                        }),
+                    )),
             );
         let file_rows = self.files.iter().enumerate().map(|(ix, file)| {
             let name = std::path::Path::new(&file.path)
@@ -345,7 +325,7 @@ impl Render for CommitPage {
                 .rounded(px(ui::R_ROW))
                 .cursor_pointer()
                 .when(selected, |r| r.bg(theme.hairline))
-                .when(!selected, |r| r.hover(|s| s.bg(theme.hairline.opacity(0.6))))
+                .when(!selected, |r| r.hover(|s| s.bg(ui::hover(&theme))))
                 .child(div().flex_1().min_w_0().truncate().text_color(color).child(name))
                 .child(
                     div()

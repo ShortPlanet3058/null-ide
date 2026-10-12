@@ -32,7 +32,7 @@ fn gh(dir: &Path) -> Result<Command, String> {
     Ok(command)
 }
 
-pub const MISSING: &str = "GitHub works through its gh command: install it (cli.github.com), then run gh auth login.";
+pub const MISSING: &str = "GitHub works through its gh command: install it (cli.github.com), then run “gh auth login”.";
 
 fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
     let output = gh(dir)?.args(args).output().map_err(|e| format!("Couldn't run gh: {e}"))?;

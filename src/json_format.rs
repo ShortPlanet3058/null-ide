@@ -165,11 +165,13 @@ pub fn format(text: &str, unit: &str, newline: &str) -> Result<String, Problem> 
                     Some((o, line)) => {
                         return Err(Problem {
                             line: *token_line,
-                            message: format!("this `{c}` closes the `{o}` of line {}", line + 1),
+                            message: format!("this “{c}” closes the “{o}” of line {}", line + 1),
                         });
                     }
                     None => {
-                        return Err(Problem { line: *token_line, message: format!("a `{c}` with nothing to close") });
+                        return Err(Problem {
+                            line: *token_line, message: format!("a “{c}” with nothing to close")
+                        });
                     }
                 }
                 new_line(&mut out, open.len(), false);
@@ -236,7 +238,7 @@ pub fn format(text: &str, unit: &str, newline: &str) -> Result<String, Problem> 
         }
     }
     if let Some((o, line)) = open.pop() {
-        return Err(Problem { line, message: format!("this `{o}` is never closed") });
+        return Err(Problem { line, message: format!("this “{o}” is never closed") });
     }
     while out.ends_with(' ') {
         out.pop();
@@ -310,10 +312,10 @@ mod tests {
         let problem = |text: &str| format(text, "  ", "\n").unwrap_err();
         assert_eq!(
             problem("{\n  \"a\": [1, 2}\n"),
-            Problem { line: 1, message: "this `}` closes the `[` of line 2".into() }
+            Problem { line: 1, message: "this “}” closes the “[” of line 2".into() }
         );
         assert_eq!(problem("{\n\"a\": 1\n").line, 0);
-        assert_eq!(problem("]").message, "a `]` with nothing to close");
+        assert_eq!(problem("]").message, "a “]” with nothing to close");
         assert_eq!(problem("{\"a\n}").message, "a string that never ends");
         assert_eq!(problem("/* x").message, "a comment that never ends");
     }

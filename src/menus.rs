@@ -49,6 +49,7 @@ pub fn set(cx: &mut App) {
     let fade_label =
         if settings.fade_bars_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
     let wrap_label = if settings.word_wrap { "Stop Wrapping Lines" } else { "Wrap Lines" };
+    let sidebar_label = if settings.sidebar_visible { "Hide Sidebar" } else { "Show Sidebar" };
     cx.set_menus(vec![
         Menu {
             name: "Null".into(),
@@ -74,7 +75,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("New File", NewUntitled),
                 MenuItem::action("Open File or Folder…", Open),
                 MenuItem::action("Open Recent…", crate::workspace::OpenRecent),
-                MenuItem::action("New Window…", crate::workspace::NewWindow),
+                MenuItem::action("Open Folder in New Window…", crate::workspace::NewWindow),
                 MenuItem::action("Reopen Closed Tab", ReopenClosedTab),
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),
@@ -83,18 +84,6 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Revert to Saved", crate::workspace::RevertToSaved),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close All Tabs", CloseAllTabs),
-                MenuItem::separator(),
-                MenuItem::action("Review Changes…", crate::workspace::ReviewChanges),
-                MenuItem::action("Commit…", crate::workspace::CommitAll),
-                MenuItem::action("Undo Last Commit", crate::workspace::UndoLastCommit),
-                MenuItem::action("Set Changes Aside", crate::workspace::SetChangesAside),
-                MenuItem::action("Bring Back Changes", crate::workspace::BringBackChanges),
-                MenuItem::action("Push", crate::workspace::PushBranch),
-                MenuItem::action("Pull", crate::workspace::PullBranch),
-                MenuItem::action("Fetch", crate::workspace::FetchBranch),
-                MenuItem::action("Show File History", crate::workspace::FileHistory),
-                MenuItem::action("Switch Branch…", crate::workspace::SwitchBranch),
-                MenuItem::action("Revert All Changes…", crate::workspace::RevertAllChanges),
             ],
         },
         Menu {
@@ -115,8 +104,8 @@ pub fn set(cx: &mut App) {
                     name: "Lines".into(),
                     items: vec![
                         // Tab / Shift+Tab work on any selection; the menu shows the other shortcut.
-                        MenuItem::action("Indent (Tab on a selection)", Indent),
-                        MenuItem::action("Outdent (Shift+Tab)", Outdent),
+                        MenuItem::action("Indent", Indent),
+                        MenuItem::action("Outdent", Outdent),
                         MenuItem::action("Toggle Comment", ToggleComment),
                         MenuItem::action("Toggle Block Comment", crate::editor::ToggleBlockComment),
                         MenuItem::separator(),
@@ -134,16 +123,16 @@ pub fn set(cx: &mut App) {
                         MenuItem::action("Remove Duplicate Lines", crate::editor::RemoveDuplicateLines),
                         MenuItem::action("Rewrap", crate::editor::Rewrap),
                         MenuItem::separator(),
-                        MenuItem::action("Upper Case", crate::editor::UpperCase),
-                        MenuItem::action("Lower Case", crate::editor::LowerCase),
-                        MenuItem::action("snake_case", crate::editor::SnakeCase),
-                        MenuItem::action("camelCase", crate::editor::CamelCase),
-                        MenuItem::action("PascalCase", crate::editor::PascalCase),
-                        MenuItem::action("kebab-case", crate::editor::KebabCase),
-                        MenuItem::action("Title Case", crate::editor::TitleCase),
+                        MenuItem::action("To Upper Case", crate::editor::UpperCase),
+                        MenuItem::action("To Lower Case", crate::editor::LowerCase),
+                        MenuItem::action("To snake_case", crate::editor::SnakeCase),
+                        MenuItem::action("To camelCase", crate::editor::CamelCase),
+                        MenuItem::action("To PascalCase", crate::editor::PascalCase),
+                        MenuItem::action("To kebab-case", crate::editor::KebabCase),
+                        MenuItem::action("To Title Case", crate::editor::TitleCase),
                         MenuItem::separator(),
-                        MenuItem::action("Increment", crate::editor::Increment),
-                        MenuItem::action("Decrement", crate::editor::Decrement),
+                        MenuItem::action("Increment Number or Flip Value", crate::editor::Increment),
+                        MenuItem::action("Decrement Number or Flip Value", crate::editor::Decrement),
                     ],
                 }),
                 MenuItem::submenu(Menu {
@@ -191,9 +180,9 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Go to Implementation", crate::editor::GoToImplementation),
                 MenuItem::action("Find References", crate::editor::FindReferences),
                 MenuItem::action("Show Callers", crate::editor::ShowCallers),
-                MenuItem::action("Show Callees", crate::editor::ShowCallees),
-                MenuItem::action("Show Supertypes", crate::editor::ShowSupertypes),
-                MenuItem::action("Show Subtypes", crate::editor::ShowSubtypes),
+                MenuItem::action("Show What This Calls", crate::editor::ShowCallees),
+                MenuItem::action("Show What This Extends", crate::editor::ShowSupertypes),
+                MenuItem::action("Show What Extends This", crate::editor::ShowSubtypes),
                 MenuItem::action("Rename Symbol", crate::editor::RenameSymbol),
                 MenuItem::action("Quick Fix…", crate::editor::QuickFix),
                 MenuItem::action("Format Document", crate::editor::FormatDocument),
@@ -226,8 +215,9 @@ pub fn set(cx: &mut App) {
                 MenuItem::action("Markdown Preview to the Side", crate::workspace::OpenPreviewToTheSide),
                 MenuItem::separator(),
                 MenuItem::action("Focus Mode", crate::workspace::ToggleFocusMode),
-                MenuItem::action("Toggle Sidebar", ToggleSidebar),
-                MenuItem::action("Toggle Terminal", ToggleTerminal),
+                MenuItem::action(sidebar_label, ToggleSidebar),
+                // (Each window has its own terminal, so this one can't say which it'll do.)
+                MenuItem::action("Show or Hide Terminal", ToggleTerminal),
                 MenuItem::action("Run Task…", crate::workspace::RunTask),
                 MenuItem::action("Run Test at Cursor", crate::workspace::RunTestAtCursor),
                 MenuItem::action("Run Tests in File", crate::workspace::RunTestsInFile),
@@ -262,12 +252,31 @@ pub fn set(cx: &mut App) {
             ],
         },
         Menu {
+            name: "Git".into(),
+            items: vec![
+                MenuItem::action("Show Changes", crate::workspace::ReviewChanges),
+                MenuItem::action("Commit…", crate::workspace::CommitAll),
+                MenuItem::action("Undo Last Commit", crate::workspace::UndoLastCommit),
+                MenuItem::separator(),
+                MenuItem::action("Push", crate::workspace::PushBranch),
+                MenuItem::action("Pull", crate::workspace::PullBranch),
+                MenuItem::action("Fetch", crate::workspace::FetchBranch),
+                MenuItem::action("Switch Branch…", crate::workspace::SwitchBranch),
+                MenuItem::separator(),
+                MenuItem::action("Set Changes Aside", crate::workspace::SetChangesAside),
+                MenuItem::action("Bring Back Changes", crate::workspace::BringBackChanges),
+                MenuItem::action("Show File History", crate::workspace::FileHistory),
+                MenuItem::separator(),
+                MenuItem::action("Discard All Changes…", crate::workspace::RevertAllChanges),
+            ],
+        },
+        Menu {
             name: "Debug".into(),
             items: vec![
-                MenuItem::action("Start or Continue", crate::workspace::StartDebugging),
+                MenuItem::action("Start Debugging", crate::workspace::StartDebugging),
                 MenuItem::action("Debug Test at Cursor", crate::workspace::DebugTestAtCursor),
                 MenuItem::action("Pause", crate::workspace::PauseDebugging),
-                MenuItem::action("Stop", crate::workspace::StopDebugging),
+                MenuItem::action("Stop Debugging", crate::workspace::StopDebugging),
                 MenuItem::separator(),
                 MenuItem::action("Step Over", crate::workspace::StepOver),
                 MenuItem::action("Step Into", crate::workspace::StepInto),
@@ -279,6 +288,14 @@ pub fn set(cx: &mut App) {
         Menu {
             name: "Window".into(),
             items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)],
+        },
+        // (macOS puts its search of every menu here.)
+        Menu {
+            name: "Help".into(),
+            items: vec![
+                MenuItem::action("Keyboard Shortcuts", crate::workspace::ShowKeyboardShortcuts),
+                MenuItem::action("Quick Settings and Commands…", ShowCommands),
+            ],
         },
     ]);
 }

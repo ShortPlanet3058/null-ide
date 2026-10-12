@@ -618,7 +618,7 @@ impl Editor {
         self.definition_task = Some(cx.spawn(async move |this, cx| {
             let found = request.await;
             this.update(cx, |this, cx| {
-                this.go_or_list(found, offset, "Nothing calls this here.", &format!("callers of {word}"), cx)
+                this.go_or_list(found, offset, "Found nothing that calls this.", &format!("callers of {word}"), cx)
             })
             .ok();
         }));
@@ -637,7 +637,7 @@ impl Editor {
         self.definition_task = Some(cx.spawn(async move |this, cx| {
             let found = request.await;
             this.update(cx, |this, cx| {
-                this.go_or_list(found, offset, "This calls nothing the server knows.", &format!("called by {word}"), cx)
+                this.go_or_list(found, offset, "Found nothing this calls.", &format!("called by {word}"), cx)
             })
             .ok();
         }));
@@ -657,9 +657,9 @@ impl Editor {
             let found = request.await;
             this.update(cx, |this, cx| {
                 let (none, what) = if up {
-                    ("Nothing this type comes from, as the server knows.", format!("types {word} comes from"))
+                    ("Found no types this extends.", format!("types {word} comes from"))
                 } else {
-                    ("No types come from this one, as the server knows.", format!("types from {word}"))
+                    ("Found no types extending this one.", format!("types from {word}"))
                 };
                 this.go_or_list(found, offset, none, &what, cx)
             })

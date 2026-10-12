@@ -59,8 +59,9 @@ pub enum BlockKind {
     Ghost(Vec<String>),
     /// The new code as the AI writes it, above the code it replaces.
     Writing(Vec<String>),
-    /// The keys for a reviewed change, with how many more there are.
-    ReviewHint(usize),
+    /// The keys for a reviewed change, with how many more there are, and whether an AI
+    /// task made it (undone) or not (discarded).
+    ReviewHint(usize, bool),
     /// A conversation on the line above (`threads`' index).
     Thread(usize),
 }
@@ -217,8 +218,8 @@ impl Editor {
 
     /// ⌘I. With a change showing, it goes back to the field to adjust it.
     pub(crate) fn open_inline_assist(&mut self, ask_only: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // AI switched off: no AI anywhere, not even a field saying so.
-        if !cx.global::<Settings>().ai.enabled {
+        // AI switched off (or no provider to ask): no AI anywhere, not even a field saying so.
+        if !cx.global::<Settings>().ai.ready() {
             return;
         }
         if let Some(prompt) = &self.prompt {
@@ -430,7 +431,7 @@ impl Editor {
         // The lines asked about changed meanwhile (typed into, moved by an edit above, read
         // again from disk): the answer isn't written over what's there now.
         if self.buffer.slice(range.clone()) != prompt.original {
-            let failed = "The code changed while the answer came. Ask again.";
+            let failed = "The code changed before the answer arrived. Ask again.";
             self.prompt = Some(Prompting { writing: false, failed: Some(failed.into()), task: None, ..prompt });
             return cx.notify();
         }
@@ -696,7 +697,7 @@ impl Editor {
                 blocks.push(Block {
                     before_line: hunk.new.end.max(hunk.new.start),
                     rows: 1,
-                    kind: BlockKind::ReviewHint(review.hunks.len() - 1),
+                    kind: BlockKind::ReviewHint(review.hunks.len() - 1, review.of_ai),
                 });
             }
         }
@@ -783,7 +784,7 @@ impl Editor {
                 BlockKind::Prompt => {
                     let Some(prompt) = &self.prompt else { continue };
                     let (status, hint): (Option<String>, &str) = if prompt.writing {
-                        (Some("Writing…".into()), "esc cancel")
+                        (Some("Writing…".into()), "Esc cancel")
                     } else if let Some(failed) = &prompt.failed {
                         (None, if failed.len() > 60 { "" } else { failed.as_str() })
                     } else {
@@ -815,7 +816,7 @@ impl Editor {
                             .border_1()
                             .border_color(if prompt.writing { theme.caret.opacity(0.5) } else { theme.hairline })
                             .bg(theme.raised)
-                            .text_size(px(13.))
+                            .text_size(px(ui::T_MD))
                             .child(div().text_color(theme.caret).child("✦"))
                             .child(
                                 div()
@@ -868,7 +869,7 @@ impl Editor {
                             .into_any_element(),
                     );
                 }
-                BlockKind::ReviewHint(more) => {
+                BlockKind::ReviewHint(more, of_ai) => {
                     // The keys as they're bound now, so a changed shortcut shows here too.
                     let key = |action: &dyn gpui::Action, fallback: &str, label: &str| {
                         let keys = crate::palette::shortcut(action, cx).unwrap_or_else(|| fallback.to_string());
@@ -887,7 +888,7 @@ impl Editor {
                             .text_size(px(ui::T_XS))
                             .text_color(theme.muted)
                             .child(key(&super::KeepHunk, "⇥", "keep"))
-                            .child(key(&super::UndoHunk, "Esc", "undo"))
+                            .child(key(&super::UndoHunk, "Esc", if *of_ai { "undo" } else { "discard" }))
                             .when(*more > 0, |d| {
                                 d.child(if *more == 1 {
                                     "1 more change".to_string()
@@ -944,7 +945,7 @@ impl Editor {
                                     .bg(theme.surface)
                                     .px(px(14.))
                                     .py(px(6.))
-                                    .text_size(px(13.))
+                                    .text_size(px(ui::T_MD))
                                     .line_height(px(20.))
                                     .text_color(theme.foreground)
                                     .child(
@@ -964,7 +965,7 @@ impl Editor {
                                                     .flex_none()
                                                     .pl(px(12.))
                                                     .font_weight(FontWeight::MEDIUM)
-                                                    .child(if note.done { "esc close" } else { "" }),
+                                                    .child(if note.done { "Esc close" } else { "" }),
                                             ),
                                     )
                                     .children(body),
@@ -1002,7 +1003,7 @@ impl Editor {
                                     .px(px(12.))
                                     .py(px(6.))
                                     .font_family(cx.global::<crate::fonts::Fonts>().ui.clone())
-                                    .text_size(px(13.))
+                                    .text_size(px(ui::T_MD))
                                     .line_height(px(20.))
                                     .text_color(theme.foreground)
                                     .children(comments)
@@ -1110,7 +1111,10 @@ mod tests {
 
     fn editor<'a>(cx: &'a mut TestAppContext, text: &str) -> (Entity<Editor>, &'a mut VisualTestContext) {
         cx.update(|cx| {
-            cx.set_global(Settings::default());
+            // (A provider chosen: ⌘I opens only when AI can answer.)
+            let mut settings = Settings::default();
+            settings.ai.provider = crate::ai::ProviderId::Ollama;
+            cx.set_global(settings);
             cx.set_global(Theme::oled());
             cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });

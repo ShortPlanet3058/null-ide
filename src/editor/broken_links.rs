@@ -105,7 +105,7 @@ impl Editor {
             None => self.nearest_files(&written),
         };
         if choices.is_empty() {
-            self.show_notice(range.start, "Nothing there by a name like that.".into(), cx);
+            self.show_notice(range.start, "No file or heading with a name like that.".into(), cx);
             return true;
         }
         let fixes = choices

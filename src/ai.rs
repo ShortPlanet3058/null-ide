@@ -319,6 +319,11 @@ impl AiSettings {
         if self.enabled { self.provider } else { ProviderId::Off }
     }
 
+    /// Whether AI can be asked: on, with a provider chosen. What shows anything AI.
+    pub fn ready(&self) -> bool {
+        self.active() != ProviderId::Off
+    }
+
     pub fn model(&self, id: ProviderId) -> Option<String> {
         self.providers
             .get(id.key())
@@ -431,17 +436,70 @@ pub enum AiEvent {
     Failed(String),
 }
 
-/// Runs [`ask`] on its own thread and streams what happens. Dropping the receiver
-/// stops listening; the request itself finishes in the background.
+/// Requests asked for (⌘I, a question, a commit message) still on their way…
+static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// …and when one last failed.
+static FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Whether AI is answering something asked of it (not a suggestion while typing): what its
+/// dot in the status bar shows.
+pub fn working() -> bool {
+    WORKING.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+/// Whether a request failed in the last few seconds.
+pub fn failed_lately() -> bool {
+    FAILED_AT.lock().ok().and_then(|at| *at).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(8))
+}
+
+/// Counts a request as working while it lives, even if it panics on the way.
+struct Working;
+
+impl Working {
+    fn start() -> Self {
+        WORKING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Working
+    }
+}
+
+impl Drop for Working {
+    fn drop(&mut self) {
+        WORKING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Runs [`ask`] on its own thread and streams what happens, lighting AI's dot while it
+/// runs. Dropping the receiver stops listening; the request itself finishes in the background.
 pub fn stream(settings: AiSettings, prompt: Prompt) -> futures::channel::mpsc::UnboundedReceiver<AiEvent> {
+    stream_with(settings, prompt, true)
+}
+
+/// [`stream`] for suggestions while typing: AI's dot stays out of it.
+pub fn stream_quietly(settings: AiSettings, prompt: Prompt) -> futures::channel::mpsc::UnboundedReceiver<AiEvent> {
+    stream_with(settings, prompt, false)
+}
+
+fn stream_with(
+    settings: AiSettings,
+    prompt: Prompt,
+    shown: bool,
+) -> futures::channel::mpsc::UnboundedReceiver<AiEvent> {
     let (tx, rx) = futures::channel::mpsc::unbounded();
     std::thread::Builder::new()
         .name("ai-request".into())
         .spawn(move || {
+            let working = shown.then(Working::start);
             let text_tx = tx.clone();
             let result = ask(&settings, &prompt, &mut |text| {
                 text_tx.unbounded_send(AiEvent::Text(text.to_string())).ok();
             });
+            drop(working);
+            if shown
+                && result.is_err()
+                && let Ok(mut at) = FAILED_AT.lock()
+            {
+                *at = Some(std::time::Instant::now());
+            }
             tx.unbounded_send(match result {
                 Ok(()) => AiEvent::Done,
                 Err(message) => AiEvent::Failed(message),
@@ -533,7 +591,7 @@ pub(crate) fn error_message(status: u16, body: &str) -> String {
     match status {
         401 | 403 => format!("The API key was refused ({status}): {message}"),
         404 => format!("Not found ({status}). Check the model name and address: {message}"),
-        429 => format!("Rate limited ({status}). Try again in a moment: {message}"),
+        429 => format!("Too many requests just now ({status}). Try again in a moment."),
         _ => format!("The provider answered {status}: {message}"),
     }
 }
@@ -709,10 +767,10 @@ pub fn find_cli(name: &str) -> Option<std::path::PathBuf> {
 pub fn install_hint(id: ProviderId) -> Option<&'static str> {
     match id {
         ProviderId::ClaudeCode => Some(
-            "Install Claude Code with `curl -fsSL https://claude.ai/install.sh | bash`, then run `claude` once to sign in with your Claude plan.",
+            "Install Claude Code with “curl -fsSL https://claude.ai/install.sh | bash”, then run “claude” once to sign in with your Claude plan.",
         ),
         ProviderId::Codex => Some(
-            "Install Codex with `npm install -g @openai/codex`, then run `codex` once to sign in with your ChatGPT plan.",
+            "Install Codex with “npm install -g @openai/codex”, then run “codex” once to sign in with your ChatGPT plan.",
         ),
         _ => None,
     }
@@ -730,7 +788,7 @@ fn spawn_cli_in(
 ) -> Result<std::process::Child, String> {
     let id = if program == "claude" { ProviderId::ClaudeCode } else { ProviderId::Codex };
     let path = find_cli(program)
-        .ok_or_else(|| format!("`{program}` isn't installed. {}", install_hint(id).unwrap_or_default()))?;
+        .ok_or_else(|| format!("“{program}” isn't installed. {}", install_hint(id).unwrap_or_default()))?;
     // Tools installed with npm start with `#!/usr/bin/env node`: give them a PATH that finds node.
     let search_path = crate::tools::search_path();
     let mut command = Command::new(&path);
@@ -747,9 +805,9 @@ fn spawn_cli_in(
         command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(
             |e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    format!("`{program}` isn't installed, or isn't on the PATH Null was started with.")
+                    format!("“{program}” isn't installed, or isn't on the PATH Null was started with.")
                 } else {
-                    format!("Couldn't start `{program}`: {e}")
+                    format!("Couldn't start “{program}”: {e}")
                 }
             },
         )?;
@@ -773,7 +831,7 @@ fn finish_cli(program: &str, mut child: std::process::Child) -> Result<(), Strin
     }
     let detail: String =
         stderr.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-    Err(format!("`{program}` stopped with an error. Is it signed in? {detail}").trim().to_string())
+    Err(format!("“{program}” stopped with an error. Is it signed in? {detail}").trim().to_string())
 }
 
 /// The person's own Claude Code, signed in with their Claude plan. All tools are
@@ -992,7 +1050,7 @@ pub fn run_task(
     } else {
         let detail: Vec<&str> = errors.lines().rev().take(3).collect();
         Err(format!(
-            "`{program}` stopped with an error. Is it signed in? {}",
+            "“{program}” stopped with an error. Is it signed in? {}",
             detail.into_iter().rev().collect::<Vec<_>>().join(" ")
         )
         .trim()

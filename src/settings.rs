@@ -500,8 +500,10 @@ pub struct Settings {
     pub dim_paragraphs: bool,
     /// In Markdown and text, typed quotes curl and two hyphens make a dash.
     pub smart_punctuation: bool,
-    /// Misspelled words in Markdown, text and comments get a faint wavy line.
+    /// Misspelled words in Markdown and text get a faint wavy line…
     pub spell_check: bool,
+    /// …and in code's comments too.
+    pub spell_check_comments: bool,
     /// A faint line at the length the project keeps lines to, when it sets one.
     pub line_guide: bool,
     /// Keep the first lines of the blocks scrolled into pinned at the top.
@@ -543,7 +545,7 @@ impl Default for Settings {
             line_numbers: LineNumbers::Shown,
             whitespace: ShowWhitespace::Selection,
             sidebar_visible: true,
-            fade_bars_while_typing: false,
+            fade_bars_while_typing: true,
             word_wrap: false,
             wrap_prose: true,
             wrap_at_guide: false,
@@ -564,9 +566,9 @@ impl Default for Settings {
             languages: Default::default(),
             welcomed: false,
             autocomplete: true,
-            line_blame: true,
+            line_blame: false,
             inlay_hints: false,
-            code_lens: true,
+            code_lens: false,
             indent_guides: true,
             caret_blink: true,
             caret: CaretShape::Bar,
@@ -574,8 +576,9 @@ impl Default for Settings {
             dim_paragraphs: false,
             smart_punctuation: false,
             spell_check: true,
+            spell_check_comments: false,
             line_guide: true,
-            sticky_scroll: true,
+            sticky_scroll: false,
             symbol_marks: true,
             auto_close: true,
             hide: Vec::new(),
@@ -750,9 +753,12 @@ impl Settings {
     /// `~/.config/null/settings.json` on macOS and Linux (or `$XDG_CONFIG_HOME/null`),
     /// `%APPDATA%\Null\settings.json` on Windows.
     pub fn path() -> Option<PathBuf> {
-        // Tests never read or write the real settings.
+        // Tests never read or write the real settings, nor each other's (side by side, one
+        // test's settings were read by another).
         if cfg!(test) {
-            let dir = crate::tools::test_dir("test-config");
+            let thread = format!("{:?}", std::thread::current().id()).replace(|c: char| !c.is_ascii_alphanumeric(), "");
+            let dir = crate::tools::test_dir("test-config").join(thread);
+            std::fs::create_dir_all(&dir).ok();
             return Some(dir.join("settings.json"));
         }
         let dir = if cfg!(target_os = "windows") {
@@ -1065,7 +1071,10 @@ fn save_project(file: &std::path::Path, values: &JsonMap) -> Result<(), String> 
             Some(text) => text,
             None => {
                 eprintln!("null: not saving over {}, which can't be followed", file.display());
-                return Err("This project's settings are written in a way Null can't follow: nothing changed".into());
+                return Err(
+                    "This project's settings.json is laid out in a way Null can't safely edit, so nothing changed."
+                        .into(),
+                );
             }
         },
         None => serde_json::to_string_pretty(values).unwrap_or_default() + "\n",

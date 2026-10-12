@@ -338,7 +338,7 @@ impl FindBar {
             .rounded(px(ui::R_ROW))
             .cursor_pointer()
             .group(id)
-            .hover(|s| s.bg(theme.hairline))
+            .hover(|s| s.bg(ui::hover_on_raised(theme)))
             // An icon takes its own colour (it doesn't inherit the text's).
             .child(
                 svg()
@@ -363,7 +363,7 @@ impl FindBar {
             "case" => ("Match case", Some(Box::new(ToggleCaseSensitive))),
             "word" => ("Whole word", Some(Box::new(ToggleWholeWord))),
             "regex" => ("Regular expression", Some(Box::new(ToggleRegex))),
-            "selection" => ("Only in the lines selected: click for the whole file", None),
+            "selection" => ("Only in the selected lines: click for the whole file", None),
             "previous" => ("Previous match", Some(Box::new(FindPrevious))),
             "next" => ("Next match", Some(Box::new(FindNext))),
             "close" => ("Close", Some(Box::new(CloseFind))),
@@ -394,7 +394,7 @@ impl FindBar {
             .text_size(px(ui::T_SM))
             .text_color(if on { theme.caret } else { theme.muted })
             .when(on, |b| b.bg(theme.accent_soft))
-            .when(!on, |b| b.hover(|s| s.bg(theme.hairline).text_color(theme.foreground)))
+            .when(!on, |b| b.hover(|s| s.bg(ui::hover_on_raised(theme)).text_color(theme.foreground)))
             .child(label)
             .tooltip({
                 let (label, action) = Self::tooltip_for(id);
@@ -444,7 +444,7 @@ impl Render for FindBar {
                 } else if search.query.text.is_empty() {
                     (false, "".into())
                 } else if search.matches.is_empty() {
-                    (false, "No results".into())
+                    (false, "No matches".into())
                 } else {
                     let total = search.matches.len();
                     let total = if total >= MAX_MATCHES { format!("{total}+") } else { total.to_string() };
@@ -563,7 +563,7 @@ impl Render for FindBar {
                 .rounded(px(ui::R_ROW))
                 .text_size(px(ui::T_SM))
                 .text_color(theme.muted)
-                .hover(|s| s.bg(theme.hairline).text_color(theme.foreground))
+                .hover(|s| s.bg(ui::hover_on_raised(&theme)).text_color(theme.foreground))
                 .child(label)
         };
         let replace_row = div()
@@ -583,7 +583,7 @@ impl Render for FindBar {
                     .on_click(act(|this, window, cx| this.replace_next(&ReplaceNext, window, cx))),
             )
             .child(
-                text_button("replace-all", "Replace all")
+                text_button("replace-all", "Replace All")
                     .active(|s| s.opacity(0.7))
                     .on_click(act(|this, window, cx| this.replace_all(&ReplaceAll, window, cx))),
             );

@@ -22,21 +22,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-actions!(
-    palette,
-    [
-        SelectNext,
-        SelectPrevious,
-        Confirm,
-        ConfirmAside,
-        Dismiss,
-        AdjustLeft,
-        AdjustRight,
-        ToggleCommitFile,
-        WriteCommitMessage,
-        ForgetProject
-    ]
-);
+actions!(palette, [SelectNext, SelectPrevious, Confirm, ConfirmAside, Dismiss, AdjustLeft, AdjustRight, ForgetProject]);
 
 /// Registered after the text field's keys: on a choice row, ←→ change the choice
 /// instead of moving the caret (the query is empty there anyway).
@@ -51,8 +37,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Confirm, ctx),
         KeyBinding::new("secondary-enter", ConfirmAside, ctx),
         KeyBinding::new("escape", Dismiss, ctx),
-        KeyBinding::new("tab", ToggleCommitFile, Some("Palette && committing")),
-        KeyBinding::new("secondary-i", WriteCommitMessage, Some("Palette && committing")),
         KeyBinding::new("left", AdjustLeft, adjusting),
         KeyBinding::new("right", AdjustRight, adjusting),
         // In the recent projects, ⌘⌫ takes the one picked off the list.
@@ -80,8 +64,6 @@ pub enum PaletteKind {
     Locations,
     /// A task for the AI, typed in one line.
     Task,
-    /// A commit message.
-    Commit,
     /// The git branches, to switch to one or start a new one.
     Branch,
     /// The project's tasks, to run one in the terminal (or a command typed).
@@ -129,8 +111,7 @@ impl PaletteKind {
             PaletteKind::Line => "Go to line",
             PaletteKind::Locations => "Filter",
             PaletteKind::Task => "Describe the task",
-            PaletteKind::Commit => "Commit message",
-            PaletteKind::Branch => "Switch to branch, or name a new one",
+            PaletteKind::Branch => "Switch to a branch, or name a new one",
             PaletteKind::Run => "Run a task, or type a command",
             PaletteKind::Projects => "Open a recent project",
             PaletteKind::Ex => ":",
@@ -142,6 +123,7 @@ impl PaletteKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
     File,
+    Git,
     Edit,
     Lines,
     Cursors,
@@ -153,8 +135,9 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 9] = [
+    pub const ALL: [Category; 10] = [
         Category::File,
+        Category::Git,
         Category::Edit,
         Category::Lines,
         Category::Cursors,
@@ -168,6 +151,7 @@ impl Category {
     pub fn label(self) -> &'static str {
         match self {
             Category::File => "File",
+            Category::Git => "Git",
             Category::Edit => "Edit",
             Category::Lines => "Lines",
             Category::Cursors => "Cursors",
@@ -337,6 +321,8 @@ enum Item {
     Branch(usize),
     /// Start a branch named after what's typed.
     NewBranch,
+    /// ⌘K: what's typed, looked for in Settings (a setting not among the quick ones).
+    SearchSettings,
     RunTask(usize),
     Project(usize),
     /// Run what's typed, as a command.
@@ -367,10 +353,6 @@ pub enum PaletteEvent {
     StartTask(String),
     /// A Vim command typed after `:`.
     Ex(String),
-    /// Commit with this message: every change but the files left out.
-    Commit(String, Vec<PathBuf>),
-    /// ⌘I in the commit list: a message written by AI from these files' changes.
-    WriteCommitMessage(Vec<PathBuf>),
     SwitchBranch(crate::git::Branch),
     /// Start a branch with this name, here.
     CreateBranch(String),
@@ -380,6 +362,8 @@ pub enum PaletteEvent {
     OpenProject(PathBuf),
     /// Open this folder in a window of its own.
     OpenProjectInNewWindow(PathBuf),
+    /// Settings opened, looking for this.
+    SearchSettings(String),
 }
 
 pub struct Palette {
@@ -401,8 +385,6 @@ pub struct Palette {
     projects: Vec<PathBuf>,
     /// Symbols of the open file: their line is enough, and moving through them shows each.
     in_file: bool,
-    /// Committing: the changed files (by their row in `locations`) left out of the commit.
-    left_out: std::collections::HashSet<usize>,
     root: PathBuf,
     rows: Vec<Row>,
     selected: usize,
@@ -421,7 +403,7 @@ impl Palette {
         let kind = options.kind;
         // One-line entries keep their own placeholder; their title is the line under them.
         let placeholder = match kind {
-            PaletteKind::Task | PaletteKind::Commit => kind.placeholder().to_string(),
+            PaletteKind::Task => kind.placeholder().to_string(),
             _ => options.title.clone().unwrap_or_else(|| kind.placeholder().to_string()),
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
@@ -483,7 +465,6 @@ impl Palette {
             prose_here: options.prose_here,
             language_here: options.language_here,
             title: options.title,
-            left_out: Default::default(),
             in_file: matches!(options.locations.first(), Some(l) if matches!(l.kind, LocationKind::Symbol(_)))
                 && options.locations.iter().all(|l| Some(&l.path) == options.locations.first().map(|f| &f.path)),
             locations: options.locations,
@@ -532,12 +513,6 @@ impl Palette {
             PaletteKind::Files => self.file_rows(split_place(&query).0),
             PaletteKind::Quick => self.quick_rows(&query),
             PaletteKind::Line | PaletteKind::Task | PaletteKind::Ex => {}
-            // What's typed is the message: every changed file stays listed under it.
-            PaletteKind::Commit => {
-                for i in 0..self.locations.len() {
-                    self.push(Item::Location(i), Vec::new(), false);
-                }
-            }
             PaletteKind::Locations => self.location_rows(&query),
             PaletteKind::Branch => self.branch_rows(&query),
             PaletteKind::Run => self.task_rows(&query),
@@ -752,7 +727,8 @@ impl Palette {
             // A command a quick setting stands in for: its own name finds that setting
             // ("toggle sidebar" finds Sidebar), shown once.
             if let Some(quick) = quick_for(c.action.name()) {
-                if let Some((score, _)) = fuzzy::score(&c.label, query) {
+                let also = || also_called(c.action.name()).and_then(|words| fuzzy::score(words, query));
+                if let Some((score, _)) = fuzzy::score(&c.label, query).or_else(also) {
                     match found.iter_mut().find(|(_, item, _)| *item == Item::Quick(quick)) {
                         Some(entry) => entry.0 = entry.0.max(score + 8),
                         None => found.push((score + 8, Item::Quick(quick), Vec::new())),
@@ -761,7 +737,9 @@ impl Palette {
                 continue;
             }
             let recent = self.recent_commands.iter().position(|&n| n == c.action.name());
-            let boost = recent.map_or(0, |r| 12 - r.min(12) as i32);
+            // (One "Language: …" a language: below the rest, or "go" and "r" find only them.)
+            let lower = if c.label.starts_with("Language: ") { 25 } else { 0 };
+            let boost = recent.map_or(0, |r| 12 - r.min(12) as i32) - lower;
             if let Some((score, highlights)) = fuzzy::score(&c.label, query) {
                 found.push((score + boost + 5, Item::Command(i), highlights));
                 continue;
@@ -790,6 +768,8 @@ impl Palette {
         for (_, item, highlights) in found.into_iter().take(MAX_RESULTS) {
             self.push(item, highlights, true);
         }
+        // Every setting can be found from here: the rest are in Settings.
+        self.push(Item::SearchSettings, Vec::new(), false);
     }
 
     fn selected_item(&self) -> Option<Item> {
@@ -861,19 +841,6 @@ impl Palette {
         self.confirm_at(self.selected, cx);
     }
 
-    /// Committing, ⇥: the selected file is left out of the commit, or put back in.
-    fn toggle_commit_file(&mut self, _: &ToggleCommitFile, _: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_left_out(cx);
-    }
-
-    fn toggle_left_out(&mut self, cx: &mut Context<Self>) {
-        let Some(Item::Location(i)) = self.selected_item() else { return };
-        if !self.left_out.remove(&i) {
-            self.left_out.insert(i);
-        }
-        cx.notify();
-    }
-
     /// What's typed in the field.
     #[cfg(test)]
     pub fn query(&self) -> &str {
@@ -884,20 +851,6 @@ impl Palette {
     #[cfg(test)]
     pub fn location_texts(&self) -> Vec<String> {
         self.locations.iter().map(|l| l.text.clone()).collect()
-    }
-
-    /// ⌘I while committing: the files that go in, for AI to write the message from.
-    fn write_commit_message(&mut self, _: &WriteCommitMessage, _: &mut Window, cx: &mut Context<Self>) {
-        if self.kind != PaletteKind::Commit || !cx.global::<Settings>().ai.enabled {
-            return;
-        }
-        let files: Vec<PathBuf> = (0..self.locations.len())
-            .filter(|i| !self.left_out.contains(i))
-            .map(|i| self.locations[i].path.clone())
-            .collect();
-        if !files.is_empty() {
-            cx.emit(PaletteEvent::WriteCommitMessage(files));
-        }
     }
 
     fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
@@ -924,13 +877,6 @@ impl Palette {
             }
             PaletteKind::Ex => {
                 cx.emit(PaletteEvent::Ex(self.query.clone()));
-                return;
-            }
-            PaletteKind::Commit => {
-                let left_out: Vec<PathBuf> = self.left_out.iter().map(|&i| self.locations[i].path.clone()).collect();
-                if !self.query.is_empty() && left_out.len() < self.locations.len().max(1) {
-                    cx.emit(PaletteEvent::Commit(self.query.clone(), left_out));
-                }
                 return;
             }
             PaletteKind::Files
@@ -984,6 +930,7 @@ impl Palette {
             Item::Branch(i) if self.branches[i].current => cx.emit(PaletteEvent::Dismissed),
             Item::Branch(i) => cx.emit(PaletteEvent::SwitchBranch(self.branches[i].clone())),
             Item::NewBranch => cx.emit(PaletteEvent::CreateBranch(crate::git::branch_name(&self.query))),
+            Item::SearchSettings => cx.emit(PaletteEvent::SearchSettings(self.query.clone())),
             Item::RunTask(i) => {
                 let task = &self.tasks[i];
                 cx.emit(PaletteEvent::RunCommand(task.command.clone(), Some(task.label.clone())))
@@ -1086,7 +1033,7 @@ impl Palette {
                     .when(row.show_category, |d| d.child(div().text_color(dim).child(command.category.label())))
                     .children(command.keys.clone().map(|k| ui::key_cap(k, theme)));
                 (
-                    div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
+                    div().text_size(px(ui::T_MD)).text_color(accent).child("›").into_any_element(),
                     StyledText::new(label).with_highlights(marked).into_any_element(),
                     Some(right.into_any_element()),
                 )
@@ -1117,7 +1064,7 @@ impl Palette {
                 )
             }
             Item::Line(line) => (
-                div().text_size(px(13.)).text_color(accent).child(":").into_any_element(),
+                div().text_size(px(ui::T_MD)).text_color(accent).child(":").into_any_element(),
                 div().child(format!("Go to line {line}")).into_any_element(),
                 None,
             ),
@@ -1144,7 +1091,7 @@ impl Palette {
             Item::RunTask(i) => {
                 let task = &self.tasks[i];
                 (
-                    div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
+                    div().text_size(px(ui::T_MD)).text_color(accent).child("›").into_any_element(),
                     div()
                         .code_font(cx)
                         .text_size(px(ui::T_MD))
@@ -1169,14 +1116,20 @@ impl Palette {
                 )
             }
             Item::RunTyped => (
-                div().text_size(px(13.)).text_color(accent).child("›").into_any_element(),
+                div().text_size(px(ui::T_MD)).text_color(accent).child("›").into_any_element(),
                 div().code_font(cx).text_size(px(ui::T_MD)).child(self.query.clone()).into_any_element(),
                 Some(div().text_color(dim).child("in the terminal").into_any_element()),
+            ),
+            Item::SearchSettings => (
+                div().text_size(px(ui::T_MD)).text_color(dim).child("›").into_any_element(),
+                div().text_color(dim).child(format!("Search Settings for “{}”", self.query)).into_any_element(),
+                crate::palette::shortcut(&crate::workspace::OpenSettings, cx)
+                    .map(|keys| div().text_color(dim).child(keys).into_any_element()),
             ),
             Item::NewBranch => {
                 let from = self.branches.iter().find(|b| b.current).map(|b| format!("from {}", b.name));
                 (
-                    div().text_size(px(13.)).text_color(accent).child("+").into_any_element(),
+                    div().text_size(px(ui::T_MD)).text_color(accent).child("+").into_any_element(),
                     div().child(format!("Create branch “{}”", crate::git::branch_name(&self.query))).into_any_element(),
                     from.map(|f| div().text_color(dim).child(f).into_any_element()),
                 )
@@ -1195,20 +1148,7 @@ impl Palette {
                 if let LocationKind::FileChange(kind, added, removed) = location.kind {
                     use crate::ai_task::ChangeKind;
                     let text = StyledText::new(location.text.clone()).with_highlights(highlights_in(&location.text, 0));
-                    // Left out of a commit: quiet, with a hollow dot.
-                    if self.kind == PaletteKind::Commit && self.left_out.contains(&i) {
-                        return self.render_row_parts(
-                            ix,
-                            div().size(px(5.)).rounded_full().border_1().border_color(dim).into_any_element(),
-                            div().text_color(dim).child(text).into_any_element(),
-                            Some(div().text_color(dim).child("left out").into_any_element()),
-                            cx,
-                        );
-                    }
                     let (dot, place) = match kind {
-                        ChangeKind::Deleted if self.kind == PaletteKind::Commit => {
-                            (theme.git_deleted, "deleted".to_string())
-                        }
                         // (A file that isn't text has no lines to count.)
                         ChangeKind::Added if added == NOT_TEXT => (theme.git_added, "new · not text".to_string()),
                         ChangeKind::Changed if added == NOT_TEXT => (theme.git_modified, "not text".to_string()),
@@ -1258,7 +1198,7 @@ impl Palette {
                     let text = StyledText::new(location.text.clone()).with_highlights(marked);
                     // Code shows in the code font; a problem's message in the interface one.
                     let label = if location.kind == LocationKind::Reference {
-                        div().code_font(cx).text_size(px(13.)).child(text)
+                        div().code_font(cx).text_size(px(ui::T_MD)).child(text)
                     } else {
                         div().child(text)
                     };
@@ -1326,15 +1266,7 @@ impl Palette {
                 }
             }))
             .active(|s| s.opacity(0.7))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                // Committing, a file's row leaves it out (or puts it back); elsewhere it's picked.
-                if this.kind == PaletteKind::Commit {
-                    this.selected = ix;
-                    this.toggle_left_out(cx);
-                } else {
-                    this.confirm_at(ix, cx)
-                }
-            }))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.confirm_at(ix, cx)))
             .into_any_element()
     }
 
@@ -1372,8 +1304,6 @@ impl Palette {
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
             PaletteKind::Ex => "↵ run",
-            PaletteKind::Commit if self.left_out.is_empty() => "↵ commit",
-            PaletteKind::Commit => "↵ commit these",
             PaletteKind::Run => "↵ run",
             PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window · ⌘⌫ off the list",
             PaletteKind::Projects => "↵ open · Ctrl+↵ new window · Ctrl+⌫ off the list",
@@ -1581,39 +1511,6 @@ impl Render for Palette {
                 };
                 Some(self.render_message(text, self.line_target().is_some(), cx))
             }
-            PaletteKind::Commit => {
-                // The files under the line saying what's committed; ⇥ leaves the selected one out.
-                let (total, kept) = (self.locations.len(), self.locations.len() - self.left_out.len());
-                let branch = self.title.clone().unwrap_or_default();
-                let files = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
-                let text = match (kept, total) {
-                    (0, _) => "Nothing left to commit: ⇥ puts a file back".to_string(),
-                    (k, t) if k == t => format!("Commits every change on {branch}: {} · ⇥ leaves one out", files(t)),
-                    (k, t) => format!("Commits {k} of {} on {branch}", files(t)),
-                };
-                let ai = cx.global::<Settings>().ai.enabled && kept > 0 && self.query.is_empty();
-                let text = if ai { format!("{text} · ⌘I writes the message") } else { text };
-                let rows: Vec<AnyElement> = (0..self.rows.len()).map(|i| self.render_row(i, window, cx)).collect();
-                Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(self.render_message(text, false, cx))
-                        .child(
-                            div()
-                                .id("palette-results")
-                                .max_h(px(LIST_HEIGHT))
-                                .overflow_y_scroll()
-                                .track_scroll(&self.scroll)
-                                .px(px(6.))
-                                .pb(px(6.))
-                                .flex()
-                                .flex_col()
-                                .children(rows),
-                        )
-                        .into_any_element(),
-                )
-            }
             PaletteKind::Task => {
                 let text = match &self.title {
                     Some(who) => format!("{who} changes the files; you review every change before it stays"),
@@ -1658,9 +1555,6 @@ impl Render for Palette {
         if matches!(self.selected_item(), Some(Item::Quick(q)) if q.is_choice()) {
             context.add("adjusting");
         }
-        if self.kind == PaletteKind::Commit {
-            context.add("committing");
-        }
         if self.kind == PaletteKind::Projects {
             context.add("projects");
         }
@@ -1671,9 +1565,7 @@ impl Render for Palette {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
-            .on_action(cx.listener(Self::write_commit_message))
             .on_action(cx.listener(Self::confirm))
-            .on_action(cx.listener(Self::toggle_commit_file))
             .on_action(cx.listener(Self::confirm_aside))
             .on_action(cx.listener(Self::forget_project))
             .on_action(cx.listener(Self::dismiss))
@@ -1733,6 +1625,9 @@ fn also_called(action: &str) -> Option<&'static str> {
         "workspace::MoveTabDown" => "split down",
         "workspace::MoveTabUp" => "split up",
         "workspace::OpenOnOtherSide" => "split",
+        // (Named Show/Hide now; VS Code's name still finds them.)
+        "workspace::ToggleSidebar" => "toggle sidebar",
+        "workspace::ToggleTerminal" => "toggle terminal",
         _ => return None,
     })
 }
@@ -1817,6 +1712,8 @@ mod tests {
         p.read_with(cx, |p, _| {
             p.rows
                 .iter()
+                // (Always last in ⌘K: looked at on its own.)
+                .filter(|r| r.item != Item::SearchSettings)
                 .map(|r| match r.item {
                     Item::Command(i) => p.commands[i].label.to_string(),
                     Item::Quick(q) => format!("quick: {}", q.label()),
@@ -1837,6 +1734,8 @@ mod tests {
         assert_eq!(items(cx, &p).len(), Quick::ALL.len());
         type_query(cx, &p, "dup");
         assert_eq!(items(cx, &p), ["Duplicate Line"]);
+        // Last, whatever's typed: looked for in Settings.
+        assert!(p.read_with(cx, |p, _| p.rows.last().is_some_and(|r| r.item == Item::SearchSettings)));
         // A command a quick setting covers isn't listed twice.
         type_query(cx, &p, "wrap");
         assert_eq!(items(cx, &p), ["quick: Wrap lines"]);

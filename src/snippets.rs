@@ -304,7 +304,7 @@ pub fn new_file(language: &str) -> String {
     format!(
         "// Your snippets for {language} files. Each one has a name, the prefix you type, and the\n\
          // body it becomes; $1, $2… are places to fill in (⇥ goes to the next) and $0 is where\n\
-         // the caret ends. For example:\n\
+         // the cursor ends. For example:\n\
          //\n\
          //   \"Print a value\": {{\n\
          //     \"prefix\": \"pv\",\n\

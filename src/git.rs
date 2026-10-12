@@ -100,6 +100,7 @@ pub fn commit_all(root: &Path, message: &str) -> Result<String, String> {
 }
 
 /// Commits every change but those to `left_out`, which stay as they are, uncommitted.
+#[cfg(test)]
 pub fn commit(root: &Path, message: &str, left_out: &[PathBuf]) -> Result<String, String> {
     run(root, &["add", "-A", "--", "."])?;
     if !left_out.is_empty() {
@@ -226,7 +227,7 @@ pub fn counts(base: &str, current: &str) -> (usize, usize) {
 pub fn undo_last_commit(root: &Path) -> Result<String, String> {
     let commit = run(root, &["rev-list", "--parents", "-n", "1", "HEAD"]).map_err(|_| "There's no commit to undo.")?;
     if run(root, &["symbolic-ref", "-q", "HEAD"]).is_err() {
-        return Err("No branch is checked out: switch to one first.".into());
+        return Err("Not on a branch.".into());
     }
     let git_dir = run(root, &["rev-parse", "--absolute-git-dir"]).map(|d| PathBuf::from(d.trim()))?;
     if ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
@@ -241,7 +242,7 @@ pub fn undo_last_commit(root: &Path) -> Result<String, String> {
         _ => return Err("The last commit is a merge: undo it from the terminal.".into()),
     }
     if !run(root, &["branch", "-r", "--contains", "HEAD"])?.trim().is_empty() {
-        return Err("The last commit is pushed already: undoing it here would part from what others have.".into());
+        return Err("The last commit is already pushed, so it can't be undone here.".into());
     }
     let message = run(root, &["log", "-1", "--format=%B"])?.trim_end().to_string();
     run(root, &["reset", "-q", "--soft", "HEAD~1"])?;
@@ -494,6 +495,48 @@ pub fn push(root: &Path) -> Result<String, String> {
     Ok(branch)
 }
 
+/// Whether one of the repository's remotes is on GitHub: a host with "github" in its name
+/// (an SSH alias for it too, usually), or one `gh` is signed in to (GitHub Enterprise).
+pub fn remote_on_github(root: &Path) -> bool {
+    let Some(remotes) = git(root, &["remote", "-v"]) else { return false };
+    let remotes = remotes.to_lowercase();
+    if remotes.contains("github") {
+        return true;
+    }
+    let known = gh_hosts();
+    remotes
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter_map(remote_host)
+        .any(|host| known.iter().any(|k| k == host))
+}
+
+/// The host in a remote's address: `https://host/…`, `ssh://user@host:port/…` or `user@host:…`.
+fn remote_host(url: &str) -> Option<&str> {
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest.split('/').next()?,
+        None => url.split_once(':')?.0,
+    };
+    let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    let host = host.split(':').next()?;
+    (!host.is_empty()).then_some(host)
+}
+
+/// The hosts `gh` is signed in to, from its hosts.yml (its top-level keys).
+fn gh_hosts() -> Vec<String> {
+    let dir = std::env::var_os("GH_CONFIG_DIR").map(PathBuf::from).or_else(|| {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(|d| PathBuf::from(d).join("gh"))
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/gh")))
+    });
+    let Some(text) = dir.and_then(|d| std::fs::read_to_string(d.join("hosts.yml")).ok()) else { return Vec::new() };
+    text.lines()
+        .filter(|line| !line.starts_with([' ', '\t', '#']))
+        .filter_map(|line| line.trim_end().strip_suffix(':'))
+        .map(|host| host.trim_matches(['"', '\'']).to_lowercase())
+        .collect()
+}
+
 /// The branch checked out, if one is (not a commit looked at on no branch).
 pub fn branch_checked_out(root: &Path) -> Option<String> {
     git(root, &["symbolic-ref", "-q", "--short", "HEAD"]).map(|b| b.trim().to_string()).filter(|b| !b.is_empty())
@@ -633,7 +676,7 @@ pub fn branch_name(typed: &str) -> String {
 }
 
 /// What `switch_branch` says when changes here would be overwritten there.
-pub const WOULD_LOSE_CHANGES: &str = "Changes here would be lost on that branch: commit or revert them first.";
+pub const WOULD_LOSE_CHANGES: &str = "Changes here would be lost on that branch: commit them or set them aside first.";
 
 /// Sets every change since the last commit aside (new files too, only under `root`): the
 /// files go back to the last commit until `bring_back` returns the changes.
@@ -807,7 +850,7 @@ fn set_aside_at(root: &Path, index: usize, id: Option<&str>) -> Result<String, S
         return Err("Nothing is set aside.".into());
     };
     if id.is_some_and(|id| id != found.trim()) {
-        return Err("The changes set aside have changed since: look again.".into());
+        return Err("Those set-aside changes have changed: check them again.".into());
     }
     Ok(at)
 }
@@ -1027,7 +1070,7 @@ pub fn stop_joining(root: &Path, kind: Joining) -> Result<(), String> {
 pub fn finish_joining(root: &Path, kind: Joining) -> Result<Vec<PathBuf>, String> {
     // (What git is in now: a merge stopped in the terminal leaves nothing to commit.)
     if joining(root).is_none_or(|state| state.kind != kind) {
-        return Err("Git isn't waiting in that any more.".into());
+        return Err("That's already finished.".into());
     }
     if let Some((path, _)) = undecided(root).into_iter().next() {
         let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
@@ -1037,8 +1080,8 @@ pub fn finish_joining(root: &Path, kind: Joining) -> Result<Vec<PathBuf>, String
     let marked = conflicted.iter().filter(|p| still_marked(p)).count();
     match marked {
         0 => {}
-        1 => return Err("A file still has conflicts: ⌘. resolves each.".into()),
-        n => return Err(format!("{n} files still have conflicts: ⌘. resolves each.")),
+        1 => return Err("A file still has conflicts.".into()),
+        n => return Err(format!("{n} files still have conflicts.")),
     }
     if !conflicted.is_empty() {
         let names: Vec<String> = conflicted.iter().map(|p| p.to_string_lossy().into_owned()).collect();
@@ -1192,7 +1235,7 @@ pub fn web_url(remote: &str) -> Option<String> {
 pub fn line_link(path: &Path, first: usize, last: usize) -> Result<String, String> {
     let dir = path.parent().ok_or("No folder.")?;
     let remote = git(dir, &["remote", "get-url", "origin"]).ok_or("This repository has no remote called origin.")?;
-    let web = web_url(&remote).ok_or_else(|| format!("Don't know the web address of {}", remote.trim()))?;
+    let web = web_url(&remote).ok_or_else(|| format!("Couldn't tell the web address of {}.", remote.trim()))?;
     let top = git(dir, &["rev-parse", "--show-toplevel"]).ok_or("Not in a git repository.")?;
     let commit = git(dir, &["rev-parse", "HEAD"]).ok_or("Nothing committed yet.")?;
     // Through any links: a project opened from /tmp is /private/tmp to git on macOS.
@@ -1449,7 +1492,7 @@ mod tests {
         assert_eq!(sets.len(), 2);
         assert_eq!((sets[0].branch.as_str(), sets[0].message.as_str()), ("main", "Null: set aside"));
         // A place whose changes aren't the ones listed any more: left alone.
-        assert!(drop_set_aside(&repo, 0, &sets[1].id).unwrap_err().contains("changed since"));
+        assert!(drop_set_aside(&repo, 0, &sets[1].id).unwrap_err().contains("have changed"));
         assert_eq!(bring_back_at(&repo, 1, Some(&sets[1].id)).unwrap(), Vec::<PathBuf>::new());
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "first set\n");
         assert!(!repo.join("b.txt").exists());
@@ -1975,7 +2018,7 @@ mod tests {
         // A change that main's version would overwrite: git refuses, in plain words.
         std::fs::write(repo.join("a.txt"), "three\n").unwrap();
         let main = Branch { name: "main".into(), current: false, remote: false, when: String::new() };
-        assert!(switch_branch(&repo, &main).unwrap_err().contains("commit or revert"));
+        assert!(switch_branch(&repo, &main).unwrap_err().contains("commit them or set them aside"));
         revert(&repo, &repo.join("a.txt"), FileStatus::Modified).unwrap();
         switch_branch(&repo, &main).unwrap();
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\n");
@@ -2047,5 +2090,13 @@ mod tests {
         assert!(committed_text(&readme, Default::default()).is_some_and(|t| t.contains("Null")));
         assert!(current_branch(readme.parent().unwrap()).is_some());
         assert!(committed_text(&readme.with_file_name("does-not-exist.txt"), Default::default()).is_none());
+    }
+
+    #[test]
+    fn a_remotes_host_is_read_from_each_kind_of_address() {
+        assert_eq!(remote_host("https://github.example.com/team/app.git"), Some("github.example.com"));
+        assert_eq!(remote_host("ssh://git@git.corp.example:2222/team/app.git"), Some("git.corp.example"));
+        assert_eq!(remote_host("git@git.corp.example:team/app.git"), Some("git.corp.example"));
+        assert_eq!(remote_host("/Users/me/elsewhere.git"), None);
     }
 }

@@ -373,7 +373,7 @@ impl Debugger {
         self.program = Some(program.clone());
         let Some(adapter_path) = crate::dap::find_adapter() else {
             self.state = DebugState::Idle;
-            let message = "Null debugs with lldb-dap, which comes with Xcode (or LLVM): it wasn't found.\n";
+            let message = "Debugging needs lldb-dap, which comes with Xcode. It wasn't found.\n";
             return self.append_output(message, cx);
         };
         let (adapter, mut messages) = match DebugAdapter::spawn(&adapter_path, &cwd) {

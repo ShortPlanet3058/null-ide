@@ -56,9 +56,10 @@ pub(super) fn syntax_at(spans: &[crate::highlight::Span], at: usize) -> Option<S
 impl Editor {
     /// Whether this file's words are checked: prose, or code with comments to read.
     fn checks_spelling(&self, cx: &App) -> bool {
-        cx.global::<crate::settings::Settings>().spell_check
+        let settings = cx.global::<crate::settings::Settings>();
+        settings.spell_check
             && self.preview.is_none()
-            && (self.is_prose() || self.comment_marks().is_some())
+            && (self.is_prose() || (settings.spell_check_comments && self.comment_marks().is_some()))
     }
 
     /// Whether the line is code in a Markdown fence. Worked out once per version of the text.

@@ -1031,7 +1031,9 @@ impl Element for EditorElement {
                         hints.into_iter().map(|(byte, text, swatch)| ((byte, text), swatch)).unzip();
                     // A folded line ends in "⋯", standing in for the lines it hides; the
                     // caret's line can end in who last changed it, faintly.
-                    let blame = (row.last && show_blame && !editor.is_folded(row.line))
+                    // (Not while ⌘I is open or changes are reviewed: the change is what matters.)
+                    let quiet = editor.assist_target().is_some() || editor.in_review();
+                    let blame = (row.last && show_blame && !quiet && !editor.is_folded(row.line))
                         .then(|| editor.line_blame())
                         .flatten()
                         .filter(|(line, _)| *line == row.line)
