@@ -81,6 +81,14 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           awk -v v="## $version" '$0 ~ "^## " { on = index($0, v) == 1; next } on' CHANGELOG.md > notes.md
           test -s notes.md
+      # Also under names without the version: the site's links always get the latest
+      # (releases/latest/download/null-windows-x86_64.zip).
+      - name: Names that stay
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cp "dist/Null-$version.dmg" dist/Null-macos.dmg
+          cp "dist/null-$version-windows-x86_64.zip" dist/null-windows-x86_64.zip
+          cp "dist/null-$version-linux-x86_64.tar.gz" dist/null-linux-x86_64.tar.gz
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
