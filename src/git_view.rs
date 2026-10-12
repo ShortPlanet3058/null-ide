@@ -156,6 +156,8 @@ pub fn graph(commits: &[git::LogCommit]) -> Vec<GraphRow> {
 }
 
 pub enum GitViewEvent {
+    /// With several folders: this one's repository picked, for git to act on.
+    PickRepo(PathBuf),
     /// A commit clicked in the history: shown.
     ShowCommit(git::LogCommit),
     /// A pull request (by number) clicked: shown.
@@ -194,6 +196,8 @@ impl EventEmitter<GitViewEvent> for GitView {}
 
 pub struct GitView {
     root: PathBuf,
+    /// The window's folders when it has several (each its repository), to pick from.
+    repos: Vec<PathBuf>,
     focus_handle: FocusHandle,
     /// None until read: then whether this is a repository.
     pub repository: Option<bool>,
@@ -331,6 +335,7 @@ impl GitView {
         ];
         Self {
             root,
+            repos: Vec::new(),
             focus_handle: cx.focus_handle(),
             repository: None,
             files: Vec::new(),
@@ -367,6 +372,36 @@ impl GitView {
             pr_base,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The window's folders, when it has several: a picker of their repositories shows.
+    pub fn set_repos(&mut self, repos: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.repos = repos;
+        cx.notify();
+    }
+
+    /// With several folders: which one's repository git shows, picked by its name.
+    fn render_repos(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.repos.len() < 2 {
+            return None;
+        }
+        let theme = cx.global::<Theme>().clone();
+        let pieces = self.repos.iter().enumerate().map(|(i, repo)| {
+            let on = *repo == self.root;
+            let repo = repo.clone();
+            ui::segment(on, &theme)
+                .id(("git-repo", i))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .truncate()
+                .cursor_pointer()
+                .when(!on, |p| p.hover(|s| s.text_color(theme.foreground)))
+                .child(crate::roots::ProjectRoots::name(&repo))
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::PickRepo(repo.clone()))))
+        });
+        Some(div().px(px(12.)).pt(px(10.)).child(ui::segmented(&theme).children(pieces)).into_any_element())
     }
 
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -1070,6 +1105,7 @@ impl Render for GitView {
             self.focus_message = false;
             window.focus(&self.summary.focus_handle(cx));
         }
+        let repos = self.render_repos(cx);
         let tabs = self.render_tabs(cx);
         let shown = match self.tab {
             Tab::Changes => self.render_changes(cx),
@@ -1083,6 +1119,7 @@ impl Render for GitView {
             .flex()
             .flex_col()
             .text_size(px(ui::T_MD))
+            .children(repos)
             .child(tabs)
             .child(div().flex_1().min_h_0().child(shown))
     }

@@ -147,6 +147,8 @@ pub fn run(cx: &mut App) {
                     // (A path from the project's folder, as a file of it is written.)
                     "open" => {
                         let path = workspace.root(cx).join(arg);
+                        // (`../web/a.tsx`, another folder of the window's: its real path.)
+                        let path = dunce::canonicalize(&path).unwrap_or(path);
                         workspace.open_file(path, window, cx)
                     }
                     "run" => workspace.qa_run(arg.to_string(), window, cx),

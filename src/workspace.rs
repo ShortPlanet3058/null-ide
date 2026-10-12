@@ -743,6 +743,9 @@ const READ_IN_BACKGROUND_FROM: u64 = 1024 * 1024;
 pub struct Workspace {
     /// The folders the window has open (the files, search, git… work across them).
     roots: crate::roots::ProjectRoots,
+    /// The folder whose repository git acts on: the Git panel, the branch in the status
+    /// bar, commit, push… With several folders, the one of the file at hand (or picked).
+    git_root: PathBuf,
     focus_handle: FocusHandle,
     tree: Entity<FileTree>,
     lsp: Entity<LspStore>,
@@ -1097,6 +1100,7 @@ impl Workspace {
         let mut workspace = Self {
             focus_handle: cx.focus_handle(),
             tree,
+            git_root: roots.primary().to_path_buf(),
             roots,
             lsp,
             project_search,
@@ -1643,7 +1647,7 @@ impl Workspace {
 
     /// Re-reads the branch and every open file's committed version.
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         self.branch_task = Some(cx.spawn(async move |this, cx| {
             let branch = cx.background_executor().spawn(async move { git::current_branch(&root) }).await;
             this.update(cx, |this, cx| {
@@ -1673,14 +1677,24 @@ impl Workspace {
     }
 
     fn refresh_git_status_after(&mut self, wait: Duration, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
+        // (Every folder's changes, for the files' marks and the count; the rest, the
+        // repository git acts on.)
+        let others: Vec<PathBuf> = self.roots.all().iter().filter(|r| **r != root).cloned().collect();
         self.git_status_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, _| this.git_status_at = Instant::now()).ok();
             let (changed, sync, joining, to_settle) = cx
                 .background_executor()
                 .spawn(async move {
-                    let changed = git::status(&root);
+                    let mut changed = git::status(&root);
+                    for other in &others {
+                        for found in git::status(other) {
+                            if !changed.iter().any(|(p, _)| *p == found.0) {
+                                changed.push(found);
+                            }
+                        }
+                    }
                     let joining = git::joining(&root);
                     // (Conflicted in git's index, and markers still in the file.)
                     let mut to_settle: Vec<PathBuf> = changed
@@ -1713,6 +1727,28 @@ impl Workspace {
             })
             .ok();
         }));
+    }
+
+    /// Git acts on `root`'s repository from now on (the Git panel shows it).
+    fn set_git_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if self.git_root == root {
+            return;
+        }
+        self.git_root = root.clone();
+        self.drop_pages(cx);
+        self.git_view.update(cx, |view, cx| view.set_root(root, cx));
+        self.refresh_git(cx);
+    }
+
+    /// With several folders: git follows the file at hand to its folder's repository.
+    fn follow_git_root(&mut self, cx: &mut Context<Self>) {
+        if !self.roots.several() {
+            return;
+        }
+        let path = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        if let Some(root) = path.and_then(|p| self.roots.root_of(&p).map(Path::to_path_buf)) {
+            self.set_git_root(root, cx);
+        }
     }
 
     /// The window's minimise, maximise and close, where Null draws them (not on the Mac).
@@ -1789,7 +1825,7 @@ impl Workspace {
     fn review_git_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(&(_, status)) = self.git_status.iter().find(|(p, _)| p == path) else { return false };
         if status == git::FileStatus::Deleted {
-            let root = self.roots.primary().to_path_buf();
+            let root = self.roots.root_for(path).to_path_buf();
             let message = match git::revert(&root, path, status) {
                 Ok(()) => format!("Restored {}.", path.file_name().unwrap_or_default().to_string_lossy()),
                 Err(error) => format!("Couldn't restore it: {error}"),
@@ -1826,7 +1862,7 @@ impl Workspace {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { git::undo_last_commit(&root) }).await;
             this.update(cx, |this, cx| {
@@ -1855,7 +1891,7 @@ impl Workspace {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
         self.save_named_tabs(cx);
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         let files = match self.git_status.len() {
             1 => "1 file's changes".to_string(),
             n => format!("{n} files' changes"),
@@ -1886,7 +1922,7 @@ impl Workspace {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
         self.save_named_tabs(cx);
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result =
                 cx.background_executor().spawn(async move { git::bring_back_at(&root, index, id.as_deref()) }).await;
@@ -2024,7 +2060,7 @@ impl Workspace {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         cx.spawn_in(window, async move |this, cx| {
             let branches = cx.background_executor().spawn(async move { git::branches(&root) }).await;
             this.update_in(cx, |this, window, cx| {
@@ -2040,7 +2076,7 @@ impl Workspace {
     /// first, so git sees every change; it refuses if any would be lost.
     fn change_branch(&mut self, target: Result<git::Branch, String>, window: &mut Window, cx: &mut Context<Self>) {
         self.save_named_tabs(cx);
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         let (switch_to, root_now) = (target.clone().ok(), root.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -2249,7 +2285,7 @@ impl Workspace {
                 .unwrap_or(false)
         };
         let settings = cx.global::<Settings>().ai.clone();
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         // Nothing in the field meanwhile: ↵ there must never commit a placeholder.
         const WRITING: &str = "Writing the commit message…";
         self.show_notice(WRITING.into(), cx);
@@ -2575,7 +2611,7 @@ impl Workspace {
         if self.branch.is_none() {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         self.show_notice("Fetching…".into(), cx);
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -2605,7 +2641,7 @@ impl Workspace {
             return self.show_notice("This folder isn't a git repository.".into(), cx);
         }
         self.save_named_tabs(cx);
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         self.show_notice("Pulling…".into(), cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_executor().spawn(async move { git::pull(&root) }).await;
@@ -2641,7 +2677,7 @@ impl Workspace {
     }
 
     fn push_branch(&mut self, _: &PushBranch, _: &mut Window, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         self.show_notice("Pushing…".into(), cx);
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { git::push(&root) }).await;
@@ -2674,7 +2710,7 @@ impl Workspace {
             &["Discard", "Cancel"],
             cx,
         );
-        let root = self.roots.primary().to_path_buf();
+        let root = self.roots.root_for(&path).to_path_buf();
         cx.spawn(async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
@@ -2715,7 +2751,7 @@ impl Workspace {
             cx,
         );
         let changed = self.git_status.clone();
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         cx.spawn(async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
@@ -3654,6 +3690,8 @@ impl Workspace {
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.roots = crate::roots::ProjectRoots::new(path.clone());
+        self.git_root = path.clone();
+        self.git_view.update(cx, |view, cx| view.set_repos(Vec::new(), cx));
         // (Its git, not the last project's: a commit shown would act there.)
         self.drop_pages(cx);
         crate::palette::list_files_soon(self.roots.clone(), cx);
@@ -3745,6 +3783,7 @@ impl Workspace {
         self.share_open_files(cx);
         self.schedule_session_save(cx);
         self.tree.update(cx, |tree, cx| tree.set_active(path, cx));
+        self.follow_git_root(cx);
         cx.notify();
     }
 
@@ -4630,6 +4669,11 @@ impl Workspace {
     /// The window's folders changed: everything that works across them told.
     fn roots_changed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let roots = self.roots.all().to_vec();
+        if !roots.contains(&self.git_root) {
+            self.set_git_root(self.roots.primary().to_path_buf(), cx);
+        }
+        let several = self.roots.several();
+        self.git_view.update(cx, |view, cx| view.set_repos(if several { roots.clone() } else { Vec::new() }, cx));
         self.tree.update(cx, |tree, cx| tree.set_roots(roots.clone(), cx));
         self.watch_roots(cx);
         crate::palette::list_files_soon(self.roots.clone(), cx);
@@ -5982,7 +6026,7 @@ impl Workspace {
 
     /// A commit from the history, in the place of the code.
     fn show_commit(&mut self, commit: git::LogCommit, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         let page = cx.new(|cx| crate::commit_page::CommitPage::new(root, commit, cx));
         self.github_page = None;
         let subscription = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
@@ -6005,7 +6049,7 @@ impl Workspace {
 
     /// A pull request (or issue) from the GitHub tab, in the place of the code.
     fn show_github(&mut self, number: u64, issue: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         let page = cx.new(|cx| crate::github_page::GitHubPage::new(root, number, issue, cx));
         let subscription = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
             use crate::github_page::GitHubPageEvent;
@@ -6076,6 +6120,7 @@ impl Workspace {
             GitViewEvent::SetAside => self.set_changes_aside(&SetChangesAside, window, cx),
             GitViewEvent::Said(said) => self.show_notice(said.clone(), cx),
             GitViewEvent::Changed => self.refresh_git(cx),
+            GitViewEvent::PickRepo(root) => self.set_git_root(root.clone(), cx),
         }
     }
 
@@ -6095,7 +6140,7 @@ impl Workspace {
                 cx,
             )
         });
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         cx.spawn_in(window, async move |this, cx| {
             if let Some(asked) = asked
                 && asked.await != Ok(0)
@@ -6152,7 +6197,7 @@ impl Workspace {
             &["Stop", "Cancel"],
             cx,
         );
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         cx.spawn_in(window, async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
@@ -6177,7 +6222,7 @@ impl Workspace {
     fn finish_joining(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.joining.clone() else { return };
         self.save_named_tabs(cx);
-        let root = self.roots.primary().to_path_buf();
+        let root = self.git_root.clone();
         cx.spawn_in(window, async move |this, cx| {
             // A conflict with no markers to settle (a side deleted the file, or it isn't
             // text) is decided first: committing would keep whatever's there, unasked.
