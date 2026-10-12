@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+**Windows, from its first tests**
+
+- The window's minimise, maximise and close buttons work, and so do dragging, double-clicking
+  and snap layouts.
+- Ctrl+O opens a folder; File › Close Folder (also in Ctrl+K) leaves the window empty.
+- Started from a shortcut, Null opens the last project; a file opened from the terminal goes
+  to the window that holds it.
+- Git, Node, Python and other tools are found in their usual Windows folders, and a missing
+  Git is said as such, not as "not a repository".
+- The welcome asks where AI answers come from on a step of its own, once AI is wanted.
+
+**Everywhere**
+
+- Quick settings: − + and ← → are buttons; the ≡ button lists every command.
+- Committing a file ends the changes shown in it.
+
 ## 0.1.0
 
 The first release of Null: a calm, fast code editor where the screen belongs to your code,
