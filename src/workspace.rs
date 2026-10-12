@@ -2360,7 +2360,10 @@ impl Workspace {
     /// issue or a chat: where they're from, then the code fenced, its common indentation off.
     fn copy_as_code_block(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else { return };
-        let root = self.roots.primary().to_path_buf();
+        let root = editor
+            .read(cx)
+            .path()
+            .map_or_else(|| self.roots.primary().to_path_buf(), |p| self.roots.root_for(p).to_path_buf());
         let e = editor.read(cx);
         let range = e.selection.range();
         let (first, _) = e.buffer.point(range.start);
@@ -2797,7 +2800,7 @@ impl Workspace {
         const WAIT: Duration = Duration::from_secs(2);
         let request = self.lsp.read(cx).will_rename(&from, &to);
         // Markdown's links to it (and a moved Markdown file's own), which no server keeps.
-        let root = self.roots.primary().to_path_buf();
+        let root = self.roots.root_for(&from).to_path_buf();
         let (old, new) = (from.clone(), to.clone());
         // Open files as they are in their tabs, saved or not.
         let open: std::collections::HashMap<PathBuf, String> = self
@@ -3583,9 +3586,9 @@ impl Workspace {
     /// Opens what the Finder or the `null` command handed over: files in tabs, a folder
     /// as the project (unless it's this one already).
     pub fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
         for path in paths {
-            if path == root {
+            // (A folder of the window's already: nothing to open.)
+            if self.roots.all().contains(&path) {
                 continue;
             }
             self.open_path(path, window, cx);
@@ -3657,6 +3660,13 @@ impl Workspace {
             Err(error) => format!("Couldn't install the command: {error}"),
         };
         self.show_notice(message, cx);
+    }
+
+    /// The folder of the file at hand, else the primary one: where a new terminal starts,
+    /// whose tasks and launch settings count.
+    fn active_root(&self, cx: &App) -> PathBuf {
+        let path = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
+        path.map_or_else(|| self.roots.primary().to_path_buf(), |p| self.roots.root_for(&p).to_path_buf())
     }
 
     /// The window's primary folder.
@@ -4518,11 +4528,8 @@ impl Workspace {
 
     fn ask_where_to_save(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         let current = editor.read(cx).path().map(Path::to_path_buf);
-        let dir = current
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.roots.primary().to_path_buf());
+        let dir =
+            current.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_else(|| self.active_root(cx));
         // Untitled: a name from what it holds (`Trip to Lyon.md`, `untitled.py`).
         let name = match current.as_ref().and_then(|p| p.file_name()) {
             Some(name) => name.to_string_lossy().into_owned(),
@@ -4674,6 +4681,8 @@ impl Workspace {
         }
         let several = self.roots.several();
         self.git_view.update(cx, |view, cx| view.set_repos(if several { roots.clone() } else { Vec::new() }, cx));
+        let for_servers = roots.clone();
+        self.lsp.update(cx, |lsp, _| lsp.set_roots(for_servers));
         self.tree.update(cx, |tree, cx| tree.set_roots(roots.clone(), cx));
         self.watch_roots(cx);
         crate::palette::list_files_soon(self.roots.clone(), cx);
@@ -5622,7 +5631,7 @@ impl Workspace {
 
     /// Project search, in folder `dir` only (from the files' menu).
     fn find_in_folder(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.roots.root_for(dir).to_path_buf();
         let folder = dir.strip_prefix(&root).unwrap_or(dir).to_string_lossy().replace('\\', "/");
         self.sidebar_search.set(true, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
@@ -5687,7 +5696,8 @@ impl Workspace {
 
     fn start_task(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
-        let root = self.roots.primary().to_path_buf();
+        // (Several folders: the task works in the one of the file at hand.)
+        let root = self.active_root(cx);
         // The task reads and writes files on disk: unsaved edits go there first.
         let mut saved = 0;
         for tab in &self.tabs {
@@ -5798,13 +5808,12 @@ impl Workspace {
     fn review_ai_task(&mut self, _: &ReviewAiTask, window: &mut Window, cx: &mut Context<Self>) {
         use crate::palette::{Category, Command, Location, LocationKind};
         let Some(AiTaskRun { state: TaskState::Review(changes), title, .. }) = &self.ai_task else { return };
-        let root = self.roots.primary().to_path_buf();
         let locations = changes
             .iter()
             .map(|c| Location {
                 path: c.path.clone(),
                 position: lsp_types::Position::default(),
-                text: c.path.strip_prefix(&root).unwrap_or(&c.path).display().to_string(),
+                text: self.roots.display(&c.path),
                 kind: LocationKind::FileChange(c.kind, c.added, c.removed),
             })
             .collect();
@@ -6488,9 +6497,25 @@ impl Workspace {
 
     /// Looks through the project for tests, off the main thread.
     fn find_tests(&mut self, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let roots = self.roots.all().to_vec();
+        let several = self.roots.several();
         self.tests_task = Some(cx.spawn(async move |this, cx| {
-            let found = cx.background_executor().spawn(async move { crate::test_at::discover(&root) }).await;
+            // (Every folder's tests, one folder after the other, each run in its own.)
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    roots
+                        .iter()
+                        .flat_map(|r| {
+                            let mut found = crate::test_at::discover(r);
+                            if several {
+                                found.iter_mut().for_each(|f| run_in_root(f, r));
+                            }
+                            found
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
             this.update(cx, |this, cx| {
                 this.tests = Some(std::rc::Rc::new(found));
                 for ran in std::mem::take(&mut this.results_waiting) {
@@ -6504,16 +6529,23 @@ impl Workspace {
 
     /// A file saved while the tests show: its own tests read again.
     fn tests_saved(&mut self, path: PathBuf, text: String, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
-        if self.tests.is_none() || !path.starts_with(&root) {
+        let root = self.roots.root_for(&path).to_path_buf();
+        if self.tests.is_none() || !self.roots.contains(&path) {
             return;
         }
+        let several = self.roots.several();
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_executor()
                 .spawn({
                     let path = path.clone();
-                    async move { crate::test_at::tests_in_file(&root, &path, &text) }
+                    async move {
+                        let mut found = crate::test_at::tests_in_file(&root, &path, &text);
+                        if several && let Some(found) = &mut found {
+                            run_in_root(found, &root);
+                        }
+                        found
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -6686,7 +6718,7 @@ impl Workspace {
             .enumerate()
             .flat_map(|(f, file)| std::iter::once((f, None)).chain((0..file.tests.len()).map(move |t| (f, Some(t)))))
             .collect();
-        let root = self.roots.primary().to_path_buf();
+        let roots = self.roots.clone();
         let status = self.test_status.clone();
         let list = uniform_list(
             "tests",
@@ -6722,7 +6754,7 @@ impl Workspace {
                         };
                         let line = match t {
                             None => {
-                                let shown = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().into_owned();
+                                let shown = roots.display(&path);
                                 let which: Vec<(PathBuf, String)> =
                                     file.tests.iter().map(|t| (path.clone(), t.id.clone())).collect();
                                 div()
@@ -7488,7 +7520,7 @@ impl Workspace {
         self.save_named_tabs(cx);
         self.debug_panel_open = true;
         self.debugged_test = None;
-        let root = self.roots.primary().to_path_buf();
+        let root = self.active_root(cx);
         // The project's own way, in .vscode/launch.json (its first, when it has several).
         let file = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let launches = crate::launch::read(&root, file.as_deref());
@@ -7732,7 +7764,7 @@ impl Workspace {
     }
 
     fn debug_with(&mut self, program: PathBuf, init_commands: Vec<String>, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.active_root(cx);
         self.debug_in(crate::debugger::Run::new(program, root), init_commands, cx);
     }
 
@@ -7817,7 +7849,7 @@ impl Workspace {
             DebugState::Running => "Running".to_string(),
             DebugState::Stopped(stop) => {
                 let place = stop.place.as_ref().map(|(p, l)| {
-                    let file = p.strip_prefix(&root).unwrap_or(p).display().to_string();
+                    let file = self.roots.display(p);
                     format!(" at {file}:{}", l + 1)
                 });
                 let reason = match stop.reason.as_str() {
@@ -8115,9 +8147,16 @@ impl Workspace {
 
     /// ⌘⇧B: the project's tasks (the last run first), to run one in the terminal.
     fn run_task(&mut self, _: &RunTask, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.active_root(cx);
         let file = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let mut tasks = crate::tasks::find(&root, file.as_deref(), &cx.global::<Settings>().tasks);
+        // (Several folders: each runs in its own, whichever the terminal is in.)
+        if self.roots.several() {
+            for task in &mut tasks {
+                task.command =
+                    crate::shell::in_folder(&root.display().to_string(), &task.command, crate::shell::kind());
+            }
+        }
         // Run lately: first, whether the project lists them or they were typed.
         for (command, name) in self.recent_runs.iter().rev() {
             let same_task = name.as_ref().and_then(|name| tasks.iter().position(|t| &t.label == name));
@@ -8137,7 +8176,10 @@ impl Workspace {
     /// open files saved first so it runs what's on screen.
     fn run_test(&mut self, at_caret: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor().cloned() else { return };
-        let root = self.roots.primary().to_path_buf();
+        let root = editor
+            .read(cx)
+            .path()
+            .map_or_else(|| self.roots.primary().to_path_buf(), |p| self.roots.root_for(p).to_path_buf());
         let Some(run) = editor.update(cx, |e, _| e.test_run(&root, at_caret)) else {
             let message = if at_caret { "No test at the cursor." } else { "No tests in this file." };
             return self.show_notice(message.into(), cx);
@@ -8148,7 +8190,12 @@ impl Workspace {
             }
         }
         self.show_notice(format!("Running {}", run.name), cx);
-        self.run_in_terminal(run.command, None, window, cx);
+        let command = if self.roots.several() {
+            crate::shell::in_folder(&root.display().to_string(), &run.command, crate::shell::kind())
+        } else {
+            run.command
+        };
+        self.run_in_terminal(command, None, window, cx);
     }
 
     /// Types `command` into the terminal (opening it first if needed) and runs it.
@@ -8172,7 +8219,7 @@ impl Workspace {
 
     /// Starts a shell in the project folder, as the terminal shown.
     fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.active_root(cx);
         self.add_terminal_in(root, window, cx)
     }
 
@@ -8284,9 +8331,9 @@ impl Workspace {
 
     fn add_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // In a Python project with its own environment: made the shell's, as activating does.
-        let root = self.roots.primary().to_path_buf();
+        let root = self.roots.root_for(&dir).to_path_buf();
         let activate =
-            (dir.starts_with(&root)).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
+            self.roots.contains(&dir).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
                 let shell = if cfg!(windows) {
                     crate::shell::windows_program()
                 } else {
@@ -9190,7 +9237,7 @@ impl Workspace {
     /// The project's own settings (`.null/settings.json`), made if there are none yet: any
     /// setting there is used over yours in this project.
     fn open_project_settings(&mut self, _: &OpenProjectSettings, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.roots.primary().to_path_buf();
+        let root = self.active_root(cx);
         let path = crate::settings::project_file(&root);
         if !path.exists() {
             let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
@@ -9617,10 +9664,10 @@ impl Workspace {
     /// the project is copied next to the Markdown file first, so the link keeps working.
     fn link_dropped(&mut self, editor: Entity<Editor>, paths: &[PathBuf], at: usize, cx: &mut Context<Self>) {
         let Some(dir) = editor.read(cx).path().and_then(Path::parent).map(Path::to_path_buf) else { return };
-        let root = self.roots.primary().to_path_buf();
         let mut links = Vec::new();
         for path in paths {
-            let target = if path.starts_with(&root) {
+            // (In one of the window's folders: linked where it is; elsewhere, copied in.)
+            let target = if self.roots.contains(path) {
                 path.clone()
             } else {
                 match crate::fs_ops::copy_into(path, &dir) {
@@ -9644,7 +9691,7 @@ impl Workspace {
     /// A file's path on the clipboard: in full, or from the project's folder.
     fn copy_path(&self, path: Option<&Path>, relative: bool, cx: &mut Context<Self>) {
         let Some(path) = path else { return };
-        let root = self.roots.primary().to_path_buf();
+        let root = self.roots.root_for(path).to_path_buf();
         let shown = if relative { path.strip_prefix(&root).unwrap_or(path) } else { path };
         crate::system_clipboard::write(cx, gpui::ClipboardItem::new_string(shown.display().to_string()));
     }
@@ -10152,6 +10199,22 @@ fn shell_script(launch: &str, waiting: &str, all: &str) -> String {
          \tif [ -n \"$wait\" ]; then {waiting}; else {launch}; fi\n\
          done\n"
     )
+}
+
+/// A file's tests, run in `root` (one of a window's several folders), whichever folder the
+/// terminal is in.
+fn run_in_root(tests: &mut crate::test_at::FileTests, root: &Path) {
+    let folder = root.display().to_string();
+    let wrap = |c: &mut Option<String>| {
+        if let Some(command) = c {
+            *command = crate::shell::in_folder(&folder, command, crate::shell::kind());
+        }
+    };
+    wrap(&mut tests.command);
+    wrap(&mut tests.every);
+    for test in &mut tests.tests {
+        test.command = crate::shell::in_folder(&folder, &test.command, crate::shell::kind());
+    }
 }
 
 /// Where `path` ends up when `from` (it, or a folder above it) is renamed to `to`.

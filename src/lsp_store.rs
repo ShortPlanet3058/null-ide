@@ -186,7 +186,8 @@ pub struct ExpandedMacro {
 type ServerKey = (&'static str, PathBuf);
 
 pub struct LspStore {
-    root: PathBuf,
+    /// The window's folders, the first its primary one: each gets servers of its own.
+    roots: Vec<PathBuf>,
     servers: HashMap<ServerKey, ServerState>,
     /// The folder each folder's Python files are served from, worked out once.
     python_roots: std::cell::RefCell<HashMap<PathBuf, PathBuf>>,
@@ -228,7 +229,7 @@ fn typescript_for(program: &Path, root: &Path) -> Option<String> {
 impl LspStore {
     pub fn new(root: PathBuf) -> Self {
         Self {
-            root,
+            roots: vec![root],
             servers: HashMap::new(),
             python_roots: Default::default(),
             starts: 0,
@@ -240,6 +241,25 @@ impl LspStore {
             progress: HashMap::new(),
             _tasks: Vec::new(),
         }
+    }
+
+    /// The window's folders changed: files of a new one get servers of their own as they
+    /// open (those of a folder let go are left to finish with the window).
+    pub fn set_roots(&mut self, roots: Vec<PathBuf>) {
+        if !roots.is_empty() {
+            self.roots = roots;
+            self.python_roots.borrow_mut().clear();
+        }
+    }
+
+    /// The folder `path` is in (the innermost), else the primary one: its servers serve it.
+    fn root_for(&self, path: &Path) -> PathBuf {
+        self.roots
+            .iter()
+            .filter(|r| path.starts_with(r))
+            .max_by_key(|r| r.as_os_str().len())
+            .unwrap_or(&self.roots[0])
+            .clone()
     }
 
     /// When `path`'s own diagnostics last changed (0: never).
@@ -265,8 +285,9 @@ impl LspStore {
     /// (Not one server with a folder per package: pyright checks a file in every folder
     /// holding it, with each folder's Python, and the project's answer wins.)
     fn key_for(&self, config: &'static ServerConfig, path: &Path) -> ServerKey {
+        let project = self.root_for(path);
         if !crate::lsp::is_python_server(config.name) {
-            return (config.name, self.root.clone());
+            return (config.name, project);
         }
         let folder = path.parent().unwrap_or(path).to_path_buf();
         let root = self
@@ -274,7 +295,7 @@ impl LspStore {
             .borrow_mut()
             .entry(folder.clone())
             .or_insert_with(|| {
-                crate::python_env::owner_for(&self.root, &folder).map_or(self.root.clone(), |(owner, _)| owner)
+                crate::python_env::owner_for(&project, &folder).map_or(project.clone(), |(owner, _)| owner)
             })
             .clone();
         (config.name, root)
@@ -282,7 +303,7 @@ impl LspStore {
 
     /// The project's server of that name (where installing is noted).
     fn project_key(&self, config: &'static ServerConfig) -> ServerKey {
-        (config.name, self.root.clone())
+        (config.name, self.roots[0].clone())
     }
 
     pub fn readiness(&self, path: &Path) -> Option<Readiness> {
@@ -700,8 +721,8 @@ impl LspStore {
     fn configuration(&self, server: &str, item: &Value) -> Value {
         let python = crate::lsp::is_python_server(server) && item["section"].as_str() == Some("python");
         let scope = item["scopeUri"].as_str().and_then(|uri| uri.parse().ok()).and_then(|uri| path_for(&uri));
-        let env =
-            python.then(|| crate::python_env::find_for(&self.root, scope.as_deref().unwrap_or(&self.root))).flatten();
+        let scope = scope.unwrap_or_else(|| self.roots[0].clone());
+        let env = python.then(|| crate::python_env::find_for(&self.root_for(&scope), &scope)).flatten();
         match env {
             // (A path that isn't text, on Linux: not given.)
             Some(env) => match crate::python_env::interpreter(&env).to_str() {
@@ -1351,8 +1372,8 @@ impl LspStore {
     /// servers start again.
     pub fn python_folders_changed(&mut self, cx: &mut Context<Self>) {
         let moved = self.python_roots.borrow().iter().any(|(folder, served)| {
-            crate::python_env::owner_for(&self.root, folder).map_or_else(|| self.root.clone(), |(owner, _)| owner)
-                != *served
+            let project = self.root_for(folder);
+            crate::python_env::owner_for(&project, folder).map_or(project, |(owner, _)| owner) != *served
         });
         if moved {
             self.restart_python(cx);
