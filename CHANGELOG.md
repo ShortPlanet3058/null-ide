@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.1
+
+What the first tests on Windows and Linux found, several folders in one window, and a new
+license.
 
 **Windows, from its first tests**
 
