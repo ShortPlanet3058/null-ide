@@ -7,6 +7,7 @@
 # change it (Space pauses, ← → step, ?t=24.5 opens it at a moment).
 #
 #   scripts/promo/render.sh            the film
+#   scripts/promo/render.sh 30         the 30-second cut, wide and vertical
 #   scripts/promo/render.sh 12 30.5    pictures of those moments, in target/promo-stills
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -20,15 +21,29 @@ fi
 if [ ! -x "$score" ] || [ "$here/score.swift" -nt "$score" ]; then
     swiftc -O -swift-version 5 -o "$score" "$here/score.swift"
 fi
-if [ $# -gt 0 ]; then
+if [ $# -gt 0 ] && [ "$1" != "30" ]; then
     stills="$(IFS=,; echo "$*")"
     "$bin" "$here/promo.html" "$repo/target/promo-stills" --stills "$stills"
     echo "$repo/target/promo-stills"
     exit
 fi
-# The master in 4K at 60 frames a second, and a 1080p copy to share, both with the sound.
 out="$repo/target/film"
 mkdir -p "$out"
+if [ "${1:-}" = "30" ]; then
+    # The 30-second cut, wide (4K and 1080p) and vertical for phones (1080x1920), its music
+    # cut on the bars: the build from a bar, the silence shortened, the big beat, five bars
+    # of groove, the last phrase.
+    pieces="24.06-29.4@0,31.6-49.66@5.34,136.06-145.4@23.4"
+    "$bin" "$here/promo.html" "$out/pictures-30-4k.mp4" --query "cut=30" --fps 60 --size 3840x2160 --also 1920x1080 "$out/pictures-30-1080p.mp4"
+    "$bin" "$here/promo.html" "$out/pictures-30-vertical.mp4" --query "cut=30&vertical" --page 1080x1920 --fps 60 --size 1080x1920
+    "$score" "$here/music.mp3" "$out/pictures-30-4k.mp4" "$out/null-film-30s-4k.mp4" "$out/pictures-30-4k.sounds.json" --pieces "$pieces"
+    "$score" "$here/music.mp3" "$out/pictures-30-1080p.mp4" "$out/null-film-30s-1080p.mp4" "$out/pictures-30-4k.sounds.json" --pieces "$pieces"
+    "$score" "$here/music.mp3" "$out/pictures-30-vertical.mp4" "$out/null-film-30s-vertical.mp4" "$out/pictures-30-vertical.sounds.json" --pieces "$pieces"
+    rm -f "$out"/pictures-30-*.mp4
+    ls -la "$out"
+    exit
+fi
+# The master in 4K at 60 frames a second, and a 1080p copy to share, both with the sound.
 "$bin" "$here/promo.html" "$out/pictures-4k.mp4" --fps 60 --size 3840x2160 --also 1920x1080 "$out/pictures-1080p.mp4" --poster 102 "$out/null-film-poster.jpg"
 "$score" "$here/music.mp3" "$out/pictures-4k.mp4" "$out/null-film-4k.mp4" "$out/pictures-4k.sounds.json"
 "$score" "$here/music.mp3" "$out/pictures-1080p.mp4" "$out/null-film-1080p.mp4" "$out/pictures-4k.sounds.json"

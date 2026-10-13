@@ -2,7 +2,9 @@
 // sounds the film asks for (keys, pops, a whoosh, ticks: made here, from noise and sine
 // waves), mixed, then put with the pictures in one MP4 (the pictures as they are).
 //
-//   score MUSIC VIDEO.mp4 OUT.mp4 [SOUNDS.json]
+//   score MUSIC VIDEO.mp4 OUT.mp4 [SOUNDS.json] [--pieces FROM-TO@AT,...]
+//
+// --pieces gives another cut of the music (the 30-second film's: see render.sh).
 //
 // The music (Null's track, 75 BPM: a bar is 3.2 s; its bars fall on 1.66 + 3.2k s) and
 // where each piece of it goes in the film:
@@ -13,7 +15,7 @@
 //   136.06 – end     from 97.66 s: the last phrase and its fade, under the end card
 import AVFoundation
 
-let pieces: [(from: Double, to: Double, at: Double)] = [
+var pieces: [(from: Double, to: Double, at: Double)] = [
     (0, 59.26, 0),
     (84.86, 123.26, 59.26),
     (136.06, 145.4, 97.66),
@@ -21,9 +23,16 @@ let pieces: [(from: Double, to: Double, at: Double)] = [
 let crossfade = 0.03
 let fadeOut = 1.0
 
-let args = CommandLine.arguments
+var args = CommandLine.arguments
+if let at = args.firstIndex(of: "--pieces"), at + 1 < args.count {
+    pieces = args[at + 1].split(separator: ",").map { piece in
+        let parts = piece.split(separator: "@"), range = parts[0].split(separator: "-")
+        return (Double(range[0])!, Double(range[1])!, Double(parts[1])!)
+    }
+    args.removeSubrange(at...(at + 1))
+}
 guard args.count == 4 || args.count == 5 else {
-    FileHandle.standardError.write("usage: score MUSIC VIDEO.mp4 OUT.mp4 [SOUNDS.json]\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: score MUSIC VIDEO.mp4 OUT.mp4 [SOUNDS.json] [--pieces FROM-TO@AT,...]\n".data(using: .utf8)!)
     exit(2)
 }
 let music = URL(fileURLWithPath: args[1]), video = URL(fileURLWithPath: args[2]), out = URL(fileURLWithPath: args[3])

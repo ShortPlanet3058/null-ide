@@ -5,7 +5,8 @@
 //   render PAGE.html OUT.mp4 [--fps 30] [--size 1920x1080] [--also WxH OTHER.mp4] [--poster SECONDS OUT.jpg]
 // The page is laid out at 1920×1080 whatever the size: WebKit draws it at the screen's scale
 // (twice on a Retina), and the film is that picture at --size (3840x2160 for 4K); --also
-// writes a second film at another size from the same pictures.
+// writes a second film at another size from the same pictures. --query passes options to
+// the page (cut=30, vertical); --page is its layout size (1080x1920 for the vertical one).
 //   render PAGE.html DIR --stills 1.5,12,30   (pictures of those moments, to look at)
 //
 // The page says how long it is (`window.DURATION`). Its window stays off-screen and the
@@ -23,6 +24,9 @@ struct Options {
     var poster: (Double, URL)?
     var stills: [Double]?
     var also: (Int, Int, URL)?
+    var query: String?
+    var pageWidth = 1920
+    var pageHeight = 1080
 }
 
 func options() -> Options {
@@ -40,6 +44,10 @@ func options() -> Options {
             let parts = args.removeFirst().split(separator: "x").map { Int($0)! }
             o.width = parts[0]; o.height = parts[1]
         case "--poster": o.poster = (Double(args.removeFirst())!, URL(fileURLWithPath: args.removeFirst()))
+        case "--query": o.query = args.removeFirst()
+        case "--page":
+            let parts = args.removeFirst().split(separator: "x").map { Int($0)! }
+            o.pageWidth = parts[0]; o.pageHeight = parts[1]
         case "--also":
             let parts = args.removeFirst().split(separator: "x").map { Int($0)! }
             o.also = (parts[0], parts[1], URL(fileURLWithPath: args.removeFirst()))
@@ -59,7 +67,7 @@ final class Renderer: NSObject, WKNavigationDelegate {
 
     init(_ o: Options) {
         self.o = o
-        let size = NSRect(x: -20000, y: -20000, width: 1920, height: 1080)
+        let size = NSRect(x: -20000, y: -20000, width: o.pageWidth, height: o.pageHeight)
         web = WKWebView(frame: NSRect(origin: .zero, size: size.size), configuration: WKWebViewConfiguration())
         window = NSWindow(contentRect: size, styleMask: .borderless, backing: .buffered, defer: false)
         super.init()
@@ -78,7 +86,9 @@ final class Renderer: NSObject, WKNavigationDelegate {
     func load() async throws {
         await withCheckedContinuation { c in
             loaded = c
-            web.loadFileURL(o.page, allowingReadAccessTo: o.page.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())
+            var page = URLComponents(url: o.page.absoluteURL, resolvingAgainstBaseURL: true)!
+            page.query = o.query
+            web.loadFileURL(page.url!, allowingReadAccessTo: o.page.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())
         }
         _ = try await web.callAsyncJavaScript("await document.fonts.ready; if (window.ready) await window.ready; return 1", contentWorld: .page)
     }
@@ -86,8 +96,8 @@ final class Renderer: NSObject, WKNavigationDelegate {
     func frame(at t: Double) async throws -> CGImage {
         _ = try await web.callAsyncJavaScript("window.render(t); return 1", arguments: ["t": t], contentWorld: .page)
         let config = WKSnapshotConfiguration()
-        config.rect = NSRect(x: 0, y: 0, width: 1920, height: 1080)
-        config.snapshotWidth = NSNumber(value: max(o.width, 1920))
+        config.rect = NSRect(x: 0, y: 0, width: o.pageWidth, height: o.pageHeight)
+        config.snapshotWidth = NSNumber(value: max(o.width, o.pageWidth))
         config.afterScreenUpdates = true
         let image = try await web.takeSnapshot(configuration: config)
         var rect = NSRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
