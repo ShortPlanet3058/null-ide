@@ -112,7 +112,7 @@ mod tests {
     fn folders_are_found_shown_and_kept_apart() {
         let p = PathBuf::from;
         let one = ProjectRoots::new(p("/code/api"));
-        assert_eq!(one.display(Path::new("/code/api/src/a.rs")), Path::new("src").join("a.rs").display().to_string());
+        assert_eq!(one.display(Path::new("/code/api/src/a.rs")), Path::new("src/a.rs").display().to_string());
         assert_eq!(one.root_for(Path::new("/elsewhere/x")), Path::new("/code/api"));
         let mut two = ProjectRoots::new(p("/code/api"));
         assert!(two.add(p("/code/web")) && !two.add(p("/code/api/sub")), "a folder inside another isn't one more");
