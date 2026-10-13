@@ -60,7 +60,7 @@ impl ProjectRoots {
     }
 
     /// `root`'s name among the window's folders: with its parent's when another has the
-    /// same name (`a/app`, `b/app`), its whole path when even that's the same.
+    /// same name (`a/app`, `b/app`, with the system's separator), its whole path when even that's the same.
     pub fn label(&self, root: &Path) -> String {
         Self::label_among(&self.roots, root)
     }
@@ -74,7 +74,9 @@ impl ProjectRoots {
         }
         let parent = |p: &Path| p.parent().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
         match parent(root) {
-            Some(up) if others.iter().all(|r| parent(r).as_deref() != Some(up.as_str())) => format!("{up}/{name}"),
+            Some(up) if others.iter().all(|r| parent(r).as_deref() != Some(up.as_str())) => {
+                Path::new(&up).join(&name).display().to_string()
+            }
             _ => root.display().to_string(),
         }
     }
@@ -110,13 +112,13 @@ mod tests {
     fn folders_are_found_shown_and_kept_apart() {
         let p = PathBuf::from;
         let one = ProjectRoots::new(p("/code/api"));
-        assert_eq!(one.display(Path::new("/code/api/src/a.rs")), Path::new("src/a.rs").display().to_string());
+        assert_eq!(one.display(Path::new("/code/api/src/a.rs")), Path::new("src").join("a.rs").display().to_string());
         assert_eq!(one.root_for(Path::new("/elsewhere/x")), Path::new("/code/api"));
         let mut two = ProjectRoots::new(p("/code/api"));
         assert!(two.add(p("/code/web")) && !two.add(p("/code/api/sub")), "a folder inside another isn't one more");
         assert_eq!(two.all(), [p("/code/api"), p("/code/web")]);
         assert_eq!(two.root_of(Path::new("/code/web/app/page.tsx")), Some(Path::new("/code/web")));
-        assert_eq!(two.display(Path::new("/code/web/app.tsx")), Path::new("web/app.tsx").display().to_string());
+        assert_eq!(two.display(Path::new("/code/web/app.tsx")), Path::new("web").join("app.tsx").display().to_string());
         assert_eq!(two.display(Path::new("/tmp/x")), Path::new("/tmp/x").display().to_string());
         assert!(!two.add(p("/code/web/inner")));
         assert!(!two.add(p("/code")), "nor one holding the primary");
@@ -132,12 +134,12 @@ mod tests {
         let mut roots = ProjectRoots::new(p("/work/client/app"));
         roots.add(p("/work/server/app"));
         roots.add(p("/work/docs"));
-        assert_eq!(roots.label(Path::new("/work/client/app")), "client/app");
-        assert_eq!(roots.label(Path::new("/work/server/app")), "server/app");
+        assert_eq!(roots.label(Path::new("/work/client/app")), Path::new("client").join("app").display().to_string());
+        assert_eq!(roots.label(Path::new("/work/server/app")), Path::new("server").join("app").display().to_string());
         assert_eq!(roots.label(Path::new("/work/docs")), "docs");
         assert_eq!(
             roots.display(Path::new("/work/server/app/main.rs")),
-            Path::new("server/app/main.rs").display().to_string()
+            Path::new("server").join("app").join("main.rs").display().to_string()
         );
         let same = [p("/a/x/app"), p("/b/x/app")];
         assert_eq!(

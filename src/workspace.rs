@@ -12712,7 +12712,10 @@ mod tests {
             w.add_roots(vec![web.clone(), api.join("src"), web.clone()], window, cx);
             assert_eq!(w.roots().all(), [api.clone(), web.clone()]);
             assert_eq!(w.session(cx).roots, std::slice::from_ref(&web));
-            assert_eq!(w.roots().display(&web.join("page.tsx")), Path::new("web/page.tsx").display().to_string());
+            assert_eq!(
+                w.roots().display(&web.join("page.tsx")),
+                Path::new("web").join("page.tsx").display().to_string()
+            );
         });
         // Its folder opened again (as from Recent): the other comes back.
         let session = workspace.read_with(cx, |w, cx| w.session(cx));
