@@ -1525,7 +1525,7 @@ mod live_tests {
     #[test]
     #[ignore]
     fn nvidia_streams_an_answer() {
-        let settings = AiSettings { provider: ProviderId::Nvidia, ..Default::default() };
+        let settings = AiSettings { enabled: true, provider: ProviderId::Nvidia, ..Default::default() };
         let prompt = Prompt {
             system: "Answer with one word.".into(),
             user: "What color is the sky on a clear day?".into(),
