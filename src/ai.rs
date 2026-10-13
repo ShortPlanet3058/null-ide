@@ -296,9 +296,10 @@ pub struct ProviderSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "AiSettingsFile")]
 pub struct AiSettings {
-    /// The master switch: when off, no AI appears anywhere, whatever the provider.
+    /// The master switch: when off, no AI appears anywhere, whatever the provider. Off
+    /// until it's turned on.
     pub enabled: bool,
     pub provider: ProviderId,
     /// Ghost completions: the AI's guess at what comes next, shown faintly at the caret.
@@ -309,7 +310,37 @@ pub struct AiSettings {
 
 impl Default for AiSettings {
     fn default() -> Self {
-        Self { enabled: true, provider: ProviderId::Off, completions: false, providers: HashMap::new() }
+        Self { enabled: false, provider: ProviderId::Off, completions: false, providers: HashMap::new() }
+    }
+}
+
+/// AI's settings as a file has them. Files only hold what differs from the defaults, and
+/// AI used to be on by default: a file with a provider chosen but no `enabled` was someone
+/// using AI, and it stays on for them.
+#[derive(Deserialize)]
+#[serde(default)]
+struct AiSettingsFile {
+    enabled: Option<bool>,
+    provider: ProviderId,
+    completions: bool,
+    #[serde(flatten)]
+    providers: HashMap<String, ProviderSettings>,
+}
+
+impl Default for AiSettingsFile {
+    fn default() -> Self {
+        Self { enabled: None, provider: ProviderId::Off, completions: false, providers: HashMap::new() }
+    }
+}
+
+impl From<AiSettingsFile> for AiSettings {
+    fn from(file: AiSettingsFile) -> Self {
+        Self {
+            enabled: file.enabled.unwrap_or(file.provider != ProviderId::Off),
+            provider: file.provider,
+            completions: file.completions,
+            providers: file.providers,
+        }
     }
 }
 
@@ -1373,6 +1404,18 @@ mod request_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AI is off until turned on; a file from when it was on by default (a provider, no
+    /// `enabled`) keeps it on; turned off stays off.
+    #[test]
+    fn ai_is_off_until_turned_on() {
+        let read = |json: &str| serde_json::from_str::<AiSettings>(json).unwrap();
+        assert!(!AiSettings::default().enabled);
+        assert!(!read("{}").enabled);
+        assert!(read(r#"{"provider": "claude_code"}"#).enabled, "someone already using AI");
+        assert!(!read(r#"{"provider": "claude_code", "enabled": false}"#).enabled);
+        assert!(read(r#"{"enabled": true}"#).enabled);
+    }
 
     #[test]
     fn settings_fill_in_defaults_and_read_overrides() {

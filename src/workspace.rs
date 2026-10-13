@@ -7382,7 +7382,11 @@ impl Workspace {
     }
 
     fn use_ai(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
-        settings::update(cx, |s| s.ai.provider = provider);
+        // (Choosing where answers come from is wanting AI.)
+        settings::update(cx, |s| {
+            s.ai.provider = provider;
+            s.ai.enabled = true;
+        });
         let hint = if provider.uses_api_key() && crate::ai::known_key(provider) == Some(false) {
             " Add a key with “AI: Set API Key”."
         } else {

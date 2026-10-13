@@ -41,6 +41,8 @@ license.
 - Typing `cart` in Ctrl+P finds cart.rs before Cargo.toml: letters typed together come
   first.
 - After Close Folder the title and the files say no folder is open.
+- AI is off until you turn it on: the welcome's AI step starts on Off (if you already use
+  AI, it stays on).
 
 **Installers**
 
