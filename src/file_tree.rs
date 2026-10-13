@@ -183,6 +183,14 @@ pub enum FileTreeEvent {
     Notice(String),
     /// Hide from Files: this path (a folder, if so) kept out, in the project's settings.
     Hide(PathBuf, bool),
+    /// Folders dropped from outside (the Finder, Explorer): added to the window, or copied
+    /// into `into`, as the person says (files dropped along go in either way).
+    FoldersDropped {
+        paths: Vec<PathBuf>,
+        into: PathBuf,
+    },
+    /// Remove Folder from Window: this one of its folders.
+    RemoveRoot(PathBuf),
 }
 
 #[derive(Clone)]
@@ -331,6 +339,8 @@ enum MenuItem {
     CopyPaths,
     /// With two files picked: one against the other.
     Compare,
+    /// On a folder's heading, with several: the window lets it go (nothing on disk changes).
+    RemoveRoot,
 }
 
 impl MenuItem {
@@ -354,6 +364,7 @@ impl MenuItem {
             MenuItem::Trash => fs_ops::MOVE_TO_TRASH,
             MenuItem::CopyPaths => "Copy Paths",
             MenuItem::Compare => "Compare the Two",
+            MenuItem::RemoveRoot => "Remove Folder from Window",
         }
     }
 
@@ -367,7 +378,10 @@ impl MenuItem {
 
     /// A line is drawn above these, to group the menu.
     fn starts_group(self) -> bool {
-        matches!(self, MenuItem::Rename | MenuItem::CopyPath | MenuItem::DiscardChanges | MenuItem::Trash)
+        matches!(
+            self,
+            MenuItem::Rename | MenuItem::CopyPath | MenuItem::DiscardChanges | MenuItem::Trash | MenuItem::RemoveRoot
+        )
     }
 }
 
@@ -382,14 +396,17 @@ struct Menu {
 /// The project's files, folders first. Folders are read when first expanded.
 pub struct FileTree {
     focus_handle: FocusHandle,
-    root: PathBuf,
+    /// The window's folders, the first its primary one: with several, each is a heading
+    /// row (an open or closed folder), its files under it.
+    roots: Vec<PathBuf>,
     expanded: HashSet<PathBuf>,
     /// When each folder was last opened or closed, to animate its arrow.
     toggled_at: HashMap<PathBuf, Instant>,
     children: HashMap<PathBuf, Vec<Entry>>,
-    /// What the `hide` setting keeps out of the files (`*.pyc`), as written and as rules.
+    /// What the `hide` setting keeps out of the files (`*.pyc`), as written and as rules
+    /// (anchored at each folder: `/build/` is each one's own).
     hide: Vec<String>,
-    hidden: ignore::gitignore::Gitignore,
+    hidden: Vec<(PathBuf, ignore::gitignore::Gitignore)>,
     rows: Vec<Row>,
     /// The open file, highlighted.
     active: Option<PathBuf>,
@@ -424,10 +441,10 @@ impl FileTree {
             focus_handle: cx.focus_handle(),
             expanded: HashSet::from([root.clone()]),
             toggled_at: HashMap::new(),
-            root,
+            hidden: vec![(root.clone(), ignore::gitignore::Gitignore::empty())],
+            roots: vec![root],
             children: HashMap::new(),
             hide: Vec::new(),
-            hidden: ignore::gitignore::Gitignore::empty(),
             rows: Vec::new(),
             active: None,
             selected: None,
@@ -446,28 +463,85 @@ impl FileTree {
         tree
     }
 
+    /// The primary folder.
     pub fn root(&self) -> &Path {
-        &self.root
+        &self.roots[0]
     }
 
-    /// The folders expanded below the root, for the session.
+    /// The folder `path` is in (the innermost), else the primary one.
+    fn root_of(&self, path: &Path) -> &Path {
+        self.roots.iter().filter(|r| path.starts_with(r)).max_by_key(|r| r.as_os_str().len()).unwrap_or(&self.roots[0])
+    }
+
+    fn is_root(&self, path: &Path) -> bool {
+        self.roots.iter().any(|r| r == path)
+    }
+
+    /// Whether the window has several folders (each a heading row).
+    fn several(&self) -> bool {
+        self.roots.len() > 1
+    }
+
+    /// Whether `folder` is shown as a row: inside a folder of the window, and with several,
+    /// those folders' headings too.
+    fn shown_as_row(&self, folder: &Path) -> bool {
+        self.roots.iter().any(|r| folder.starts_with(r)) && (self.several() || !self.is_root(folder))
+    }
+
+    /// The `hide` rules for what's in `dir`: those of its folder.
+    fn hidden_for(&self, dir: &Path) -> &ignore::gitignore::Gitignore {
+        let root = self.root_of(dir);
+        self.hidden.iter().find(|(r, _)| r == root).map(|(_, rules)| rules).unwrap_or(&self.hidden[0].1)
+    }
+
+    /// The folders expanded below the window's folders, for the session (headings closed by
+    /// hand too, as their folders not being there).
     pub fn expanded_folders(&self) -> Vec<PathBuf> {
-        let mut folders: Vec<PathBuf> = self.expanded.iter().filter(|p| **p != self.root).cloned().collect();
+        let mut folders: Vec<PathBuf> = self.expanded.iter().filter(|p| !self.is_root(p)).cloned().collect();
         folders.sort();
         folders
     }
 
     /// Expands folders again, as they were last time.
     pub fn expand_folders(&mut self, folders: &[PathBuf], cx: &mut Context<Self>) {
-        self.expanded.extend(folders.iter().filter(|p| p.starts_with(&self.root) && p.is_dir()).cloned());
+        let inside = |p: &PathBuf| self.roots.iter().any(|r| p.starts_with(r)) && p.is_dir();
+        let folders: Vec<PathBuf> = folders.iter().filter(|p| inside(p)).cloned().collect();
+        self.expanded.extend(folders);
         self.rebuild();
         cx.notify();
     }
 
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        self.expanded = HashSet::from([root.clone()]);
-        self.hidden = crate::project_index::hidden_rules(&root, &self.hide);
-        self.root = root;
+        self.set_roots(vec![root], cx);
+    }
+
+    /// The window's folders, the first primary: a new one starts open. Folders opened in
+    /// those that stay, stay open, and what's picked stays picked; a new primary (another
+    /// project) starts afresh.
+    pub fn set_roots(&mut self, roots: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let same_project = roots.first() == self.roots.first();
+        let inside = |p: &PathBuf| roots.iter().any(|r| p.starts_with(r));
+        if same_project {
+            let added: Vec<PathBuf> = roots.iter().filter(|r| !self.roots.contains(r)).cloned().collect();
+            self.expanded.retain(|p| inside(p));
+            self.expanded.extend(added);
+            self.children.retain(|dir, _| inside(dir));
+            self.hidden =
+                roots.iter().map(|r| (r.clone(), crate::project_index::hidden_rules(r, &self.hide))).collect();
+            self.roots = roots;
+            if self.active.as_ref().is_some_and(|a| !self.roots.iter().any(|r| a.starts_with(r))) {
+                self.active = None;
+            }
+            if self.selected.as_ref().is_some_and(|s| !self.roots.iter().any(|r| s.starts_with(r))) {
+                self.selected = None;
+            }
+            self.also.clear();
+            self.rebuild();
+            return cx.notify();
+        }
+        self.expanded = roots.iter().cloned().collect();
+        self.hidden = roots.iter().map(|r| (r.clone(), crate::project_index::hidden_rules(r, &self.hide))).collect();
+        self.roots = roots;
         self.children.clear();
         self.active = None;
         self.selected = None;
@@ -515,8 +589,11 @@ impl FileTree {
     }
 
     fn expand_to(&mut self, path: &Path) {
-        if let Ok(relative) = path.strip_prefix(&self.root) {
-            let mut dir = self.root.clone();
+        let root = self.root_of(path).to_path_buf();
+        if let Ok(relative) = path.strip_prefix(&root) {
+            // (With several folders, its heading opens too.)
+            self.expanded.insert(root.clone());
+            let mut dir = root.clone();
             for part in relative.parent().into_iter().flat_map(Path::components) {
                 dir.push(part);
                 self.expanded.insert(dir.clone());
@@ -530,7 +607,7 @@ impl FileTree {
             return;
         }
         self.hide = hide.to_vec();
-        self.hidden = crate::project_index::hidden_rules(&self.root, hide);
+        self.hidden = self.roots.iter().map(|r| (r.clone(), crate::project_index::hidden_rules(r, hide))).collect();
         self.children.clear();
         self.rebuild();
         cx.notify();
@@ -586,9 +663,27 @@ impl FileTree {
 
     fn rebuild(&mut self) {
         self.rows.clear();
-        let root = self.root.clone();
-        self.push_new_item_row(&root, 0);
-        self.push_children(&root, 0);
+        if !self.several() {
+            let root = self.roots[0].clone();
+            self.push_new_item_row(&root, 0);
+            self.push_children(&root, 0);
+            return;
+        }
+        // Several folders: each a heading (an open or closed folder), its files under it.
+        for root in self.roots.clone() {
+            let expanded = self.expanded.contains(&root);
+            let entry = Entry {
+                name: crate::roots::ProjectRoots::label_among(&self.roots, &root).into(),
+                is_dir: true,
+                ignored: false,
+                path: root.clone(),
+            };
+            self.rows.push(Row { kind: RowKind::Entry(entry), depth: 0, expanded, chain: None });
+            if expanded {
+                self.push_new_item_row(&root, 1);
+                self.push_children(&root, 1);
+            }
+        }
     }
 
     fn push_new_item_row(&mut self, dir: &Path, depth: usize) {
@@ -608,12 +703,14 @@ impl FileTree {
     }
 
     fn push_children_of(&mut self, dir: &Path, depth: usize, inside_ignored: bool) {
-        let hidden = &self.hidden;
-        let entries = self
-            .children
-            .entry(dir.to_path_buf())
-            .or_insert_with(|| Self::read_dir(dir, inside_ignored, hidden))
-            .clone();
+        let entries = match self.children.get(dir) {
+            Some(entries) => entries.clone(),
+            None => {
+                let read = Self::read_dir(dir, inside_ignored, self.hidden_for(dir));
+                self.children.insert(dir.to_path_buf(), read.clone());
+                read
+            }
+        };
         for mut entry in entries {
             let expanded = entry.is_dir && self.expanded.contains(&entry.path);
             // Open, and holding only a folder: that folder joins this row, and so on down.
@@ -625,11 +722,14 @@ impl FileTree {
                     Ok(real) if !seen.contains(&real) => seen.push(real),
                     _ => break,
                 }
-                let inner = self
-                    .children
-                    .entry(entry.path.clone())
-                    .or_insert_with(|| Self::read_dir(&entry.path, entry.ignored, &self.hidden))
-                    .clone();
+                let inner = match self.children.get(&entry.path) {
+                    Some(inner) => inner.clone(),
+                    None => {
+                        let read = Self::read_dir(&entry.path, entry.ignored, self.hidden_for(&entry.path));
+                        self.children.insert(entry.path.clone(), read.clone());
+                        read
+                    }
+                };
                 let [only] = inner.as_slice() else { break };
                 if !only.is_dir {
                     break;
@@ -875,7 +975,7 @@ impl FileTree {
         let Some(entry) = self.selected_entry() else { return };
         if entry.is_dir && self.folder_row(&entry.path).1 {
             self.toggle_row(&entry.path, cx);
-        } else if let Some(parent) = entry.path.parent().filter(|p| *p != self.root) {
+        } else if let Some(parent) = entry.path.parent().filter(|p| self.shown_as_row(p)) {
             // On a file or closed folder, Left goes up to the parent folder (alone).
             self.also.clear();
             self.selected = Some(parent.to_path_buf());
@@ -899,8 +999,8 @@ impl FileTree {
     fn dir_for(&self, target: Option<&Entry>) -> PathBuf {
         match target {
             Some(e) if e.is_dir => e.path.clone(),
-            Some(e) => e.path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.root.clone()),
-            None => self.root.clone(),
+            Some(e) => e.path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.root().to_path_buf()),
+            None => self.root().to_path_buf(),
         }
     }
 
@@ -922,7 +1022,7 @@ impl FileTree {
             }
         });
         if let EditKind::NewFile { dir } | EditKind::NewFolder { dir } = &kind
-            && *dir != self.root
+            && (self.several() || !self.is_root(dir))
         {
             self.expanded.insert(dir.clone());
         }
@@ -948,7 +1048,8 @@ impl FileTree {
     }
 
     pub fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(entry) = self.selected_entry() {
+        // (A folder of the window's: not renamed from its heading.)
+        if let Some(entry) = self.selected_entry().filter(|e| !self.is_root(&e.path)) {
             self.start_edit(EditKind::Rename { path: entry.path }, &entry.name, window, cx);
         }
     }
@@ -1023,7 +1124,9 @@ impl FileTree {
     }
 
     fn keep_files(&mut self, cut: bool, cx: &mut Context<Self>) {
-        let paths: Vec<PathBuf> = self.picked().into_iter().map(|e| e.path).collect();
+        // (A folder of the window's is copied, never cut away from it.)
+        let paths: Vec<PathBuf> =
+            self.picked().into_iter().map(|e| e.path).filter(|p| !cut || !self.is_root(p)).collect();
         if paths.is_empty() {
             return;
         }
@@ -1064,6 +1167,8 @@ impl FileTree {
 
     /// Moves `paths` into `dir` (see `drop_into`).
     fn move_into(&mut self, paths: Vec<PathBuf>, dir: PathBuf, cx: &mut Context<Self>) {
+        // (The window's own folders stay where they are.)
+        let paths: Vec<PathBuf> = paths.into_iter().filter(|p| !self.is_root(p)).collect();
         // Two with one name (`a/index.ts`, `b/index.ts`) can't both go there: none go.
         let mut names = HashSet::new();
         if let Some(twice) = paths.iter().filter_map(|p| p.file_name()).find(|name| !names.insert(*name)) {
@@ -1088,9 +1193,23 @@ impl FileTree {
         self.also.clear();
     }
 
+    /// The last of the window's folders: what's at the bottom of the files.
+    fn last_root(&self) -> PathBuf {
+        self.roots.last().cloned().unwrap_or_default()
+    }
+
+    /// Dropped from outside: files are copied in; folders, the workspace asks (add them to
+    /// the window, or copy them in).
+    fn dropped_in(&mut self, paths: &[PathBuf], dir: &Path, cx: &mut Context<Self>) {
+        if paths.iter().any(|p| p.is_dir()) {
+            return cx.emit(FileTreeEvent::FoldersDropped { paths: paths.to_vec(), into: dir.to_path_buf() });
+        }
+        self.copy_in(paths, dir, cx);
+    }
+
     /// Files and folders dropped from the Finder on a folder: copied into it (beside what
     /// has the same name, never over it), the last one chosen.
-    fn copy_in(&mut self, paths: &[PathBuf], dir: &Path, cx: &mut Context<Self>) {
+    pub fn copy_in(&mut self, paths: &[PathBuf], dir: &Path, cx: &mut Context<Self>) {
         let mut problems = Vec::new();
         for path in paths {
             match fs_ops::copy_into(path, dir) {
@@ -1136,7 +1255,7 @@ impl FileTree {
     // ---------- other operations ----------
 
     fn duplicate(&mut self, _: &Duplicate, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.selected_entry() else { return };
+        let Some(entry) = self.selected_entry().filter(|e| !self.is_root(&e.path)) else { return };
         match fs_ops::duplicate(&entry.path) {
             Ok(copy) => {
                 self.children.clear();
@@ -1159,11 +1278,12 @@ impl FileTree {
     }
 
     pub fn trash(&mut self, _: &Trash, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = self.picked();
+        // (A folder of the window's isn't trashed from its heading.)
+        let picked: Vec<Entry> = self.picked().into_iter().filter(|e| !self.is_root(&e.path)).collect();
         if picked.len() > 1 {
             return self.trash_picked(picked, window, cx);
         }
-        let Some(entry) = self.selected_entry() else { return };
+        let Some(entry) = self.selected_entry().filter(|e| !self.is_root(&e.path)) else { return };
         let what = if entry.is_dir { "folder" } else { "file" };
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
@@ -1260,23 +1380,23 @@ impl FileTree {
     }
 
     fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
-        let path = self.selected_entry().map(|e| e.path).unwrap_or_else(|| self.root.clone());
+        let path = self.selected_entry().map(|e| e.path).unwrap_or_else(|| self.root().to_path_buf());
         crate::system_clipboard::write(cx, ClipboardItem::new_string(path.display().to_string()));
     }
 
     fn copy_relative_path(&mut self, _: &CopyRelativePath, _: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.selected_entry() else { return };
-        let relative = entry.path.strip_prefix(&self.root).unwrap_or(&entry.path).display().to_string();
+        let relative = entry.path.strip_prefix(self.root_of(&entry.path)).unwrap_or(&entry.path).display().to_string();
         crate::system_clipboard::write(cx, ClipboardItem::new_string(relative));
     }
 
     fn reveal(&mut self, _: &Reveal, _: &mut Window, cx: &mut Context<Self>) {
-        let path = self.selected_entry().map(|e| e.path).unwrap_or_else(|| self.root.clone());
+        let path = self.selected_entry().map(|e| e.path).unwrap_or_else(|| self.root().to_path_buf());
         cx.reveal_path(&path);
     }
 
     fn collapse_all(&mut self, _: &CollapseAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.expanded = HashSet::from([self.root.clone()]);
+        self.expanded = self.roots.iter().cloned().collect();
         self.rebuild();
         cx.notify();
     }
@@ -1291,7 +1411,7 @@ impl FileTree {
         }
         self.git_folders = git
             .keys()
-            .flat_map(|p| p.ancestors().skip(1).take_while(|a| a.starts_with(&self.root) && *a != self.root))
+            .flat_map(|p| p.ancestors().skip(1).take_while(|a| self.shown_as_row(a)))
             .map(Path::to_path_buf)
             .collect();
         self.git = git;
@@ -1306,7 +1426,7 @@ impl FileTree {
         }
         self.error_folders = files
             .iter()
-            .flat_map(|p| p.ancestors().skip(1).take_while(|a| a.starts_with(&self.root) && *a != self.root))
+            .flat_map(|p| p.ancestors().skip(1).take_while(|a| self.shown_as_row(a)))
             .map(Path::to_path_buf)
             .collect();
         self.errors = files;
@@ -1341,6 +1461,16 @@ impl FileTree {
         }
         self.also.clear();
         let items = match &target {
+            // A folder's heading: what's done in it, and letting it go from the window (it's
+            // not renamed or trashed from here).
+            Some(e) if self.is_root(&e.path) => {
+                let mut items = vec![NewFile, NewFolder, CopyPath, Reveal, OpenInTerminal, FindInFolder];
+                // (Not the first: the window is kept by it.)
+                if self.several() && e.path != self.roots[0] {
+                    items.push(RemoveRoot);
+                }
+                items
+            }
             Some(e) if e.is_dir => {
                 let mut items = vec![
                     NewFile,
@@ -1456,11 +1586,17 @@ impl FileTree {
                 }
             }
             MenuItem::OpenInTerminal => {
-                let dir = terminal_dir(target.as_ref().map(|e| (e.path.as_path(), e.is_dir)), &self.root);
+                let root = target.as_ref().map_or_else(|| self.root(), |e| self.root_of(&e.path)).to_path_buf();
+                let dir = terminal_dir(target.as_ref().map(|e| (e.path.as_path(), e.is_dir)), &root);
                 cx.emit(FileTreeEvent::OpenTerminal(dir));
             }
             MenuItem::CollapseAll => self.collapse_all(&CollapseAll, window, cx),
             MenuItem::Trash => self.trash(&Trash, window, cx),
+            MenuItem::RemoveRoot => {
+                if let Some(entry) = target {
+                    cx.emit(FileTreeEvent::RemoveRoot(entry.path));
+                }
+            }
         }
         cx.notify();
     }
@@ -1639,19 +1775,33 @@ impl FileTree {
                     let edit = self.edit.as_ref().unwrap();
                     row_el.key_context("TreeEdit").child(name_field(edit)).into_any_element()
                 } else {
-                    row_el
+                    // A folder of the window's, with several: a heading, as the sidebar's are.
+                    let heading = self.several() && row.depth == 0;
+                    let shown: SharedString = match &row.chain {
                         // A joined row: the folders it goes through, then its own name, one line.
-                        .child(div().flex_1().min_w_0().truncate().child(match &row.chain {
-                            Some((_, names)) => SharedString::from(format!("{names}{}", entry.name)),
-                            None => entry.name.clone(),
-                        }))
+                        Some((_, names)) => format!("{names}{}", entry.name).into(),
+                        None if heading => entry.name.to_uppercase().into(),
+                        None => entry.name.clone(),
+                    };
+                    row_el
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .when(heading, |d| d.text_size(px(ui::T_XS)).font_weight(gpui::FontWeight::SEMIBOLD))
+                                .child(shown),
+                        )
                         // A folder with changes inside: a small dot at the end.
                         .when(holds_changes || holds_errors, |r| {
                             let dot = if holds_errors { theme.error } else { theme.git_modified };
                             r.child(div().flex_none().size(px(5.)).rounded_full().bg(dot.opacity(0.8)))
                         })
                         .active(|s| s.opacity(0.7))
-                        .on_drag(dragged, |d, _, _, cx| cx.new(|_| EntryGhost { name: d.name.clone() }))
+                        // (A folder of the window's isn't dragged away: it'd move on disk.)
+                        .when(!self.is_root(&entry.path), |r| {
+                            r.on_drag(dragged, |d, _, _, cx| cx.new(|_| EntryGhost { name: d.name.clone() }))
+                        })
                         .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(tint))
                         .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(tint))
                         .on_drop(cx.listener({
@@ -1663,7 +1813,7 @@ impl FileTree {
                         }))
                         .on_drop(cx.listener(move |this, dropped: &gpui::ExternalPaths, _, cx| {
                             cx.stop_propagation();
-                            this.copy_in(dropped.paths(), &drop_dir, cx);
+                            this.dropped_in(dropped.paths(), &drop_dir, cx);
                         }))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click(ix, event.click_count(), event.modifiers(), window, cx)
@@ -1748,7 +1898,12 @@ impl Render for FileTree {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let menu = self.render_menu(cx);
         let theme = cx.global::<Theme>();
-        let title = self.root.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default();
+        // (Several folders: each its own heading below, none up here.)
+        let title = if self.several() {
+            String::new()
+        } else {
+            self.root().file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default()
+        };
         let header_button = |id: &'static str, icon: &'static str| {
             let (label, action): (&'static str, Box<dyn gpui::Action>) = match id {
                 "tree-new-file" => ("New file", Box::new(NewFile)),
@@ -1857,15 +2012,15 @@ impl Render for FileTree {
                     .id("tree-body")
                     .flex_1()
                     .min_h_0()
-                    // Dropped below the files: to the project's top folder.
+                    // Dropped below the files: into the folder just above (the last one's).
                     .on_drop(cx.listener(|this, dragged: &DraggedEntry, _, cx| {
-                        let root = this.root.clone();
+                        let root = this.last_root();
                         this.drop_into(dragged, root, cx);
                     }))
                     .on_drop(cx.listener(|this, dropped: &gpui::ExternalPaths, _, cx| {
                         cx.stop_propagation();
-                        let root = this.root.clone();
-                        this.copy_in(dropped.paths(), &root, cx);
+                        let root = this.last_root();
+                        this.dropped_in(dropped.paths(), &root, cx);
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -1904,8 +2059,52 @@ impl Render for FileTree {
 mod tests {
     use super::*;
 
-    /// Typing with the files focused goes to a name starting with what's typed; the same
-    /// letter again, to the next one with it.
+    /// Several folders: each a heading with its files under it, closed and opened as a
+    /// folder; one is never renamed or trashed from its heading; one folder again, no heading.
+    #[gpui::test]
+    fn several_folders_each_have_a_heading(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("tree-roots");
+        let _ = std::fs::remove_dir_all(&dir);
+        for (folder, file) in [("api", "lib.rs"), ("web", "page.tsx")] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+            std::fs::write(dir.join(folder).join(file), "").unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Settings::default());
+            cx.set_global(crate::theme::Theme::oled());
+            cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            bind_keys(cx);
+        });
+        let (api, web) = (dir.join("api"), dir.join("web"));
+        let (tree, cx) = cx.add_window_view(|_, cx| FileTree::new(api.clone(), cx));
+        let rows = |t: &FileTree| {
+            t.rows
+                .iter()
+                .filter_map(|r| match &r.kind {
+                    RowKind::Entry(e) => Some(format!("{}{}", "  ".repeat(r.depth), e.name)),
+                    RowKind::NewItem { .. } => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        tree.update(cx, |t, _| assert_eq!(rows(t), ["lib.rs"], "one folder: no heading"));
+        tree.update_in(cx, |t, window, cx| {
+            t.set_roots(vec![api.clone(), web.clone()], cx);
+            assert_eq!(rows(t), ["api", "  lib.rs", "web", "  page.tsx"]);
+            // Closed from its heading, as a folder.
+            t.toggle_row(&web, cx);
+            assert_eq!(rows(t), ["api", "  lib.rs", "web"]);
+            // Not renamed or trashed from its heading.
+            t.selected = Some(api.clone());
+            t.rename(&Rename, window, cx);
+            assert!(t.edit.is_none());
+            t.trash(&Trash, window, cx);
+            assert!(api.exists());
+            t.set_roots(vec![web.clone()], cx);
+            assert_eq!(rows(t), ["page.tsx"]);
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// ⌘-click and ⇧-click pick several; their menu copies their paths, compares two files,
     /// and moves them all to the Trash with one question.
     #[gpui::test]
@@ -2084,6 +2283,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Typing with the files focused goes to a name starting with what's typed; the same
+    /// letter again, to the next one with it.
     #[gpui::test]
     fn typing_goes_to_a_name(cx: &mut gpui::TestAppContext) {
         let dir = crate::tools::test_dir("tree-typing");

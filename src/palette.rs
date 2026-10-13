@@ -276,7 +276,8 @@ fn quick_for(name: &str) -> Option<Quick> {
 pub struct PaletteOptions {
     pub kind: PaletteKind,
     pub commands: Vec<Command>,
-    pub root: PathBuf,
+    /// The window's folders: its files listed from them all.
+    pub roots: crate::roots::ProjectRoots,
     /// Files opened lately, most recent first (the current one left out).
     pub recent_files: Vec<PathBuf>,
     /// Names of the actions run lately, most recent first; they rank higher.
@@ -305,8 +306,10 @@ pub(crate) struct FileEntry {
 }
 
 impl FileEntry {
-    fn new(path: PathBuf, root: &Path) -> Self {
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+    /// As shown and searched: inside its folder (with that folder's name first when the
+    /// window has several).
+    fn new(path: PathBuf, roots: &crate::roots::ProjectRoots) -> Self {
+        let relative = roots.display(&path);
         let name_start = relative.rfind(['/', '\\']).map_or(0, |i| i + 1);
         Self { path, relative, name_start }
     }
@@ -390,7 +393,7 @@ pub struct Palette {
     projects: Vec<PathBuf>,
     /// Symbols of the open file: their line is enough, and moving through them shows each.
     in_file: bool,
-    root: PathBuf,
+    roots: crate::roots::ProjectRoots,
     rows: Vec<Row>,
     selected: usize,
     /// Where the pointer was when the keyboard last moved the selection.
@@ -417,13 +420,13 @@ impl Palette {
         // project that took 1.4 s), and the rows updated if they've changed.
         let mut listed = None;
         if kind == PaletteKind::Files {
-            let root = options.root.clone();
+            let roots = options.roots.clone();
             let hide = cx.global::<crate::settings::Settings>().hidden_paths();
-            let key = (root.clone(), hide.clone());
+            let key = (roots.all().to_vec(), hide.clone());
             listed =
                 LISTED.lock().ok().and_then(|last| last.as_ref().filter(|(k, _)| *k == key).map(|(_, f)| f.clone()));
             cx.spawn(async move |this, cx| {
-                let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
+                let files = cx.background_executor().spawn(async move { list_files_in(&roots, &hide) }).await;
                 if let Ok(mut last) = LISTED.lock() {
                     *last = Some((key, files.clone()));
                 }
@@ -455,7 +458,7 @@ impl Palette {
             .into_iter()
             .filter(|p| p.is_file())
             .take(MAX_RECENT)
-            .map(|p| FileEntry::new(p, &options.root))
+            .map(|p| FileEntry::new(p, &options.roots))
             .collect();
         let mut palette = Self {
             kind,
@@ -477,7 +480,7 @@ impl Palette {
             branches: options.branches,
             tasks: options.tasks,
             projects: options.projects,
-            root: options.root.clone(),
+            roots: options.roots.clone(),
             rows: Vec::new(),
             selected: 0,
             pointer_anchor: None,
@@ -586,7 +589,7 @@ impl Palette {
                 continue;
             }
             let location = &self.locations[i];
-            let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+            let file = self.roots.display(&location.path);
             if fuzzy::score(&format!("{} {file}", location.text), query).is_some() {
                 let highlights = fuzzy::score(&location.text, query).map(|(_, h)| h).unwrap_or_default();
                 self.push(Item::Location(i), highlights, false);
@@ -1220,8 +1223,7 @@ impl Palette {
                     let place = if self.in_file {
                         format!("{}", location.position.line + 1)
                     } else {
-                        let file =
-                            location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+                        let file = self.roots.display(&location.path);
                         format!("{file}:{}", location.position.line + 1)
                     };
                     (
@@ -1236,7 +1238,7 @@ impl Palette {
                         Some(div().text_color(dim).child(place).into_any_element()),
                     )
                 } else {
-                    let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+                    let file = self.roots.display(&location.path);
                     let marked = highlights_in(&location.text, 0);
                     let text = StyledText::new(location.text.clone()).with_highlights(marked);
                     // Code shows in the code font; a problem's message in the interface one.
@@ -1417,19 +1419,19 @@ fn rank_files(files: &[FileEntry], query: &str, recent: &HashSet<PathBuf>) -> Ve
     }
 }
 
-/// The project's files as ⌘P last listed them (with the `hide` setting then).
-type Listed = ((PathBuf, Vec<String>), Vec<FileEntry>);
+/// The project's files as ⌘P last listed them (its folders, the `hide` setting then).
+type Listed = ((Vec<PathBuf>, Vec<String>), Vec<FileEntry>);
 static LISTED: std::sync::Mutex<Option<Listed>> = std::sync::Mutex::new(None);
 
 /// The project's files listed a moment after it opens (in the background), so the first
 /// ⌘P shows them at once.
-pub(crate) fn list_files_soon(root: PathBuf, cx: &mut App) {
+pub(crate) fn list_files_soon(roots: crate::roots::ProjectRoots, cx: &mut App) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
         // (The settings now: the project's own, read since it opened.)
         let Ok(hide) = cx.update(|cx| cx.global::<crate::settings::Settings>().hidden_paths()) else { return };
-        let key = (root.clone(), hide.clone());
-        let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
+        let key = (roots.all().to_vec(), hide.clone());
+        let files = cx.background_executor().spawn(async move { list_files_in(&roots, &hide) }).await;
         if let Ok(mut last) = LISTED.lock() {
             // (Unless ⌘P has listed them meanwhile.)
             if last.as_ref().is_none_or(|(k, _)| *k != key) {
@@ -1440,9 +1442,33 @@ pub(crate) fn list_files_soon(root: PathBuf, cx: &mut App) {
     .detach();
 }
 
+/// Every file in the window's folders, each as [`list_files`] lists them, folder after folder.
+pub(crate) fn list_files_in(roots: &crate::roots::ProjectRoots, hide: &[String]) -> Vec<FileEntry> {
+    if !roots.several() {
+        return list_files_under(roots.primary(), roots, hide);
+    }
+    // (Each folder its share of the most listed: a big first one doesn't leave the others out.)
+    let share = MAX_FILES / roots.all().len();
+    roots
+        .all()
+        .iter()
+        .flat_map(|root| {
+            let mut files = list_files_under(root, roots, hide);
+            files.truncate(share);
+            files
+        })
+        .collect()
+}
+
 /// Every file in the project, respecting `.gitignore` and the `hide` setting, sorted by path.
-/// Its folders are read side by side (one by one, 42,000 files took 1.4 s).
+#[cfg(test)]
 pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
+    list_files_under(root, &crate::roots::ProjectRoots::new(root.to_path_buf()), hide)
+}
+
+/// The files in `root` (one of `roots`), as shown among them all. Its folders are read side
+/// by side (one by one, 42,000 files took 1.4 s).
+fn list_files_under(root: &Path, roots: &crate::roots::ProjectRoots, hide: &[String]) -> Vec<FileEntry> {
     use ignore::WalkState;
     let hidden = crate::project_index::hidden_rules(root, hide);
     let found: std::sync::Mutex<Vec<FileEntry>> = std::sync::Mutex::new(Vec::new());
@@ -1465,7 +1491,7 @@ pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
                 if found.len() >= MAX_FILES * 4 {
                     return WalkState::Quit;
                 }
-                found.push(FileEntry::new(entry.into_path(), root));
+                found.push(FileEntry::new(entry.into_path(), roots));
                 WalkState::Continue
             })
         });
@@ -1749,7 +1775,7 @@ mod tests {
         let options = PaletteOptions {
             kind,
             commands,
-            root: PathBuf::from("/nonexistent"),
+            roots: crate::roots::ProjectRoots::new(PathBuf::from("/nonexistent")),
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             line_count: Some(10),
@@ -1835,7 +1861,7 @@ mod tests {
         let options = PaletteOptions {
             kind: PaletteKind::Locations,
             commands: Vec::new(),
-            root: PathBuf::from("/p"),
+            roots: crate::roots::ProjectRoots::new(PathBuf::from("/p")),
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             line_count: None,
@@ -1866,7 +1892,7 @@ mod tests {
         let options = PaletteOptions {
             kind: PaletteKind::Branch,
             commands: Vec::new(),
-            root: PathBuf::from("/p"),
+            roots: crate::roots::ProjectRoots::new(PathBuf::from("/p")),
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             line_count: None,
@@ -1907,7 +1933,7 @@ mod tests {
         let options = PaletteOptions {
             kind: PaletteKind::Run,
             commands: Vec::new(),
-            root: PathBuf::from("/p"),
+            roots: crate::roots::ProjectRoots::new(PathBuf::from("/p")),
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             line_count: None,

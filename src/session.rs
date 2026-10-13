@@ -27,6 +27,8 @@ pub struct Session {
     pub searches: Vec<crate::search::SearchQuery>,
     pub terminal_open: bool,
     pub window: Option<WindowState>,
+    /// The window's other folders, beside the one this session is for: they come back with it.
+    pub roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

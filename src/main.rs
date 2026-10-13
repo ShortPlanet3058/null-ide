@@ -60,6 +60,7 @@ mod punctuation;
 mod python_env;
 #[cfg(debug_assertions)]
 mod qa;
+mod roots;
 mod search;
 mod server_log;
 mod servers;
@@ -101,6 +102,8 @@ use workspace::Workspace;
 /// editor).
 struct Opening {
     root: PathBuf,
+    /// More folders, opened in the same window beside `root` (`null api web`).
+    others: Vec<PathBuf>,
     file: Option<PathBuf>,
     place: Option<(u32, u32)>,
     wait: bool,
@@ -131,6 +134,16 @@ fn resolve_args() -> Opening {
     if wait {
         args.remove(0);
     }
+    // Several folders (`null api web`): one window with them all.
+    if !wait && args.len() > 1 {
+        let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
+        let folders: Vec<PathBuf> = args.iter().map(|a| absolute(&cwd.join(a))).collect();
+        if folders.iter().all(|f| f.is_dir()) {
+            let mut folders = folders.into_iter();
+            let root = folders.next().unwrap_or(cwd);
+            return Opening { root, others: folders.collect(), file: None, place: None, wait: false };
+        }
+    }
     let (root, file) = resolve_path(args.first().cloned());
     // A file named with its place (`a.rs:42`) when there's no file by that whole name.
     let (file, place) = match file {
@@ -150,7 +163,7 @@ fn resolve_args() -> Opening {
         (Some(file), true) => repository_of(file),
         _ => root,
     };
-    Opening { root, file, place, wait }
+    Opening { root, others: Vec::new(), file, place, wait }
 }
 
 /// The repository `file` is in (the folder holding `.git`), else its own folder.
@@ -264,10 +277,13 @@ fn main() {
             }
         }
     });
-    let Opening { root, file, place, wait } = resolve_args();
+    // Started by the Mac with nothing to open (the Dock, the Finder, or `null a b` through
+    // `open -a`, whose paths come a moment later as "open these").
+    let by_the_system = cfg!(target_os = "macos") && std::env::args().len() <= 1;
+    let Opening { root, others, file, place, wait } = resolve_args();
     trace::mark("what to open worked out");
     // Off the Mac: a Null already running opens it instead (a waiting one is its own).
-    let request = instance::Request { root: root.clone(), file: file.clone(), place };
+    let request = instance::Request { root: root.clone(), others: others.clone(), file: file.clone(), place };
     let mut handed = match instance::launch(&request, wait) {
         instance::Launch::HandedOver => return,
         instance::Launch::First(handed) => handed,
@@ -278,7 +294,10 @@ fn main() {
     let app = Application::new().with_assets(assets::Assets);
     trace::mark("app made");
     let (opened, mut to_open) = futures::channel::mpsc::unbounded::<Vec<String>>();
+    let handed_paths = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_paths = handed_paths.clone();
     app.on_open_urls(move |urls| {
+        saw_paths.store(true, std::sync::atomic::Ordering::SeqCst);
         opened.unbounded_send(urls).ok();
     });
     app.run(move |cx: &mut App| {
@@ -287,8 +306,39 @@ fn main() {
             use futures::StreamExt;
             while let Some(urls) = to_open.next().await {
                 let paths: Vec<PathBuf> = urls.iter().filter_map(|u| path_from_url(u)).collect();
+                // Several folders at once (`null api web`, or dropped together on the Dock
+                // icon): one window with them all.
+                if paths.len() > 1 && paths.iter().all(|p| p.is_dir()) {
+                    let mut folders = paths.into_iter();
+                    let root = folders.next().unwrap_or_default();
+                    cx.update(|cx| {
+                        open_project_window_now(root.clone(), None, None, cx);
+                        add_folders(&root, folders.collect(), cx);
+                    })
+                    .ok();
+                    continue;
+                }
                 cx.update(|cx| {
                     let workspace = cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>());
+                    // Null was started for these: the first is the window's project (a
+                    // file's folder, with the file open), the rest open in it.
+                    if workspace.is_none() {
+                        let mut paths = paths.into_iter();
+                        let Some(first) = paths.next() else { return };
+                        let (root, file) = if first.is_dir() {
+                            (first, None)
+                        } else {
+                            (first.parent().map(PathBuf::from).unwrap_or_default(), Some(first))
+                        };
+                        open_project_window_now(root.clone(), file, None, cx);
+                        let rest: Vec<PathBuf> = paths.collect();
+                        if !rest.is_empty()
+                            && let Some(handle) = window_on(&root, None, cx)
+                        {
+                            handle.update(cx, |workspace, window, cx| workspace.open_paths(rest, window, cx)).ok();
+                        }
+                        return;
+                    }
                     if let Some(handle) = workspace {
                         handle
                             .update(cx, |workspace, window, cx| {
@@ -309,7 +359,8 @@ fn main() {
                 while let Some(request) = handed.next().await {
                     cx.update(|cx| {
                         // A file in a project a window has open: opened there.
-                        if let Some(file) = &request.file
+                        if request.others.is_empty()
+                            && let Some(file) = &request.file
                             && let Some(handle) = window_holding(file, cx)
                         {
                             let (file, place) = (file.clone(), request.place);
@@ -321,7 +372,9 @@ fn main() {
                                 .ok();
                             return;
                         }
-                        open_project_window_now(request.root, request.file, request.place, cx)
+                        let root = request.root.clone();
+                        open_project_window_now(request.root, request.file, request.place, cx);
+                        add_folders(&root, request.others, cx);
                     })
                     .ok();
                 }
@@ -364,8 +417,26 @@ fn main() {
         trace::mark("settings, keys and menus ready");
         if wait {
             open_waiting_window(root, file, place, cx);
+        } else if by_the_system && !handed_paths.load(std::sync::atomic::Ordering::SeqCst) {
+            // Paths may be on their way: then they're what opens, not the last project.
+            // (A timer, not a deferred open: that would wait for an update that never comes.)
+            let handed_paths = handed_paths.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(350)).await;
+                cx.update(|cx| {
+                    if !handed_paths.load(std::sync::atomic::Ordering::SeqCst) && cx.windows().is_empty() {
+                        open_project_window_now(root, file, place, cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        } else if by_the_system {
+            // (Already here: the paths open the window.)
         } else {
+            let first = root.clone();
             open_project_window_now(root, file, place, cx);
+            add_folders(&first, others, cx);
         }
         trace::mark("window opened");
         // The spell checker started once the window's up, then what's shown checked.
@@ -392,8 +463,8 @@ fn main() {
     });
 }
 
-/// The window already on project `root`, other than `except`. One project has one window:
-/// two would keep (and clear) the same backup of unsaved work.
+/// The window already on project `root` (one of its folders), other than `except`. One
+/// project has one window: two would keep (and clear) the same backup of unsaved work.
 pub(crate) fn window_on(
     root: &std::path::Path,
     except: Option<gpui::AnyWindowHandle>,
@@ -405,10 +476,20 @@ pub(crate) fn window_on(
         .into_iter()
         .filter(|w| Some(*w) != except)
         .filter_map(|w| w.downcast::<Workspace>())
-        .find(|handle| handle.read(cx).is_ok_and(|workspace| real(workspace.root(cx)) == root))
+        .find(|handle| handle.read(cx).is_ok_and(|workspace| workspace.roots().all().iter().any(|r| real(r) == root)))
 }
 
-/// The window whose project holds `file` (the innermost, should several), if one does.
+/// `others` added to the window on `root` (just opened), beside it.
+fn add_folders(root: &std::path::Path, others: Vec<PathBuf>, cx: &mut gpui::App) {
+    if others.is_empty() {
+        return;
+    }
+    if let Some(handle) = window_on(root, None, cx) {
+        handle.update(cx, |workspace, window, cx| workspace.add_roots(others, window, cx)).ok();
+    }
+}
+
+/// The window with a folder holding `file` (the innermost, should several), if one does.
 fn window_holding(file: &std::path::Path, cx: &gpui::App) -> Option<gpui::WindowHandle<Workspace>> {
     let real = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let file = real(file);
@@ -416,8 +497,17 @@ fn window_holding(file: &std::path::Path, cx: &gpui::App) -> Option<gpui::Window
         .into_iter()
         .filter_map(|w| w.downcast::<Workspace>())
         .filter_map(|handle| {
-            let root = real(handle.read(cx).ok()?.root(cx));
-            file.starts_with(&root).then(|| (root.as_os_str().len(), handle))
+            // Any of its folders; the innermost that holds the file counts.
+            let workspace = handle.read(cx).ok()?;
+            let depth = workspace
+                .roots()
+                .all()
+                .iter()
+                .map(|r| real(r))
+                .filter(|r| file.starts_with(r))
+                .map(|r| r.as_os_str().len())
+                .max()?;
+            Some((depth, handle))
         })
         .max_by_key(|(depth, _)| *depth)
         .map(|(_, handle)| handle)

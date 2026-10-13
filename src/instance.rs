@@ -14,6 +14,9 @@ use std::time::Duration;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Request {
     pub root: PathBuf,
+    /// More folders for the same window (`null api web`).
+    #[serde(default)]
+    pub others: Vec<PathBuf>,
     pub file: Option<PathBuf>,
     pub place: Option<(u32, u32)>,
 }
@@ -207,7 +210,12 @@ mod tests {
             }
             got
         });
-        let request = Request { root: PathBuf::from("/p"), file: Some(PathBuf::from("/p/a.rs")), place: Some((4, 2)) };
+        let request = Request {
+            root: PathBuf::from("/p"),
+            others: Vec::new(),
+            file: Some(PathBuf::from("/p/a.rs")),
+            place: Some((4, 2)),
+        };
         assert!(send(port, "wrong", &request).is_none());
         assert!(send(port, "s3cret", &request).is_some());
         assert_eq!(server.join().unwrap(), [None, Some(request)]);

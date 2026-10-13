@@ -19,8 +19,11 @@
 
 **Everywhere**
 
+- **Several folders in one window**: Add Folder to Window…, folders dropped on the files, or
+  `null api web`. Each folder is a heading in the files; ⌘P, search, symbols and git's marks
+  cover them all; each gets its own language servers; git follows the file you're in, with a
+  picker of the folders' repositories in the Git panel. The window remembers its folders.
 - Null is now under the GNU General Public License 3.0 (0.1.0 stays MIT or Apache 2.0).
-
 - Quick settings: − + and ← → are buttons; the ≡ button lists every command.
 - Committing a file ends the changes shown in it.
 
