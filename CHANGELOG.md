@@ -46,6 +46,9 @@ license.
 - Linux: an API key is saved even where the system has no keyring yet (as after an xrdp
   login): Null asks for one to be made. The key can also come from its environment
   variable, as `NVIDIA_API_KEY`.
+- A hosted AI service that hasn't started answering after a minute is said as such (with a
+  hint to try another model), instead of "Writing…" forever: NVIDIA's free models can keep a
+  request waiting for minutes.
 
 **Installers**
 

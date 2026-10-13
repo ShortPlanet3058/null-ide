@@ -652,6 +652,32 @@ pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().http_status_as_error(false).build().into()
 }
 
+/// How long a hosted service may take to start a streamed answer. NVIDIA's free models can
+/// hold a request in a queue for minutes, with nothing to show for it.
+const START_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The agent for a streamed answer from `base`: it gives up on a hosted service that hasn't
+/// started answering in time. A model on this computer may be loading first, so it gets as
+/// long as it needs.
+fn streaming_agent(base: &str) -> ureq::Agent {
+    ureq::Agent::config_builder().http_status_as_error(false).timeout_recv_response(start_limit(base)).build().into()
+}
+
+fn start_limit(base: &str) -> Option<std::time::Duration> {
+    let local = ["localhost", "127.0.0.1", "[::1]"].iter().any(|host| base.contains(host));
+    (!local).then_some(START_WITHIN)
+}
+
+/// Why a request to `service` got no answer.
+fn unreached(service: &str, error: ureq::Error) -> String {
+    match error {
+        ureq::Error::Timeout(_) => format!(
+            "{service} hasn't started answering in a minute: it may be busy. Try again, or choose another model in Settings → AI."
+        ),
+        error => format!("Couldn't reach {service}: {error}"),
+    }
+}
+
 /// The message inside a provider's error response, or the raw body.
 pub(crate) fn error_message(status: u16, body: &str) -> String {
     let parsed: Option<Value> = serde_json::from_str(body).ok();
@@ -736,17 +762,16 @@ fn openai_compatible(
         crate::ollama::ensure_running(base);
     }
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-    let mut request = agent().post(&url).header("Content-Type", "application/json");
+    let mut request = streaming_agent(base).post(&url).header("Content-Type", "application/json");
     if let Some(key) = key {
         request = request.header("Authorization", &format!("Bearer {key}"));
     }
     let body = chat_body(id, base, model, effort, prompt);
-    let response = request.send_json(&body).map_err(|e| {
-        if id == ProviderId::Ollama {
+    let response = request.send_json(&body).map_err(|e| match e {
+        e if id == ProviderId::Ollama && !matches!(e, ureq::Error::Timeout(_)) => {
             format!("Couldn't reach Ollama at {base}. Is it running? ({e})")
-        } else {
-            format!("Couldn't reach {}: {e}", id.label())
         }
+        e => unreached(id.label(), e),
     })?;
     let status = response.status().as_u16();
     let mut body = response.into_body();
@@ -795,14 +820,14 @@ fn claude_api(
     on_text: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     let body = claude_body(model, effort, prompt);
-    let response = agent()
+    let response = streaming_agent("https://api.anthropic.com")
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
         .header("anthropic-beta", "server-side-fallback-2026-07-01")
         .header("content-type", "application/json")
         .send_json(&body)
-        .map_err(|e| format!("Couldn't reach the Claude API: {e}"))?;
+        .map_err(|e| unreached("the Claude API", e))?;
     let status = response.status().as_u16();
     let mut body = response.into_body();
     if status >= 400 {
@@ -1437,6 +1462,15 @@ mod tests {
 
     /// AI is off until turned on; a file from when it was on by default (a provider, no
     /// `enabled`) keeps it on; turned off stays off.
+    #[test]
+    fn hosted_services_must_start_answering_in_time() {
+        assert_eq!(start_limit("https://integrate.api.nvidia.com/v1"), Some(START_WITHIN));
+        assert_eq!(start_limit("https://api.anthropic.com"), Some(START_WITHIN));
+        // A local model may be loading first.
+        assert_eq!(start_limit("http://localhost:11434/v1"), None);
+        assert_eq!(start_limit("http://127.0.0.1:8000/v1"), None);
+    }
+
     #[test]
     fn ai_is_off_until_turned_on() {
         let read = |json: &str| serde_json::from_str::<AiSettings>(json).unwrap();
