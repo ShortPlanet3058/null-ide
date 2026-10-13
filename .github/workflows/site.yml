@@ -1,11 +1,11 @@
-# Null's site (site/, with the README's pictures and the app's icon), published on GitHub
+# Null's site (put together by scripts/build-site.sh), published on GitHub
 # Pages whenever main changes it.
 name: Site
 
 on:
   push:
     branches: [main]
-    paths: ["site/**", "docs/images/**", "packaging/null.svg", ".github/workflows/site.yml"]
+    paths: ["site/**", "docs/images/**", "packaging/null.svg", "scripts/promo/**", "scripts/build-site.sh", "assets/fonts/**", ".github/workflows/site.yml"]
   workflow_dispatch:
 
 permissions:
@@ -26,11 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Put the site together
-        run: |
-          mkdir -p _site/images
-          cp -R site/. _site/
-          cp docs/images/*.png _site/images/
-          cp packaging/null.svg _site/icon.svg
+        run: scripts/build-site.sh _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

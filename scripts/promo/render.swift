@@ -8,6 +8,7 @@
 // writes a second film at another size from the same pictures. --query passes options to
 // the page (cut=30, vertical); --page is its layout size (1080x1920 for the vertical one).
 //   render PAGE.html DIR --stills 1.5,12,30   (pictures of those moments, to look at)
+// --bitrate MBPS sets the video's (for the website's small files).
 //
 // The page says how long it is (`window.DURATION`). Its window stays off-screen and the
 // program never comes to the front.
@@ -27,6 +28,7 @@ struct Options {
     var query: String?
     var pageWidth = 1920
     var pageHeight = 1080
+    var bitrate: Double?
 }
 
 func options() -> Options {
@@ -45,6 +47,7 @@ func options() -> Options {
             o.width = parts[0]; o.height = parts[1]
         case "--poster": o.poster = (Double(args.removeFirst())!, URL(fileURLWithPath: args.removeFirst()))
         case "--query": o.query = args.removeFirst()
+        case "--bitrate": o.bitrate = Double(args.removeFirst())! * 1_000_000
         case "--page":
             let parts = args.removeFirst().split(separator: "x").map { Int($0)! }
             o.pageWidth = parts[0]; o.pageHeight = parts[1]
@@ -126,8 +129,8 @@ final class Renderer: NSObject, WKNavigationDelegate {
             return
         }
         let duration = try await web.callAsyncJavaScript("return window.DURATION", contentWorld: .page) as! Double
-        var films = [try Film(url: o.out, width: o.width, height: o.height, fps: o.fps)]
-        if let (w, h, url) = o.also { films.append(try Film(url: url, width: w, height: h, fps: o.fps)) }
+        var films = [try Film(url: o.out, width: o.width, height: o.height, fps: o.fps, bitrate: o.bitrate)]
+        if let (w, h, url) = o.also { films.append(try Film(url: url, width: w, height: h, fps: o.fps, bitrate: o.bitrate)) }
         let frames = Int((duration * Double(o.fps)).rounded())
         let started = Date()
         for i in 0..<frames {
@@ -156,12 +159,12 @@ final class Film {
     let adaptor: AVAssetWriterInputPixelBufferAdaptor
     let width: Int, height: Int, fps: Int
 
-    init(url: URL, width: Int, height: Int, fps: Int) throws {
+    init(url: URL, width: Int, height: Int, fps: Int, bitrate wanted: Double? = nil) throws {
         self.width = width; self.height = height; self.fps = fps
         try? FileManager.default.removeItem(at: url)
         writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         // Mostly still, dark pictures: the encoder stays well under this.
-        let bitrate = Int(Double(width * height * fps) * 0.08)
+        let bitrate = Int(wanted ?? Double(width * height * fps) * 0.08)
         input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
