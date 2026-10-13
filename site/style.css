@@ -180,6 +180,9 @@ section.features, section.ai, section.film, section.download { max-width: 1280px
 .platform .how { color: var(--muted); font-size: 15px; margin: 10px 0 18px; }
 .platform .get { margin-top: auto; align-self: flex-start; padding: 11px 18px; border-radius: 999px; border: 1px solid var(--line-2); font-weight: 600; font-size: 15px; transition: background .3s, color .3s, border-color .3s; }
 .platform:hover .get { border-color: var(--text); }
+.platform .how code { font-size: .85em; color: var(--soft); }
+.platform .alt { margin-top: 12px; font-size: 13px; color: var(--faint); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; cursor: pointer; }
+.platform .alt:hover { color: var(--muted); }
 .platform.mine { border-color: rgba(242,179,91,.55); box-shadow: 0 0 80px rgba(242,179,91,.08); }
 .platform.mine::before { content: "Your computer"; position: absolute; top: 18px; right: 18px; font: 500 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--amber); }
 .platform.mine .get { background: var(--amber); color: var(--amber-ink); border-color: var(--amber); }

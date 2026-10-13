@@ -23,3 +23,22 @@ mkdir -p "$data/applications"
 sed "s|^Exec=null |Exec=$HOME/.local/bin/null |" "$desktop" > "$data/applications/null.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database "$data/applications" || true
 echo "Installed Null: ~/.local/bin/null and its menu entry"
+
+# `null` in a terminal: ~/.local/bin on the PATH. Ubuntu's ~/.profile adds it only at the
+# next login, and zsh never reads that file: the line added to the shell's own file.
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) exit 0 ;;
+esac
+line='export PATH="$HOME/.local/bin:$PATH"  # added by the Null installer'
+added=
+for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    [ -f "$rc" ] || continue
+    grep -qs '/.local/bin' "$rc" && continue
+    printf '\n%s\n' "$line" >> "$rc"
+    added="$added ${rc##*/}"
+done
+if [ -n "$added" ]; then
+    echo "Added ~/.local/bin to the PATH in$added: open a new terminal and \`null .\` works."
+else
+    echo "~/.local/bin isn't on your PATH: add it to your shell's settings to type \`null\`."
+fi

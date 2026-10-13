@@ -78,6 +78,11 @@
     $("#hero-download").textContent = `Download for ${name}`;
     $("#hero-download").href = mine.href;
   }
+  // The second download in a card (a link inside a link isn't allowed: a span that goes).
+  $$(".platform .alt").forEach(alt => alt.addEventListener("click", e => {
+    e.preventDefault();
+    location.href = alt.dataset.href;
+  }));
   // Keys as this computer names them.
   if (os && os !== "mac") {
     $$(".lead, .steps span, .three p, .three .k").forEach(el => {

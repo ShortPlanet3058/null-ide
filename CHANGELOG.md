@@ -42,6 +42,14 @@ license.
   first.
 - After Close Folder the title and the files say no folder is open.
 
+**Installers**
+
+- Windows: an installer, for you alone (no administrator): the Start menu, `null` on the
+  PATH, "Open with Null" on folders and files, an uninstaller. The .zip stays.
+- Ubuntu and Debian: a .deb, `null` in /usr/bin for every terminal at once.
+- Linux's install.sh adds ~/.local/bin to your shell's PATH when it isn't there (zsh never
+  had it).
+
 ## 0.1.0
 
 The first release of Null: a calm, fast code editor where the screen belongs to your code,
