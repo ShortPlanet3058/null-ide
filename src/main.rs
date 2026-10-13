@@ -264,7 +264,52 @@ fn window_bounds(saved: Option<session::WindowState>, cx: &App) -> WindowBounds 
     }
 }
 
+/// What `null --help` says.
+const HELP: &str = "Null, a calm, fast code editor.
+
+  null                  the last project (from a terminal: the folder you're in)
+  null PATH             a folder as the project, or a file in it
+  null FILE:LINE[:COL]  a file at a line (and column)
+  null A B ...          several folders in one window
+  null --wait FILE      returns once the file's tab is closed (git's editor)
+  null --version        Null's version
+";
+
+/// `--version` and `--help`, answered in the terminal (Null not started); and on Linux, no
+/// display to open a window on said, not waited on forever.
+fn answered_in_the_terminal() -> bool {
+    let first = std::env::args().nth(1);
+    let answer = match first.as_deref() {
+        Some("--version" | "-V") => format!("Null {}", env!("CARGO_PKG_VERSION")),
+        Some("--help" | "-h") => HELP.trim_end().to_string(),
+        _ => {
+            if cfg!(all(unix, not(target_os = "macos")))
+                && std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty())
+                && std::env::var_os("WAYLAND_DISPLAY").is_none_or(|d| d.is_empty())
+            {
+                eprintln!("Null needs a graphical session: neither DISPLAY nor WAYLAND_DISPLAY is set.");
+                std::process::exit(1);
+            }
+            return false;
+        }
+    };
+    // (On Windows Null has no console of its own: the one it was started from, if any.)
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn AttachConsole(process: u32) -> i32;
+        }
+        // SAFETY: a plain Win32 call with no pointers; it fails harmlessly with no console.
+        unsafe { AttachConsole(u32::MAX) };
+    }
+    println!("{answer}");
+    true
+}
+
 fn main() {
+    if answered_in_the_terminal() {
+        return;
+    }
     trace::start();
     trace::mark("main");
     crash::record();

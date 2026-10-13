@@ -8,7 +8,7 @@ use crate::git;
 use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
 use crate::lsp_store::{LspStore, Readiness};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
-use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, format_keys};
+use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, PathFor, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::AutoSave;
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
@@ -3641,7 +3641,7 @@ impl Workspace {
                     format!("\"{}\" \"$@\" &", exe.display()),
                 ),
             };
-            let script = shell_script(&launch, &waiting, &all);
+            let script = shell_script(&exe.display().to_string(), &launch, &waiting, &all);
             let home = crate::tools::home_dir().unwrap_or_default();
             let system = PathBuf::from("/usr/local/bin");
             let writable = |dir: &Path| {
@@ -3759,6 +3759,8 @@ impl Workspace {
         session.window = self.window_state;
         self.restore_session(session, window, cx);
         self.schedule_session_save(cx);
+        // (With no tab open, nothing else names the new project in the title.)
+        self.refresh_title(window, cx);
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -4023,7 +4025,9 @@ impl Workspace {
     /// "file — project" in the title bar, and the close button's unsaved dot.
     fn refresh_title(&self, window: &mut Window, cx: &App) {
         // (Several folders: all their names, `api + web`.)
-        let names: Vec<String> = self.roots.all().iter().map(|r| self.roots.label(r)).collect();
+        // (No folder open, Null's own empty one: no name.)
+        let names: Vec<String> =
+            self.roots.all().iter().filter(|r| !crate::session::is_scratch(r)).map(|r| self.roots.label(r)).collect();
         let project = (!names.is_empty()).then(|| names.join(" + "));
         let editor = self.active_editor().map(|e| e.read(cx));
         let title = match (editor.map(|e| e.file_name()), project) {
@@ -4283,8 +4287,8 @@ impl Workspace {
             multiple: false,
             prompt: Some("Open in New Window".into()),
         });
-        cx.spawn_in(window, async move |_, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::NewWindow, cx) else { return };
             if let Some(folder) = paths.into_iter().next() {
                 cx.update(|_, cx| crate::open_project_window(folder, None, cx)).ok();
             }
@@ -4632,7 +4636,7 @@ impl Workspace {
             prompt: Some("Open".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::File, cx) else { return };
             let Some(path) = paths.into_iter().next() else { return };
             this.update_in(cx, |this, window, cx| this.open_path(path, window, cx)).ok();
         })
@@ -4658,7 +4662,7 @@ impl Workspace {
             prompt: Some("Add to Window".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::AddFolder, cx) else { return };
             this.update_in(cx, |this, window, cx| this.add_roots(paths, window, cx)).ok();
         })
         .detach();
@@ -4757,6 +4761,30 @@ impl Workspace {
         .detach();
     }
 
+    /// What a file dialog chose; when the system has none (its answer an error), the path
+    /// typed instead, and nothing for now.
+    fn chosen<E, C>(
+        answer: Result<Result<Option<Vec<PathBuf>>, E>, C>,
+        this: &gpui::WeakEntity<Self>,
+        purpose: PathFor,
+        cx: &mut gpui::AsyncWindowContext,
+    ) -> Option<Vec<PathBuf>> {
+        match answer {
+            Ok(Ok(paths)) => paths,
+            _ => {
+                this.update_in(cx, |this, window, cx| this.type_a_path(purpose, window, cx)).ok();
+                None
+            }
+        }
+    }
+
+    /// No file dialog on this system (Linux without a desktop portal, as on a bare window
+    /// manager): the path typed instead, with what's in the folders listed on the way.
+    fn type_a_path(&mut self, purpose: PathFor, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_notice("This system has no file dialog (no desktop portal): type the path instead.".into(), cx);
+        self.open_palette_with(PaletteKind::Path(purpose), None, Vec::new(), window, cx);
+    }
+
     /// A folder as the project, in this window.
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -4766,7 +4794,7 @@ impl Workspace {
             prompt: Some("Open Folder".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::Folder, cx) else { return };
             let Some(path) = paths.into_iter().next() else { return };
             this.update_in(cx, |this, window, cx| this.open_path(path, window, cx)).ok();
         })
@@ -5377,6 +5405,19 @@ impl Workspace {
                 this.open_settings_at(None, window, cx);
                 if let Some((panel, _)) = &this.settings_panel {
                     panel.update(cx, |panel, cx| panel.search_for(&query, cx));
+                }
+            }
+            PaletteEvent::PathChosen(purpose, path) => {
+                let path = path.clone();
+                this.close_palette(window, cx);
+                match purpose {
+                    PathFor::Folder | PathFor::File => this.open_path(path, window, cx),
+                    PathFor::NewWindow => crate::open_project_window(path, None, cx),
+                    PathFor::AddFolder => this.add_roots(vec![path], window, cx),
+                    PathFor::Program => {
+                        this.debug_program = Some(path.clone());
+                        this.debug(path, cx);
+                    }
                 }
             }
             PaletteEvent::OpenProjectInNewWindow(path) => {
@@ -7627,7 +7668,7 @@ impl Workspace {
             prompt: Some("Debug".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::Program, cx) else { return };
             let Some(program) = paths.into_iter().next() else { return };
             this.update(cx, |this, cx| {
                 this.debug_program = Some(program.clone());
@@ -10230,6 +10271,8 @@ fn cmd_script(exe: &Path) -> String {
          rem null --wait <file> returns once its tab is closed (git's editor).\r\n\
          setlocal\r\n\
          set \"wait=\"\r\n\
+         if \"%~1\"==\"--version\" (\"{exe}\" --version & exit /b)\r\n\
+         if \"%~1\"==\"--help\" (\"{exe}\" --help & exit /b)\r\n\
          if \"%~1\"==\"--wait\" set \"wait=1\"\r\n\
          if defined wait shift\r\n\
          if \"%~1\"==\"\" (start \"\" \"{exe}\" \"%CD%\\.\" & exit /b)\r\n\
@@ -10252,6 +10295,7 @@ fn git_bash_script(exe: &Path) -> String {
     let exe = exe.display().to_string().replace('\\', "/");
     format!(
         "#!/bin/sh\n# Opens files and folders in Null from Git Bash: `null .`, `null a.rs:42`, `null --wait <file>`.\n\
+         case \"$1\" in --version|-V|--help|-h) exec \"{exe}\" \"$1\" ;; esac\n\
          wait=\n\
          [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
@@ -10272,11 +10316,12 @@ fn git_bash_script(exe: &Path) -> String {
     )
 }
 
-fn shell_script(launch: &str, waiting: &str, all: &str) -> String {
+fn shell_script(exe: &str, launch: &str, waiting: &str, all: &str) -> String {
     format!(
         "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`, `null a.rs:42`.\n\
          # `null --wait <file>` returns once its tab is closed (git's editor: GIT_EDITOR=\"null --wait\").\n\
          # `null api web`: several folders, one window.\n\
+         case \"$1\" in --version|-V|--help|-h) exec \"{exe}\" \"$1\" ;; esac\n\
          wait=\n\
          [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
@@ -13542,12 +13587,17 @@ mod tests {
         let log = dir.join("log");
         // A stand-in for Null that writes down what it was given.
         let script = shell_script(
+            "echo",
             &format!("echo \"$p\" >> \"{}\"", log.display()),
             &format!("echo \"wait $p\" >> \"{}\"", log.display()),
             &format!("echo \"all $*\" >> \"{}\"", log.display()),
         );
         let command = dir.join("null");
         std::fs::write(&command, script).unwrap();
+        // `--version` goes to Null itself (here `echo`), opening nothing.
+        let version = crate::tools::command("sh").arg(&command).arg("--version").current_dir(&dir).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "--version");
+        assert!(!log.exists());
         let run = crate::tools::command("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         let given = std::fs::read_to_string(&log).unwrap();

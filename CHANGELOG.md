@@ -30,6 +30,18 @@ license.
 - Quick settings: − + and ← → are buttons; the ≡ button lists every command.
 - Committing a file ends the changes shown in it.
 
+**From testing on fresh Windows and Ubuntu machines**
+
+- Windows: Null starts on a fresh Windows (it needed Microsoft's Visual C++ runtime,
+  VCRUNTIME140.dll, which only comes with other software).
+- Linux: with no file dialog on the system (no desktop portal, as on a bare window manager),
+  Open, Open Folder and Add Folder let you type the path, listing what's in each folder.
+- `null --version` and `null --help` answer in the terminal; on Linux without a display,
+  Null says so instead of waiting.
+- Typing `cart` in Ctrl+P finds cart.rs before Cargo.toml: letters typed together come
+  first.
+- After Close Folder the title and the files say no folder is open.
+
 ## 0.1.0
 
 The first release of Null: a calm, fast code editor where the screen belongs to your code,

@@ -1901,6 +1901,9 @@ impl Render for FileTree {
         // (Several folders: each its own heading below, none up here.)
         let title = if self.several() {
             String::new()
+        } else if crate::session::is_scratch(self.root()) {
+            // No folder open (Null's own empty one, as after Close Folder).
+            "NO FOLDER OPEN".to_string()
         } else {
             self.root().file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default()
         };
