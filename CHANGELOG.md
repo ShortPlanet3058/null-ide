@@ -43,6 +43,9 @@ license.
 - After Close Folder the title and the files say no folder is open.
 - AI is off until you turn it on: the welcome's AI step starts on Off (if you already use
   AI, it stays on).
+- Linux: an API key is saved even where the system has no keyring yet (as after an xrdp
+  login): Null asks for one to be made. The key can also come from its environment
+  variable, as `NVIDIA_API_KEY`.
 
 **Installers**
 

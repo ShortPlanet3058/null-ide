@@ -83,6 +83,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 libc = "0.2"
 
 # Null's icon and version built into null.exe (see build.rs). Already in the build.
+# (Already there, under keyring: to make the desktop's keyring when it has none.)
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+secret-service = { version = "5", features = ["crypto-rust"] }
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
 

@@ -440,11 +440,41 @@ pub fn store_api_key(id: ProviderId, key: &str) -> Result<(), String> {
     }
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, id.key()).map_err(|e| e.to_string())?;
     let key = key.trim();
-    if key.is_empty() { entry.delete_credential().or(Ok(())) } else { entry.set_password(key) }
-        .map_err(|e: keyring::Error| e.to_string())?;
+    let keep = |entry: &keyring::Entry| {
+        if key.is_empty() { entry.delete_credential().or(Ok(())) } else { entry.set_password(key) }
+    };
+    match keep(&entry) {
+        // Linux with no keyring yet (a first login over remote desktop, a bare window
+        // manager): the usual one made (the desktop asks for its password), then again.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        Err(keyring::Error::NoStorageAccess(_)) => {
+            make_default_keyring()?;
+            keep(&entry).map_err(|e| no_keyring(e.to_string()))?;
+        }
+        result => result.map_err(|e| no_keyring(e.to_string()))?,
+    }
     let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
     keys.get_or_insert_with(HashMap::new).insert(id.key(), (!key.is_empty()).then(|| key.to_string()));
     Ok(())
+}
+
+/// What went wrong keeping a key, and the way round it: the provider's environment
+/// variable, read before the key store.
+fn no_keyring(error: String) -> String {
+    format!("{error}. The key can also come from its environment variable (as NVIDIA_API_KEY).")
+}
+
+/// The Secret Service's default keyring, made when there's none ("Login", as GNOME's is):
+/// the desktop asks for the password that locks it.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn make_default_keyring() -> Result<(), String> {
+    use secret_service::{EncryptionType, blocking::SecretService};
+    let failed = |e: secret_service::Error| no_keyring(format!("No keyring to keep it in ({e})"));
+    let service = SecretService::connect(EncryptionType::Dh).map_err(failed)?;
+    if service.get_default_collection().is_ok() {
+        return Ok(());
+    }
+    service.create_collection("Login", "default").map(|_| ()).map_err(failed)
 }
 
 #[derive(Clone, Default)]
