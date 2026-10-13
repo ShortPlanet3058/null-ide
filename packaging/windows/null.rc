@@ -21,7 +21,7 @@ BEGIN
             VALUE "ProductName", "Null"
             VALUE "ProductVersion", "__VERSION__"
             VALUE "OriginalFilename", "null.exe"
-            VALUE "LegalCopyright", "MIT OR Apache-2.0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 ShortPlanet3058. GNU GPL 3.0"
         END
     END
     BLOCK "VarFileInfo"

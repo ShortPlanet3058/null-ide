@@ -12,7 +12,7 @@ if ($LASTEXITCODE) { exit $LASTEXITCODE }
 $stage = "target\release\$name"
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $stage | Out-Null
-Copy-Item target\release\null.exe, README.md, LICENSE-MIT, LICENSE-APACHE $stage
+Copy-Item target\release\null.exe, README.md, LICENSE $stage
 Compress-Archive -Path $stage -DestinationPath "target\release\$name.zip" -Force
 Remove-Item -Recurse -Force $stage
 Write-Output "Built target\release\$name.zip"

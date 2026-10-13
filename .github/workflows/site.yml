@@ -1,0 +1,35 @@
+# Null's site (put together by scripts/build-site.sh), published on GitHub
+# Pages whenever main changes it.
+name: Site
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "docs/images/**", "packaging/null.svg", "scripts/promo/**", "scripts/build-site.sh", "assets/fonts/**", ".github/workflows/site.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Put the site together
+        run: scripts/build-site.sh _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

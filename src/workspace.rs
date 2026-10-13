@@ -35,6 +35,8 @@ actions!(
         Open,
         OpenFolder,
         AddFolderToWindow,
+        CloseFolder,
+        ShowAllCommands,
         ShowKeyboardShortcuts,
         CloseTab,
         ToggleSidebar,
@@ -211,7 +213,6 @@ pub fn bind_keys(cx: &mut App) {
         // (⇧⌘P for VS Code hands; ⌘K bound last, so it's the one shown.)
         KeyBinding::new("secondary-shift-p", ShowCommands, ctx),
         KeyBinding::new("secondary-k", ShowCommands, ctx),
-        KeyBinding::new("secondary-o", Open, ctx),
         KeyBinding::new("secondary-w", CloseTab, ctx),
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
@@ -296,6 +297,7 @@ pub fn bind_keys(cx: &mut App) {
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
+            KeyBinding::new("cmd-o", Open, ctx),
             KeyBinding::new("cmd-shift-]", NextTab, ctx),
             KeyBinding::new("cmd-shift-[", PreviousTab, ctx),
             KeyBinding::new("ctrl--", GoBack, ctx),
@@ -307,6 +309,11 @@ pub fn bind_keys(cx: &mut App) {
         ]);
     } else {
         keys.extend([
+            // (The system's dialog picks files or folders, not both: Ctrl+O a folder, the
+            // project, as work starts there; a file from inside it is Ctrl+P away.)
+            KeyBinding::new("ctrl-o", OpenFolder, ctx),
+            // A letter: on every keyboard (Ctrl+` too, where the keyboard has it).
+            KeyBinding::new("ctrl-j", ToggleTerminal, ctx),
             KeyBinding::new("alt-left", GoBack, ctx),
             KeyBinding::new("alt-right", GoForward, ctx),
             KeyBinding::new("ctrl-pagedown", NextTab, ctx),
@@ -1855,7 +1862,7 @@ impl Workspace {
     /// nothing changed there's no message to write).
     fn commit_all(&mut self, _: &CommitAll, window: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
-            return self.show_notice("This folder isn't a git repository.".into(), cx);
+            return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         }
         self.show_changes(&ShowChanges, window, cx);
         if self.repo_changes().is_empty() {
@@ -1868,7 +1875,7 @@ impl Workspace {
     /// message waits in Commit's field, to commit them again with more or reworded.
     fn undo_last_commit(&mut self, _: &UndoLastCommit, _: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
-            return self.show_notice("This folder isn't a git repository.".into(), cx);
+            return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         }
         let root = self.git_root.clone();
         cx.spawn(async move |this, cx| {
@@ -1896,7 +1903,7 @@ impl Workspace {
     /// back to the last commit, to work on something else, until Bring Back Changes.
     fn set_changes_aside(&mut self, _: &SetChangesAside, _: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
-            return self.show_notice("This folder isn't a git repository.".into(), cx);
+            return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         }
         self.save_named_tabs(cx);
         let root = self.git_root.clone();
@@ -1927,7 +1934,7 @@ impl Workspace {
     /// Returns the changes set aside at `index` (0: the latest), if they're still commit `id`.
     fn bring_back_at(&mut self, index: usize, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
-            return self.show_notice("This folder isn't a git repository.".into(), cx);
+            return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         }
         self.save_named_tabs(cx);
         let root = self.git_root.clone();
@@ -2066,7 +2073,7 @@ impl Workspace {
     /// The branches, to switch to one or start one.
     fn switch_branch(&mut self, _: &SwitchBranch, window: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
-            return self.show_notice("This folder isn't a git repository.".into(), cx);
+            return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         }
         let root = self.git_root.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -2620,7 +2627,7 @@ impl Workspace {
     /// Asks the remotes what's new: the counts beside the branch catch up, and say so.
     fn fetch_branch(&mut self, _: &FetchBranch, _: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
-            return self.show_notice("This folder isn't a git repository.".into(), cx);
+            return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         }
         let root = self.git_root.clone();
         self.show_notice("Fetching…".into(), cx);
@@ -2649,7 +2656,7 @@ impl Workspace {
 
     fn pull_branch(&mut self, _: &PullBranch, window: &mut Window, cx: &mut Context<Self>) {
         if self.branch.is_none() {
-            return self.show_notice("This folder isn't a git repository.".into(), cx);
+            return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         }
         self.save_named_tabs(cx);
         let root = self.git_root.clone();
@@ -4766,6 +4773,17 @@ impl Workspace {
         .detach();
     }
 
+    /// No folder open in the window: its tabs close (asked about unsaved work first) and
+    /// it's left on an empty folder of Null's own, to open another from.
+    fn close_folder(&mut self, _: &CloseFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(scratch) = crate::session::scratch_folder() else { return };
+        if self.root(cx) == scratch {
+            return;
+        }
+        self.save_session(cx);
+        self.confirm_unsaved(CloseAction::SwitchProject(scratch), window, cx);
+    }
+
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         // ⌘W over a commit (or pull request): that's what closes.
         if self.git_page.is_some() || self.github_page.is_some() {
@@ -4859,6 +4877,7 @@ impl Workspace {
             (File, "Add Folder to Window…".into(), Box::new(AddFolderToWindow)),
             (File, "Open Recent…".into(), Box::new(OpenRecent)),
             (File, "Open Folder in New Window…".into(), Box::new(NewWindow)),
+            (File, "Close Folder".into(), Box::new(CloseFolder)),
             (File, "Reopen Closed Tab".into(), Box::new(ReopenClosedTab)),
             (Go, "Go to File…".into(), Box::new(TogglePalette)),
             (Go, "Go to Symbol in Project…".into(), Box::new(GoToSymbolInProject)),
@@ -5326,7 +5345,7 @@ impl Workspace {
         let active_path = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf));
         let options = PaletteOptions {
             kind,
-            commands: if kind == PaletteKind::Quick {
+            commands: if matches!(kind, PaletteKind::Quick | PaletteKind::Commands) {
                 self.commands(window, cx)
             } else {
                 std::mem::take(&mut self.pending_commands)
@@ -5493,6 +5512,11 @@ impl Workspace {
         self.recent_commands.retain(|n| *n != name);
         self.recent_commands.insert(0, name);
         self.recent_commands.truncate(20);
+    }
+
+    /// The ≡ button off the Mac (the menu bar's place): every command, listed.
+    fn show_all_commands(&mut self, _: &ShowAllCommands, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(PaletteKind::Commands, window, cx);
     }
 
     fn show_commands(&mut self, _: &ShowCommands, window: &mut Window, cx: &mut Context<Self>) {
@@ -5894,6 +5918,24 @@ impl Workspace {
         true
     }
 
+    /// Files committed whole: their changes were decided, so the changes shown in them
+    /// (an AI task's, or the file's own) end, and they leave the task's list.
+    fn end_reviews_of(&mut self, committed: &[PathBuf], cx: &mut Context<Self>) {
+        let editors: Vec<Entity<Editor>> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.editor.clone())
+            .filter(|editor| {
+                let editor = editor.read(cx);
+                editor.in_review() && editor.path().is_some_and(|path| committed.iter().any(|c| c == path))
+            })
+            .collect();
+        for editor in editors {
+            editor.update(cx, |editor, cx| editor.end_review(cx));
+            self.file_reviewed(&editor, cx);
+        }
+    }
+
     /// Every change in a file was kept or undone: it leaves the list.
     fn file_reviewed(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
         let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
@@ -6137,11 +6179,14 @@ impl Workspace {
                 self.save_named_tabs(cx);
                 self.git_view.update(cx, |view, cx| view.commit(cx));
             }
-            GitViewEvent::Committed(result) => {
+            GitViewEvent::Committed(result, whole) => {
                 let notice = match result {
                     Ok(id) => format!("Committed {id}."),
                     Err(error) => format!("Couldn't commit: {error}"),
                 };
+                if result.is_ok() {
+                    self.end_reviews_of(whole, cx);
+                }
                 self.show_notice(notice, cx);
                 self.refresh_git(cx);
             }
@@ -6167,7 +6212,7 @@ impl Workspace {
     /// the work finishes or stops it.
     fn join_branch(&mut self, branch: String, rebase: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(here) = self.branch.clone() else {
-            return self.show_notice("This folder isn't a git repository.".into(), cx);
+            return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         };
         let asked = rebase.then(|| {
             window.prompt(
@@ -9983,7 +10028,11 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(12.))
-                    .children(hint(&Open, "Open a file or folder"))
+                    .children(if cfg!(target_os = "macos") {
+                        hint(&Open, "Open a file or folder")
+                    } else {
+                        hint(&OpenFolder, "Open a folder")
+                    })
                     .children(hint(&OpenRecent, "Open a recent project"))
                     .children(hint(&TogglePalette, "Find a file"))
                     .children(hint(&ShowCommands, "Quick settings and commands")),
@@ -10778,14 +10827,20 @@ impl Render for Workspace {
             // No menu bar off the Mac: its place, every command, behind one button.
             .when(!cfg!(target_os = "macos"), |bar| {
                 bar.child(
-                    ui::icon_button_for("app-menu", "icons/menu.svg", "Commands", Some(Box::new(ShowCommands)), theme)
-                        .mr(px(6.))
-                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                        .on_mouse_up(MouseButton::Right, |_, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        })
-                        .on_click(|_: &ClickEvent, window, cx| window.dispatch_action(Box::new(ShowCommands), cx)),
+                    ui::icon_button_for(
+                        "app-menu",
+                        "icons/menu.svg",
+                        "All commands",
+                        Some(Box::new(ShowAllCommands)),
+                        theme,
+                    )
+                    .mr(px(6.))
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_mouse_up(MouseButton::Right, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_click(|_: &ClickEvent, window, cx| window.dispatch_action(Box::new(ShowAllCommands), cx)),
                 )
             })
             .map(|bar| match tabs_right {
@@ -10804,6 +10859,7 @@ impl Render for Workspace {
             .h(px(40.))
             .flex_none()
             .flex()
+            .map(crate::window_frame::frame_bar)
             .border_b_1()
             .border_color(theme.hairline)
             .bg(theme.surface)
@@ -11440,6 +11496,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::turn_on_ai))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::add_folder_to_window))
+            .on_action(cx.listener(Self::close_folder))
+            .on_action(cx.listener(Self::show_all_commands))
             .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
@@ -11502,6 +11560,7 @@ impl Render for Workspace {
                             .h(px(40.))
                             .flex_none()
                             .flex()
+                            .map(crate::window_frame::frame_bar)
                             .child(
                                 div()
                                     .flex_1()
@@ -14972,6 +15031,42 @@ esac
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         assert!(renamed.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file committed whole: the changes shown in it end. Close Folder leaves the window on
+    /// Null's empty folder, with no tabs.
+    #[gpui::test]
+    fn committing_ends_the_review_and_a_folder_closes(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("close-folder");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(dir.join("a.txt"), window, cx);
+            let editor = w.active_editor().unwrap().clone();
+            editor.update(cx, |e, cx| e.start_ai_review("one\n".into(), cx));
+            assert!(editor.read(cx).in_review());
+            w.end_reviews_of(&[dir.join("other.txt")], cx);
+            assert!(editor.read(cx).in_review(), "another file's commit leaves it");
+            w.end_reviews_of(&[dir.join("a.txt")], cx);
+            assert!(!editor.read(cx).in_review());
+            window.focus(&w.focus_handle(cx));
+        });
+        cx.dispatch_action(CloseFolder);
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(Some(w.root(cx).to_path_buf()), crate::session::scratch_folder());
+            assert!(w.tabs.is_empty());
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 

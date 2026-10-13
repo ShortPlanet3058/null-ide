@@ -94,6 +94,7 @@ tests and how releases are made.
 
 ## License
 
-Null is free and open source, under either the [MIT](LICENSE-MIT) or the
-[Apache 2.0](LICENSE-APACHE) license, at your option. Its fonts are under the SIL Open Font
+Null is free and open source, under the [GNU General Public License 3.0](LICENSE): use it
+for anything, and share it as you like; a changed Null you share must stay open under the
+same license. Copyright © 2026 ShortPlanet3058. Its fonts are under the SIL Open Font
 License (see `assets/fonts`).

@@ -12,7 +12,7 @@ stage="target/release/$name"
 rm -rf "$stage"
 mkdir -p "$stage"
 cp target/release/null packaging/linux/null.desktop packaging/linux/install.sh packaging/null.svg \
-    README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+    README.md LICENSE "$stage/"
 tar -C target/release -czf "target/release/$name.tar.gz" "$name"
 rm -rf "$stage"
 echo "Built target/release/$name.tar.gz"

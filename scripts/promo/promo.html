@@ -1,0 +1,943 @@
+<!doctype html>
+<!--
+  Null's promotional film. Every frame is drawn by render(t) from the time alone, so
+  scripts/promo/render.sh can film it frame by frame (opening this file in a browser plays
+  it, silent: Space pauses, ← → step, ?t=60 opens it at a moment, a click on the bar seeks).
+
+  It's timed on its music (scripts/promo/score.swift cuts the track to fit): 75 BPM, a bar
+  is 3.2 s, and bar 0 is the first big beat, when the editor comes in. B(k) is bar k.
+  The story: one change to a small shop, from the first line to the push.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Null: promotional film</title>
+<style>
+@font-face { font-family: "Instrument Sans"; font-weight: 400; src: url("../../assets/fonts/instrument-sans/InstrumentSans-Regular.ttf"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 500; src: url("../../assets/fonts/instrument-sans/InstrumentSans-Medium.ttf"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 600; src: url("../../assets/fonts/instrument-sans/InstrumentSans-SemiBold.ttf"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 700; src: url("../../assets/fonts/instrument-sans/InstrumentSans-Bold.ttf"); }
+@font-face { font-family: "Geist Mono"; font-weight: 400; src: url("../../assets/fonts/geist-mono/GeistMono-Regular.ttf"); }
+@font-face { font-family: "Geist Mono"; font-weight: 500; src: url("../../assets/fonts/geist-mono/GeistMono-Medium.ttf"); }
+
+:root { --ui: "Instrument Sans", -apple-system, sans-serif; --mono: "Geist Mono", ui-monospace, Menlo, monospace; --amber: #f2b35b; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #000; overflow: hidden; }
+body.player { display: grid; place-items: center; height: 100vh; }
+#stage { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #000; color: #ebe8e2; font-family: var(--ui); -webkit-font-smoothing: antialiased; transform-origin: center; }
+.layer { position: absolute; inset: 0; visibility: hidden; }
+.caret { display: inline-block; position: relative; width: 4px; background: var(--amber); border-radius: 2px; box-shadow: 0 0 22px rgba(242,179,91,.55); }
+
+/* ---------- opening and the silence ---------- */
+#word { position: absolute; left: 0; right: 0; top: 410px; text-align: center; font: 500 150px/1 var(--mono); letter-spacing: -0.02em; }
+#word .caret { height: 150px; vertical-align: -14px; margin-left: 12px; }
+#definition { position: absolute; left: 0; right: 0; top: 610px; text-align: center; font: 400 38px/1.4 var(--ui); color: #8b8a92; }
+#definition i { color: #46464e; margin-right: 18px; }
+#back { position: absolute; left: 0; right: 0; top: 500px; text-align: center; font: 500 64px/1 var(--ui); letter-spacing: -0.015em; }
+#back .caret { height: 64px; vertical-align: -8px; margin-left: 8px; }
+
+/* ---------- the noise ---------- */
+#noise .c { position: absolute; background: #121216; border: 1px solid #26262d; color: #74737b; font: 500 15px/1 var(--ui); overflow: hidden; }
+#noise .bare { background: none; border: none; overflow: visible; }
+#noise .row { display: flex; align-items: center; gap: 18px; height: 100%; padding: 0 14px; white-space: nowrap; }
+#noise .ico { width: 22px; height: 22px; border-radius: 5px; background: #2a2a31; flex: none; }
+#noise .col { display: flex; flex-direction: column; align-items: center; gap: 20px; padding-top: 16px; }
+#noise .tab { padding: 0 16px; height: 100%; display: flex; align-items: center; border-right: 1px solid #26262d; }
+#noise .line { height: 10px; border-radius: 3px; background: #24242a; margin: 10px 14px; }
+#noise .head { font: 600 13px/1 var(--ui); letter-spacing: .08em; color: #8b8a92; padding: 14px; }
+#noise .toast { background: #1b1b21; border: 1px solid #34343c; border-radius: 10px; color: #c9c7cf; font: 500 17px/1.35 var(--ui); padding: 16px 18px; box-shadow: 0 12px 40px rgba(0,0,0,.6); height: 100%; }
+#noise .toast b { display: block; color: #ebe8e2; font-weight: 600; margin-bottom: 6px; }
+#noise .btns { display: flex; gap: 10px; margin-top: 12px; }
+#noise .btn { background: #2e2e36; border-radius: 6px; padding: 6px 12px; font-size: 14px; color: #ebe8e2; }
+#noise .btn.blue { background: #3b6fd8; color: #fff; }
+#noise .badge { display: inline-block; background: #d9534f; color: #fff; border-radius: 9px; padding: 2px 7px; font-size: 12px; }
+#noise .modal { background: #18181d; border: 1px solid #3a3a42; border-radius: 14px; box-shadow: 0 30px 90px rgba(0,0,0,.75); color: #c9c7cf; font: 400 18px/1.5 var(--ui); padding: 26px 30px; height: 100%; }
+#noise .modal h3 { margin: 0 0 12px; font: 600 26px/1.2 var(--ui); color: #ebe8e2; }
+#noise .code { font: 400 15px/26px var(--mono); color: #4d4d55; padding: 12px 18px; white-space: pre; }
+#noise .ai { background: #1d1830; border: 1px solid #4b3f86; color: #cdbff7; border-radius: 10px; padding: 12px 16px; font: 500 17px/1.35 var(--ui); box-shadow: 0 12px 40px rgba(0,0,0,.6); height: 100%; }
+#noise .ai b { color: #e7defd; }
+#noise .ghost { font: italic 400 16px/1 var(--mono); color: #6c6680; white-space: nowrap; }
+#noise .spin { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #8d7fe0; border-right-color: transparent; vertical-align: -2px; margin-right: 8px; }
+
+/* ---------- words and keys ---------- */
+#caption { position: absolute; left: 0; right: 0; top: 38px; text-align: center; font: 600 52px/1.1 var(--ui); letter-spacing: -0.02em; }
+#caption .sub { display: block; margin-top: 10px; font: 400 26px/1.2 var(--ui); color: #8b8a92; letter-spacing: 0; }
+#keys { position: absolute; left: 0; right: 0; top: 968px; display: flex; justify-content: center; }
+#keys .pill { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 18px; background: rgba(8,8,10,.86); border: 1px solid #26262d; box-shadow: 0 16px 50px rgba(0,0,0,.6); }
+.key { min-width: 54px; height: 54px; padding: 0 16px; display: grid; place-items: center; border-radius: 11px; background: #17171c; border: 1px solid #34343c; border-bottom-width: 3px; font: 500 26px/1 var(--ui); color: #ebe8e2; }
+.key-alt { margin: 0 4px 0 12px; font: 400 21px/1 var(--ui); color: #66656d; }
+#scrim-top, #scrim-bottom { position: absolute; left: 0; right: 0; height: 200px; }
+#scrim-top { top: 0; background: linear-gradient(#000 0, #000 52%, rgba(0,0,0,0)); }
+#scrim-bottom { bottom: 0; background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.92) 70%, #000); }
+#dim { position: absolute; inset: 0; background: #000; }
+
+/* ---------- the window ---------- */
+#window { position: absolute; left: 200px; top: 150px; width: 1520px; height: 840px; border-radius: 14px; overflow: hidden; background: var(--bg); color: var(--fg); box-shadow: 0 40px 120px rgba(0,0,0,.85), 0 0 0 1px rgba(255,255,255,.09); }
+.titlebar { position: absolute; left: 0; right: 0; top: 0; height: 50px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.light { position: absolute; top: 19px; width: 13px; height: 13px; border-radius: 50%; }
+.tabs { position: absolute; left: 104px; top: 8px; display: flex; gap: 6px; }
+.ftab { height: 34px; padding: 0 14px; display: flex; align-items: center; gap: 12px; border-radius: 8px; font-size: 16px; color: var(--muted); }
+.ftab.on { background: var(--raised); color: var(--fg); }
+.ftab .x { color: var(--muted); font-size: 13px; }
+.ctl { position: absolute; top: 0; right: 0; display: flex; }
+.ctl span { width: 54px; height: 50px; display: grid; place-items: center; color: var(--muted); }
+.sidebar { position: absolute; left: 0; top: 50px; bottom: 36px; width: 350px; border-right: 1px solid var(--line); background: var(--bg); }
+.segments { position: absolute; left: 16px; right: 16px; top: 14px; height: 40px; border: 1px solid var(--line); border-radius: 10px; display: flex; align-items: center; padding: 3px; font-size: 15px; color: var(--muted); }
+.segments span { padding: 7px 11px; border-radius: 7px; white-space: nowrap; }
+.segments span.on { background: var(--raised); color: var(--fg); }
+.project { position: absolute; left: 20px; font: 600 14px/1 var(--ui); letter-spacing: .04em; color: var(--muted); }
+.tree { position: absolute; left: 8px; right: 8px; font-size: 16px; }
+.tree div { height: 33px; display: flex; align-items: center; gap: 10px; border-radius: 8px; padding-left: 14px; color: var(--muted); }
+.tree div.on { background: var(--sel-row); color: var(--fg); }
+.tree .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+.tree .on .dot { background: var(--caret); }
+.tree .chev { width: 10px; font-size: 13px; }
+.git .sub { position: absolute; left: 20px; top: 70px; display: flex; gap: 20px; font-size: 16px; color: var(--muted); }
+.git .sub .on { color: var(--fg); }
+.git .box { position: absolute; left: 16px; right: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.git .msg { padding: 14px 16px; font-size: 16px; line-height: 1.5; min-height: 90px; }
+.git .ph { color: var(--faint); }
+.git .acts { display: flex; justify-content: space-between; align-items: center; padding: 0 12px 12px; font-size: 15px; color: var(--muted); }
+.git .commit { border: 1px solid var(--line-2); border-radius: 8px; padding: 7px 14px; color: var(--fg); }
+.git .commit.go { background: var(--caret); color: var(--bg); border-color: var(--caret); }
+.git .incommit { position: absolute; left: 20px; right: 20px; font-size: 15px; }
+.git .incommit .h { font: 600 13px/1 var(--ui); letter-spacing: .04em; color: var(--muted); margin-bottom: 14px; }
+.git .file { display: flex; align-items: center; gap: 10px; font-size: 16px; }
+.git .cb { width: 16px; height: 16px; border-radius: 4px; background: var(--muted); color: var(--bg); font-size: 12px; display: grid; place-items: center; }
+.status { position: absolute; left: 0; right: 0; bottom: 0; height: 36px; display: flex; align-items: center; gap: 22px; padding: 0 22px; font-size: 15px; color: var(--muted); border-top: 1px solid var(--line); background: var(--bg); }
+.status .grow { flex: 1; }
+.status .aidot { width: 7px; height: 7px; border-radius: 50%; background: var(--caret); box-shadow: 0 0 10px var(--caret); }
+.status .task { color: var(--fg); display: flex; gap: 8px; }
+.status .task .s { color: var(--caret); }
+.code { position: absolute; left: 351px; right: 0; top: 51px; overflow: hidden; font: 400 18px/33px var(--mono); }
+.r { position: absolute; left: 0; right: 0; height: 33px; white-space: pre; }
+.r .n { position: absolute; left: 0; width: 64px; text-align: right; color: var(--faint); }
+.r .t { position: absolute; left: 100px; }
+.r.cur .n { color: var(--fg); }
+.r.cur { background: rgba(255,255,255,.025); }
+.r.del { background: var(--del); }
+.r.del .t span { color: var(--faint) !important; }
+.r.del .t .struck { text-decoration: line-through; text-decoration-color: var(--faint); }
+.r.add { background: var(--add); }
+.r.add::before { content: ""; position: absolute; left: 76px; top: 0; bottom: 0; width: 3px; background: var(--modified); }
+.r.stop { background: rgba(242,179,91,.10); }
+.r .bp { position: absolute; left: 70px; top: 11px; width: 11px; height: 11px; border-radius: 50%; background: #e88d8d; }
+.r .val { color: var(--faint); font-family: var(--ui); font-size: 16px; margin-left: 28px; }
+.hint { position: absolute; left: 100px; display: flex; gap: 8px; align-items: center; font: 400 15px/1 var(--ui); color: var(--muted); }
+.hint .k { border: 1px solid var(--line-2); border-radius: 6px; padding: 5px 7px; font-size: 13px; color: var(--fg); margin-left: 10px; }
+.hint .k:first-child { margin-left: 0; }
+.prompt { position: absolute; left: 100px; width: 780px; height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 12px; border-radius: 9px; background: var(--raised); border: 1px solid var(--caret-half); font: 400 18px/1 var(--ui); }
+.prompt .star { color: var(--caret); }
+.prompt .grow { flex: 1; color: var(--fg); }
+.prompt .ph { color: var(--faint); }
+.prompt .hintr { color: var(--muted); font-size: 15px; }
+.k-kw { color: var(--kw); } .k-ty { color: var(--ty); } .k-fn { color: var(--fn); } .k-st { color: var(--st); }
+.k-nu { color: var(--nu); } .k-co { color: var(--co); } .k-pu { color: var(--pu); } .k-at { color: var(--at); } .k-ma { color: var(--fn); }
+.codecaret { position: absolute; width: 2px; height: 25px; background: var(--caret); }
+.term { position: absolute; left: 351px; right: 0; bottom: 37px; border-top: 1px solid var(--line); background: var(--bg); overflow: hidden; }
+.term .h { position: absolute; left: 20px; top: 14px; font-size: 16px; display: flex; gap: 10px; }
+.term .h span:last-child { color: var(--muted); }
+.term .out { position: absolute; left: 18px; right: 18px; font: 400 17px/27px var(--mono); white-space: pre; }
+.g { color: #86d6a2; } .red { color: #e88d8d; } .b { font-weight: 500; }
+.tcaret { display: inline-block; width: 10px; height: 20px; background: var(--caret); vertical-align: -4px; }
+.palette { position: absolute; left: 330px; width: 860px; top: 70px; border-radius: 16px; background: var(--raised); border: 1px solid var(--line-2); box-shadow: 0 30px 90px rgba(0,0,0,.55); overflow: hidden; }
+.palette .q { height: 72px; display: flex; align-items: center; padding: 0 30px; font: 400 25px/1 var(--ui); border-bottom: 1px solid var(--line); position: relative; }
+.palette .q .ph { color: var(--faint); }
+.palette .q .r2 { position: absolute; right: 30px; font-size: 17px; color: var(--muted); }
+.palette .item { height: 54px; margin: 6px 9px; padding: 0 22px; display: flex; align-items: center; gap: 14px; border-radius: 10px; font-size: 19px; }
+.palette .item.on { background: var(--sel-row); }
+.palette .m { color: var(--caret); }
+.palette .w { margin-left: auto; color: var(--muted); font-size: 16px; }
+.palette .tog { margin-left: auto; width: 42px; height: 24px; border-radius: 12px; background: var(--line-2); position: relative; }
+.palette .tog.on { background: var(--caret); }
+.palette .tog::after { content: ""; position: absolute; top: 3px; left: var(--knob, 3px); width: 18px; height: 18px; border-radius: 50%; background: var(--fg); }
+.notice { position: absolute; right: 24px; bottom: 54px; padding: 12px 18px; border-radius: 10px; background: var(--raised); border: 1px solid var(--line-2); font-size: 16px; box-shadow: 0 16px 40px rgba(0,0,0,.5); }
+
+/* ---------- providers ---------- */
+#providers { position: absolute; left: 0; right: 0; top: 760px; text-align: center; }
+#providers .lead { font: 400 28px/1.3 var(--ui); color: #b9b7bf; margin-bottom: 22px; }
+#providers .names { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px 14px; max-width: 1500px; margin: 0 auto; }
+#providers .p { padding: 10px 18px; border-radius: 12px; border: 1px solid #2c2c33; background: #0d0d10; font: 500 22px/1 var(--ui); color: #ebe8e2; }
+#providers .p i { font-style: normal; color: #66656d; font-size: 16px; margin-left: 8px; }
+
+/* ---------- montage ---------- */
+#montage .shot { position: absolute; left: 260px; top: 52px; width: 1400px; height: 875px; border-radius: 14px; overflow: hidden; box-shadow: 0 40px 120px rgba(0,0,0,.85), 0 0 0 1px rgba(255,255,255,.09); background: #000; }
+#montage .shot canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+#montage .label { position: absolute; left: 0; right: 0; top: 956px; text-align: center; }
+#montage .label b { display: block; font: 600 44px/1.1 var(--ui); letter-spacing: -0.015em; }
+#montage .label span { display: block; margin-top: 8px; font: 400 24px/1.2 var(--ui); color: #8b8a92; }
+#montage .osbar { position: absolute; left: 0; right: 0; top: 0; height: 46px; background: #000; border-bottom: 1px solid #1d1d22; }
+#montage .osbar .ftab { position: absolute; left: 12px; top: 7px; height: 32px; background: #141418; color: #ebe8e2; }
+#montage .osbar .ctl span { width: 50px; height: 46px; color: #8b8a92; }
+
+/* ---------- the end ---------- */
+#endmark { position: absolute; left: 0; right: 0; top: 330px; display: flex; justify-content: center; align-items: center; gap: 34px; font: 600 190px/1 var(--ui); letter-spacing: -0.03em; }
+#endmark .caret { width: 9px; height: 170px; border-radius: 4px; }
+#tagline { position: absolute; left: 0; right: 0; top: 590px; text-align: center; font: 400 48px/1.2 var(--ui); color: #b9b7bf; }
+#cta { position: absolute; left: 0; right: 0; top: 700px; display: flex; justify-content: center; }
+#cta span { padding: 14px 28px; border-radius: 14px; background: var(--amber); color: #1b1206; font: 600 28px/1 var(--ui); }
+#facts { position: absolute; left: 0; right: 0; top: 790px; text-align: center; font: 500 26px/1.2 var(--ui); color: #6f6e76; }
+#url { position: absolute; left: 0; right: 0; top: 850px; text-align: center; font: 400 24px/1 var(--mono); color: #8b8a92; }
+#endcaret { position: absolute; left: 958px; top: 488px; width: 4px; height: 104px; }
+
+/* ---------- vertical (9:16): the same scenes, framed for a phone ---------- */
+.vertical #stage { width: 1080px; height: 1920px; }
+.vertical #opening, .vertical #silence, .vertical #end { top: 420px; height: 1080px; bottom: auto; }
+.vertical #back { font-size: 76px; line-height: 1.15; padding: 0 80px; top: 430px; }
+.vertical #endcaret { left: 538px; }
+.vertical #noise { inset: auto; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; transform: translateX(-1166.7px) scale(1.7778); }
+.vertical #caption { top: 230px; font-size: 68px; padding: 0 60px; }
+.vertical #caption .sub { font-size: 34px; }
+.vertical #keys { top: 1640px; }
+.vertical .key { min-width: 76px; height: 76px; font-size: 36px; border-radius: 14px; }
+.vertical .key-alt { font-size: 28px; }
+.vertical #scrim-top, .vertical #scrim-bottom { height: 460px; }
+.vertical #providers { top: 1450px; }
+.vertical #providers .names { max-width: 1000px; }
+.vertical #montage .label { top: 1530px; padding: 0 60px; }
+.vertical #montage .label b { font-size: 60px; }
+.vertical #montage .label span { font-size: 32px; }
+
+#bar { position: fixed; left: 0; right: 0; bottom: 0; height: 6px; background: #111; cursor: pointer; }
+#bar div { height: 100%; background: var(--amber); width: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="layer" id="opening">
+    <div id="word"><span id="wordtext"></span><span class="caret" id="wordcaret"></span></div>
+    <div id="definition"><i>adj.</i>amounting to nothing.</div>
+  </div>
+  <div class="layer" id="noise"></div>
+  <div class="layer" id="silence"><div id="back"><span id="backtext"></span><span class="caret" id="backcaret"></span></div></div>
+  <div class="layer" id="story">
+    <div id="window"></div>
+    <div id="providers"></div>
+    <div id="scrim-top"></div><div id="scrim-bottom"></div>
+  </div>
+  <div class="layer" id="montage"></div>
+  <div class="layer" id="end">
+    <span class="caret" id="endcaret"></span>
+    <div id="endmark"><span class="caret"></span><span>Null</span></div>
+    <div id="tagline">A calm, fast code editor.</div>
+    <div id="cta"><span>Free to download</span></div>
+    <div id="facts">macOS&nbsp;&nbsp;·&nbsp;&nbsp;Windows&nbsp;&nbsp;·&nbsp;&nbsp;Linux&nbsp;&nbsp;·&nbsp;&nbsp;open source</div>
+    <div id="url">shortplanet3058.github.io/null-ide</div>
+  </div>
+  <div class="layer" id="words" style="visibility:visible"><div id="caption"></div><div id="keys"></div></div>
+</div>
+<script>
+"use strict";
+
+// ---------- which film: the full one, or a cut (?cut=30), wide or vertical (?vertical) ----------
+const QUERY = new URLSearchParams(location.search);
+const CUT = QUERY.get("cut");
+const VERTICAL = QUERY.has("vertical");
+// For the website: ?nocaptions (no words over the picture), ?nokeys (no keys shown), and
+// ?embed (no player: the page around it calls render(t), the stage fits the frame).
+const NOCAPTIONS = QUERY.has("nocaptions"), NOKEYS = QUERY.has("nokeys"), EMBED = QUERY.has("embed");
+if (VERTICAL) document.documentElement.classList.add("vertical");
+
+// ---------- the music's clock ----------
+const BAR = 3.2, BEAT = 0.8;
+const B = k => 33.66 + BAR * k;       // bar k; bar 0 is the first big beat
+window.DURATION = 105.2;
+
+// ---------- helpers ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const out3 = x => 1 - Math.pow(1 - x, 3);
+const inOut = x => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const in3 = x => x * x * x;
+const fade = (t, a, b, c, d) => Math.min(out3(prog(t, a, b)), 1 - in3(prog(t, c, d)));
+const blink = (t, since = -1, still = 0.5) => (t - since < still ? 1 : ((t - since - still) % 1.06) < 0.53 ? 1 : 0);
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function show(id, o, transform) {
+  const el = $(id);
+  el.style.opacity = o;
+  el.style.visibility = o > 0.001 ? "visible" : "hidden";
+  if (transform !== undefined) el.style.transform = transform;
+  return o > 0.001;
+}
+function setHTML(id, html) { const el = $(id); if (el.dataset.h !== html) { el.innerHTML = html; el.dataset.h = html; } }
+
+// Sounds the film asks for (score.swift makes and mixes them): [time, kind, loudness].
+window.SOUNDS = [];
+const sound = (t, kind, gain = 1) => window.SOUNDS.push([+t.toFixed(3), kind, gain]);
+
+function seeded(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+/** A person typing `text` from `start`: each character its own (repeatable) moment, a key sound each. */
+function typing(text, start, perChar, seed = 7, gain = 0.8) {
+  const r = seeded(seed), at = [];
+  let time = start;
+  for (const ch of text) {
+    time += perChar * (0.55 + r() * 0.9) + (ch === " " ? perChar * 0.4 : 0) + (ch === "\n" ? perChar * 3 : 0);
+    at.push(time);
+    if (gain > 0) sound(time, ch === "\n" ? "enter" : "key", gain * (0.75 + r() * 0.5));
+  }
+  return {
+    text, at, start, end: time,
+    shown(t) { let n = 0; while (n < at.length && at[n] <= t) n++; return text.slice(0, n); },
+    last(t) { let l = start; for (const a of at) if (a <= t) l = a; return l; },
+  };
+}
+/** A key pressed (shown in the pill at the bottom): [from, to, keys, other platforms]. */
+const KEYS = [];
+function press(t, keys, alt = "", hold = 0.75) { KEYS.push([t - 0.1, t + hold, keys, alt]); sound(t, "press", 1); }
+
+// ---------- Rust colours ----------
+const KW = new Set("pub fn let const struct impl match if else self Self use mut as return for in where enum crate mod async await".split(" "));
+function colour(src) {
+  const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|(#\[[^\]]*\])|(\b\d[\d_]*\b)|(\b[a-z_][a-z0-9_]*!)|(\b[A-Za-z_][A-Za-z0-9_]*\b)(?=\s*\()|(\b[A-Za-z_][A-Za-z0-9_]*\b)|([^\sA-Za-z0-9_])/g;
+  let out = "", last = 0, m;
+  while ((m = re.exec(src))) {
+    out += esc(src.slice(last, m.index));
+    const [w] = m;
+    let cls;
+    if (m[1]) cls = "co"; else if (m[2]) cls = "st"; else if (m[3]) cls = "at"; else if (m[4]) cls = "nu"; else if (m[5]) cls = "ma";
+    else if (m[6]) cls = KW.has(w) ? "kw" : /^[A-Z]/.test(w) ? "ty" : "fn";
+    else if (m[7]) cls = KW.has(w) ? "kw" : /^[A-Z]/.test(w) || /^(u8|u32|u64|str|bool)$/.test(w) ? "ty" : null;
+    else cls = "pu";
+    out += cls ? `<span class="k-${cls}">${esc(w)}</span>` : esc(w);
+    last = m.index + w.length;
+  }
+  return out + esc(src.slice(last));
+}
+
+// ---------- Null's theme (src/theme.rs) ----------
+const THEME = { bg: "#000000", surface: "#08080a", fg: "#ebe8e2", muted: "#8b8a92", faint: "#46464e", line: "#1d1d22", line2: "#2c2c33", raised: "#141418", caret: "#f2b35b", kw: "#c6a6f6", ty: "#87c7e1", fn: "#f1d9a9", st: "#a9d59c", nu: "#f3a37e", co: "#5f626e", pu: "#8d8c96", at: "#9aa6ba", selrow: "rgba(242,179,91,.14)" };
+function applyTheme(el) {
+  const th = THEME, set = (k, v) => el.style.setProperty(k, v);
+  set("--bg", th.bg); set("--surface", th.surface); set("--fg", th.fg); set("--muted", th.muted); set("--faint", th.faint);
+  set("--line", th.line); set("--line-2", th.line2); set("--raised", th.raised); set("--caret", th.caret);
+  set("--caret-half", th.caret + "80"); set("--sel-row", th.selrow);
+  for (const k of ["kw", "ty", "fn", "st", "nu", "co", "pu", "at"]) set("--" + k, th[k]);
+  set("--add", "rgba(104,201,140,.12)"); set("--del", "rgba(238,104,104,.11)"); set("--modified", "#7fa8e0");
+}
+
+// ---------- the shop ----------
+const CART = [
+  "use crate::price::Cents;", "",
+  "/// Orders at or above this ship for free.",
+  "const FREE_SHIPPING: Cents = Cents(50_00);",
+  "const SHIPPING: Cents = Cents(4_90);", "",
+  "#[derive(Debug, Clone)]", "pub struct Item {", "    pub name: String,", "    pub price: Cents,", "    pub quantity: u32,", "}", "",
+  "#[derive(Debug, Default)]", "pub struct Cart {", "    items: Vec<Item>,", "}", "",
+  "impl Cart {", "    pub fn add(&mut self, item: Item) {", "        self.items.push(item);", "    }", "",
+];
+const SUBTOTAL = "    /// What the items cost together, before shipping.\n    pub fn subtotal(&self) -> Cents {\n        self.items.iter().map(|i| i.price * i.quantity).sum()\n    }\n";
+const SHIPPING_FN = ["    pub fn shipping(&self) -> Cents {", "        SHIPPING", "    }", "}"];
+const FIXED = ["        if self.subtotal() >= FREE_SHIPPING {", "            Cents(0)", "        } else {", "            SHIPPING", "        }"];
+const CART_DONE = CART.concat(SUBTOTAL.split("\n"), SHIPPING_FN);   // the subtotal written
+const SHIP_LINE = CART_DONE.indexOf(SHIPPING_FN[0]);
+const TEST = [
+  "use shop::cart::{Cart, Item};", "use shop::price::Cents;", "",
+  "#[test]", "fn adds_items() {", "    let mut cart = Cart::default();", "    cart.add(Item::new(\"Mug\", Cents(12_00), 1));", "    assert_eq!(cart.subtotal(), Cents(12_00));", "}", "",
+  "#[test]", "fn free_shipping_above_50() {", "    let mut cart = Cart::default();", "    cart.add(Item::new(\"Lamp\", Cents(64_00), 1));", "    assert_eq!(cart.shipping(), Cents(0));", "}",
+];
+const RUN1 = [
+  "<span class='g b'>   Compiling</span> shop v0.1.0", "<span class='g b'>    Finished</span> test profile in 0.84s", "",
+  "running 4 tests", "test cart::adds_items ... <span class='g'>ok</span>", "test cart::empty_cart_costs_nothing ... <span class='g'>ok</span>",
+  "test cart::subtotal_counts_quantities ... <span class='g'>ok</span>", "test cart::free_shipping_above_50 ... <span class='red'>FAILED</span>", "",
+  "  left: Cents(490)", " right: Cents(0)", "",
+  "test result: <span class='red'>FAILED</span>. 3 passed; 1 failed",
+];
+const RUN2 = [
+  "<span class='g b'>    Finished</span> test profile in 0.31s", "",
+  "running 4 tests", "test cart::adds_items ... <span class='g'>ok</span>", "test cart::empty_cart_costs_nothing ... <span class='g'>ok</span>",
+  "test cart::subtotal_counts_quantities ... <span class='g'>ok</span>", "test cart::free_shipping_above_50 ... <span class='g'>ok</span>", "",
+  "test result: <span class='g'>ok</span>. 4 passed; 0 failed",
+];
+
+// ---------- the timeline ----------
+const T = {
+  word: typing("null", 0.9, 0.13, 3),
+  back: typing("Null gives you the screen back.", 29.55, 0.045, 11, 0.6),
+  code: typing(SUBTOTAL, B(0) + 0.9, 0.024, 5, 0.55),
+  query: typing("tests", B(2) + 0.35, 0.09, 9),
+  cmd: typing("cargo test", B(4) + 0.45, 0.07, 21),
+  ask: typing("free shipping above 50 €", B(10) + 0.45, 0.045, 13),
+  draft: typing("Free shipping above 50 €\nOrders of FREE_SHIPPING or more ship free.", B(13) + 1.1, 0.018, 17, 0),
+};
+press(B(2), ["⌘", "P"], "Ctrl+P");
+press(B(2) + 1.45, ["↵"]);
+press(B(4), ["⌃", "`"], "Ctrl+J");
+press(T.cmd.end + 0.22, ["↵"]);
+press(B(6) + 0.8, ["⌃", "–"], "Alt+←");
+press(B(8) + 1.6, ["⌘", "K"], "Ctrl+K");
+press(B(9), ["↵"]);
+press(B(10), ["⌘", "I"], "Ctrl+I");
+press(T.ask.end + 0.3, ["↵"]);
+press(B(12), ["⇥"], "Tab");
+press(B(12) + 1.2, ["↑", "↵"]);
+press(B(13) + 0.6, ["✦ Draft"], "", 0.6);
+press(B(14), ["⌘", "↵"], "Ctrl+Enter");
+press(B(14) + 1.6, ["Push"], "", 0.6);
+sound(B(12), "tick", 1.2);
+sound(B(9), "tick", 1.2);
+sound(B(14) + 0.1, "tick", 1);
+
+// Words, few: [from, to, html].
+const CAPTIONS = [
+  [B(0) + 1.2, B(2) - 0.2, "Calm.<span class='sub'>The bars fade while you write.</span>"],
+  [B(2) + 0.1, B(4) - 0.2, "Fast.<span class='sub'>42,000 files listed in a quarter of a second.</span>"],
+  [B(4) + 0.3, B(6) + 0.6, "Run it.<span class='sub'>The terminal is one key away.</span>"],
+  [B(8) + 0.1, B(10) - 0.1, "AI stays off until you want it."],
+  [B(10) + 0.2, B(11) + 0.4, "Ask in your own words."],
+  [B(11) + 0.6, B(13) - 0.15, "Every change shown. You keep what you want."],
+  [B(13) + 0.1, B(15) - 0.15, "Commit, with the message drafted for you."],
+];
+
+// ---------- the noise: three waves, then the build ----------
+const W1 = B(-9), W2 = B(-7), W3 = B(-5), BUILD = B(-3), STOP = 28.7;
+const NOISE = [
+  // [left, top, width, height, html, appears, bare, from (slide direction)]
+  [0, 0, 1920, 36, `<div class="row">${"File Edit Selection View Go Run Terminal Window Help".split(" ").map(w => `<span>${w}</span>`).join("")}</div>`, W1, 0],
+  [394, 156, 1036, 570, `<div class="code">use crate::price::Cents;\n\nconst FREE_SHIPPING: Cents = Cents(50_00);\nconst SHIPPING: Cents = Cents(4_90);\n\n#[derive(Debug, Clone)]\npub struct Item {\n    pub name: String,\n    pub price: Cents,\n    pub quantity: u32,\n}\n\nimpl Cart {\n    pub fn add(&mut self, item: Item) {</div>`, W1, 0],
+  [0, 36, 1920, 48, `<div class="row">${Array(14).fill('<span class="ico"></span>').join("")}<span style="margin-left:auto;background:#1d1d23;border:1px solid #2e2e36;border-radius:7px;padding:8px 160px 8px 12px">Search…</span><span>▶ Run</span><span>Debug ▾</span><span>Sign in to sync</span></div>`, W1 + 0.8, 0],
+  [0, 84, 64, 966, `<div class="col">${Array(10).fill('<span class="ico"></span>').join("")}<span class="badge" id="nb1">12</span></div>`, W1 + 1.6, 0],
+  [64, 84, 330, 966, `<div class="head">EXPLORER</div>${Array(9).fill('<div class="line"></div>').join("")}<div class="head">OPEN EDITORS <span class="badge">9</span></div>${Array(5).fill('<div class="line"></div>').join("")}<div class="head">OUTLINE</div>${Array(4).fill('<div class="line"></div>').join("")}<div class="head">TIMELINE</div><div class="head">NPM SCRIPTS</div>`, W1 + 2.4, 0],
+  [394, 84, 1126, 42, `<div class="row" style="padding:0;gap:0">${["cart.rs", "lib.rs", "price.rs", "README.md", "Cargo.toml", "settings.json", "Welcome", "Release Notes", "untitled-3"].map(n => `<span class="tab">${n} ✕</span>`).join("")}</div>`, W1 + 3.2, 0],
+  [394, 126, 1126, 30, `<div class="row" style="font-size:14px">src › cart.rs › impl Cart › fn add › item  ·  ⚑ 2 references  ·  ✎ You, 3 days ago</div>`, W1 + 3.6, 0],
+  [1430, 156, 90, 570, Array(30).fill(0).map((_, i) => `<div style="height:4px;margin:6px 10px;width:${30 + ((i * 37) % 50)}px;background:#2a2a31"></div>`).join(""), W1 + 4.0, 0],
+  [394, 726, 1126, 324, `<div class="row" style="height:42px;border-bottom:1px solid #26262d;font-size:14px;letter-spacing:.05em">PROBLEMS <span class="badge" id="nb2">12</span> OUTPUT  DEBUG CONSOLE  TERMINAL  PORTS  GIT LOG  TEST RESULTS</div><div class="code" style="color:#5e5d66">warning: unused import: \`std::fmt\`\n  --> src/lib.rs:3:5\nwarning: field \`quantity\` is never read\nerror[E0308]: mismatched types\n[Info  - 10:42:13] Indexing workspace… <span id="nb3">37</span>%\n[Info  - 10:42:14] Downloading telemetry config…</div>`, W1 + 4.8, 0],
+  [0, 1050, 1920, 30, `<div class="row" style="font-size:13px;background:#1e3a6e;color:#d6e2ff;height:30px">⑂ main*  ⟳ 0↓ 3↑  ⊗ 4  ⚠ <span id="nb4">37</span>  ·  Ln 1, Col 1  ·  Spaces: 4  ·  UTF-8  ·  LF  ·  {} Rust  ·  🔔 <span id="nb5">3</span>  ·  Indexing…  ·  ☁ Sync off</div>`, W1 + 5.6, 0],
+  // Wave 2: notifications.
+  [1460, 640, 440, 140, `<div class="toast"><b>A new version is available</b>Restart to update now?<div class="btns"><span class="btn blue">Restart</span><span class="btn">Later</span><span class="btn">Release notes</span></div></div>`, W2, 1, "right"],
+  [1460, 795, 440, 120, `<div class="toast"><b>Recommended extensions</b>12 extensions are recommended for this file type.<div class="btns"><span class="btn blue">Install all</span><span class="btn">Show</span></div></div>`, W2 + 0.8, 1, "right"],
+  [300, 90, 520, 110, `<div class="toast"><b>Sign in to sync your settings</b><div class="btns"><span class="btn blue">Sign in</span><span class="btn">Not now</span></div></div>`, W2 + 1.6, 1, "up"],
+  [610, 200, 700, 300, `<div class="modal"><h3>What's new in version 2.84</h3>• A redesigned activity bar with 6 new panels<br>• Smarter notifications (now with sounds)<br>• Personalised tips, every time you open a file<br>• Sign in to unlock cloud settings sync</div>`, W2 + 2.4, 1],
+  [120, 640, 460, 150, `<div class="toast"><b>💡 Tip of the day</b>Did you know you can customise 4,000 settings?<div class="btns"><span class="btn">Next tip</span><span class="btn">Close</span></div></div>`, W2 + 3.2, 1, "left"],
+  [1460, 930, 440, 110, `<div class="toast"><b>Your session expires in 5 minutes</b><div class="btns"><span class="btn blue">Stay signed in</span></div></div>`, W2 + 4.0, 1, "right"],
+  [820, 860, 560, 92, `<div class="toast" style="background:#2a2116;border-color:#5a4520;color:#e9cf9f"><b style="color:#f6dcaa">Your trial ends in 3 days</b>Upgrade to keep using premium features.</div>`, W2 + 4.8, 1, "up"],
+  [1080, 300, 420, 120, `<div class="toast"><b>★ Enjoying the editor?</b>Rate us on the marketplace!<div class="btns"><span class="btn">★★★★★</span></div></div>`, W2 + 5.6, 1, "right"],
+  // Wave 3: AI everywhere.
+  [1520, 84, 400, 556, `<div class="head">✦ ASSISTANT <span class="badge">NEW</span></div><div class="toast" style="margin:10px 14px;height:auto">How can I help you today? I can explain, refactor, write tests…</div><div class="toast" style="margin:10px 14px;height:auto">⚡ Upgrade for faster answers</div>`, W3, 0],
+  [560, 520, 820, 30, `<div class="ghost">fn calculate_total_with_tax_and_shipping_and_discount_v2(&amp;self) -&gt; …  ⇥ accept</div>`, W3 + 0.8, 1],
+  [700, 250, 380, 60, `<div class="ai"><b>✦ Fix with AI</b>  ·  ✦ Explain  ·  ✦ Test</div>`, W3 + 1.2, 1],
+  [430, 560, 520, 96, `<div class="ai"><b>✦ Want me to explain this file?</b><div class="btns"><span class="btn" style="background:#4b3f86">Explain</span><span class="btn">Don't ask again</span></div></div>`, W3 + 1.6, 1, "up"],
+  [960, 420, 520, 70, `<div class="ai"><span class="spin" id="spin1"></span><b>Agent is editing 14 files…</b></div>`, W3 + 2.4, 1, "right"],
+  [140, 360, 480, 96, `<div class="ai"><b>✦ Let AI write your commit message?</b><div class="btns"><span class="btn" style="background:#4b3f86">Generate</span></div></div>`, W3 + 3.2, 1, "left"],
+  [1180, 520, 330, 52, `<div class="ai">✦ Ask AI  <span style="color:#7d70b8">⌘L</span></div>`, W3 + 4.0, 1],
+  [620, 700, 640, 110, `<div class="ai"><b>✦ You've used 80% of your AI credits</b>Upgrade to Pro for unlimited completions.</div>`, W3 + 4.8, 1, "up"],
+  [300, 210, 360, 52, `<div class="ai">✦ 3 suggestions available</div>`, W3 + 5.6, 1],
+];
+const COUNTERS = [["nb1", 12, 99], ["nb2", 12, 999], ["nb3", 37, 99], ["nb4", 37, 999], ["nb5", 3, 99]];
+function buildNoise() {
+  $("noise").innerHTML = NOISE.map(([l, tp, w, h, html, , bare], i) =>
+    `<div class="c ${bare ? "bare" : ""}" id="n${i}" style="left:${l}px;top:${tp}px;width:${w}px;height:${h}px">${html}</div>`).join("");
+  NOISE.forEach(([, , , , , appears, , from]) => sound(appears, from ? "pop" : "thock", from ? 0.8 : 0.5));
+  sound(STOP - 0.45, "whoosh", 1);
+}
+
+// ---------- the window, from what a scene says ----------
+const SVG = {
+  min: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.5 8h9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+  max: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="3.5" y="3.5" width="9" height="9" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>',
+  close: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5l7 7m0-7l-7 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  branch: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="4.5" cy="3.5" r="1.6"/><circle cx="4.5" cy="12.5" r="1.6"/><circle cx="11.5" cy="5.5" r="1.6"/><path d="M4.5 5.1v5.8M11.5 7.1c0 2.4-2 3-5 3.9"/></svg>',
+};
+const TREE = [["⌄ src", 0], ["cart.rs", 1], ["lib.rs", 1], ["price.rs", 1], ["⌄ tests", 0], ["cart.rs", 1, "test"], ["Cargo.toml", 0], ["README.md", 0]];
+const treeHTML = items => items.map(([n, d, on]) => `<div class="${on ? "on" : ""}" style="padding-left:${14 + d * 22}px">${n.startsWith("⌄") ? `<span class="chev">⌄</span>${n.slice(2)}` : `<span class="dot"></span>${n}`}</div>`).join("");
+let charW = 10.8;
+
+/** The window's inside, from a scene's state (see storyState). */
+function windowHTML(s) {
+  const lh = 33, codeBottom = 37 + (s.term ? s.term.h : 0);
+  let h = `<div class="titlebar"><div class="light" style="left:22px;background:#fe5f57"></div><div class="light" style="left:46px;background:#febc2e"></div><div class="light" style="left:70px;background:#28c840"></div>
+    <div class="tabs" style="opacity:${0.35 + 0.65 * s.bars}">${s.tabs.map(([n, on]) => `<div class="ftab ${on ? "on" : ""}"><span>${n}</span>${on ? '<span class="x">✕</span>' : ""}</div>`).join("")}</div></div>`;
+  h += `<div class="sidebar" style="opacity:${s.bars}"><div class="segments">${["Files", "Outline", "Tests", "Search", "Git 1"].map(n => `<span class="${(s.sidebar === "git") === (n === "Git 1") ? "on" : ""}">${n}</span>`).join("")}</div>`;
+  if (s.sidebar === "git") {
+    const g = s.git;
+    h += `<div class="git"><div class="sub"><span class="on">Changes</span><span>History</span><span>Branches</span></div>
+      <div class="box" style="top:108px;padding:14px 16px;font-size:16px;display:flex;gap:10px;align-items:center">${SVG.branch}<span>main</span><span style="margin-left:auto;color:var(--muted)">${g.ahead ? "↑1" : ""}</span></div>
+      <div class="box" style="top:170px"><div class="msg">${g.message ? g.message : '<span class="ph">Commit message</span><br><span class="ph" style="font-size:15px">Body: what and why (optional)</span>'}</div>
+      <div class="acts"><span style="color:${g.drafting ? "var(--caret)" : "var(--muted)"}">✦ Draft</span><span class="commit ${g.go ? "go" : ""}">Commit 1 file ⌘↵</span></div></div>
+      <div class="incommit" style="top:340px;opacity:${g.files}"><div class="h">IN THIS COMMIT</div><div class="file"><span class="cb">✓</span><span>cart.rs</span><span style="color:var(--muted)">src</span><span style="margin-left:auto;color:#86d6a2">+9</span><span style="color:#e88d8d">−1</span></div></div></div>`;
+  } else if (s.roots) {
+    h += `<div class="project" style="top:76px">SHOP</div><div class="tree" style="top:102px">${treeHTML([["⌄ src", 0], ["cart.rs", 1], ["price.rs", 1], ["Cargo.toml", 0]])}</div>
+      <div class="project" style="top:250px">PAYMENTS</div><div class="tree" style="top:276px">${treeHTML([["⌄ src", 0], ["charge.rs", 1, true], ["refund.rs", 1], ["Cargo.toml", 0]])}</div>`;
+  } else {
+    h += `<div class="project" style="top:76px">SHOP</div><div class="tree" style="top:102px">${treeHTML(TREE.map(([n, d, k]) => [n, d, s.active === "test" ? k === "test" : n === "cart.rs" && !k]))}</div>`;
+  }
+  h += `</div><div class="code" style="bottom:${codeBottom}px">`;
+  let y = 10 - s.scroll * lh, caretY = null, caretN = 1;
+  for (const r of s.rows) {
+    const rh = (r.h === undefined ? 1 : r.h) * lh;
+    if (rh < 0.5) continue;
+    const top = y;
+    y += rh;
+    if (r.caret) caretN = r.n;
+    if (top > 900 || top + rh < -40) continue;
+    if (r.prompt) { h += `<div class="prompt" style="top:${top + 6}px;opacity:${r.o}">${r.prompt}</div>`; continue; }
+    if (r.hint) { h += `<div class="hint" style="top:${top + 8}px;opacity:${clamp(rh / lh)}"><span class="k">⇥</span>keep<span class="k">Esc</span>undo<span class="k">⌘I</span>adjust</div>`; continue; }
+    const text = r.cls === "del" ? r.text.match(/^\s*/)[0] + `<span class="struck">${colour(r.text.trim())}</span>` : colour(r.text);
+    const bg = r.fadeBg !== undefined ? `background:rgba(104,201,140,${0.12 * r.fadeBg});` : "";
+    h += `<div class="r ${r.cls || ""} ${r.caret ? "cur" : ""}" style="top:${top}px;height:${rh}px;overflow:hidden;${bg}${r.alpha !== undefined ? `opacity:${r.alpha};` : ""}">${r.bp ? '<span class="bp"></span>' : ""}<span class="n">${r.n || ""}</span><span class="t">${text}${r.val ? `<span class="val">${esc(r.val)}</span>` : ""}</span></div>`;
+    if (r.caret) caretY = top;
+  }
+  if (caretY !== null && s.caretOn !== false) h += `<div class="codecaret" style="left:${100 + s.caretCol * charW}px;top:${caretY + 4}px;opacity:${s.caretBlink}"></div>`;
+  h += `</div>`;
+  if (s.term) {
+    const tm = s.term, lines = tm.lines.slice(-Math.max(1, Math.floor((tm.h - 60) / 27)));
+    h += `<div class="term" style="height:${tm.h}px"><div class="h"><span>Terminal</span><span>shop</span></div><div class="out" style="top:52px">${lines.join("\n")}</div></div>`;
+  }
+  const st = s.status || {};
+  h += `<div class="status" style="opacity:${0.3 + 0.7 * s.bars}"><span style="display:flex;align-items:center;gap:7px">${SVG.branch}main</span><span>${st.crumbs || ""}</span><span class="grow"></span>
+    ${st.task ? `<span class="task"><span class="s">✦</span>${st.task}</span>` : ""}${st.ai ? `<span class="aidot" style="opacity:${st.ai}"></span>` : ""}<span>Ln ${caretN}, Col ${s.caretCol + 1}</span><span>Rust</span></div>`;
+  if (s.notice) h += `<div class="notice" style="opacity:${s.notice[1]}">${s.notice[0]}</div>`;
+  if (s.dim) h += `<div style="position:absolute;inset:0;background:#000;opacity:${s.dim.toFixed(3)}"></div>`;
+  return h + (s.overlay || "");
+}
+
+// ---------- the story, scene by scene ----------
+function storyState(t) {
+  const s = { tabs: [["cart.rs", true]], active: "cart", bars: 1, rows: [], scroll: 5, caretCol: 4, caretBlink: 1, sidebar: "files", status: { crumbs: "src/cart.rs › Cart" } };
+  // The bars fade while typing, and come back after: plainly, so it's seen.
+  const fadeFor = (a, b) => (t < a ? 1 : t < b ? 1 - 0.85 * out3(prog(t, a, a + 0.5)) : 0.15 + 0.85 * out3(prog(t, b, b + 0.6)));
+  if (t < B(2)) {
+    // Writing `subtotal`.
+    s.bars = fadeFor(T.code.start + 0.1, T.code.end + 0.6);
+    const typed = T.code.shown(t), pieces = typed.split("\n");
+    const lines = CART.concat(pieces);
+    s.rows = lines.concat(SHIPPING_FN).map((text, i) => ({ text, n: i + 1 }));
+    s.rows[lines.length - 1].caret = true;
+    s.caretCol = pieces[pieces.length - 1].length || 4;
+    s.caretBlink = blink(t, T.code.last(t), 0.5);
+    if (typed.length > 60) s.status.crumbs = "src/cart.rs › subtotal";
+  } else if (t < B(4)) {
+    // ⌘P, "tests", the test file.
+    const opened = t > B(2) + 1.45;
+    const p = fade(t, B(2) + 0.02, B(2) + 0.18, B(2) + 1.45, B(2) + 1.6);
+    s.rows = (opened ? TEST : CART_DONE).map((text, i) => ({ text, n: i + 1 }));
+    s.scroll = opened ? 0 : 5;
+    if (opened) { s.tabs = [["cart.rs", false], ["cart.rs  tests", true]]; s.active = "test"; s.rows[13].caret = true; s.status.crumbs = "tests/cart.rs › free_shipping_above_50"; }
+    else s.rows[CART.length + 3].caret = true;
+    s.caretBlink = blink(t, B(2) + 1.5, 0.5);
+    if (p > 0) {
+      const q = T.query.shown(t);
+      const hits = q.length >= 2
+        ? [["<span class='m'>tests</span>/cart.rs", "tests"], ["src/cart.rs", "src"], ["README.md", ""]]
+        : [["cart.rs", "src"], ["lib.rs", "src"], ["price.rs", "src"], ["cart.rs", "tests"], ["README.md", ""]];
+      s.overlay = `<div class="palette" style="opacity:${p};transform:translateY(${(1 - p) * -10}px)"><div class="q"><span style="display:inline-block;width:2px;height:28px;background:var(--caret);margin-right:2px;opacity:${blink(t, T.query.last(t), 0.4)}"></span>${q ? esc(q) : '<span class="ph">Go to file, @ for a symbol</span>'}<span class="r2">↵ open</span></div>
+        ${hits.map((h, i) => `<div class="item ${i === 0 ? "on" : ""}"><span>${h[0]}</span><span class="w">${h[1]}</span></div>`).join("")}<div style="height:6px"></div></div>`;
+    }
+  } else if (t < B(8)) {
+    // The terminal: cargo test, one fails; then back to the code.
+    const back = t > B(6) + 0.8;
+    s.tabs = back ? [["cart.rs", true], ["cart.rs  tests", false]] : [["cart.rs", false], ["cart.rs  tests", true]];
+    s.active = back ? "cart" : "test";
+    s.rows = (back ? CART_DONE : TEST).map((text, i) => ({ text, n: i + 1 }));
+    s.scroll = back ? SHIP_LINE - 6 : 0;
+    if (back) { s.rows[SHIP_LINE + 1].caret = true; s.caretCol = 8; s.status.crumbs = "src/cart.rs › shipping"; }
+    else { s.rows[13].caret = true; s.caretCol = 4; s.status.crumbs = "tests/cart.rs › free_shipping_above_50"; }
+    s.caretOn = back;
+    s.caretBlink = blink(t, B(6) + 0.8, 0.5);
+    const open = out3(prog(t, B(4) + 0.02, B(4) + 0.3));
+    const cmd = T.cmd.shown(t), ran = t > T.cmd.end + 0.22;
+    const lines = [`shop % ${cmd}${ran ? "" : `<span class="tcaret" style="opacity:${blink(t, T.cmd.last(t), 0.4)}"></span>`}`];
+    if (ran) {
+      const n = Math.floor(prog(t, T.cmd.end + 0.4, B(5) + 0.9) * RUN1.length + 0.0001);
+      lines.push(...RUN1.slice(0, n));
+      if (n >= RUN1.length) lines.push(`shop % <span class="tcaret" style="opacity:${blink(t, B(5) + 1.0, 0.4)}"></span>`);
+    }
+    s.term = { h: 330 * open, lines };
+  } else if (t < B(13)) {
+    // The turn, then AI: ⌘I, the change, ⇥, the tests again.
+    const aiAt = B(11), kept = inOut(prog(t, B(12), B(12) + 0.45));
+    const open = out3(prog(t, aiAt, aiAt + 0.45));
+    const promptO = fade(t, B(10) + 0.05, B(10) + 0.3, aiAt - 0.25, aiAt);
+    let n = 1;
+    CART_DONE.forEach((text, i) => {
+      if (i === SHIP_LINE + 1 && open > 0) {
+        s.rows.push({ text, cls: "del", h: open * (1 - kept), alpha: 1 - kept });
+        FIXED.forEach((a, j) => s.rows.push({ text: a, cls: kept > 0.5 ? "" : "add", h: open, n: n++, fadeBg: 1 - kept, caret: j === 0 }));
+        s.rows.push({ hint: true, h: open * (1 - kept) * 1.3 });
+        return;
+      }
+      s.rows.push({ text, n: n++, caret: i === SHIP_LINE + 1 && open === 0 });
+      if (i === SHIP_LINE && promptO > 0) {
+        const ask = T.ask.shown(t), thinking = t > T.ask.end + 0.3;
+        const inner = thinking
+          ? `<span class="star" style="opacity:${0.45 + 0.55 * Math.abs(Math.sin(t * 5))}">✦</span><span class="grow" style="color:var(--muted)">Thinking…</span>`
+          : `<span class="star">✦</span><span class="grow">${ask ? esc(ask) + `<span style="display:inline-block;width:2px;height:20px;background:var(--caret);vertical-align:-4px;margin-left:2px;opacity:${blink(t, T.ask.last(t), 0.4)}"></span>` : '<span class="ph">Describe a change, or ask a question</span>'}</span><span class="hintr">${ask ? "↵ change" : ""}</span>`;
+        s.rows.push({ prompt: inner, h: promptO * 1.6, o: promptO });
+      }
+    });
+    s.scroll = SHIP_LINE - 6;
+    s.caretCol = 8;
+    s.caretOn = promptO < 0.5;
+    s.caretBlink = blink(t, aiAt, 0.6);
+    s.status.crumbs = "src/cart.rs › shipping";
+    s.status.ai = t > B(9) ? out3(prog(t, B(9), B(9) + 0.4)) : 0;
+    s.bars = t > B(10) && t < B(12) + 0.4 ? fadeFor(B(10) + 0.2, B(12) + 0.4) : 1;
+    s.dim = fade(t, B(8) + 0.2, B(8) + 1.4, B(10) - 0.3, B(10) + 0.1) * 0.6;
+    // ⌘K: the AI switch, in the quiet.
+    const k = fade(t, B(8) + 1.65, B(8) + 1.85, B(10) - 0.35, B(10) - 0.05);
+    if (k > 0) {
+      const on = t > B(9), knob = 3 + 18 * out3(prog(t, B(9), B(9) + 0.18));
+      const row = (label, right, sel) => `<div class="item ${sel ? "on" : ""}">${label}${right}</div>`;
+      s.overlay = `<div class="palette" style="opacity:${k};transform:translateY(${(1 - k) * -10}px)"><div class="q"><span style="display:inline-block;width:2px;height:28px;background:var(--caret);margin-right:2px"></span><span>ai</span><span class="r2">↵ switch</span></div>
+        ${row("AI", `<span class="tog ${on ? "on" : ""}" style="--knob:${knob}px"></span>`, true)}${row("Suggestions while typing", '<span class="tog on" style="--knob:21px"></span>')}${row("AI Settings…", "")}<div style="height:6px"></div></div>`;
+    }
+    if (t > B(12) + 1.0) {
+      const open2 = out3(prog(t, B(12) + 1.0, B(12) + 1.3));
+      const n2 = Math.floor(prog(t, B(12) + 1.5, B(12) + 2.6) * RUN2.length + 0.0001);
+      const lines = ["shop % cargo test", ...RUN2.slice(0, n2)];
+      if (n2 >= RUN2.length) lines.push(`shop % <span class="tcaret"></span>`);
+      s.term = { h: 300 * open2, lines };
+    }
+  } else {
+    // Commit, with a message drafted for you; push.
+    s.rows = CART_DONE.slice(0, SHIP_LINE + 1).concat(FIXED, CART_DONE.slice(SHIP_LINE + 2)).map((text, i) => ({ text, n: i + 1 }));
+    s.scroll = SHIP_LINE - 6;
+    s.rows[SHIP_LINE + 1].caret = true;
+    s.caretCol = 8;
+    s.sidebar = "git";
+    const draft = T.draft.shown(t).split("\n");
+    const committed = t > B(14) + 0.1;
+    s.git = {
+      message: committed ? "" : draft[0] ? esc(draft[0]) + (draft[1] !== undefined ? `<br><span style="color:var(--muted);font-size:15px">${esc(draft[1])}</span>` : "") : "",
+      drafting: t > B(13) + 0.6 && t < T.draft.end,
+      go: t > B(14) - 0.15 && !committed,
+      files: committed ? 0 : 1,
+      ahead: committed && t < B(14) + 1.7,
+    };
+    s.status.crumbs = "src/cart.rs › shipping";
+    s.status.ai = 1;
+    if (committed) s.notice = [t > B(14) + 1.7 ? "Pushed to origin/main." : "Committed 4e1a9c2: Free shipping above 50 €.", fade(t, B(14) + 0.1, B(14) + 0.3, B(15) - 0.4, B(15))];
+  }
+  return s;
+}
+
+/** The camera on the window: [from, to, zoom, x, y] (where it looks, in window coordinates). */
+const SHOTS = [
+  [B(0), B(0) + 1.4, 1.0, 760, 420], [B(0) + 1.4, B(1) + 1.2, 1.28, 700, 620],
+  [B(2) - 0.4, B(2), 1.0, 760, 420],
+  [B(4), B(4) + 0.8, 1.12, 760, 700],
+  [B(6) + 0.6, B(7), 1.22, 720, 420],
+  [B(8) + 1.2, B(8) + 1.7, 1.0, 760, 420],
+  [B(10), B(10) + 0.9, 1.25, 760, 420],
+  [B(12) + 0.8, B(12) + 1.4, 1.1, 760, 640],
+  [B(13) - 0.1, B(13) + 0.6, 1.3, 330, 330],
+  [B(14) + 0.9, B(15) - 0.2, 1.08, 760, 420],
+];
+function camera(t) {
+  let zoom = 1, x = 760, y = 420, from = [1, 760, 420];
+  for (const [a, b, z, cx, cy] of SHOTS) {
+    if (t < a) break;
+    const p = inOut(prog(t, a, b));
+    zoom = from[0] + (z - from[0]) * p; x = from[1] + (cx - from[1]) * p; y = from[2] + (cy - from[2]) * p;
+    if (t >= b) from = [z, cx, cy];
+  }
+  return [zoom, x, y];
+}
+
+function renderStory(t) {
+  const o = fade(t, B(0) - 0.05, B(0) + 0.3, B(15) - 0.25, B(15));
+  if (!show("story", o, `scale(${0.96 + 0.04 * out3(prog(t, B(0) - 0.05, B(0) + 0.5))})`)) return;
+  const w = $("window");
+  const html = windowHTML(storyState(t));
+  if (w.dataset.h !== html) { w.innerHTML = html; w.dataset.h = html; }
+  const [zoom, x, y] = camera(t);
+  if (VERTICAL) {
+    // The code fills the width (its text runs from x 451 to about 1165): centred on it,
+    // as close as still shows whole lines.
+    const fx = x < 500 ? x : 808, fy = y;
+    w.style.left = `${540 - fx}px`;
+    w.style.top = `${1000 - fy}px`;
+    w.style.transformOrigin = `${fx}px ${fy}px`;
+    w.style.transform = `scale(${Math.min(zoom * 1.3, 1.42)})`;
+  } else {
+    w.style.transformOrigin = `${x}px ${y}px`;
+    w.style.transform = `scale(${zoom})`;
+  }
+  const scrim = VERTICAL ? 1 : clamp((zoom - 1) / 0.15);
+  $("scrim-top").style.opacity = scrim;
+  $("scrim-bottom").style.opacity = scrim;
+  // The turn: the code dims (inside the window, under the palette), the names come up.
+  if (show("providers", fade(t, B(9) + 0.3, B(9) + 0.7, B(10) - 0.3, B(10)))) {
+    const list = [["Claude Code", "your Claude plan"], ["Codex", "your ChatGPT plan"], ["Claude API"], ["OpenAI"], ["Gemini"], ["Mistral"], ["Groq"], ["OpenRouter"], ["NVIDIA"], ["Ollama", "on your computer"]];
+    setHTML("providers", `<div class="lead">With your plan, an API key, or a model on your own computer:</div><div class="names">${list.map(([n, w2], i) =>
+      `<span class="p" style="opacity:${out3(prog(t, B(9) + 0.5 + i * 0.1, B(9) + 0.8 + i * 0.1)).toFixed(2)}">${n}${w2 ? `<i>${w2}</i>` : ""}</span>`).join("")}</div>`);
+  }
+}
+
+// ---------- the montage: one shot every half bar ----------
+const M0 = B(15), HALF = BAR / 2;
+const MONTAGE = [
+  ["task", "Bigger tasks, in the background", "Claude Code or Codex does the work; you review every change"],
+  ["debug", "A debugger in the code", "Values shown where they are, not in a pane"],
+  ["md", "Markdown, with a live preview", "Tables, formulas and diagrams"],
+  ["roots", "Several folders, one window", "Each with its own files, git and language servers"],
+  ["vim", "Vim, if your hands know it", "Modes, motions, registers, macros"],
+  ["keyboard", "Or the keys you already know", "VS Code, JetBrains, Sublime Text, Zed"],
+  ["themes", "Six themes", "True black by default"],
+  ["windows", "On Windows", ""],
+  ["linux", "On Linux", ""],
+  ["code", "And on the Mac", ""],
+];
+MONTAGE.forEach((_, i) => sound(M0 + i * HALF, i === 0 ? "thock" : "swish", 0.7));
+
+function fakeWindow(kind, local) {
+  const rows = (lines, start = 1) => lines.map((text, i) => ({ text, n: start + i }));
+  const s = { tabs: [["cart.rs", true]], active: "cart", bars: 1, rows: [], scroll: 0, caretCol: 8, caretBlink: 1, sidebar: "files", status: { crumbs: "src/cart.rs › shipping", ai: 1 } };
+  if (kind === "task") {
+    const discount = ["use crate::price::Cents;", "", "/// A code taken off the subtotal.", "pub struct Discount {", "    pub code: String,", "    pub percent: u8,", "}", "", "impl Discount {", "    pub fn apply(&self, total: Cents) -> Cents {", "        total - total * self.percent / 100", "    }", "}"];
+    s.tabs = [["cart.rs", false], ["discount.rs", true]];
+    s.rows = discount.map((text, i) => ({ text, n: i + 1, cls: i >= 2 ? "add" : "" }));
+    s.rows.push({ hint: true, h: 1.3 });
+    s.rows[9].caret = true;
+    s.status.task = local < 0.7 ? "Working on discount.rs… <span style='color:var(--muted)'>Stop</span>" : "Review 3 files";
+    s.status.crumbs = "src/discount.rs";
+  } else if (kind === "debug") {
+    s.rows = rows(CART_DONE.slice(SHIP_LINE - 6, SHIP_LINE + 1).concat(FIXED, ["    }", "}"]), SHIP_LINE - 5);
+    s.rows[2].val = "items = [Item { name: \"Lamp\", price: Cents(6400), quantity: 1 }]";
+    Object.assign(s.rows[7], { bp: true, cls: "stop", caret: true, val: "subtotal = Cents(6400)   FREE_SHIPPING = Cents(5000)" });
+    s.status.crumbs = "Paused in shipping · cart.rs:30";
+  } else if (kind === "roots") {
+    s.rows = rows(["use stripe::Charge;", "", "/// Takes the payment for an order.", "pub async fn charge(order: &Order) -> Result<Charge> {", "    let total = order.cart.subtotal() + order.cart.shipping();", "    stripe::charge(total, &order.card).await", "}"]);
+    s.rows[4].caret = true;
+    s.tabs = [["cart.rs", false], ["charge.rs", true]];
+    s.roots = true;
+    s.status.crumbs = "payments/src/charge.rs";
+  }
+  return windowHTML(s);
+}
+
+function buildMontage() {
+  $("montage").innerHTML = MONTAGE.map(([kind, title, sub], i) => {
+    let inner;
+    if (["task", "debug", "roots"].includes(kind)) {
+      inner = `<div class="fw" id="fw${i}" style="position:absolute;left:0;top:0;width:1520px;height:950px;transform:scale(${1400 / 1520});transform-origin:0 0;background:#000"></div>`;
+    } else if (kind === "windows" || kind === "linux") {
+      // Off the Mac, Null draws its own minimise, maximise and close.
+      inner = `<canvas data-src="shots/code.jpg"></canvas><div class="osbar"><div class="ftab"><span>cart.rs</span><span style="color:#8b8a92;font-size:13px">✕</span></div><div class="ctl"><span>${SVG.min}</span><span>${SVG.max}</span><span>${SVG.close}</span></div></div>`;
+    } else {
+      inner = `<canvas data-src="shots/${kind}.jpg"></canvas>`;
+    }
+    return `<div class="shot" id="ms${i}" style="visibility:hidden">${inner}</div><div class="label" id="ml${i}" style="visibility:hidden"><b>${title}</b>${sub ? `<span>${sub}</span>` : ""}</div>`;
+  }).join("");
+  document.querySelectorAll("#montage .fw").forEach(applyTheme);
+}
+
+function renderMontage(t) {
+  if (!show("montage", fade(t, M0 - 0.05, M0 + 0.15, B(20) - 0.05, B(20) + 0.45))) return;
+  const current = clamp(Math.floor((t - M0) / HALF), 0, MONTAGE.length - 1);
+  MONTAGE.forEach(([kind], i) => {
+    if (i !== current) { show("ms" + i, 0); show("ml" + i, 0); return; }
+    const local = t - (M0 + i * HALF);
+    const enter = out3(prog(local, 0, 0.22)), z = 1.0 + 0.035 * (local / HALF);
+    if (VERTICAL) {
+      // A part of the shot fills the width: where it matters (the right edge for the
+      // window buttons off the Mac, the left for the Mac's).
+      const focus = { md: 0.62, windows: 0.68, linux: 0.68, code: 0.32 }[kind] ?? 0.55;
+      const box = $("ms" + i);
+      box.style.left = `${540 - focus * 1400}px`;
+      box.style.top = `${900 - 437}px`;
+      box.style.transformOrigin = `${focus * 1400}px 437px`;
+      show("ms" + i, enter, `scale(${1.2 * z * (0.97 + 0.03 * enter)})`);
+    } else {
+      show("ms" + i, enter, `scale(${z * (0.97 + 0.03 * enter)})`);
+    }
+    show("ml" + i, NOCAPTIONS ? 0 : out3(prog(local, 0.1, 0.4)), `translateY(${(1 - out3(prog(local, 0.1, 0.45))) * 10}px)`);
+    if ($("fw" + i)) setHTML("fw" + i, fakeWindow(kind, local));
+  });
+}
+
+// ---------- opening, noise, silence, the end ----------
+function renderOpening(t) {
+  if (!show("opening", fade(t, 0, 0.01, W1 - 0.5, W1))) return;
+  const typed = T.word.shown(t);
+  $("wordtext").textContent = typed;
+  $("wordcaret").style.opacity = t < 0.25 ? 0 : blink(t, T.word.last(t), 0.45);
+  $("wordcaret").style.marginLeft = typed ? "12px" : "0";
+  show("definition", fade(t, 1.8, 2.5, W1 - 0.6, W1 - 0.1), `translateY(${(1 - out3(prog(t, 1.8, 2.5))) * 16}px)`);
+}
+
+function renderNoise(t) {
+  if (!show("noise", t > W1 - 0.05 && t < STOP + 0.1 ? 1 : 0)) return;
+  const shake = in3(prog(t, BUILD, STOP - 0.45));
+  NOISE.forEach(([l, tp, w, h, , appears, , from], i) => {
+    const inP = out3(prog(t, appears, appears + 0.3));
+    const q = in3(prog(t, STOP - 0.42 + (i % 5) * 0.01, STOP - 0.02));
+    const cx = l + w / 2, cy = tp + h / 2, slide = 1 - inP;
+    const sx = from === "right" ? 260 * slide : from === "left" ? -260 * slide : 0, sy = from === "up" ? 120 * slide : 10 * slide;
+    const jx = Math.sin(t * 37 + i * 1.7) * 7 * shake, jy = Math.cos(t * 41 + i * 2.3) * 5 * shake;
+    const beat = t > BUILD ? Math.exp(-((t - BUILD) % BEAT) * 9) * shake * 0.03 : 0;
+    const el = $("n" + i);
+    el.style.opacity = inP * (1 - q);
+    el.style.transform = `translate(${sx + jx + (960 - cx) * q}px, ${sy + jy + (540 - cy) * q}px) scale(${(0.96 + 0.04 * inP + beat) * (1 - 0.98 * q)})`;
+  });
+  for (const [id, a, b] of COUNTERS) {
+    const v = Math.round(a + (b - a) * in3(prog(t, W2, STOP - 0.5)));
+    $(id).textContent = id === "nb3" ? v : v > 999 ? "999+" : v;
+  }
+  $("spin1").style.transform = `rotate(${t * 540}deg)`;
+}
+
+function renderSilence(t) {
+  if (!show("silence", fade(t, STOP - 0.05, STOP + 0.05, B(0) - 0.7, B(0) - 0.15))) return;
+  const typed = T.back.shown(t);
+  $("backtext").textContent = typed;
+  $("backcaret").style.marginLeft = typed ? "8px" : "0";
+  $("backcaret").style.opacity = blink(t, Math.max(T.back.last(t), STOP), 0.4);
+}
+
+function renderEnd(t) {
+  const E = B(20);
+  if (!show("end", fade(t, E - 0.1, E + 0.1, FULL_DURATION - 0.9, FULL_DURATION - 0.2))) return;
+  // The caret alone again, as at the start; then the name.
+  $("endcaret").style.opacity = t < E + 1.6 ? blink(t, E, 0.3) * (1 - prog(t, E + 1.4, E + 1.6)) : 0;
+  show("endmark", out3(prog(t, E + 1.6, E + 2.3)), `translateY(${(1 - out3(prog(t, E + 1.6, E + 2.4))) * 20}px)`);
+  $("endmark").querySelector(".caret").style.opacity = blink(t, E + 1.6, 0.8);
+  show("tagline", out3(prog(t, E + 2.4, E + 3.1)), `translateY(${(1 - out3(prog(t, E + 2.4, E + 3.1))) * 14}px)`);
+  show("cta", out3(prog(t, E + 3.2, E + 3.7)), `scale(${0.96 + 0.04 * out3(prog(t, E + 3.2, E + 3.7))})`);
+  show("facts", out3(prog(t, E + 3.6, E + 4.2)));
+  show("url", out3(prog(t, E + 4.0, E + 4.6)));
+}
+
+function renderWords(t) {
+  if (NOCAPTIONS && NOKEYS) { show("words", 0); return; }
+  let cap = "", capO = 0, capY = 0;
+  for (const [a, b, text] of CAPTIONS) {
+    const f = fade(t, a, a + 0.4, b - 0.3, b);
+    if (f > 0 && !NOCAPTIONS) { cap = text; capO = f; capY = (1 - out3(prog(t, a, a + 0.45))) * 14; }
+  }
+  setHTML("caption", cap);
+  show("caption", capO, `translateY(${capY}px)`);
+  let html = "", o = 0, scale = 1;
+  for (const [a, b, keys, alt] of KEYS) {
+    const f = fade(t, a, a + 0.1, b - 0.2, b);
+    if (f > 0 && !NOKEYS) {
+      html = `<div class="pill">${keys.map(k => `<span class="key">${k}</span>`).join("")}${alt ? `<span class="key-alt">${alt}</span>` : ""}</div>`;
+      o = f; scale = 1 - 0.07 * Math.sin(Math.PI * prog(t, a + 0.1, a + 0.28));
+    }
+  }
+  setHTML("keys", html);
+  show("keys", o, `scale(${scale})`);
+}
+
+// ---------- the 30-second cut: the full film's moments, re-timed on the music's bars ----------
+// [cut from, cut to, film from, film to]: each piece of the cut shows that stretch of the
+// full film (faster or slower to fit). The music: score.swift --pieces (see render.sh).
+const KEEP = [0, 1, 2, 4, 6, 7, 8, 9];   // montage shots kept: task, debug, md, vim, themes, windows, linux, mac
+const EDITS = {
+  "30": [
+    [0, 4.22, W1, STOP - 0.42],              // the noise, fast: chaos from the first frame
+    [4.22, 4.64, STOP - 0.42, STOP],         // pulled into the caret as the music stops
+    [4.64, 7.40, STOP, B(0)],                // the silence, and the sentence
+    [7.40, 10.60, B(0), B(2) - 0.15],        // the first big beat: writing, the bars fading
+    [10.60, 13.80, B(10) + 0.1, B(11)],      // ⌘I, in plain words
+    [13.80, 15.40, B(11), B(12)],            // the change, shown
+    [15.40, 17.00, B(12), B(12) + 1.0],      // ⇥: kept
+    ...KEEP.map((k, j) => [17.0 + 0.8 * j, 17.8 + 0.8 * j, B(15) + k * BAR / 2, B(15) + (k + 1) * BAR / 2]),
+    [23.40, 30.20, B(20), 105.2],            // the end card, on the music's last phrase
+  ],
+  // The website's moving backgrounds, one scene each (silent).
+  "calm": [[0, 6.1, B(0) - 0.1, B(2) - 0.3]],
+  "fast": [[0, 6.3, B(2) - 0.3, B(4) - 0.1]],
+  "ai": [[0, 7.4, B(10) + 0.15, B(12) + 1.6]],
+  "everywhere": [[0, 6.35, B(15) + 6 * BAR / 2, B(20) - 0.05]],
+};
+const EDIT = CUT ? EDITS[CUT] : null;
+const FULL_DURATION = window.DURATION;
+if (EDIT) window.DURATION = EDIT[EDIT.length - 1][1];
+/** The full film's sounds, where the cut shows them (once every sound is known). */
+function cutSounds() {
+  if (!EDIT) return;
+  const kept = [];
+  for (const [t, kind, gain] of window.SOUNDS) {
+    for (const [a, b, fa, fb] of EDIT) {
+      if (t >= fa && t < fb) { kept.push([+(a + (t - fa) * (b - a) / (fb - fa)).toFixed(3), kind, gain]); break; }
+    }
+  }
+  window.SOUNDS = kept;
+}
+function filmTime(t) {
+  if (!EDIT) return t;
+  for (const [a, b, fa, fb] of EDIT) if (t < b) return fa + (clamp(t, a, b) - a) * (fb - fa) / (b - a);
+  return FULL_DURATION;
+}
+
+let measured = false;
+window.render = function (cutTime) {
+  const t = filmTime(cutTime);
+  if (!measured) {
+    const c = document.createElement("canvas").getContext("2d");
+    c.font = "400 18px 'Geist Mono'";
+    charW = c.measureText("0000000000").width / 10;
+    measured = true;
+  }
+  renderOpening(t);
+  renderNoise(t);
+  renderSilence(t);
+  renderStory(t);
+  renderMontage(t);
+  renderEnd(t);
+  renderWords(t);
+};
+
+buildNoise();
+buildMontage();
+cutSounds();
+applyTheme($("window"));
+// The app's pictures, drawn once into canvases (a large image shown for the first time can
+// be painted a frame late; a canvas is always there). The film is ready once they are.
+window.ready = Promise.all([...document.querySelectorAll("canvas[data-src]")].map(canvas => {
+  const img = new Image();
+  img.src = canvas.dataset.src;
+  return img.decode().then(() => {
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+  }).catch(() => {});
+}));
+window.SOUNDS.sort((a, b) => a[0] - b[0]);
+
+// ---------- playing it in a browser ----------
+if (EMBED) {
+  // Inside a page: fit the frame; the page calls render(t).
+  document.body.style.background = "transparent";
+  const fit = () => {
+    const [W, H] = VERTICAL ? [1080, 1920] : [1920, 1080];
+    const sc = Math.min(innerWidth / W, innerHeight / H);
+    $("stage").style.transformOrigin = "0 0";
+    $("stage").style.transform = `translate(${(innerWidth - W * sc) / 2}px, ${(innerHeight - H * sc) / 2}px) scale(${sc})`;
+  };
+  addEventListener("resize", fit); fit();
+  window.ready.then(() => document.fonts.ready).then(() => { window.render(0); parent.postMessage("null-film-ready", "*"); });
+} else if (!navigator.userAgent.includes("NullFilm")) {
+  document.body.classList.add("player");
+  const bar = document.createElement("div");
+  bar.id = "bar"; bar.innerHTML = "<div></div>";
+  document.body.appendChild(bar);
+  const fit = () => {
+    const [W, H] = VERTICAL ? [1080, 1920] : [1920, 1080];
+    const sc = Math.min(innerWidth / W, (innerHeight - 8) / H);
+    $("stage").style.transform = `scale(${sc})`;
+    $("stage").style.margin = `${(H * sc - H) / 2}px ${(W * sc - W) / 2}px`;
+  };
+  addEventListener("resize", fit); fit();
+  let t = parseFloat(QUERY.get("t") || "0"), playing = !QUERY.has("t"), last = null;
+  addEventListener("keydown", e => {
+    if (e.key === " ") playing = !playing;
+    if (e.key === "ArrowRight") t = Math.min(DURATION, t + (e.shiftKey ? 0.1 : 1));
+    if (e.key === "ArrowLeft") t = Math.max(0, t - (e.shiftKey ? 0.1 : 1));
+  });
+  bar.addEventListener("click", e => { t = DURATION * e.clientX / innerWidth; });
+  document.fonts.ready.then(() => {
+    const frame = now => {
+      if (playing && last !== null) t = (t + (now - last) / 1000) % DURATION;
+      last = now;
+      window.render(t);
+      bar.firstChild.style.width = (100 * t / DURATION) + "%";
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  });
+}
+</script>
+</body>
+</html>

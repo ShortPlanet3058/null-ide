@@ -188,7 +188,10 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
         let home = crate::tools::home_dir().map(|h| absolute(&h));
         let own = std::env::current_exe().ok().and_then(|e| e.parent().map(absolute));
         let system = std::env::var_os("SystemRoot").map(|r| absolute(&PathBuf::from(r)));
-        let from_finder = cwd.parent().is_none()
+        // (On Windows, null.exe started with nothing is a shortcut's or Explorer's, whatever
+        // folder it starts in: `null` from a terminal passes the folder it's in.)
+        let from_finder = cfg!(windows)
+            || cwd.parent().is_none()
             || Some(&cwd) == home.as_ref()
             || Some(&cwd) == own.as_ref()
             || system.is_some_and(|r| cwd.starts_with(r));
@@ -198,8 +201,7 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
             }
             // The very first time: not the whole disk (or home) as a project, read and
             // watched, but an empty folder of Null's own until one is opened.
-            if let Some(scratch) = tools::data_dir().map(|d| d.join("Scratch")) {
-                std::fs::create_dir_all(&scratch).ok();
+            if let Some(scratch) = session::scratch_folder() {
                 return (scratch, None);
             }
         }
@@ -331,6 +333,20 @@ fn main() {
                 use futures::StreamExt;
                 while let Some(request) = handed.next().await {
                     cx.update(|cx| {
+                        // A file in a project a window has open: opened there.
+                        if request.others.is_empty()
+                            && let Some(file) = &request.file
+                            && let Some(handle) = window_holding(file, cx)
+                        {
+                            let (file, place) = (file.clone(), request.place);
+                            handle
+                                .update(cx, |workspace, window, cx| {
+                                    window.activate_window();
+                                    open_at(workspace, file, place, window, cx);
+                                })
+                                .ok();
+                            return;
+                        }
                         let root = request.root.clone();
                         open_project_window_now(request.root, request.file, request.place, cx);
                         add_folders(&root, request.others, cx);
@@ -430,6 +446,30 @@ fn add_folders(root: &std::path::Path, others: Vec<PathBuf>, cx: &mut gpui::App)
     if let Some(handle) = window_on(root, None, cx) {
         handle.update(cx, |workspace, window, cx| workspace.add_roots(others, window, cx)).ok();
     }
+}
+
+/// The window with a folder holding `file` (the innermost, should several), if one does.
+fn window_holding(file: &std::path::Path, cx: &gpui::App) -> Option<gpui::WindowHandle<Workspace>> {
+    let real = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let file = real(file);
+    cx.windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<Workspace>())
+        .filter_map(|handle| {
+            // Any of its folders; the innermost that holds the file counts.
+            let workspace = handle.read(cx).ok()?;
+            let depth = workspace
+                .roots()
+                .all()
+                .iter()
+                .map(|r| real(r))
+                .filter(|r| file.starts_with(r))
+                .map(|r| r.as_os_str().len())
+                .max()?;
+            Some((depth, handle))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, handle)| handle)
 }
 
 /// Opens a window on project `root`, as it was left (and `file` in it, if given); the

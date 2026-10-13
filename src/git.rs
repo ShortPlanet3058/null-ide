@@ -6,6 +6,21 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Whether git is installed where Null can find it.
+pub fn installed() -> bool {
+    static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| cfg!(test) || crate::tools::find("git").is_some())
+}
+
+/// What's said where git can't be used: no repository here, or no git at all.
+pub fn not_a_repository() -> &'static str {
+    if installed() {
+        "This folder isn't a git repository"
+    } else {
+        "Git isn't installed (or Null can't find it): get it from git-scm.com"
+    }
+}
+
 /// git, run in `dir`. Paths given to it are names, never patterns: discarding `app/[id].tsx`
 /// mustn't touch `app/d.tsx`.
 fn command(dir: &Path) -> Command {

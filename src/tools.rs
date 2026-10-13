@@ -29,8 +29,11 @@ pub fn test_dir(name: &str) -> PathBuf {
 /// A program to run in the background: on Windows without a console window of its own
 /// flashing up (git, language servers and the rest are console programs).
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    // A bare name (`git`) run from where it's installed, if that's somewhere Null knows but
+    // not on the PATH an app is given (Git for Windows' own folder, Homebrew's…).
+    let resolved = located(program.as_ref());
     #[allow(unused_mut)]
-    let mut command = std::process::Command::new(&program);
+    let mut command = std::process::Command::new(resolved.as_deref().map_or(program.as_ref(), |p| p.as_os_str()));
     // Tests' repositories keep their files as written: no CRLF from Windows' git
     // (core.autocrlf, set there by default), whatever the machine's settings.
     #[cfg(test)]
@@ -47,6 +50,23 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+/// Where a bare program name is installed, looked up once (`git` runs often).
+fn located(program: &std::ffi::OsStr) -> Option<PathBuf> {
+    use std::sync::Mutex;
+    static FOUND: Mutex<Option<std::collections::HashMap<String, PathBuf>>> = Mutex::new(None);
+    let name = program.to_str()?;
+    if name.contains(['/', '\\']) || cfg!(test) {
+        return None;
+    }
+    // (Remembered once found; not found, looked for again next time: installed meanwhile.)
+    if let Some(path) = FOUND.lock().ok()?.get_or_insert_with(Default::default).get(name) {
+        return Some(path.clone());
+    }
+    let path = find(name)?;
+    FOUND.lock().ok()?.get_or_insert_with(Default::default).insert(name.to_string(), path.clone());
+    Some(path)
 }
 
 /// The person's home folder: `$HOME`, or on Windows (where it's rarely set) `%USERPROFILE%`.
@@ -95,6 +115,34 @@ pub fn search_dirs() -> Vec<PathBuf> {
         }
     }
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/go/bin"].map(PathBuf::from));
+    // Linux: Snap's, and Homebrew's there.
+    if cfg!(target_os = "linux") {
+        dirs.extend(["/snap/bin", "/home/linuxbrew/.linuxbrew/bin"].map(PathBuf::from));
+    }
+    // Windows: where Git, Node, the GitHub CLI and Scoop install themselves, when an app
+    // isn't given them on its PATH.
+    if cfg!(windows) {
+        let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+        for (base, rest) in [
+            ("ProgramFiles", "Git\\cmd"),
+            ("ProgramFiles(x86)", "Git\\cmd"),
+            ("LOCALAPPDATA", "Programs\\Git\\cmd"),
+            ("ProgramFiles", "nodejs"),
+            ("APPDATA", "npm"),
+            ("ProgramFiles", "GitHub CLI"),
+            ("USERPROFILE", "scoop\\shims"),
+        ] {
+            if let Some(base) = var(base) {
+                dirs.push(base.join(rest));
+            }
+        }
+        // Python from python.org: one folder for each version.
+        if let Some(python) = var("LOCALAPPDATA").map(|d| d.join("Programs\\Python"))
+            && let Ok(versions) = std::fs::read_dir(python)
+        {
+            dirs.extend(versions.flatten().map(|v| v.path()));
+        }
+    }
     // What Null installed itself.
     if let Some(data) = data_dir() {
         dirs.push(data.join("servers/node_modules/.bin"));
