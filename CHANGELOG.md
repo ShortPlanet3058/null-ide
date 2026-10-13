@@ -19,6 +19,8 @@
 
 **Everywhere**
 
+- Null is now under the GNU General Public License 3.0 (0.1.0 stays MIT or Apache 2.0).
+
 - Quick settings: − + and ← → are buttons; the ≡ button lists every command.
 - Committing a file ends the changes shown in it.
 
