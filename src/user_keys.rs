@@ -135,6 +135,8 @@ pub fn bindings(
 pub fn register(cx: &mut App) {
     let keys = cx.try_global::<crate::settings::Settings>().map(|s| s.keys.clone()).unwrap_or_default();
     let (bindings, taken, problems) = bindings(&keys, cx);
+    let taken: Vec<(String, String)> =
+        taken.into_iter().map(|(keys, name)| (crate::keymap::as_bound(&keys, cx), name)).collect();
     if !taken.is_empty() {
         let kept: Vec<KeyBinding> = {
             let keymap = cx.key_bindings();

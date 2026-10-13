@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+**Windows, from its first tests**
+
+- The window's minimise, maximise and close buttons work, and so do dragging, double-clicking
+  and snap layouts.
+- Ctrl+O opens a folder; File › Close Folder (also in Ctrl+K) leaves the window empty.
+- Started from a shortcut, Null opens the last project; a file opened from the terminal goes
+  to the window that holds it.
+- Git, Node, Python and other tools are found in their usual Windows folders, and a missing
+  Git is said as such, not as "not a repository".
+- The welcome asks where AI answers come from on a step of its own, once AI is wanted.
+- Shortcuts work on every keyboard: on digits and symbols they follow the key's place on
+  the keyboard (on a French AZERTY: Ctrl+ù terminal, Ctrl+: comment, Ctrl+& first tab), and
+  Ctrl+J shows and hides the terminal (Join Lines moves to Ctrl+Shift+J). On Linux an
+  AZERTY's digit row works without Shift.
+
+**Everywhere**
+
+- Quick settings: − + and ← → are buttons; the ≡ button lists every command.
+- Committing a file ends the changes shown in it.
+
 ## 0.1.0
 
 The first release of Null: a calm, fast code editor where the screen belongs to your code,

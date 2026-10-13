@@ -57,7 +57,8 @@ pub fn bind_keys(cx: &mut App) {
         ]);
         // Outside macOS, Null's shortcuts use Ctrl, which shells need too (Ctrl+W
         // deletes a word, Ctrl+B moves back...). Inside the terminal, give them back.
-        for key in "abcdefghijklmnopqrstuvwxyz,=-0".chars() {
+        // (Not J: Ctrl+J hides the terminal, the shell has Enter for it.)
+        for key in "abcdefghiklmnopqrstuvwxyz,=-0".chars() {
             keys.push(KeyBinding::new(&format!("ctrl-{key}"), NoAction {}, ctx));
             // Ctrl+Shift+C and V stay copy and paste, F find, K clear.
             if !"cvfk".contains(key) {

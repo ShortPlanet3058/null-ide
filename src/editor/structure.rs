@@ -47,7 +47,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-d", DuplicateSelection, ctx),
         KeyBinding::new("secondary-enter", NewlineBelow, ctx),
         KeyBinding::new("secondary-shift-enter", NewlineAbove, ctx),
-        KeyBinding::new("ctrl-j", JoinLines, ctx),
+        // (Off the Mac, Ctrl+J shows the terminal, as in VS Code.)
+        KeyBinding::new(if cfg!(target_os = "macos") { "ctrl-j" } else { "ctrl-shift-j" }, JoinLines, ctx),
         KeyBinding::new("alt-f5", NextChange, ctx),
         KeyBinding::new("alt-shift-f5", PreviousChange, ctx),
     ]);

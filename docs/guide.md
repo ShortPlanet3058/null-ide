@@ -3,8 +3,12 @@
 Everything Null does, and how to reach it. Shortcuts are written as on the Mac; on Windows
 and Linux, ⌘ is Ctrl, ⌥ is Alt and ⌃ is Ctrl, and a few differ to keep out of the way of
 the system's own (Find Next is F3, tabs are Ctrl+PgUp / Ctrl+PgDn, bookmarks Ctrl+Alt+L /
-Ctrl+Alt+J, folding Ctrl+Shift+[ and ]). Menus and ⌘K always show the keys as they are on
-your computer, and for the keymap you picked.
+Ctrl+Alt+J, folding Ctrl+Shift+[ and ], the terminal Ctrl+J, Join Lines Ctrl+Shift+J).
+Shortcuts on digits and symbols follow your keyboard: on Windows they're on the key in the
+same place as on an American keyboard (on a French AZERTY, the terminal is also Ctrl+ù,
+comments Ctrl+:, tab 1 Ctrl+&), and on Linux an AZERTY's digit row works without Shift.
+Menus and ⌘K always show the keys as they are on your computer, and for the keymap you
+picked.
 
 ## Getting around
 

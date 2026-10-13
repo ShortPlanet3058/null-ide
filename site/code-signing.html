@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Null — code signing policy</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <a class="mark" href="./"><span class="caret"></span>Null</a>
+      <nav><a href="./#download">Download</a><a href="https://github.com/ShortPlanet3058/null-ide">Source</a></nav>
+    </header>
+    <div class="prose">
+      <h1>Code signing policy</h1>
+      <p>Free code signing for Windows is provided by <a href="https://signpath.io">SignPath.io</a>, with a
+        certificate by the <a href="https://signpath.org">SignPath Foundation</a> (once Null's application is
+        accepted; until then, Windows builds are not signed).</p>
+
+      <h2>What is signed</h2>
+      <p>Only <code>null.exe</code> as released on Null's
+        <a href="https://github.com/ShortPlanet3058/null-ide/releases">GitHub releases page</a>: built from the tagged
+        source in this repository by its public
+        <a href="https://github.com/ShortPlanet3058/null-ide/blob/main/.github/workflows/release.yml">release workflow</a>
+        on GitHub Actions, never on a person's own computer. Nothing from other projects is signed with Null's
+        certificate.</p>
+
+      <h2>Team roles</h2>
+      <table>
+        <tr><th>Role</th><th>Who</th></tr>
+        <tr><td>Committers and reviewers</td><td><a href="https://github.com/ShortPlanet3058">ShortPlanet3058</a></td></tr>
+        <tr><td>Approvers (who approve each signing)</td><td><a href="https://github.com/ShortPlanet3058">ShortPlanet3058</a></td></tr>
+      </table>
+      <p>Changes reach a release only through pull requests into <code>dev</code>, then into <code>main</code>,
+        each built and tested by CI on macOS, Windows and Linux; a release is a tag on <code>main</code>.</p>
+
+      <h2>Privacy</h2>
+      <p>This program will not transfer any information to other networked systems unless specifically requested
+        by the user or the person installing or operating it. See <a href="privacy.html">Null's privacy statement</a>
+        for what it contacts when asked.</p>
+    </div>
+    <footer>
+      <span>Null is free software under the MIT or Apache 2.0 license.</span>
+      <span><a href="./">Home</a> · <a href="privacy.html">Privacy</a></span>
+    </footer>
+  </div>
+</body>
+</html>

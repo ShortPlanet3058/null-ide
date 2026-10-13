@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Null — privacy</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <a class="mark" href="./"><span class="caret"></span>Null</a>
+      <nav><a href="./#download">Download</a><a href="https://github.com/ShortPlanet3058/null-ide">Source</a></nav>
+    </header>
+    <div class="prose">
+      <h1>Privacy</h1>
+      <p>Null collects nothing. It has no telemetry, no analytics, no crash reporting, and it doesn't check for
+        updates. It will not transfer any information to other networked systems unless you ask it to.</p>
+
+      <h2>What it contacts, and only when you ask</h2>
+      <ul>
+        <li><strong>The AI provider you choose</strong>, when AI is on and you use it (it's off until you turn it on):
+          the code and question you send go to that provider (Anthropic, OpenAI, Mistral, Groq, Google, OpenRouter,
+          NVIDIA), or stay on your computer with Ollama. API keys are kept in your system's key store, never in a file.</li>
+        <li><strong>Language servers</strong>, when you click Install: they're downloaded with the tool that ships
+          them (npm, pip, rustup, go).</li>
+        <li><strong>Git and GitHub</strong>, when you fetch, pull or push, or open a pull request: through your own
+          <code>git</code> and <code>gh</code>, with your own credentials.</li>
+        <li><strong>Links you open</strong>, in your browser.</li>
+      </ul>
+
+      <h2>What stays on your computer</h2>
+      <p>Settings, sessions, unsaved work and the local history of your files are kept in Null's own folders on your
+        computer (<code>~/Library/Application Support/Null</code>, <code>%LOCALAPPDATA%\Null</code> or
+        <code>~/.local/share/null</code>) and nowhere else.</p>
+    </div>
+    <footer>
+      <span>Null is free software under the MIT or Apache 2.0 license.</span>
+      <span><a href="./">Home</a> · <a href="code-signing.html">Code signing</a></span>
+    </footer>
+  </div>
+</body>
+</html>

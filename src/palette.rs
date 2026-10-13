@@ -72,6 +72,8 @@ pub enum PaletteKind {
     Projects,
     /// Vim's command line (:w, :q, :42, :%s/a/b/g).
     Ex,
+    /// Every command, listed with nothing typed (the menu bar's place off the Mac).
+    Commands,
 }
 
 /// The lines added and removed a file change shows when it isn't text (no lines).
@@ -115,6 +117,7 @@ impl PaletteKind {
             PaletteKind::Run => "Run a task, or type a command",
             PaletteKind::Projects => "Open a recent project",
             PaletteKind::Ex => ":",
+            PaletteKind::Commands => "Commands",
         }
     }
 }
@@ -515,6 +518,13 @@ impl Palette {
             }
             PaletteKind::Files => self.file_rows(split_place(&query).0),
             PaletteKind::Quick => self.quick_rows(&query),
+            // Nothing typed: every command, as listed; typed, as ⌘K finds them.
+            PaletteKind::Commands if query.is_empty() => {
+                for i in 0..self.commands.len() {
+                    self.push(Item::Command(i), Vec::new(), false);
+                }
+            }
+            PaletteKind::Commands => self.quick_rows(&query),
             PaletteKind::Line | PaletteKind::Task | PaletteKind::Ex => {}
             PaletteKind::Locations => self.location_rows(&query),
             PaletteKind::Branch => self.branch_rows(&query),
@@ -805,12 +815,20 @@ impl Palette {
     }
 
     fn adjust(&mut self, step: isize, cx: &mut Context<Self>) {
+        if let Some(Item::Quick(quick)) = self.selected_item() {
+            self.adjust_quick(quick, step, cx);
+        }
+    }
+
+    /// A quick setting stepped one way (`step` −1) or the other (+1): by ← → on its row, or a
+    /// click on its arrows.
+    fn adjust_quick(&mut self, quick: Quick, step: isize, cx: &mut Context<Self>) {
         let settings = cx.global::<Settings>();
-        let action: Box<dyn Action> = match self.selected_item() {
-            Some(Item::Quick(Quick::Theme)) => theme_action(next_theme(settings.theme, step)),
-            Some(Item::Quick(Quick::TextSize)) if step > 0 => Box::new(crate::workspace::IncreaseFontSize),
-            Some(Item::Quick(Quick::TextSize)) => Box::new(crate::workspace::DecreaseFontSize),
-            Some(Item::Quick(Quick::LineSpacing)) => crate::workspace::spacing_action(settings.line_spacing.step(step)),
+        let action: Box<dyn Action> = match quick {
+            Quick::Theme => theme_action(next_theme(settings.theme, step)),
+            Quick::TextSize if step > 0 => Box::new(crate::workspace::IncreaseFontSize),
+            Quick::TextSize => Box::new(crate::workspace::DecreaseFontSize),
+            Quick::LineSpacing => crate::workspace::spacing_action(settings.line_spacing.step(step)),
             _ => return,
         };
         cx.emit(PaletteEvent::Apply(action));
@@ -887,6 +905,7 @@ impl Palette {
             }
             PaletteKind::Files
             | PaletteKind::Quick
+            | PaletteKind::Commands
             | PaletteKind::Locations
             | PaletteKind::Branch
             | PaletteKind::Run
@@ -951,7 +970,25 @@ impl Palette {
     }
 
     /// The control at the right of a quick setting, showing its current value.
-    fn quick_control(&self, quick: Quick, window: &Window, cx: &App) -> AnyElement {
+    fn quick_control(&self, quick: Quick, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        // Its arrows (or − +) step it, as ← → do; a click there isn't a click on the row.
+        let step = |label: &'static str, by: isize, cx: &mut Context<Self>| {
+            let theme = cx.global::<Theme>();
+            div()
+                .id(SharedString::from(format!("quick-{}-{by}", quick.label())))
+                .cursor_pointer()
+                .child(ui::key_cap(label, theme))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.adjust_quick(quick, by, cx);
+                }))
+        };
+        let (less, more) = match quick {
+            Quick::TextSize => (Some(step("−", -1, cx)), Some(step("+", 1, cx))),
+            Quick::Theme | Quick::LineSpacing => (Some(step("←", -1, cx)), Some(step("→", 1, cx))),
+            _ => (None, None),
+        };
         let theme = cx.global::<Theme>();
         let settings = cx.global::<Settings>();
         let keys = |action: &dyn Action| {
@@ -963,13 +1000,13 @@ impl Palette {
             // Six are too many to show at once: the current one, and ←→ for the others.
             Quick::Theme => row
                 .text_size(px(ui::T_SM))
-                .child(ui::key_cap("←", theme))
+                .children(less)
                 .child(div().min_w(px(64.)).text_center().text_color(theme.foreground).child(settings.theme.label()))
-                .child(ui::key_cap("→", theme))
+                .children(more)
                 .into_any_element(),
             Quick::TextSize => row
                 .text_size(px(ui::T_SM))
-                .child(ui::key_cap("−", theme))
+                .children(less)
                 .child(
                     div()
                         .w(px(26.))
@@ -977,11 +1014,11 @@ impl Palette {
                         .text_color(theme.foreground)
                         .child(format!("{}", settings.font_size)),
                 )
-                .child(ui::key_cap("+", theme))
+                .children(more)
                 .into_any_element(),
             Quick::LineSpacing => row
                 .text_size(px(ui::T_SM))
-                .child(ui::key_cap("←", theme))
+                .children(less)
                 .child(
                     div()
                         .min_w(px(64.))
@@ -989,7 +1026,7 @@ impl Palette {
                         .text_color(theme.foreground)
                         .child(settings.line_spacing.label()),
                 )
-                .child(ui::key_cap("→", theme))
+                .children(more)
                 .into_any_element(),
             Quick::AllSettings => row.children(keys(&crate::workspace::OpenSettings)).into_any_element(),
             _ => {
@@ -1317,7 +1354,7 @@ impl Palette {
                 Some(Item::NewBranch) => "↵ create",
                 _ => "↵ switch",
             },
-            PaletteKind::Quick => match self.selected_item() {
+            PaletteKind::Quick | PaletteKind::Commands => match self.selected_item() {
                 Some(Item::Quick(q)) if q.is_choice() => "←→ change",
                 Some(Item::Quick(Quick::AllSettings)) | Some(Item::Command(_)) => "↵ run",
                 Some(Item::Quick(_)) => "↵ switch",
@@ -1470,6 +1507,13 @@ pub fn format_keys(binding: &KeyBinding) -> String {
                 "down" => "↓".to_string(),
                 "left" => "←".to_string(),
                 "right" => "→".to_string(),
+                // (Linux's names for an AZERTY's keys.)
+                "eacute" => "É".to_string(),
+                "egrave" => "È".to_string(),
+                "ccedilla" => "Ç".to_string(),
+                "agrave" => "À".to_string(),
+                "ugrave" => "Ù".to_string(),
+                "section" => "§".to_string(),
                 key if key.chars().count() == 1 => key.to_uppercase(),
                 key => key[..1].to_uppercase() + &key[1..],
             };

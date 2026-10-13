@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Null — a calm, fast code editor</title>
+  <meta name="description" content="Null is a free, open-source code editor for macOS, Windows and Linux: the screen belongs to your code, and AI stays out of the way until you call it.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <a class="mark" href="./"><span class="caret"></span>Null</a>
+      <nav>
+        <a href="#download">Download</a>
+        <a href="https://github.com/ShortPlanet3058/null-ide/blob/main/docs/guide.md">Guide</a>
+        <a href="https://github.com/ShortPlanet3058/null-ide">Source</a>
+      </nav>
+    </header>
+
+    <div class="hero">
+      <h1>A calm, fast code editor<br>where nothing gets in your way.</h1>
+      <p>The screen belongs to your code. Language servers, git, a terminal, tests and a debugger
+        are a keystroke away and out of sight until then. AI is there when you call it, and
+        nowhere when it's off.</p>
+      <div class="buttons">
+        <a class="button primary" href="#download">Download Null</a>
+        <a class="button" href="#film"><span class="play"></span>Watch the film</a>
+        <a class="button" href="https://github.com/ShortPlanet3058/null-ide">View the source</a>
+      </div>
+      <p class="small">Free and open source · macOS, Windows and Linux</p>
+      <div class="shot"><img src="images/editor.png" alt="Null with a Rust file open: the files on the left, the code on true black"></div>
+    </div>
+
+    <section id="film">
+      <h2>Null in 50 seconds</h2>
+      <p class="lead">An editor that starts with nothing, and gives the screen back to your code.</p>
+      <div class="film">
+        <video controls playsinline preload="metadata" poster="media/null-film-poster.jpg">
+          <source src="media/null-film.mp4" type="video/mp4">
+          <a href="media/null-film.mp4">Watch the film</a>
+        </video>
+      </div>
+    </section>
+
+    <section>
+      <h2>Why Null</h2>
+      <p class="lead">An editor that gets out of the way, and stays fast while doing everything an IDE should.</p>
+      <div class="grid">
+        <div class="card"><h3>Your code first</h3><p>One quiet window, a true-black theme (and five others), bars that fade while you type.</p></div>
+        <div class="card"><h3>Fast</h3><p>Native and drawn on the GPU: it opens at once, big files and big projects included.</p></div>
+        <div class="card"><h3>Everything, one keystroke away</h3><p>Ctrl+P (⌘P) to any file, Ctrl+K (⌘K) to any setting or command.</p></div>
+        <div class="card"><h3>AI when you ask</h3><p>Your Claude or ChatGPT plan, an API key, a model on your own computer, or none at all. It never changes code without showing you the change.</p></div>
+        <div class="card"><h3>Keys your hands know</h3><p>VS Code, JetBrains, Sublime Text, Zed, or Vim.</p></div>
+        <div class="card"><h3>Never lose work</h3><p>Unsaved changes survive a crash, every save is kept for a month, and files changed on disk are never silently written over.</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>What it does</h2>
+      <p class="lead">Code intelligence for Rust, Python, TypeScript, Go, C, C++ and more; Markdown with a live preview; run, test and debug without leaving the code.</p>
+      <div class="pair">
+        <figure><img src="images/ai.png" alt="An AI change written into the code as a diff"><figcaption>Describe a change: it's written in place, as a diff to keep or undo.</figcaption></figure>
+        <figure><img src="images/git.png" alt="The Git panel"><figcaption>Git in one panel: commit whole files or parts, history, branches, pull requests.</figcaption></figure>
+      </div>
+    </section>
+
+    <section id="download">
+      <h2>Download</h2>
+      <p class="lead">The latest version, built from the source on GitHub by its public release workflow.</p>
+      <table>
+        <tr><th>Platform</th><th>Download</th><th>How</th></tr>
+        <tr><td>macOS 11 or later<br><span class="small">Intel and Apple silicon</span></td>
+          <td><a href="https://github.com/ShortPlanet3058/null-ide/releases/latest/download/Null-macos.dmg">Null-macos.dmg</a></td>
+          <td>Open it and drag Null to Applications.</td></tr>
+        <tr><td>Windows 10 and 11<br><span class="small">x86-64</span></td>
+          <td><a href="https://github.com/ShortPlanet3058/null-ide/releases/latest/download/null-windows-x86_64.zip">null-windows-x86_64.zip</a></td>
+          <td>Unzip it anywhere and run <code>null.exe</code>.</td></tr>
+        <tr><td>Linux<br><span class="small">x86-64, X11 or Wayland</span></td>
+          <td><a href="https://github.com/ShortPlanet3058/null-ide/releases/latest/download/null-linux-x86_64.tar.gz">null-linux-x86_64.tar.gz</a></td>
+          <td>Unpack it and run <code>./install.sh</code>.</td></tr>
+      </table>
+      <p class="small">Every version and its notes: <a href="https://github.com/ShortPlanet3058/null-ide/releases">releases</a> ·
+        <a href="https://github.com/ShortPlanet3058/null-ide/blob/main/CHANGELOG.md">changelog</a> ·
+        <a href="code-signing.html">code signing policy</a> · <a href="privacy.html">privacy</a></p>
+    </section>
+
+    <footer>
+      <span>Null is free software under the MIT or Apache 2.0 license.</span>
+      <span><a href="https://github.com/ShortPlanet3058/null-ide">GitHub</a> · <a href="https://github.com/ShortPlanet3058/null-ide/issues">Report a problem</a> · <a href="code-signing.html">Code signing</a> · <a href="privacy.html">Privacy</a></span>
+    </footer>
+  </div>
+</body>
+</html>
