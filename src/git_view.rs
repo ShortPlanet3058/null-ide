@@ -386,6 +386,7 @@ impl GitView {
             return None;
         }
         let theme = cx.global::<Theme>().clone();
+        let repos = self.repos.clone();
         let pieces = self.repos.iter().enumerate().map(|(i, repo)| {
             let on = *repo == self.root;
             let repo = repo.clone();
@@ -398,7 +399,7 @@ impl GitView {
                 .truncate()
                 .cursor_pointer()
                 .when(!on, |p| p.hover(|s| s.text_color(theme.foreground)))
-                .child(crate::roots::ProjectRoots::name(&repo))
+                .child(crate::roots::ProjectRoots::label_among(&repos, &repo))
                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::PickRepo(repo.clone()))))
         });
         Some(div().px(px(12.)).pt(px(10.)).child(ui::segmented(&theme).children(pieces)).into_any_element())

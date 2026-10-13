@@ -277,6 +277,9 @@ fn main() {
             }
         }
     });
+    // Started by the Mac with nothing to open (the Dock, the Finder, or `null a b` through
+    // `open -a`, whose paths come a moment later as "open these").
+    let by_the_system = cfg!(target_os = "macos") && std::env::args().len() <= 1;
     let Opening { root, others, file, place, wait } = resolve_args();
     trace::mark("what to open worked out");
     // Off the Mac: a Null already running opens it instead (a waiting one is its own).
@@ -291,7 +294,10 @@ fn main() {
     let app = Application::new().with_assets(assets::Assets);
     trace::mark("app made");
     let (opened, mut to_open) = futures::channel::mpsc::unbounded::<Vec<String>>();
+    let handed_paths = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_paths = handed_paths.clone();
     app.on_open_urls(move |urls| {
+        saw_paths.store(true, std::sync::atomic::Ordering::SeqCst);
         opened.unbounded_send(urls).ok();
     });
     app.run(move |cx: &mut App| {
@@ -314,6 +320,25 @@ fn main() {
                 }
                 cx.update(|cx| {
                     let workspace = cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>());
+                    // Null was started for these: the first is the window's project (a
+                    // file's folder, with the file open), the rest open in it.
+                    if workspace.is_none() {
+                        let mut paths = paths.into_iter();
+                        let Some(first) = paths.next() else { return };
+                        let (root, file) = if first.is_dir() {
+                            (first, None)
+                        } else {
+                            (first.parent().map(PathBuf::from).unwrap_or_default(), Some(first))
+                        };
+                        open_project_window_now(root.clone(), file, None, cx);
+                        let rest: Vec<PathBuf> = paths.collect();
+                        if !rest.is_empty()
+                            && let Some(handle) = window_on(&root, None, cx)
+                        {
+                            handle.update(cx, |workspace, window, cx| workspace.open_paths(rest, window, cx)).ok();
+                        }
+                        return;
+                    }
                     if let Some(handle) = workspace {
                         handle
                             .update(cx, |workspace, window, cx| {
@@ -392,6 +417,22 @@ fn main() {
         trace::mark("settings, keys and menus ready");
         if wait {
             open_waiting_window(root, file, place, cx);
+        } else if by_the_system && !handed_paths.load(std::sync::atomic::Ordering::SeqCst) {
+            // Paths may be on their way: then they're what opens, not the last project.
+            // (A timer, not a deferred open: that would wait for an update that never comes.)
+            let handed_paths = handed_paths.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(350)).await;
+                cx.update(|cx| {
+                    if !handed_paths.load(std::sync::atomic::Ordering::SeqCst) && cx.windows().is_empty() {
+                        open_project_window_now(root, file, place, cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        } else if by_the_system {
+            // (Already here: the paths open the window.)
         } else {
             let first = root.clone();
             open_project_window_now(root, file, place, cx);

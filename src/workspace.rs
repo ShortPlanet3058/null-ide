@@ -4023,7 +4023,7 @@ impl Workspace {
     /// "file — project" in the title bar, and the close button's unsaved dot.
     fn refresh_title(&self, window: &mut Window, cx: &App) {
         // (Several folders: all their names, `api + web`.)
-        let names: Vec<String> = self.roots.all().iter().map(|r| crate::roots::ProjectRoots::name(r)).collect();
+        let names: Vec<String> = self.roots.all().iter().map(|r| self.roots.label(r)).collect();
         let project = (!names.is_empty()).then(|| names.join(" + "));
         let editor = self.active_editor().map(|e| e.read(cx));
         let title = match (editor.map(|e| e.file_name()), project) {
@@ -10255,6 +10255,16 @@ fn git_bash_script(exe: &Path) -> String {
          wait=\n\
          [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
+         # Several folders (every one a folder): one window with them all.\n\
+         folders=\n\
+         if [ -z \"$wait\" ] && [ $# -gt 1 ]; then folders=1; for p in \"$@\"; do [ -d \"$p\" ] || folders=; done; fi\n\
+         if [ -n \"$folders\" ]; then\n\
+         \tn=$#\n\
+         \tfor p in \"$@\"; do set -- \"$@\" \"$(cygpath -aw \"$p\" 2>/dev/null || printf '%s' \"$p\")\"; done\n\
+         \tshift \"$n\"\n\
+         \t\"{exe}\" \"$@\" &\n\
+         \texit 0\n\
+         fi\n\
          for p in \"$@\"; do\n\
          \tw=$(cygpath -aw \"$p\" 2>/dev/null || printf '%s' \"$p\")\n\
          \tif [ -n \"$wait\" ]; then \"{exe}\" --wait \"$w\"; else \"{exe}\" \"$w\" & fi\n\
@@ -13486,6 +13496,37 @@ mod tests {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(&file, &sh).unwrap();
             assert!(crate::tools::command("sh").arg("-n").arg(&file).status().unwrap().success(), "{sh}");
+            // Run, with a stand-in for null.exe that writes down how it was started: several
+            // folders go to one Null; a folder and a file, one each.
+            let dir = file.parent().unwrap().to_path_buf();
+            let calls = dir.join("calls.txt");
+            let exe = dir.join("fake-null");
+            std::fs::write(&exe, format!("#!/bin/sh\necho \"$#:$*\" >> '{}'\n", calls.display())).unwrap();
+            crate::tools::command("chmod").arg("+x").arg(&exe).status().unwrap();
+            let script = dir.join("null-run");
+            std::fs::write(&script, git_bash_script(&exe)).unwrap();
+            std::fs::create_dir_all(dir.join("api")).unwrap();
+            std::fs::create_dir_all(dir.join("web")).unwrap();
+            std::fs::write(dir.join("notes.txt"), "").unwrap();
+            let run = |args: &[&str]| {
+                std::fs::remove_file(&calls).ok();
+                crate::tools::command("sh").arg(&script).args(args).current_dir(&dir).status().unwrap();
+                // (Started in the background: a moment to write it down.)
+                for _ in 0..50 {
+                    let n = std::fs::read_to_string(&calls).map(|c| c.lines().count()).unwrap_or(0);
+                    if n >= if args.len() > 1 && args.iter().all(|a| dir.join(a).is_dir()) { 1 } else { args.len() } {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                std::fs::read_to_string(&calls).unwrap_or_default()
+            };
+            let together = run(&["api", "web"]);
+            assert_eq!(together.lines().count(), 1, "{together}");
+            assert!(together.starts_with("2:"), "{together}");
+            let apart = run(&["api", "notes.txt"]);
+            assert_eq!(apart.lines().count(), 2, "{apart}");
         }
         assert_eq!(lines.last(), Some(&"goto next"));
     }

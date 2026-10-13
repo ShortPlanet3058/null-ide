@@ -673,7 +673,7 @@ impl FileTree {
         for root in self.roots.clone() {
             let expanded = self.expanded.contains(&root);
             let entry = Entry {
-                name: crate::roots::ProjectRoots::name(&root).into(),
+                name: crate::roots::ProjectRoots::label_among(&self.roots, &root).into(),
                 is_dir: true,
                 ignored: false,
                 path: root.clone(),
