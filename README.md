@@ -70,6 +70,8 @@ From a terminal, `null .` opens the folder you're in, `null src/main.rs:42` a fi
 and `null --wait` makes Null git's editor (on the Mac, and with the `.zip`, **Install Shell
 Command** in ⌘K adds `null` first).
 
+To remove Null, see [Uninstalling](docs/guide.md#uninstalling).
+
 Null is young: used every day on the Mac, new on Windows and Linux. If something's wrong,
 please [open an issue](https://github.com/ShortPlanet3058/null-ide/issues).
 

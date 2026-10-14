@@ -86,6 +86,7 @@ actions!(
         GoToLastEdit,
         ShowWelcome,
         InstallShellCommand,
+        UninstallNull,
         ReviewAiTask,
         StopAiTask,
         KeepAllTaskChanges,
@@ -3613,6 +3614,53 @@ impl Workspace {
     /// Installs `null`, to open files and folders from a terminal: `null .`, `null a.rs`.
     /// Into /usr/local/bin when it can write there, else ~/.local/bin; on Windows a
     /// `null.cmd` in Null's own folder.
+    /// The Mac has no uninstaller: Null.app does it. The `null` command goes now; once Null
+    /// has quit, the app goes to the Trash, with the settings, saved API keys, history and
+    /// language servers if asked (else they stay, for coming back).
+    fn uninstall(&mut self, _: &UninstallNull, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(app) = app_bundle() else {
+            self.show_notice("Only the app (Null.app) uninstalls itself.".into(), cx);
+            return;
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Uninstall Null?",
+            Some(
+                "Null quits and goes to the Trash. Your settings, saved API keys, history and language servers can stay, for if you come back, or go too.",
+            ),
+            &["Uninstall", "Uninstall and Delete My Settings", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let everything = match answer.await {
+                Ok(0) => false,
+                Ok(1) => true,
+                _ => return,
+            };
+            remove_shell_command();
+            let mut paths = vec![app];
+            if everything {
+                crate::ai::forget_api_keys();
+                paths.extend(crate::settings::Settings::path().and_then(|p| p.parent().map(Path::to_path_buf)));
+                paths.extend(crate::tools::data_dir());
+            }
+            // (After Null has quit: it writes its session on the way out.)
+            let removing = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(REMOVE_AFTER_QUIT)
+                .arg("sh")
+                .arg(std::process::id().to_string())
+                .args(&paths)
+                .spawn();
+            this.update_in(cx, |this, window, cx| match removing {
+                Ok(_) => window.dispatch_action(Box::new(Quit), cx),
+                Err(error) => this.show_notice(format!("Couldn't uninstall: {error}"), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn install_shell_command(&mut self, _: &InstallShellCommand, _: &mut Window, cx: &mut Context<Self>) {
         let Ok(exe) = std::env::current_exe() else { return };
         let (dir, target, result) = if cfg!(windows) {
@@ -5075,6 +5123,10 @@ impl Workspace {
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
+        // (Windows and Linux have their own uninstallers.)
+        if cfg!(target_os = "macos") && app_bundle().is_some() {
+            commands.push((App, "Uninstall Null…".into(), Box::new(UninstallNull)));
+        }
         if self.is_split() {
             commands.push((View, "Join Sides".into(), Box::new(JoinSides)));
         }
@@ -10320,6 +10372,34 @@ fn git_bash_script(exe: &Path) -> String {
     )
 }
 
+/// The Null.app this Null runs from, when it's one.
+fn app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf)
+}
+
+/// Words in every `null` script Install Shell Command writes: what makes one Null's to remove.
+const SHELL_SCRIPT_MARK: &str = "Opens files and folders in Null";
+
+/// Removes the `null` command Install Shell Command put on the Mac (Null's own only).
+fn remove_shell_command() {
+    let home = crate::tools::home_dir().unwrap_or_default();
+    for path in [PathBuf::from("/usr/local/bin/null"), home.join(".local/bin/null")] {
+        if std::fs::read_to_string(&path).is_ok_and(|text| text.contains(SHELL_SCRIPT_MARK)) {
+            std::fs::remove_file(&path).ok();
+        }
+    }
+}
+
+/// Run as `sh -c REMOVE_AFTER_QUIT sh PID APP [FOLDER…]`: once Null (PID) has quit, its app
+/// goes to the Trash and the folders are deleted.
+const REMOVE_AFTER_QUIT: &str = r#"pid=$1 app=$2; shift 2
+while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+name=$(basename "$app" .app); dest="$HOME/.Trash/$name.app"
+[ -e "$dest" ] && dest="$HOME/.Trash/$name $(date +%H.%M.%S).app"
+mv "$app" "$dest"
+for folder in "$@"; do rm -rf "$folder"; done"#;
+
 fn shell_script(exe: &str, launch: &str, waiting: &str, all: &str) -> String {
     format!(
         "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`, `null a.rs:42`.\n\
@@ -11393,6 +11473,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::bring_back_changes))
             .on_action(cx.listener(|this, _: &ShowWelcome, window, cx| this.show_welcome(window, cx)))
             .on_action(cx.listener(Self::install_shell_command))
+            .on_action(cx.listener(Self::uninstall))
             .on_action(cx.listener(Self::review_ai_task))
             .on_action(cx.listener(Self::stop_ai_task))
             .on_action(cx.listener(Self::keep_all_task_changes))

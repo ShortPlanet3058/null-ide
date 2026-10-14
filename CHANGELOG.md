@@ -60,6 +60,10 @@ license.
 - Ubuntu and Debian: a .deb, `null` in /usr/bin for every terminal at once.
 - Linux's install.sh adds ~/.local/bin to your shell's PATH when it isn't there (zsh never
   had it).
+- Uninstalling, everywhere: the Windows uninstaller and Linux's new uninstall.sh (kept in
+  ~/.local/share/null) ask whether your settings, saved API keys, history and language
+  servers go too; on the Mac, ⌘K › Uninstall Null… quits, moves Null to the Trash and removes
+  the `null` command. The guide has a section on it.
 
 ## 0.1.0
 

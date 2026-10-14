@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds Null's Linux release in target/release:
-#  - null-<version>-linux-x86_64.tar.gz: the binary, its icon, its menu entry and install.sh
-#    (which puts them in your home folder);
+#  - null-<version>-linux-x86_64.tar.gz: the binary, its icon, its menu entry, install.sh
+#    (which puts them in your home folder) and uninstall.sh;
 #  - null-<version>-amd64.deb, for Ubuntu and Debian (`sudo apt install ./null-…deb`): `null`
 #    in /usr/bin for every terminal at once, the menu entry and the icon (needs dpkg-deb).
 #
@@ -14,7 +14,8 @@ cargo build --release
 stage="target/release/$name"
 rm -rf "$stage"
 mkdir -p "$stage"
-cp target/release/null packaging/linux/null.desktop packaging/linux/install.sh packaging/null.svg \
+cp target/release/null packaging/linux/null.desktop packaging/linux/install.sh packaging/linux/uninstall.sh \
+    packaging/null.svg \
     README.md LICENSE "$stage/"
 tar -C target/release -czf "target/release/$name.tar.gz" "$name"
 rm -rf "$stage"

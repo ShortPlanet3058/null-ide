@@ -112,6 +112,21 @@ impl ProviderId {
         }
     }
 
+    /// Every provider, Off first.
+    pub const ALL: [ProviderId; 11] = [
+        ProviderId::Off,
+        ProviderId::Nvidia,
+        ProviderId::Ollama,
+        ProviderId::OpenaiCompatible,
+        ProviderId::Claude,
+        ProviderId::ClaudeCode,
+        ProviderId::Codex,
+        ProviderId::Mistral,
+        ProviderId::Groq,
+        ProviderId::Gemini,
+        ProviderId::OpenRouter,
+    ];
+
     /// Whether this provider takes an API key (Ollama and the CLIs don't).
     pub fn uses_api_key(self) -> bool {
         !matches!(self, ProviderId::Off | ProviderId::Ollama | ProviderId::ClaudeCode | ProviderId::Codex)
@@ -438,6 +453,19 @@ pub fn known_key(id: ProviderId) -> Option<bool> {
     }
     let keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
     keys.as_ref().and_then(|k| k.get(id.key())).map(Option::is_some)
+}
+
+/// Deletes every API key Null saved in the system's keychain (when it's uninstalled):
+/// how many there were.
+pub fn forget_api_keys() -> usize {
+    if cfg!(test) || crate::system_clipboard::kept_apart() {
+        return 0;
+    }
+    ProviderId::ALL
+        .into_iter()
+        .filter(|id| id.uses_api_key())
+        .filter(|id| keyring::Entry::new(KEYCHAIN_SERVICE, id.key()).is_ok_and(|e| e.delete_credential().is_ok()))
+        .count()
 }
 
 pub fn store_api_key(id: ProviderId, key: &str) -> Result<(), String> {
@@ -1451,18 +1479,9 @@ mod request_tests {
 
     #[test]
     fn every_provider_has_a_default_model_and_valid_thinking_default() {
-        for id in [
-            ProviderId::Nvidia,
-            ProviderId::Ollama,
-            ProviderId::OpenaiCompatible,
-            ProviderId::Claude,
-            ProviderId::ClaudeCode,
-            ProviderId::Codex,
-            ProviderId::Mistral,
-            ProviderId::Groq,
-            ProviderId::Gemini,
-            ProviderId::OpenRouter,
-        ] {
+        let keys: std::collections::HashSet<_> = ProviderId::ALL.iter().map(|id| id.key()).collect();
+        assert_eq!(keys.len(), ProviderId::ALL.len(), "each provider once");
+        for id in ProviderId::ALL.into_iter().filter(|id| *id != ProviderId::Off) {
             assert!(id.default_model().is_some() || matches!(id, ProviderId::ClaudeCode | ProviderId::Codex), "{id:?}");
             let efforts = id.efforts();
             assert!(efforts.is_empty() || efforts.contains(&id.default_effort()), "{id:?}");

@@ -282,6 +282,11 @@ fn answered_in_the_terminal() -> bool {
     let answer = match first.as_deref() {
         Some("--version" | "-V") => format!("Null {}", env!("CARGO_PKG_VERSION")),
         Some("--help" | "-h") => HELP.trim_end().to_string(),
+        // (For the uninstallers, when asked to delete everything: not in --help.)
+        Some("--forget-keys") => match ai::forget_api_keys() {
+            1 => "Deleted 1 saved API key.".to_string(),
+            n => format!("Deleted {n} saved API keys."),
+        },
         _ => {
             if cfg!(all(unix, not(target_os = "macos")))
                 && std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty())

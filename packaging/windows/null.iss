@@ -1,7 +1,7 @@
 ; Null's Windows installer (Inno Setup 6): for the person installing, no administrator
 ; needed, into %LOCALAPPDATA%\Programs\Null; a Start menu entry, `null` for terminals (the
 ; folder on the PATH), "Open with Null" on folders and files, and an uninstaller in
-; Settings > Apps. Built by package.ps1:
+; Settings > Apps (which asks whether the settings, keys and data go too). Built by package.ps1:
 ;
 ;     iscc /DVersion=0.1.1 packaging\windows\null.iss
 
@@ -50,6 +50,8 @@ en.OpenWithNull=Open with Null
 fr.OpenWithNull=Ouvrir avec Null
 en.StartNull=Start Null
 fr.StartNull=Démarrer Null
+en.DeleteEverything=Also delete your settings, saved API keys, history and downloaded language servers?%n%nChoose No to keep them, for if you install Null again.
+fr.DeleteEverything=Supprimer aussi vos réglages, clés d'API enregistrées, historique et serveurs de langage téléchargés ?%n%nChoisissez Non pour les garder, si vous réinstallez Null.
 
 [Tasks]
 Name: "path"; Description: "{cm:AddToPath}"
@@ -129,8 +131,19 @@ begin
     AddToPath(ExpandConstant('{app}'));
 end;
 
+{ Asked before anything is removed (null.exe still there to forget the keys); a silent
+  uninstall keeps everything. }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Code: Integer;
 begin
+  if (CurUninstallStep = usUninstall) and not UninstallSilent then
+    if MsgBox(CustomMessage('DeleteEverything'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+    begin
+      Exec(ExpandConstant('{app}\null.exe'), '--forget-keys', '', SW_HIDE, ewWaitUntilTerminated, Code);
+      DelTree(ExpandConstant('{userappdata}\Null'), True, True, True);
+      DelTree(ExpandConstant('{localappdata}\Null'), True, True, True);
+    end;
   if CurUninstallStep = usPostUninstall then
     RemoveFromPath(ExpandConstant('{app}'));
 end;
