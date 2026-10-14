@@ -1100,6 +1100,8 @@ impl Workspace {
         cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_git(cx);
+                // (Drawn again: a desktop that shows a window late may have missed its frame.)
+                window.refresh();
             } else {
                 // ⌃ let go elsewhere (another Space, Mission Control): the tab reached stays.
                 this.settle_switch();

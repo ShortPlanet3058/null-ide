@@ -666,10 +666,11 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
     });
     match opened {
         // (GNOME over remote desktop showed a restored window before its first frame, and
-        // never asked for another until a key or the mouse came: drawn again once it's up.)
+        // never asked for another until a key or the mouse came: drawn again once it's up,
+        // which can take seconds without a graphics card.)
         Ok(handle) => {
             cx.spawn(async move |cx| {
-                for wait in [150, 600] {
+                for wait in [150, 600, 1500, 3000, 6000] {
                     cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
                     handle.update(cx, |_, window, _| window.refresh()).ok();
                 }
