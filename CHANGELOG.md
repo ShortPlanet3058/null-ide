@@ -49,6 +49,9 @@ license.
 - A hosted AI service that hasn't started answering after a minute is said as such (with a
   hint to try another model), instead of "Writing…" forever: NVIDIA's free models can keep a
   request waiting for minutes.
+- NVIDIA: the suggested models are ones its free tier answers today: Nemotron 3 Super, Nemotron
+  3.5 Lightning (also for suggestions while typing) and GLM 5.3. DeepSeek V4.1 Flash never
+  answered and the code models were gone; a saved one gives way to the default.
 
 **Installers**
 

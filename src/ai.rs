@@ -205,8 +205,8 @@ impl ProviderId {
             ],
             ProviderId::Nvidia => &[
                 Recommended { model: "nvidia/nemotron-3-super-120b-a12b", note: "balanced" },
-                Recommended { model: "deepseek-ai/deepseek-v4.1-flash", note: "fast" },
-                Recommended { model: "mistralai/codestral-22b-instruct-v0.1", note: "for code" },
+                Recommended { model: "nvidia/nemotron-3.5-lightning-30b-a3b", note: "fast" },
+                Recommended { model: "z-ai/glm-5.3", note: "stronger, slower" },
             ],
             ProviderId::Ollama => &[
                 Recommended { model: "qwen2.5-coder:7b", note: "for code" },
@@ -219,10 +219,8 @@ impl ProviderId {
     /// code models where the provider has them: fast, and they continue the code.
     pub fn recommended_for_suggestions(self) -> &'static [Recommended] {
         match self {
-            ProviderId::Nvidia => &[
-                Recommended { model: "bigcode/starcoder2-15b", note: "fills in code" },
-                Recommended { model: "google/codegemma-7b", note: "fills in code, faster" },
-            ],
+            // (Its fill-in-the-middle models are gone from the free tier.)
+            ProviderId::Nvidia => &[Recommended { model: "nvidia/nemotron-3.5-lightning-30b-a3b", note: "fastest" }],
             ProviderId::Ollama => &[
                 Recommended { model: "qwen2.5-coder:1.5b", note: "fills in code" },
                 Recommended { model: "qwen2.5-coder:7b", note: "better, slower" },
@@ -275,6 +273,15 @@ impl Effort {
         }
     }
 }
+
+/// Models Null once suggested that no longer answer (NVIDIA's free tier, October 2026): a
+/// saved one gives way to the provider's default.
+const RETIRED: &[&str] = &[
+    "deepseek-ai/deepseek-v4.1-flash",
+    "mistralai/codestral-22b-instruct-v0.1",
+    "bigcode/starcoder2-15b",
+    "google/codegemma-7b",
+];
 
 /// Per-provider overrides, e.g. `"nvidia": { "model": "qwen/qwen3-coder-480b-a35b-instruct" }`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -359,7 +366,7 @@ impl AiSettings {
         self.providers
             .get(id.key())
             .and_then(|p| p.model.clone())
-            .filter(|m| !m.is_empty())
+            .filter(|m| !m.is_empty() && !RETIRED.contains(&m.as_str()))
             .or(id.default_model().map(str::to_owned))
     }
 
@@ -368,7 +375,7 @@ impl AiSettings {
         self.providers
             .get(id.key())
             .and_then(|p| p.completion_model.clone())
-            .filter(|m| !m.is_empty())
+            .filter(|m| !m.is_empty() && !RETIRED.contains(&m.as_str()))
             .or_else(|| id.recommended_for_suggestions().first().map(|r| r.model.to_string()))
     }
 
@@ -1462,6 +1469,21 @@ mod tests {
 
     /// AI is off until turned on; a file from when it was on by default (a provider, no
     /// `enabled`) keeps it on; turned off stays off.
+    #[test]
+    fn a_retired_model_gives_way_to_the_default() {
+        let settings: AiSettings = serde_json::from_str(
+            r#"{ "provider": "nvidia", "nvidia": { "model": "deepseek-ai/deepseek-v4.1-flash", "completion_model": "bigcode/starcoder2-15b" } }"#,
+        )
+        .unwrap();
+        assert_eq!(settings.model(ProviderId::Nvidia).as_deref(), ProviderId::Nvidia.default_model());
+        assert_eq!(
+            settings.completion_model(ProviderId::Nvidia).as_deref(),
+            Some("nvidia/nemotron-3.5-lightning-30b-a3b")
+        );
+        // Suggestions then come from a chat model.
+        assert!(!fim_available(&AiSettings { enabled: true, ..settings }));
+    }
+
     #[test]
     fn hosted_services_must_start_answering_in_time() {
         assert_eq!(start_limit("https://integrate.api.nvidia.com/v1"), Some(START_WITHIN));
