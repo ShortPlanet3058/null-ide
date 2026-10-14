@@ -52,10 +52,10 @@ en.OpenWithNull=Open with Null
 fr.OpenWithNull=Ouvrir avec Null
 en.StartNull=Start Null
 fr.StartNull=Démarrer Null
-en.DeleteQuestion=Delete your settings too?
-fr.DeleteQuestion=Supprimer aussi vos réglages ?
-en.DeleteDetail=Your settings, saved API keys, history and downloaded language servers. Keep them if you might install Null again.
-fr.DeleteDetail=Vos réglages, clés d'API enregistrées, historique et serveurs de langage téléchargés. Gardez-les si vous pensez réinstaller Null.
+en.KeepQuestion=Keep your settings?
+fr.KeepQuestion=Garder vos réglages ?
+en.KeepDetail=Your settings, saved API keys, history and downloaded language servers, for if you install Null again. Or delete them now.
+fr.KeepDetail=Vos réglages, clés d'API enregistrées, historique et serveurs de langage téléchargés, si vous réinstallez Null. Ou supprimez-les maintenant.
 en.DeleteButton=Delete them
 fr.DeleteButton=Supprimer
 en.KeepButton=Keep them
@@ -146,9 +146,10 @@ var
   Code: Integer;
 begin
   if (CurUninstallStep = usUninstall) and not UninstallSilent then
-    { (Keep, the default: Enter deletes nothing. A plain MsgBox ignores MB_DEFBUTTON2.) }
-    if SuppressibleTaskDialogMsgBox(CustomMessage('DeleteQuestion'), CustomMessage('DeleteDetail'), mbConfirmation,
-      MB_YESNO, [CustomMessage('DeleteButton'), CustomMessage('KeepButton')], 0, IDNO) = IDYES then
+    { Keep first: Enter keeps (a MsgBox ignores MB_DEFBUTTON2, and the task dialog's
+      Default is only what a silenced one answers). }
+    if SuppressibleTaskDialogMsgBox(CustomMessage('KeepQuestion'), CustomMessage('KeepDetail'), mbConfirmation,
+      MB_YESNO, [CustomMessage('KeepButton'), CustomMessage('DeleteButton')], 0, IDYES) = IDNO then
     begin
       Exec(ExpandConstant('{app}\null.exe'), '--forget-keys', '', SW_HIDE, ewWaitUntilTerminated, Code);
       DelTree(ExpandConstant('{userappdata}\Null'), True, True, True);
