@@ -22,12 +22,14 @@ pub fn bind_keys(cx: &mut App) {
     let ctx = Some("ProjectSearch");
     cx.bind_keys([
         KeyBinding::new("down", NextResult, ctx),
-        KeyBinding::new("ctrl-n", NextResult, ctx),
         KeyBinding::new("up", PreviousResult, ctx),
-        KeyBinding::new("ctrl-p", PreviousResult, ctx),
         KeyBinding::new("enter", OpenResult, ctx),
         KeyBinding::new("secondary-enter", ReplaceAllResults, ctx),
     ]);
+    // (The Mac's ⌃N/⌃P; elsewhere Ctrl+N and Ctrl+P are a new file and Go to File.)
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([KeyBinding::new("ctrl-n", NextResult, ctx), KeyBinding::new("ctrl-p", PreviousResult, ctx)]);
+    }
 }
 
 /// Files with unsaved changes in a tab, by path: searching reads these instead of the

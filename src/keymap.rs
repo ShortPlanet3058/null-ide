@@ -154,12 +154,22 @@ fn jetbrains_platform_keys() -> Vec<KeyBinding> {
             KeyBinding::new("alt-down", ShrinkSelection, editor),
         ]
     } else {
-        vec![
-            KeyBinding::new("ctrl-alt-left", GoBack, workspace),
-            KeyBinding::new("ctrl-alt-right", GoForward, workspace),
-            KeyBinding::new("ctrl-w", ExpandSelection, editor),
-            KeyBinding::new("ctrl-shift-w", ShrinkSelection, editor),
-        ]
+        // (Not on Linux, where Ctrl+Alt+←→ switch workspaces: Alt+←→ go back and forth too.)
+        let back_and_forth = if cfg!(windows) {
+            vec![
+                KeyBinding::new("ctrl-alt-left", GoBack, workspace),
+                KeyBinding::new("ctrl-alt-right", GoForward, workspace),
+            ]
+        } else {
+            Vec::new()
+        };
+        back_and_forth
+            .into_iter()
+            .chain([
+                KeyBinding::new("ctrl-w", ExpandSelection, editor),
+                KeyBinding::new("ctrl-shift-w", ShrinkSelection, editor),
+            ])
+            .collect()
     }
 }
 

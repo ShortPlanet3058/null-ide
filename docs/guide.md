@@ -7,6 +7,9 @@ Ctrl+Alt+J, folding Ctrl+Shift+[ and ], the terminal Ctrl+J, Join Lines Ctrl+Shi
 Shortcuts on digits and symbols follow your keyboard: on Windows they're on the key in the
 same place as on an American keyboard (on a French AZERTY, the terminal is also Ctrl+ù,
 comments Ctrl+:, tab 1 Ctrl+&), and on Linux an AZERTY's digit row works without Shift.
+On Linux, where the desktop keeps Ctrl+Alt+T and Ctrl+Alt+arrows for itself, the test at
+the cursor is Ctrl+Shift+F10 (debugged: Ctrl+Shift+F9) and a cursor above or below is
+Ctrl+Shift+↑/↓; back and forward are Alt+←/→ everywhere off the Mac.
 Menus and ⌘K always show the keys as they are on your computer, and for the keymap you
 picked.
 

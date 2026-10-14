@@ -219,8 +219,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("secondary-shift-b", RunTask, ctx),
-        KeyBinding::new("alt-secondary-t", RunTestAtCursor, ctx),
-        KeyBinding::new("alt-shift-secondary-t", DebugTestAtCursor, ctx),
+        // (Ctrl+Alt+T opens a terminal on Linux desktops: JetBrains' keys there.)
+        KeyBinding::new(
+            if cfg!(all(unix, not(target_os = "macos"))) { "ctrl-shift-f10" } else { "alt-secondary-t" },
+            RunTestAtCursor,
+            ctx,
+        ),
+        KeyBinding::new(
+            if cfg!(all(unix, not(target_os = "macos"))) { "ctrl-shift-f9" } else { "alt-shift-secondary-t" },
+            DebugTestAtCursor,
+            ctx,
+        ),
         KeyBinding::new("alt-secondary-o", OpenRecent, ctx),
         KeyBinding::new("secondary-shift-n", NewWindow, ctx),
         KeyBinding::new("f5", StartDebugging, ctx),

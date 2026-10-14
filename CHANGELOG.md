@@ -51,6 +51,11 @@ license.
 - Go to Line leaves the keys in the code, even when a list (the Git panel's branches) had
   them before.
 - With no folder open, the status bar doesn't show Null's own scratch folder.
+- Linux: keys the desktop doesn't take for itself. The test at the cursor is
+  Ctrl+Shift+F10 (Ctrl+Alt+T opened a terminal), a cursor above or below Ctrl+Shift+↑/↓
+  (Ctrl+Alt+↑/↓ switched workspaces).
+- Windows and Linux: Ctrl+P and Ctrl+N in the search results and the suggestion list are
+  Go to File and a new file again (they moved through the list, as on the Mac).
 - Ctrl+K offers to install the file's missing language server ("Install Python Language
   Server"), as the status bar does.
 - The Windows installer doesn't ask about an existing folder when installing again.

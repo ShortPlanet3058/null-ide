@@ -304,8 +304,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-l", SelectLine, ctx),
         KeyBinding::new("secondary-d", AddNextOccurrence, ctx),
         KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
-        KeyBinding::new("secondary-alt-up", AddCursorAbove, ctx),
-        KeyBinding::new("secondary-alt-down", AddCursorBelow, ctx),
+        // (Ctrl+Alt+↑↓ switch workspaces on Linux desktops: Ctrl+Shift there.)
+        KeyBinding::new(
+            if cfg!(all(unix, not(target_os = "macos"))) { "ctrl-shift-up" } else { "secondary-alt-up" },
+            AddCursorAbove,
+            ctx,
+        ),
+        KeyBinding::new(
+            if cfg!(all(unix, not(target_os = "macos"))) { "ctrl-shift-down" } else { "secondary-alt-down" },
+            AddCursorBelow,
+            ctx,
+        ),
         // (⌥⇧I types ï on a Mac: ⌃⇧L there, beside ⌘⇧L.)
         KeyBinding::new(
             if cfg!(target_os = "macos") { "ctrl-shift-l" } else { "alt-shift-i" },
@@ -352,8 +361,7 @@ pub fn bind_keys(cx: &mut App) {
     keys.extend([
         KeyBinding::new("up", CompletionPrevious, menu),
         KeyBinding::new("down", CompletionNext, menu),
-        KeyBinding::new("ctrl-p", CompletionPrevious, menu),
-        KeyBinding::new("ctrl-n", CompletionNext, menu),
+        // (⌃N/⌃P: the Mac's, in mac_keys. Elsewhere Ctrl+N and Ctrl+P are a new file and Go to File.)
         KeyBinding::new("enter", ConfirmCompletion, menu),
         KeyBinding::new("tab", ConfirmCompletion, menu),
         KeyBinding::new("escape", CancelCompletion, menu),
