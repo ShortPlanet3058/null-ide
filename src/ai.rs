@@ -615,7 +615,8 @@ pub fn ask(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)
         first.get_or_insert_with(|| started.elapsed());
         on_text(text)
     });
-    log_request(settings, "ask", started, first, &result);
+    let model = prompt.model.clone().or_else(|| settings.model(settings.active()));
+    log_request(settings, "ask", model.as_deref(), started, first, &result);
     result
 }
 
@@ -1252,7 +1253,7 @@ pub fn stream_fim(settings: AiSettings, fim: Fim) -> futures::channel::mpsc::Unb
                 first.get_or_insert_with(|| started.elapsed());
                 text_tx.unbounded_send(AiEvent::Text(text.to_string())).ok();
             });
-            log_request(&settings, "fill", started, first, &result);
+            log_request(&settings, "fill", None, started, first, &result);
             tx.unbounded_send(match result {
                 Ok(()) => AiEvent::Done,
                 Err(message) => AiEvent::Failed(message),
@@ -1264,16 +1265,22 @@ pub fn stream_fim(settings: AiSettings, fim: Fim) -> futures::channel::mpsc::Unb
 }
 
 /// With `NULL_AI_LOG=<file>`, one line per request: how long until the first text, how long in all.
+/// (`model`: the one asked, when it isn't the one for suggestions.)
 pub fn log_request(
     settings: &AiSettings,
     kind: &str,
+    model: Option<&str>,
     started: std::time::Instant,
     first: Option<std::time::Duration>,
     result: &Result<(), String>,
 ) {
     let Some(path) = std::env::var_os("NULL_AI_LOG") else { return };
     let id = settings.active();
-    let model = settings.completion_model(id).or_else(|| settings.model(id)).unwrap_or_default();
+    let model = model
+        .map(str::to_owned)
+        .or_else(|| settings.completion_model(id))
+        .or_else(|| settings.model(id))
+        .unwrap_or_default();
     let line = format!(
         "{kind} {} {model}: first text {}, total {:.0?}{}\n",
         id.key(),
