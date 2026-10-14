@@ -56,6 +56,8 @@ license.
   (Ctrl+Alt+↑/↓ switched workspaces).
 - Windows and Linux: Ctrl+P and Ctrl+N in the search results and the suggestion list are
   Go to File and a new file again (they moved through the list, as on the Mac).
+- Linux: a project's window reopened at start is drawn at once (over remote desktop on
+  GNOME it stayed blank until a key was pressed).
 - Ctrl+K offers to install the file's missing language server ("Install Python Language
   Server"), as the status bar does.
 - The Windows installer doesn't ask about an existing folder when installing again.

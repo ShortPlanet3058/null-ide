@@ -664,11 +664,24 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
             workspace
         })
     });
-    if let Err(error) = opened {
-        eprintln!("null: couldn't open a window: {error}");
-        // Nothing open, nothing would ever close: don't stay running out of sight.
-        if cx.windows().is_empty() {
-            cx.quit();
+    match opened {
+        // (GNOME over remote desktop showed a restored window before its first frame, and
+        // never asked for another until a key or the mouse came: drawn again once it's up.)
+        Ok(handle) => {
+            cx.spawn(async move |cx| {
+                for wait in [150, 600] {
+                    cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
+                    handle.update(cx, |_, window, _| window.refresh()).ok();
+                }
+            })
+            .detach();
+        }
+        Err(error) => {
+            eprintln!("null: couldn't open a window: {error}");
+            // Nothing open, nothing would ever close: don't stay running out of sight.
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
         }
     }
 }
