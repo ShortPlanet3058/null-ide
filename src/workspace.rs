@@ -10582,6 +10582,14 @@ impl Render for Workspace {
             .then(|| crate::trace::step(|| "window first laid out".into()))
             .flatten();
         ui::apply_zoom(window, cx);
+        // While the welcome shows, the keys are its own: a file the session reopened behind
+        // it took them once, and typing went to a project out of sight.
+        if let Some((welcome, _)) = &self.welcome {
+            let handle = welcome.focus_handle(cx);
+            if !handle.contains_focused(window, cx) {
+                window.focus(&handle);
+            }
+        }
         // The menu bar's toggles say what they'll do in the window in front.
         if window.is_window_active() {
             let settings = cx.global::<Settings>();
@@ -12089,6 +12097,35 @@ mod tests {
     }
 
     /// Revert to Saved: the saved text back, the file clean; ⌘Z brings the changes back.
+    /// The welcome keeps the keys while it shows, even when a file opened behind it takes them.
+    #[gpui::test]
+    fn the_welcome_keeps_the_keys(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("welcome-keys");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.show_welcome(window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        editor.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
+        workspace.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let welcome = workspace.read_with(cx, |w, _| w.welcome.as_ref().map(|(w, _)| w.clone()).unwrap());
+        cx.update(|window, cx| {
+            assert!(welcome.focus_handle(cx).contains_focused(window, cx), "the file behind took the keys")
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Going to a line from a list that had the keys (the Git panel's branches): the keys
     /// go to the code, where the caret went.
     #[gpui::test]
