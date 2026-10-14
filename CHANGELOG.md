@@ -51,8 +51,8 @@ license.
 - Go to Line leaves the keys in the code, even when a list (the Git panel's branches) had
   them before.
 - With no folder open, the status bar doesn't show Null's own scratch folder.
-- Ctrl+K lists Install (language) Language Server when the file's server is missing, as
-  the status bar offers it.
+- Ctrl+K offers to install the file's missing language server ("Install Python Language
+  Server"), as the status bar does.
 - The Windows installer doesn't ask about an existing folder when installing again.
 - After Close Folder the title and the files say no folder is open.
 - AI is off until you turn it on: the welcome's AI step starts on Off (if you already use

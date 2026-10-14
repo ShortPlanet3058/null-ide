@@ -148,7 +148,7 @@ begin
   if (CurUninstallStep = usUninstall) and not UninstallSilent then
     { (Keep, the default: Enter deletes nothing. A plain MsgBox ignores MB_DEFBUTTON2.) }
     if SuppressibleTaskDialogMsgBox(CustomMessage('DeleteQuestion'), CustomMessage('DeleteDetail'), mbConfirmation,
-      MB_YESNO, [CustomMessage('DeleteButton'), CustomMessage('KeepButton')], 0, True, IDNO) = IDYES then
+      MB_YESNO, [CustomMessage('DeleteButton'), CustomMessage('KeepButton')], 0, IDNO) = IDYES then
     begin
       Exec(ExpandConstant('{app}\null.exe'), '--forget-keys', '', SW_HIDE, ewWaitUntilTerminated, Code);
       DelTree(ExpandConstant('{userappdata}\Null'), True, True, True);
