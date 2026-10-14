@@ -652,28 +652,29 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
     };
     let opened = cx.open_window(options, |window, cx| {
         cx.new(|cx| {
-            let mut workspace = Workspace::new(root, window, cx);
+            let workspace = Workspace::new(root, window, cx);
             window.focus(&workspace.focus_handle(cx));
-            workspace.restore_session(session, window, cx);
-            if let Some(file) = file {
-                open_at(&mut workspace, file, place, window, cx);
-            }
-            if !cx.global::<settings::Settings>().welcomed {
-                workspace.show_welcome(window, cx);
-            }
             workspace
         })
     });
     match opened {
-        // (GNOME over remote desktop showed a restored window before its first frame, and
-        // never asked for another until a key or the mouse came: drawn again once it's up,
-        // which can take seconds without a graphics card.)
+        // The project's files once the window is up: on Linux (GNOME over remote desktop,
+        // drawn without a graphics card) a window whose first frame had a file in it was
+        // never drawn again until a key or the mouse came.
         Ok(handle) => {
             cx.spawn(async move |cx| {
-                for wait in [150, 600, 1500, 3000, 6000] {
-                    cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
-                    handle.update(cx, |_, window, _| window.refresh()).ok();
-                }
+                cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
+                handle
+                    .update(cx, |workspace, window, cx| {
+                        workspace.restore_session(session, window, cx);
+                        if let Some(file) = file {
+                            open_at(workspace, file, place, window, cx);
+                        }
+                        if !cx.global::<settings::Settings>().welcomed {
+                            workspace.show_welcome(window, cx);
+                        }
+                    })
+                    .ok();
             })
             .detach();
         }
