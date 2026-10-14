@@ -13765,9 +13765,16 @@ mod tests {
         let dir = crate::tools::test_dir("cmd");
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("log");
-        // A stand-in for Null that writes down what it was given.
+        // A stand-in for Null that says what it was given (not `echo`: GNU's answers
+        // `--version` with its own).
+        let fake = dir.join("fake-null");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$*\"\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let script = shell_script(
-            "echo",
+            &fake.display().to_string(),
             &format!("echo \"$p\" >> \"{}\"", log.display()),
             &format!("echo \"wait $p\" >> \"{}\"", log.display()),
             &format!("echo \"all $*\" >> \"{}\"", log.display()),
