@@ -21,6 +21,8 @@ AppUpdatesURL=https://github.com/ShortPlanet3058/null-ide/releases
 DefaultDirName={localappdata}\Programs\Null
 DisableProgramGroupPage=yes
 DisableDirPage=auto
+; (Installing again after an uninstall: no "the folder exists" question.)
+DirExistsWarning=no
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible

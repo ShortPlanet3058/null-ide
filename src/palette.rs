@@ -353,6 +353,12 @@ fn quick_for(name: &str) -> Option<Quick> {
     })
 }
 
+/// Whether the action picks one value of its quick setting (a theme, a line spacing).
+fn picks_a_value(name: &str) -> bool {
+    let name = name.rsplit("::").next().unwrap_or(name);
+    (name.starts_with("Use") && name.ends_with("Theme")) || name.ends_with("LineSpacing")
+}
+
 /// What the palette starts with.
 pub struct PaletteOptions {
     pub kind: PaletteKind,
@@ -808,10 +814,10 @@ impl Palette {
         let mut found = rank_files(&self.files, query, &recent);
         // Only those shown sorted (the best first), not every match.
         if found.len() > MAX_RESULTS {
-            found.select_nth_unstable_by_key(MAX_RESULTS, |(score, i, _)| (std::cmp::Reverse(*score), *i));
+            found.select_nth_unstable_by_key(MAX_RESULTS, |(score, i, _)| sort_key(*score, &self.files[*i], *i));
             found.truncate(MAX_RESULTS);
         }
-        found.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
+        found.sort_by_key(|(score, i, _)| sort_key(*score, &self.files[*i], *i));
         for (_, i, highlights) in found.into_iter().take(MAX_RESULTS) {
             self.push(Item::File(i), highlights, false);
         }
@@ -835,7 +841,13 @@ impl Palette {
         for (i, c) in self.commands.iter().enumerate() {
             // A command a quick setting stands in for: its own name finds that setting
             // ("toggle sidebar" finds Sidebar), shown once.
-            if let Some(quick) = quick_for(c.action.name()).filter(listed) {
+            // (One that picks a value, typed by that value's name — "paper" — is listed as
+            // itself: Enter on the row would only step to the next theme.)
+            let names_its_value = picks_a_value(c.action.name())
+                && Quick::ALL
+                    .iter()
+                    .all(|q| quick_for(c.action.name()) != Some(*q) || fuzzy::score(q.label(), query).is_none());
+            if let Some(quick) = quick_for(c.action.name()).filter(listed).filter(|_| !names_its_value) {
                 let also = || also_called(c.action.name()).and_then(|words| fuzzy::score(words, query));
                 if let Some((score, _)) = fuzzy::score(&c.label, query).or_else(also) {
                     match found.iter_mut().find(|(_, item, _)| *item == Item::Quick(quick)) {
@@ -1467,6 +1479,12 @@ impl Palette {
     }
 }
 
+/// The order of ⌘P's files: the best score first, then the shorter name (the source
+/// before what's built from it: test_cart.py before test_cart.cpython-312.pyc).
+fn sort_key(score: i32, file: &FileEntry, i: usize) -> (std::cmp::Reverse<i32>, usize, usize) {
+    (std::cmp::Reverse(score), file.relative.len() - file.name_start, i)
+}
+
 /// The files matching `query`, each with its score (`recent` ones a little higher), its
 /// place in `files` and the letters matched.
 fn rank_files(files: &[FileEntry], query: &str, recent: &HashSet<PathBuf>) -> Vec<(i32, usize, Vec<usize>)> {
@@ -1852,6 +1870,21 @@ mod tests {
 
     use super::*;
 
+    /// The source file comes before what's built from it: `test_cart` finds test_cart.py
+    /// first, not __pycache__/test_cart.cpython-312.pyc.
+    #[test]
+    fn the_shorter_name_wins_a_tie() {
+        let root = std::path::PathBuf::from("/p");
+        let roots = crate::roots::ProjectRoots::new(root.clone());
+        let files: Vec<FileEntry> = ["__pycache__/test_cart.cpython-312.pyc", "test_cart.py", "cart.py"]
+            .iter()
+            .map(|f| FileEntry::new(root.join(f), &roots))
+            .collect();
+        let mut found = rank_files(&files, "test_cart", &Default::default());
+        found.sort_by_key(|(score, i, _)| sort_key(*score, &files[*i], *i));
+        assert_eq!(files[found[0].1].relative, "test_cart.py");
+    }
+
     /// A path typed with no file dialog: what's in the folder typed so far, listed.
     #[test]
     fn a_typed_path_lists_what_the_folder_holds() {
@@ -1896,6 +1929,12 @@ mod tests {
                 category: Category::View,
                 label: "Move Tab to the Right Side".into(),
                 action: Box::new(crate::workspace::MoveTabRight),
+                keys: None,
+            },
+            Command {
+                category: Category::View,
+                label: "Use Paper Theme".into(),
+                action: Box::new(crate::workspace::UsePaperTheme),
                 keys: None,
             },
         ];
@@ -1964,6 +2003,11 @@ mod tests {
         assert_eq!(items(cx, &p), ["Duplicate Line"]);
         type_query(cx, &p, "lines");
         assert!(items(cx, &p).contains(&"Duplicate Line".to_string()), "a category's name: what's in it");
+        // A theme by its name: that theme, not the row that steps through them.
+        type_query(cx, &p, "paper");
+        assert_eq!(items(cx, &p), ["Use Paper Theme"]);
+        type_query(cx, &p, "theme");
+        assert_eq!(items(cx, &p), ["quick: Theme"]);
         // What a command is also called: splitting is moving a tab to a side.
         type_query(cx, &p, "split");
         assert_eq!(items(cx, &p), ["Move Tab to the Right Side"]);

@@ -40,6 +40,18 @@ license.
   Null says so instead of waiting.
 - Typing `cart` in Ctrl+P finds cart.rs before Cargo.toml: letters typed together come
   first.
+- Ctrl+P puts a source file before what's built from it: test_cart.py before
+  __pycache__/test_cart.cpython-312.pyc.
+- Running the test at the cursor (and a file's, or all of them) uses unittest, which comes
+  with Python, when the project shows no sign of pytest; each test's result is read from it.
+- Windows and Linux: Ctrl+Shift shortcuts (Ctrl+Shift+G the changes, Ctrl+Shift+P commands)
+  work from the terminal too; plain Ctrl keys stay the shell's.
+- Ctrl+K: a theme typed by its name ("paper") is offered as itself, not the row that steps
+  through themes.
+- Go to Line leaves the keys in the code, even when a list (the Git panel's branches) had
+  them before.
+- With no folder open, the status bar doesn't show Null's own scratch folder.
+- The Windows installer doesn't ask about an existing folder when installing again.
 - After Close Folder the title and the files say no folder is open.
 - AI is off until you turn it on: the welcome's AI step starts on Off (if you already use
   AI, it stays on).

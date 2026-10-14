@@ -3614,9 +3614,9 @@ impl Workspace {
     /// Installs `null`, to open files and folders from a terminal: `null .`, `null a.rs`.
     /// Into /usr/local/bin when it can write there, else ~/.local/bin; on Windows a
     /// `null.cmd` in Null's own folder.
-    /// The Mac has no uninstaller: Null.app does it. The `null` command goes now; once Null
-    /// has quit, the app goes to the Trash, with the settings, saved API keys, history and
-    /// language servers if asked (else they stay, for coming back).
+    /// The Mac has no uninstaller: Null.app does it. The app goes to the Trash and the `null`
+    /// command away, then Null quits; the settings, saved API keys, history and language
+    /// servers go too if asked (else they stay, for coming back).
     fn uninstall(&mut self, _: &UninstallNull, window: &mut Window, cx: &mut Context<Self>) {
         let Some(app) = app_bundle() else {
             self.show_notice("Only the app (Null.app) uninstalls itself.".into(), cx);
@@ -3637,23 +3637,31 @@ impl Workspace {
                 Ok(1) => true,
                 _ => return,
             };
-            remove_shell_command();
-            let mut paths = vec![app];
-            if everything {
-                crate::ai::forget_api_keys();
-                paths.extend(crate::settings::Settings::path().and_then(|p| p.parent().map(Path::to_path_buf)));
-                paths.extend(crate::tools::data_dir());
+            // (The system's Trash, as the Finder does it; Null runs on from there until it quits.)
+            let mut removing = crate::fs_ops::move_to_trash(&app);
+            if removing.is_ok() {
+                remove_shell_command();
             }
-            // (After Null has quit: it writes its session on the way out.)
-            let removing = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(REMOVE_AFTER_QUIT)
-                .arg("sh")
-                .arg(std::process::id().to_string())
-                .args(&paths)
-                .spawn();
+            if removing.is_ok() && everything {
+                crate::ai::forget_api_keys();
+                let folders: Vec<PathBuf> = crate::settings::Settings::path()
+                    .and_then(|p| p.parent().map(Path::to_path_buf))
+                    .into_iter()
+                    .chain(crate::tools::data_dir())
+                    .collect();
+                // (After Null has quit: it writes its session on the way out.)
+                removing = std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(REMOVE_AFTER_QUIT)
+                    .arg("sh")
+                    .arg(std::process::id().to_string())
+                    .args(&folders)
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+            }
             this.update_in(cx, |this, window, cx| match removing {
-                Ok(_) => window.dispatch_action(Box::new(Quit), cx),
+                Ok(()) => window.dispatch_action(Box::new(Quit), cx),
                 Err(error) => this.show_notice(format!("Couldn't uninstall: {error}"), cx),
             })
             .ok();
@@ -5571,8 +5579,10 @@ impl Workspace {
                 this.close_palette(window, cx);
                 let here = this.here(cx);
                 this.remember_place(here);
-                if let Some(editor) = this.active_editor() {
+                if let Some(editor) = this.active_editor().cloned() {
                     editor.update(cx, |editor, cx| editor.go_to_line(line, cx));
+                    // The keys go where the caret went (not back to a list that had them).
+                    window.focus(&editor.focus_handle(cx));
                 }
             }
             PaletteEvent::Run(action) => {
@@ -10391,13 +10401,10 @@ fn remove_shell_command() {
     }
 }
 
-/// Run as `sh -c REMOVE_AFTER_QUIT sh PID APP [FOLDER…]`: once Null (PID) has quit, its app
-/// goes to the Trash and the folders are deleted.
-const REMOVE_AFTER_QUIT: &str = r#"pid=$1 app=$2; shift 2
+/// Run as `sh -c REMOVE_AFTER_QUIT sh PID FOLDER…`: once Null (PID) has quit, the folders
+/// are deleted.
+const REMOVE_AFTER_QUIT: &str = r#"pid=$1; shift
 while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
-name=$(basename "$app" .app); dest="$HOME/.Trash/$name.app"
-[ -e "$dest" ] && dest="$HOME/.Trash/$name $(date +%H.%M.%S).app"
-mv "$app" "$dest"
 for folder in "$@"; do rm -rf "$folder"; done"#;
 
 fn shell_script(exe: &str, launch: &str, waiting: &str, all: &str) -> String {
@@ -10676,6 +10683,8 @@ impl Render for Workspace {
                     )
                 }
             }
+            // (No folder open: Null's own scratch folder isn't one to show.)
+            None if crate::session::is_scratch(&root) => (Vec::new(), (0, 0)),
             None => {
                 let home = crate::tools::home_dir();
                 let shown = match home.as_ref().and_then(|h| root.strip_prefix(h).ok()) {
@@ -12063,6 +12072,36 @@ mod tests {
     }
 
     /// Revert to Saved: the saved text back, the file clean; ⌘Z brings the changes back.
+    /// Going to a line from a list that had the keys (the Git panel's branches): the keys
+    /// go to the code, where the caret went.
+    #[gpui::test]
+    fn going_to_a_line_gives_the_code_the_keys(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("go-to-line-focus");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        cx.run_until_parked();
+        let elsewhere = cx.update(|_, cx| cx.focus_handle());
+        cx.update(|window, _| window.focus(&elsewhere));
+        workspace.update_in(cx, |w, window, cx| w.go_to_line(&GoToLine, window, cx));
+        cx.run_until_parked();
+        let palette = workspace.read_with(cx, |w, _| w.palette.as_ref().map(|(p, _)| p.clone()).unwrap());
+        palette.update(cx, |_, cx| cx.emit(PaletteEvent::GoToLine(3)));
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        cx.update(|window, cx| assert!(editor.focus_handle(cx).is_focused(window), "the keys stayed in the list"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[gpui::test]
     fn revert_to_saved_takes_the_file_back(cx: &mut gpui::TestAppContext) {
         let dir = crate::tools::test_dir("revert-saved");
