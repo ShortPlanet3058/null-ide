@@ -105,6 +105,7 @@ actions!(
         ToggleInlayHints,
         ToggleCodeLens,
         ShowServerLog,
+        InstallLanguageServer,
         ToggleBracketColours,
         ToggleProblemsAtLineEnds,
         ToggleFocusMode,
@@ -5131,6 +5132,12 @@ impl Workspace {
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
+        // What the status bar offers, for the keyboard too.
+        if let Some(Readiness::Missing { server } | Readiness::InstallFailed { server }) =
+            self.active_editor().and_then(|e| e.read(cx).readiness(cx))
+        {
+            commands.push((App, format!("Install {} Language Server", server.label), Box::new(InstallLanguageServer)));
+        }
         // (Windows and Linux have their own uninstallers.)
         if cfg!(target_os = "macos") && app_bundle().is_some() {
             commands.push((App, "Uninstall Null…".into(), Box::new(UninstallNull)));
@@ -11546,6 +11553,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::start_debugging))
             .on_action(cx.listener(Self::show_server_log))
+            .on_action(cx.listener(|this, _: &InstallLanguageServer, _, cx| this.install_language_server(cx)))
             .on_action(cx.listener(|this, _: &ToggleStopOnErrors, _, cx| {
                 // Where the program fails (a Rust panic, a thrown exception): stopped at.
                 let on = !this.debugger.read(cx).stop_on_errors;
