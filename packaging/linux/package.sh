@@ -45,7 +45,7 @@ Installed-Size: $size
 Depends: libc6 (>= 2.35), libgcc-s1, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libvulkan1
 Recommends: mesa-vulkan-drivers | vulkan-icd, xdg-desktop-portal, git
 Maintainer: ShortPlanet3058 <118638156+ShortPlanet3058@users.noreply.github.com>
-Homepage: https://shortplanet3058.github.io/null-ide/
+Homepage: https://null-ide.com/
 Description: A calm, fast code editor where nothing gets in your way
  Null is a code editor built around one idea: the screen belongs to your code.
  Language servers, git, a terminal, tests and a debugger are a keystroke away and

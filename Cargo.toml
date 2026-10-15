@@ -4,6 +4,7 @@ version = "0.1.1"
 edition = "2024"
 license-file = "LICENSE"
 description = "A calm, fast code editor where nothing gets in your way."
+homepage = "https://null-ide.com"
 repository = "https://github.com/ShortPlanet3058/null-ide"
 
 [[bin]]
