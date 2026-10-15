@@ -364,6 +364,21 @@ Each provider comes with recommended models (one click in Settings → AI) and a
 level: quick by default, more for harder questions. Suggestions while typing always use the
 least thinking, and their own model, a fill-in-the-middle code model where there is one.
 
+**What the AI reads.** With ⌘I, only what the request needs: the file when it's short, or in
+a long one the lines around the code with an outline of the rest; the definitions that code
+uses from elsewhere in the project (from Null's own index of the project, no language server
+needed); and the project's conventions (`AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`
+or `CONVENTIONS.md`, for providers other than Claude Code and Codex, which read them
+themselves). The field says what goes with the request and about how many tokens. What stays
+the same from one request to the next is sent first, so providers can take it from their
+cache (Anthropic's is asked for; OpenAI, Gemini, DeepSeek and others do it by themselves), and
+an AI task's conversation is cached as it grows, so each step pays only for what's new.
+
+**Tokens.** Settings → AI → AI usage shows this month's tokens (and how many came from a
+cache); "AI Usage" in ⌘K says the last request's too. A monthly limit (1M, 5M or 20M tokens)
+stops every AI request, suggestions included, once it's reached, until the next month. The
+counts stay on your computer (`ai-usage.json` in Null's folder).
+
 API keys are read from the provider's usual variable (`MISTRAL_API_KEY`, `GROQ_API_KEY`,
 `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `NVIDIA_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) when set,
 otherwise from the system's key store (the keychain, Windows Credential Manager, the Secret Service) (Settings → AI → API key), at most once per launch; they

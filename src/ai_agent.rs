@@ -181,7 +181,7 @@ pub fn run(
     match id {
         ProviderId::Claude => {
             let key = crate::ai::api_key(id).ok_or_else(|| crate::ai::missing_key(id))?;
-            claude_loop(&model, &key, effort, &user, root, stop, on_event)
+            claude_loop(&model, &key, effort, &user, root, settings.monthly_token_limit, stop, on_event)
         }
         _ => {
             let base = settings.base_url(id).unwrap_or_default();
@@ -191,7 +191,7 @@ pub fn run(
             if key.is_none() && !keyless {
                 return Err(crate::ai::missing_key(id));
             }
-            openai_loop(id, &base, &model, key.as_deref(), &user, root, stop, on_event)
+            openai_loop(id, &base, &model, key.as_deref(), &user, root, settings.monthly_token_limit, stop, on_event)
         }
     }
 }
@@ -205,6 +205,7 @@ fn openai_loop(
     key: Option<&str>,
     user: &str,
     root: &Path,
+    limit: Option<u64>,
     stop: &AtomicBool,
     on_event: &mut dyn FnMut(TaskEvent),
 ) -> Result<String, String> {
@@ -223,6 +224,7 @@ fn openai_loop(
         if stop.load(Ordering::Relaxed) {
             return Err("Stopped.".into());
         }
+        crate::ai::within_limit(limit)?;
         let body = json!({ "model": model, "messages": messages, "tools": tools, "tool_choice": "auto" });
         let mut request = crate::ai::agent().post(&url).header("Content-Type", "application/json");
         if let Some(key) = key {
@@ -235,6 +237,7 @@ fn openai_loop(
             return Err(crate::ai::error_message(status, &text));
         }
         let reply: Value = serde_json::from_str(&text).map_err(|e| format!("An answer Null couldn't read: {e}"))?;
+        crate::ai_usage::Usage::from_openai(&reply["usage"]).into_iter().for_each(crate::ai_usage::record);
         let mut message = reply["choices"][0]["message"].clone();
         let mut calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
         // A small model writes its call as text (`{"name": "read_file", ...}`) instead of
@@ -323,12 +326,14 @@ fn calls_in_text(content: &str) -> Option<Result<Vec<Value>, String>> {
 }
 
 /// Claude's tool use, through the Messages API.
+#[allow(clippy::too_many_arguments)]
 fn claude_loop(
     model: &str,
     key: &str,
     effort: Effort,
     user: &str,
     root: &Path,
+    limit: Option<u64>,
     stop: &AtomicBool,
     on_event: &mut dyn FnMut(TaskEvent),
 ) -> Result<String, String> {
@@ -341,8 +346,16 @@ fn claude_loop(
         if stop.load(Ordering::Relaxed) {
             return Err("Stopped.".into());
         }
+        crate::ai::within_limit(limit)?;
+        // The conversation so far, cached up to its end: the next step reads it all from
+        // the cache, and pays only for what's new.
+        let mut sent = messages.clone();
+        if let Some(last) = sent.last_mut() {
+            mark_for_cache(last);
+        }
+        let system = json!([{ "type": "text", "text": SYSTEM, "cache_control": { "type": "ephemeral" } }]);
         let mut body =
-            json!({ "model": model, "max_tokens": 16000, "system": SYSTEM, "tools": tools, "messages": messages });
+            json!({ "model": model, "max_tokens": 16000, "system": system, "tools": tools, "messages": sent });
         if !model.contains("haiku") && effort != Effort::Auto {
             let level = if effort == Effort::Off { "low" } else { effort.key() };
             body["output_config"] = json!({ "effort": level });
@@ -360,6 +373,7 @@ fn claude_loop(
             return Err(crate::ai::error_message(status, &text));
         }
         let reply: Value = serde_json::from_str(&text).map_err(|e| format!("An answer Null couldn't read: {e}"))?;
+        crate::ai_usage::record(crate::ai_usage::Usage::from_anthropic(&reply["usage"]));
         let content = reply["content"].as_array().cloned().unwrap_or_default();
         let calls: Vec<&Value> = content.iter().filter(|b| b["type"] == "tool_use").collect();
         if stop.load(Ordering::Relaxed) && !calls.is_empty() {
@@ -386,6 +400,18 @@ fn claude_loop(
 
 /// A path inside the project as the model reads and writes them: `src/a.rs`, with `/`
 /// on Windows too.
+/// A message marked for Anthropic's cache, at its last block: what's before it is read
+/// from the cache next time.
+fn mark_for_cache(message: &mut Value) {
+    let content = &mut message["content"];
+    if let Some(text) = content.as_str().map(str::to_owned) {
+        *content = json!([{ "type": "text", "text": text }]);
+    }
+    if let Some(last) = content.as_array_mut().and_then(|blocks| blocks.last_mut()) {
+        last["cache_control"] = json!({ "type": "ephemeral" });
+    }
+}
+
 fn slashed(path: &Path) -> String {
     let shown = path.display().to_string();
     if cfg!(windows) { shown.replace('\\', "/") } else { shown }
@@ -478,7 +504,8 @@ mod tests {
             ] } }] })],
             move || pressed.store(true, Ordering::Relaxed),
         );
-        let result = openai_loop(ProviderId::Ollama, &base, "test", None, "Task: rename", &root, &stop, &mut |_| {});
+        let result =
+            openai_loop(ProviderId::Ollama, &base, "test", None, "Task: rename", &root, None, &stop, &mut |_| {});
         assert_eq!(result, Err("Stopped.".to_string()));
         assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "fn total() {}\n", "not edited");
         server.join().unwrap();
@@ -500,7 +527,8 @@ mod tests {
         ]);
         let stop = AtomicBool::new(false);
         let summary =
-            openai_loop(ProviderId::Ollama, &base, "test", None, "Task: rename", &root, &stop, &mut |_| {}).unwrap();
+            openai_loop(ProviderId::Ollama, &base, "test", None, "Task: rename", &root, None, &stop, &mut |_| {})
+                .unwrap();
         assert_eq!(summary, "Renamed total to sum.");
         assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "fn sum() {}\n");
         let bodies = server.join().unwrap();

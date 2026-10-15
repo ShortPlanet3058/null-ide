@@ -1328,6 +1328,33 @@ impl SettingsPanel {
             div(),
             &theme,
         ));
+        // Tokens: what was used, and a limit if wanted.
+        rows.push(Self::heading("AI usage", &theme));
+        let month = crate::ai_usage::this_months();
+        let used = if month.requests == 0 {
+            "Nothing yet this month".to_string()
+        } else {
+            format!(
+                "{} tokens in {} requests, {} of them read from the provider's cache (cheaper, sooner)",
+                crate::ai_usage::short(month.usage.total()),
+                month.requests,
+                crate::ai_usage::short(month.usage.cached)
+            )
+        };
+        rows.push(Self::row("This month", Some(&used), div(), &theme));
+        let limits: Vec<(Option<u64>, String)> = [None, Some(1_000_000), Some(5_000_000), Some(20_000_000)]
+            .into_iter()
+            .map(|l| (l, l.map_or("None".to_string(), crate::ai_usage::short)))
+            .collect();
+        let limit = s.ai.monthly_token_limit.filter(|l| *l > 0);
+        rows.push(Self::row(
+            "Monthly limit",
+            Some("Tokens read and written; reached, AI waits for next month (suggestions too)"),
+            Self::choices("token-limit", limits, limit, &theme, cx, |_, value, cx| {
+                settings::update(cx, |s| s.ai.monthly_token_limit = value)
+            }),
+            &theme,
+        ));
         rows
     }
 

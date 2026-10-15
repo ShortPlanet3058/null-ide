@@ -41,8 +41,6 @@ pub fn bind_keys(cx: &mut App) {
 /// Items a ⌘I without a selection works on, smallest first.
 const RUST_SCOPES: &[&str] =
     &["function_item", "struct_item", "enum_item", "impl_item", "trait_item", "macro_definition", "mod_item"];
-/// Whole files above this many lines are trimmed to the lines around the target.
-const CONTEXT_LINES: usize = 600;
 const NOTE_MAX_ROWS: usize = 14;
 
 /// Rows between the lines of code, drawn by the editor or with something on top.
@@ -88,6 +86,9 @@ pub(super) struct Prompting {
     original: String,
     /// An error on those lines: Enter with nothing typed fixes it.
     error: Option<String>,
+    /// What's sent with the request besides the code itself (see `ai_context`), in a few
+    /// words, with its size: shown in the field.
+    sends: String,
     /// Opened to ask about the code, not to change it.
     ask_only: bool,
     writing: bool,
@@ -128,17 +129,6 @@ fn is_question(text: &str) -> bool {
         || ["why ", "what ", "how ", "where ", "when ", "which ", "who ", "explain", "is ", "does ", "can ", "should "]
             .iter()
             .any(|w| lower.starts_with(w))
-}
-
-pub fn trim_context(text: &str, lines: &Range<usize>) -> String {
-    let all: Vec<&str> = text.lines().collect();
-    if all.len() <= CONTEXT_LINES {
-        return text.to_string();
-    }
-    let margin = CONTEXT_LINES / 2;
-    let start = lines.start.saturating_sub(margin);
-    let end = (lines.end + margin).min(all.len());
-    format!("[… lines 1-{start} omitted …]\n{}\n[… rest of the file omitted …]", all[start..end].join("\n"))
 }
 
 impl Editor {
@@ -258,6 +248,12 @@ impl Editor {
             (Some(_), false) => "Fix the error, or describe a change",
             (None, false) => "Describe a change, or ask a question",
         };
+        let sends = {
+            let context = self.request_context(&lines, cx);
+            let code = self.buffer.slice(self.line_range_chars(&lines));
+            let tokens = crate::ai_usage::estimate(&context.text) + crate::ai_usage::estimate(&code) + 150;
+            format!("with {} · about {} tokens", context.summary, crate::ai_usage::short(tokens))
+        };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         if !previous.is_empty() {
             input.update(cx, |input, cx| input.set_text(&previous, cx));
@@ -274,6 +270,7 @@ impl Editor {
             original: self.buffer.slice(span),
             lines,
             error: if ask_only { None } else { error },
+            sends,
             ask_only,
             writing: false,
             preview: String::new(),
@@ -330,12 +327,19 @@ impl Editor {
         }
     }
 
-    fn file_context(&self, lines: &Range<usize>) -> String {
-        let path = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into());
-        format!(
-            "File: {path} ({})\n\n<file>\n{}\n</file>",
+    /// What the AI reads with a request about `lines`, besides them: the project's
+    /// conventions, the file (or the part of it around them), what they use from elsewhere.
+    fn request_context(&self, lines: &Range<usize>, cx: &App) -> crate::ai_context::Context {
+        let project = cx.try_global::<crate::project_index::ProjectContext>();
+        let root = project.map(|p| p.root.as_path()).filter(|r| !r.as_os_str().is_empty());
+        crate::ai_context::for_request(
+            self.path.as_deref(),
             self.language_name(),
-            trim_context(&self.buffer.to_string(), lines)
+            &self.buffer.to_string(),
+            lines,
+            root,
+            project.map_or(&[][..], |p| p.definitions.as_slice()),
+            cx.global::<Settings>().ai.active(),
         )
     }
 
@@ -343,19 +347,20 @@ impl Editor {
         let Some(prompt) = &self.prompt else { return };
         let lines = prompt.lines.clone();
         let user = format!(
-            "{}\n\n<selection lines=\"{}-{}\">\n{}</selection>\n\nInstruction: {instruction}",
-            self.file_context(&lines),
+            "<selection lines=\"{}-{}\">\n{}</selection>\n\nInstruction: {instruction}",
             lines.start + 1,
             lines.end,
             prompt.original
         );
         let request = Prompt {
             system: "You are a careful senior engineer making a small change to part of a file in a code editor. \
-                     You get the whole file for context and the part to change between <selection> tags. Apply the \
-                     instruction to that part only. Reply with the complete new text for that part and nothing \
-                     else: no explanation, no markdown fences, nothing before or after the code. Keep the file's \
-                     indentation and style, and change no more than needed."
+                     You get the file for context (or, in a long one, the lines around the change and an outline of \
+                     the rest), what the code uses from elsewhere in the project, and the part to change between \
+                     <selection> tags. Apply the instruction to that part only. Reply with the complete new text \
+                     for that part and nothing else: no explanation, no markdown fences, nothing before or after the \
+                     code. Keep the file's indentation and style, and change no more than needed."
                 .into(),
+            context: self.request_context(&lines, cx).text,
             user,
             ..Default::default()
         };
@@ -500,9 +505,9 @@ impl Editor {
     fn ask_question(&mut self, question: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = self.prompt.take() else { return };
         let lines = prompt.lines.clone();
+        let context = self.request_context(&lines, cx).text;
         let user = format!(
-            "{}\n\nThe code in question (lines {}-{}):\n<code>\n{}</code>\n\nQuestion: {question}",
-            self.file_context(&lines),
+            "The code in question (lines {}-{}):\n<code>\n{}</code>\n\nQuestion: {question}",
             lines.start + 1,
             lines.end,
             prompt.original
@@ -512,6 +517,7 @@ impl Editor {
                      shown as a small note right under the code it's about, so keep it short: a few sentences, \
                      specific to this code. Use a markdown code fence only when code really helps."
                 .into(),
+            context,
             user,
             ..Default::default()
         };
@@ -799,6 +805,8 @@ impl Editor {
                         (None, hint)
                     };
                     let failed_long = prompt.failed.as_ref().filter(|f| f.len() > 60).cloned();
+                    // What goes with it, while nothing's wrong and nothing's being written.
+                    let sends = (!prompt.writing && prompt.failed.is_none()).then(|| prompt.sends.clone());
                     out.push(
                         place(div())
                             // While it writes, the keys are here (see `writing_focus`).
@@ -827,6 +835,16 @@ impl Editor {
                                     .children(status.map(|s| div().text_color(theme.muted).child(s)))
                                     .when(!prompt.writing, |d| d.child(prompt.input.clone())),
                             )
+                            .children(sends.map(|sends| {
+                                div()
+                                    .flex_none()
+                                    .max_w(px(420.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(px(ui::T_XS))
+                                    .text_color(theme.faint)
+                                    .child(sends)
+                            }))
                             .children(failed_long.map(|f| {
                                 div()
                                     .max_w(px(360.))
