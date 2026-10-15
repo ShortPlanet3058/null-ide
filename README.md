@@ -3,6 +3,7 @@
 <p align="center"><strong>A calm, fast code editor where nothing gets in your way.</strong></p>
 
 <p align="center">
+  <a href="https://null-ide.com">Website</a> ·
   <a href="https://github.com/ShortPlanet3058/null-ide/releases/latest">Download</a> ·
   <a href="docs/guide.md">Guide</a> ·
   <a href="CHANGELOG.md">What's new</a>
