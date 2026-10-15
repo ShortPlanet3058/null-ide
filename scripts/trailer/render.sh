@@ -41,8 +41,8 @@ case "${1:-}" in
         rm -f "$out/pictures-preview.mp4"
         ;;
     web|clips)
-        # The website's: the trailer with its sound, the hero's moving background, and a
-        # silent loop for each thing it shows (the trailer's own moments, without its words).
+        # The website's: the trailer with its sound, its card, and a silent loop for each
+        # thing the page shows (the trailer's own moments, without its words).
         media="$repo/site/media"
         mkdir -p "$media"
         if [ "$1" = web ]; then
@@ -54,7 +54,6 @@ case "${1:-}" in
             sips -s format jpeg -s formatOptions 82 "$out/card/49.60.png" --out "$media/trailer-card.jpg" >/dev/null
             rm -rf "$out/card"
         fi
-        "$bin" "$page" "$media/hero.mp4" --query "clip=hero" --fps 30 --size 1600x900 --bitrate 1.6 --poster 1.5 "$media/hero.jpg"
         for clip in calm fast precise run commit write ai; do
             "$bin" "$page" "$media/$clip.mp4" --query "clip=$clip" --fps 30 --size 1280x720 --bitrate 1.4 --poster 1.8 "$media/$clip.jpg"
         done
