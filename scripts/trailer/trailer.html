@@ -60,7 +60,7 @@ body.player { display: grid; place-items: center; height: 100vh; }
 #shout span { display: inline-block; padding: 18px 46px 28px; border-radius: 26px; background: rgba(0,0,0,.82); font: 700 150px/1 var(--ui); letter-spacing: -0.035em; color: #fff; box-shadow: 0 30px 120px rgba(0,0,0,.9); }
 
 /* ---------- the name, and the quiet ---------- */
-#name { position: absolute; left: 0; right: 0; top: 400px; display: flex; justify-content: center; align-items: center; gap: 30px; font: 600 200px/1 var(--ui); letter-spacing: -0.035em; }
+#name { position: absolute; left: 0; right: 0; top: 400px; display: flex; justify-content: center; align-items: center; gap: 14px; font: 600 200px/1 var(--ui); letter-spacing: -0.035em; }
 #name .caret { width: 10px; height: 180px; border-radius: 5px; }
 #namesub { position: absolute; left: 0; right: 0; top: 650px; text-align: center; font: 400 48px/1.2 var(--ui); color: #9a99a1; }
 #quiet { position: absolute; left: 0; right: 0; top: 440px; text-align: center; font: 500 76px/1.35 var(--ui); letter-spacing: -0.02em; }
@@ -184,7 +184,7 @@ body.player { display: grid; place-items: center; height: 100vh; }
 #tiles .tile canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
 
 /* ---------- the end ---------- */
-#endmark { position: absolute; left: 0; right: 0; top: 310px; display: flex; justify-content: center; align-items: center; gap: 34px; font: 600 210px/1 var(--ui); letter-spacing: -0.035em; }
+#endmark { position: absolute; left: 0; right: 0; top: 310px; display: flex; justify-content: center; align-items: center; gap: 16px; font: 600 210px/1 var(--ui); letter-spacing: -0.035em; }
 #endmark .caret { width: 11px; height: 190px; border-radius: 5px; }
 #tagline { position: absolute; left: 0; right: 0; top: 580px; text-align: center; font: 400 50px/1.2 var(--ui); color: #b9b7bf; }
 #cta { position: absolute; left: 0; right: 0; top: 700px; display: flex; justify-content: center; }
@@ -198,7 +198,7 @@ body.player { display: grid; place-items: center; height: 100vh; }
 <body>
 <div id="stage">
   <div class="layer" id="noise"><div id="noisebox"></div><div id="shout"><span id="shouttext"></span></div></div>
-  <div class="layer" id="intro"><div id="name"><span class="caret" id="namecaret"></span><span id="nametext"></span></div><div id="namesub">A calm, fast code editor.</div></div>
+  <div class="layer" id="intro"><div id="name"><span id="nametext"></span><span class="caret" id="namecaret"></span></div><div id="namesub">A calm, fast code editor.</div></div>
   <div class="layer" id="story"><div id="window"></div></div>
   <div class="layer" id="md"><div class="shot" id="mdshot"><canvas data-src="shots/md.jpg"></canvas></div></div>
   <div class="layer" id="quiet"><span id="q1"></span><br><span class="second" id="q2"></span><span class="caret" id="qcaret"></span></div>
@@ -207,7 +207,7 @@ body.player { display: grid; place-items: center; height: 100vh; }
   <div class="layer" id="tiles"></div>
   <div class="layer" id="words"><div id="scrim"></div><div id="title"><div id="tword"></div><div id="tsub"></div></div><div id="keys"></div><div id="chips"></div></div>
   <div class="layer" id="end">
-    <div id="endmark"><span class="caret"></span><span>Null</span></div>
+    <div id="endmark"><span>Null</span><span class="caret"></span></div>
     <div id="tagline">A calm, fast code editor.</div>
     <div id="cta"><span>null-ide.com</span></div>
     <div id="facts">Free to use&nbsp;&nbsp;·&nbsp;&nbsp;macOS&nbsp;&nbsp;·&nbsp;&nbsp;Windows&nbsp;&nbsp;·&nbsp;&nbsp;Linux</div>
@@ -735,8 +735,7 @@ function renderIntro(t) {
   const typed = T.name.shown(t);
   $("nametext").textContent = typed;
   $("namecaret").style.opacity = blink(t, Math.max(STOP, T.name.last(t)), 0.35);
-  $("namecaret").style.order = typed ? 0 : 0;
-  show("nametext", typed ? 1 : 0, `translateX(${typed ? 0 : 0}px)`);
+  show("nametext", typed ? 1 : 0);
   show("namesub", out3(prog(t, B(5) + 0.05, B(5) + 0.5)), `translateY(${(1 - out3(prog(t, B(5) + 0.05, B(5) + 0.55))) * 18}px)`);
   // Leaving: pulled into the window coming in.
   const leave = in3(prog(t, B(6) - 0.25, B(6) + 0.1));
