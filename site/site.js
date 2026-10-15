@@ -5,6 +5,7 @@
   "use strict";
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+  document.documentElement.classList.add("js");
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
   const play = video => { if (!still) video.play().catch(() => {}); };
@@ -64,8 +65,9 @@
     const v = document.createElement("video");
     Object.assign(v, { muted: true, loop: true, playsInline: true, preload: "none" });
     v.setAttribute("muted", ""); v.setAttribute("playsinline", "");
-    v.poster = `media/${step.dataset.clip}.jpg`;
-    v.dataset.src = `media/${step.dataset.clip}.mp4`;
+    const own = $(".step-media video", step);
+    v.poster = own.getAttribute("poster");
+    v.dataset.src = own.dataset.src;
     screen.appendChild(v);
     ticks.appendChild(document.createElement("i"));
     return v;

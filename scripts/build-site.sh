@@ -17,4 +17,11 @@ for f in instrument-sans/InstrumentSans-Regular.ttf instrument-sans/InstrumentSa
     instrument-sans/InstrumentSans-SemiBold.ttf geist-mono/GeistMono-Regular.ttf geist-mono/GeistMono-Medium.ttf; do
     cp "$repo/assets/fonts/$f" "$out/fonts/"
 done
+# Each build's files under addresses of their own (style.css?v=…): a browser or Cloudflare
+# that kept the last site's style.css, site.js or videos can't mix them into this one.
+version="$(cd "$out" && find . -type f ! -name '*.html' -print0 | sort -z | xargs -0 shasum | shasum | cut -c1-10)"
+for page in "$out"/*.html; do
+    sed -i.bak -E "s#\"(style\.css|site\.js|media/[A-Za-z0-9_.-]+\.(mp4|jpg))\"#\"\1?v=$version\"#g" "$page"
+    rm "$page.bak"
+done
 echo "$out"
