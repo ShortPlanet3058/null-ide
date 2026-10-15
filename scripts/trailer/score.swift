@@ -1,25 +1,14 @@
-// The film's sound: the music cut on its bars to fit what happens on screen, the small
-// sounds the film asks for (keys, pops, a whoosh, ticks: made here, from noise and sine
+// The trailer's sound: the music, cut into pieces to fit the picture, the small sounds
+// the trailer asks for (keys, pops, a whoosh, ticks: made here, from noise and sine
 // waves), mixed, then put with the pictures in one MP4 (the pictures as they are).
 //
 //   score MUSIC VIDEO.mp4 OUT.mp4 [SOUNDS.json] [--pieces FROM-TO@AT,...]
 //
-// --pieces gives another cut of the music (the 30-second film's: see render.sh).
-//
-// The music (Null's track, 75 BPM: a bar is 3.2 s; its bars fall on 1.66 + 3.2k s) and
-// where each piece of it goes in the film:
-//   0 – 59.26 s      intro, the three entries (the noise), the build and its stop, the
-//                    silence, the first big beat (33.66 s: the editor), eight bars of groove
-//   84.86 – 123.26   from 59.26 s: a swell, the quiet breakdown (the turn: AI off), the
-//                    full return on a bar (65.66 s: ⌘I), ten bars of it
-//   136.06 – end     from 97.66 s: the last phrase and its fade, under the end card
+// --pieces: which stretches of the music go where (render.sh gives the trailer's cut).
+// Without it, the music plays from the start.
 import AVFoundation
 
-var pieces: [(from: Double, to: Double, at: Double)] = [
-    (0, 59.26, 0),
-    (84.86, 123.26, 59.26),
-    (136.06, 145.4, 97.66),
-]
+var pieces: [(from: Double, to: Double, at: Double)] = [(0, 100_000, 0)]
 let crossfade = 0.03
 let fadeOut = 1.0
 
