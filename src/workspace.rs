@@ -200,6 +200,8 @@ actions!(
         TurnOffAi,
         TurnOnAi,
         SetApiKey,
+        /// The key of the provider suggestions come from, when not the provider of answers.
+        SetSuggestionsKey,
     ]
 );
 
@@ -957,6 +959,9 @@ pub struct Workspace {
     /// The notices shown lately, newest last (Recent Notices lists them).
     past_notices: Vec<(String, std::time::SystemTime)>,
     notice_task: Option<Task<()>>,
+    /// Where suggestions come from was asked this session (answers from a command line
+    /// tool, too slow for them): asked once.
+    asked_suggestions: bool,
     /// A notice for when Null comes back to the front (a command finished meanwhile).
     notice_on_return: Option<String>,
     /// The terminal, once opened. It keeps running while the panel is hidden.
@@ -1048,7 +1053,10 @@ impl Workspace {
                     }
                 }
             }),
-            cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
+            cx.observe_global_in::<Settings>(window, |this, window, cx| {
+                this.apply_settings(cx);
+                this.ask_where_suggestions_come_from(window, cx);
+            }),
             cx.observe(&lsp, |_, _, cx| cx.notify()),
             cx.subscribe(&lsp, |this, _, event, cx| match event {
                 crate::lsp_store::LspEvent::Installed(result) => {
@@ -1238,6 +1246,7 @@ impl Workspace {
             past_notices: Vec::new(),
             notice_on_return: None,
             notice_task: None,
+            asked_suggestions: false,
             focus_before_palette: None,
             _subscriptions: subscriptions,
         };
@@ -1329,6 +1338,8 @@ impl Workspace {
                 cx,
             );
         }
+        // Already answering from a command line tool with suggestions on: asked once, here.
+        cx.defer_in(window, |this, window, cx| this.ask_where_suggestions_come_from(window, cx));
         workspace
     }
 
@@ -7522,6 +7533,35 @@ impl Workspace {
 
     fn set_api_key(&mut self, _: &SetApiKey, window: &mut Window, cx: &mut Context<Self>) {
         let provider = cx.global::<Settings>().ai.provider;
+        self.ask_for_key(provider, window, cx);
+    }
+
+    fn set_suggestions_key(&mut self, _: &SetSuggestionsKey, window: &mut Window, cx: &mut Context<Self>) {
+        let provider = cx.global::<Settings>().ai.suggestion_provider();
+        self.ask_for_key(provider, window, cx);
+    }
+
+    /// Suggestions wanted, answers from a command line tool (seconds to start, too slow
+    /// for them), and nothing said yet about where suggestions come from: Settings, there,
+    /// once a session.
+    fn ask_where_suggestions_come_from(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ai = &cx.global::<Settings>().ai;
+        if self.asked_suggestions || self.welcome.is_some() || !ai.suggestions_unchosen() {
+            return;
+        }
+        self.asked_suggestions = true;
+        let tool = ai.provider.label();
+        // Names only until something else is picked: what it was, and asked only this once.
+        settings::update(cx, |s| s.ai.suggestions = Some(ProviderId::Off));
+        // Settings, showing just that choice.
+        self.open_settings_at(Some(Section::Ai), window, cx);
+        if let Some((panel, _)) = &self.settings_panel {
+            panel.update(cx, |panel, cx| panel.search_for("suggestions", cx));
+        }
+        self.show_notice(format!("{tool} is too slow for suggestions as you type: choose where they come from."), cx);
+    }
+
+    fn ask_for_key(&mut self, provider: ProviderId, window: &mut Window, cx: &mut Context<Self>) {
         if !provider.uses_api_key() {
             let message = match provider {
                 ProviderId::Off => "Choose a provider first with “AI: Use …”.".to_string(),
@@ -9370,6 +9410,7 @@ impl Workspace {
         let subscription = cx.subscribe_in(&welcome, window, |this, _, WelcomeEvent::Finished, window, cx| {
             this.welcome = None;
             this.focus_main(window, cx);
+            this.ask_where_suggestions_come_from(window, cx);
             cx.notify();
         });
         window.focus(&welcome.focus_handle(cx));
@@ -11675,6 +11716,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_folder))
             .on_action(cx.listener(Self::show_all_commands))
             .on_action(cx.listener(Self::set_api_key))
+            .on_action(cx.listener(Self::set_suggestions_key))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
