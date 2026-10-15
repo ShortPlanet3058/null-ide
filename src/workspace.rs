@@ -204,6 +204,10 @@ actions!(
         SetSuggestionsKey,
         /// How many tokens AI used: the last request, and this month.
         ShowAiUsage,
+        /// Every note on the project's code, to go to.
+        ShowNotes,
+        /// The failed test at the cursor (or the first one that failed) explained by AI.
+        ExplainTestFailure,
     ]
 );
 
@@ -800,6 +804,8 @@ pub struct Workspace {
     testable: bool,
     /// How each test (file, name) did when last run.
     test_status: std::collections::HashMap<(PathBuf, String), TestStatus>,
+    /// The output of the last run where a test failed, for explaining it.
+    failed_run: Option<String>,
     /// A run's output that came before the project's tests were known (see `find_tests`).
     results_waiting: Vec<crate::terminal::Ran>,
     /// The tests run from the list, and the command running them.
@@ -1151,6 +1157,7 @@ impl Workspace {
             testable,
             tests_task: None,
             test_status: std::collections::HashMap::new(),
+            failed_run: None,
             results_waiting: Vec::new(),
             tests_running: None,
             tests_scroll: UniformListScrollHandle::new(),
@@ -3366,6 +3373,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> [Subscription; 2] {
         let editor = editor.clone();
+        self.give_notes(&editor, cx);
         [
             cx.observe(&editor, |this, editor, cx| {
                 this.sync_preview(&editor, cx);
@@ -3585,6 +3593,7 @@ impl Workspace {
                     }
                     this.schedule_session_save(cx);
                 }
+                EditorEvent::NotesChanged => this.keep_notes(editor, cx),
                 EditorEvent::BookmarksChanged => {
                     // The other copy of the file, on the other side, has the same bookmarks.
                     let (path, lines) = {
@@ -5033,6 +5042,8 @@ impl Workspace {
             (Go, "Next Bookmark".into(), Box::new(crate::editor::NextBookmark)),
             (Go, "Previous Bookmark".into(), Box::new(crate::editor::PreviousBookmark)),
             (Go, "Bookmarks…".into(), Box::new(ShowBookmarks)),
+            (Edit, "Add Note".into(), Box::new(crate::editor::AddNote)),
+            (Go, "Notes…".into(), Box::new(ShowNotes)),
             (App, "Edit Snippets…".into(), Box::new(EditSnippets)),
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
@@ -5323,6 +5334,9 @@ impl Workspace {
         }
         if settings.ai.ready() {
             commands.push((Ai, "Ask About This File…".into(), Box::new(AskAi)));
+            if self.test_status.values().any(|s| *s == TestStatus::Failed) {
+                commands.push((Ai, "Explain Test Failure".into(), Box::new(ExplainTestFailure)));
+            }
             commands.push((Ai, "AI Usage".into(), Box::new(ShowAiUsage)));
             if self.active.is_some() {
                 commands.push((Ai, "Edit with AI…".into(), Box::new(crate::editor::InlineAssist)));
@@ -6326,6 +6340,7 @@ impl Workspace {
                 self.refresh_git(cx);
             }
             GitViewEvent::Draft(files) => self.write_commit_message_into(files.clone(), cx),
+            GitViewEvent::Review(files) => self.review_with_ai(files.clone(), cx),
             GitViewEvent::ShowCommit(commit) => self.show_commit(commit.clone(), window, cx),
             GitViewEvent::ShowPull(number) => self.show_github(*number, false, window, cx),
             GitViewEvent::ShowIssue(number) => self.show_github(*number, true, window, cx),
@@ -6851,6 +6866,9 @@ impl Workspace {
                 Some((_, ok)) => *ok &= passed,
                 None => outcomes.push((id, passed)),
             }
+        }
+        if outcomes.iter().any(|(_, passed)| !passed) {
+            self.failed_run = Some(ran.output.clone());
         }
         for (id, passed) in outcomes {
             let status = if passed { TestStatus::Passed } else { TestStatus::Failed };
@@ -7537,6 +7555,225 @@ impl Workspace {
     fn set_api_key(&mut self, _: &SetApiKey, window: &mut Window, cx: &mut Context<Self>) {
         let provider = cx.global::<Settings>().ai.provider;
         self.ask_for_key(provider, window, cx);
+    }
+
+    /// A file's notes, from the project's, on their lines as the file is now.
+    fn give_notes(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
+        let Some(root) = self.roots.root_of(&path).map(Path::to_path_buf) else { return };
+        let Some(relative) = crate::code_notes::relative(&root, &path) else { return };
+        let notes = crate::code_notes::load(&root);
+        if !notes.iter().any(|n| n.path == relative) {
+            return;
+        }
+        let text = editor.read(cx).buffer.to_string();
+        let lines: Vec<&str> = text.lines().collect();
+        let on_lines: Vec<crate::editor::LineNote> = notes
+            .iter()
+            .filter(|n| n.path == relative)
+            .map(|n| crate::editor::LineNote {
+                id: n.id,
+                line: crate::code_notes::find_line(n, &lines),
+                text: n.text.clone(),
+                by_ai: n.by_ai,
+            })
+            .collect();
+        editor.update(cx, |editor, cx| editor.set_line_notes(on_lines, cx));
+    }
+
+    /// A file's notes as its editor has them now, kept with the project's (each with its
+    /// line's text, to find it again), and its other copy given them too.
+    fn keep_notes(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let (path, on_lines, text) = {
+            let e = editor.read(cx);
+            let Some(path) = e.path().map(Path::to_path_buf) else { return };
+            (path, e.line_notes().to_vec(), e.buffer.to_string())
+        };
+        let Some(root) = self.roots.root_of(&path).map(Path::to_path_buf) else { return };
+        let Some(relative) = crate::code_notes::relative(&root, &path) else { return };
+        let mut notes = crate::code_notes::load(&root);
+        let created: std::collections::HashMap<u64, (u64, bool)> =
+            notes.iter().filter(|n| n.path == relative).map(|n| (n.id, (n.created, n.review))).collect();
+        notes.retain(|n| n.path != relative);
+        let lines: Vec<&str> = text.lines().collect();
+        notes.extend(on_lines.iter().map(|n| crate::code_notes::CodeNote {
+            id: n.id,
+            path: relative.clone(),
+            line: n.line,
+            anchor: lines.get(n.line).map_or(String::new(), |l| l.trim().to_string()),
+            text: n.text.clone(),
+            by_ai: n.by_ai,
+            review: created.get(&n.id).is_some_and(|(_, review)| *review),
+            created: created.get(&n.id).map_or_else(crate::code_notes::now, |(when, _)| *when),
+        }));
+        crate::code_notes::save(&root, &notes);
+        for tab in &self.tabs {
+            if tab.editor != *editor && tab.editor.read(cx).path() == Some(path.as_path()) {
+                let twin_notes = on_lines.clone();
+                tab.editor.update(cx, |twin, cx| twin.set_line_notes(twin_notes, cx));
+            }
+        }
+    }
+
+    /// Review: the changes about to be committed, read by AI, which leaves a note on each
+    /// line it has doubts about (bugs, missed cases), never a change. A new review of a file
+    /// replaces its notes from the last one.
+    fn review_with_ai(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if files.is_empty() {
+            return self.show_notice("Nothing to review: no changes are selected.".into(), cx);
+        }
+        let settings = cx.global::<Settings>().ai.clone();
+        let root = self.git_root.clone();
+        let Some(project) = self.roots.root_of(&root).map(Path::to_path_buf).or_else(|| Some(root.clone())) else {
+            return;
+        };
+        const REVIEWING: &str = "Reviewing the changes…";
+        self.show_notice(REVIEWING.into(), cx);
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            let diff_root = root.clone();
+            let review_files = files.clone();
+            let diff = cx
+                .background_executor()
+                .spawn(async move {
+                    let changes: Vec<(String, Option<String>, Option<String>)> = review_files
+                        .iter()
+                        .map(|path| {
+                            let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
+                            let name = path.strip_prefix(&diff_root).unwrap_or(path).display().to_string();
+                            let before = git::committed_text(path, encoding);
+                            let after = crate::encoding::read(path).ok().map(|(text, _)| text);
+                            (name, before, after)
+                        })
+                        .collect();
+                    changes_as_diff(&changes, REVIEW_DIFF_CHARS)
+                })
+                .await;
+            let prompt = crate::ai::Prompt {
+                system:
+                    "You review a change to code before it's committed, as a careful colleague would. Look only for \
+                         real problems in the lines added or changed: bugs, cases not handled, wrong behaviour, data \
+                         loss, security issues, a mismatch with code around it. Not style, naming or taste. For each \
+                         problem, reply with one line of JSON: {\"file\": \"the path after b/\", \"line\": the line \
+                         number in the new file, \"code\": \"that line exactly as written\", \"note\": \"one or two \
+                         short plain sentences: what's wrong and why\"}. At most 8 lines, the most important first. No \
+                         emoji, no markdown, nothing else. If there's nothing worth pointing out, reply with nothing."
+                        .into(),
+                user: diff,
+                max_tokens: Some(2000),
+                ..Default::default()
+            };
+            let mut events = crate::ai::stream(settings, prompt);
+            let mut answer = String::new();
+            while let Some(event) = events.next().await {
+                match event {
+                    crate::ai::AiEvent::Text(chunk) => answer.push_str(&chunk),
+                    crate::ai::AiEvent::Done => break,
+                    crate::ai::AiEvent::Failed(error) => {
+                        this.update(cx, |this, cx| this.show_notice(format!("Couldn't review: {error}"), cx)).ok();
+                        return;
+                    }
+                }
+            }
+            this.update(cx, |this, cx| {
+                let found = review_findings(&answer);
+                let mut notes = crate::code_notes::load(&project);
+                // The last review of these files gives way to this one.
+                let reviewed: Vec<String> =
+                    files.iter().filter_map(|f| crate::code_notes::relative(&project, f)).collect();
+                notes.retain(|n| !(n.review && reviewed.contains(&n.path)));
+                let mut left = 0;
+                for (file, line, code, note) in found {
+                    let path = root.join(&file);
+                    let Some(relative) = crate::code_notes::relative(&project, &path) else { continue };
+                    if !reviewed.contains(&relative) {
+                        continue;
+                    }
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    let lines: Vec<&str> = text.lines().collect();
+                    let mut placed = crate::code_notes::CodeNote {
+                        id: crate::code_notes::new_id() + left as u64,
+                        path: relative,
+                        line: line.saturating_sub(1),
+                        anchor: code.trim().to_string(),
+                        text: note,
+                        by_ai: true,
+                        review: true,
+                        created: crate::code_notes::now(),
+                    };
+                    placed.line = crate::code_notes::find_line(&placed, &lines);
+                    placed.anchor = lines.get(placed.line).map_or(String::new(), |l| l.trim().to_string());
+                    notes.push(placed);
+                    left += 1;
+                }
+                crate::code_notes::save(&project, &notes);
+                // The open files show them now.
+                let editors: Vec<Entity<Editor>> = this.tabs.iter().map(|t| t.editor.clone()).collect();
+                for editor in &editors {
+                    this.give_notes(editor, cx);
+                }
+                let message = match left {
+                    0 => "Reviewed: nothing worth pointing out in these changes.".to_string(),
+                    1 => "Reviewed: 1 note on the changes (Notes… lists it).".to_string(),
+                    n => format!("Reviewed: {n} notes on the changes (Notes… lists them)."),
+                };
+                this.show_notice(message, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The failed test at the cursor, else the first that failed: opened, and explained by AI
+    /// in a note under it, from what its run said.
+    fn explain_test_failure(&mut self, _: &ExplainTestFailure, window: &mut Window, cx: &mut Context<Self>) {
+        let failed: Vec<(PathBuf, String, usize)> = self
+            .tests
+            .iter()
+            .flat_map(|files| files.iter())
+            .flat_map(|f| f.tests.iter().map(move |t| (f.path.clone(), t.id.clone(), t.line)))
+            .filter(|(path, id, _)| self.test_status.get(&(path.clone(), id.clone())) == Some(&TestStatus::Failed))
+            .collect();
+        let here = self.active_editor().and_then(|e| {
+            let e = e.read(cx);
+            Some((e.path()?.to_path_buf(), e.caret_point().0))
+        });
+        // The one at the cursor: the failed test that starts last before it, in this file.
+        let at_cursor = here.as_ref().and_then(|(path, line)| {
+            failed.iter().filter(|(p, _, l)| p == path && l <= line).max_by_key(|(_, _, l)| *l)
+        });
+        let Some((path, id, line)) = at_cursor.or(failed.first()).cloned() else {
+            return self.show_notice("No test failed in the last run.".into(), cx);
+        };
+        let output = failure_output(self.failed_run.as_deref().unwrap_or_default(), &id);
+        self.open_file(path.clone(), window, cx);
+        if let Some(editor) = self.active_editor().filter(|e| e.read(cx).path() == Some(path.as_path())).cloned() {
+            editor.update(cx, |editor, cx| editor.explain_failure(line, output, window, cx));
+        }
+    }
+
+    /// Notes…: every note on the project's code, to go to.
+    fn show_notes(&mut self, _: &ShowNotes, window: &mut Window, cx: &mut Context<Self>) {
+        let mut rows: Vec<crate::palette::Location> = Vec::new();
+        for root in self.roots.all().to_vec() {
+            for note in crate::code_notes::load(&root) {
+                let path = note.path.split('/').fold(root.clone(), |p, part| p.join(part));
+                let by = if note.by_ai { "AI: " } else { "" };
+                let first = note.text.lines().next().unwrap_or_default();
+                rows.push(crate::palette::Location {
+                    path,
+                    position: lsp_types::Position::new(note.line as u32, 0),
+                    text: format!("{by}{first}"),
+                    kind: crate::palette::LocationKind::Reference,
+                });
+            }
+        }
+        if rows.is_empty() {
+            let keys = ui::keys(&crate::editor::AddNote, "⌥⌘N", cx);
+            return self.show_notice(format!("No notes yet: {keys} writes one on the cursor's line."), cx);
+        }
+        rows.sort_by(|a, b| (&a.path, a.position.line).cmp(&(&b.path, b.position.line)));
+        self.open_locations("Notes".into(), rows, window, cx);
     }
 
     fn show_ai_usage(&mut self, _: &ShowAiUsage, _: &mut Window, cx: &mut Context<Self>) {
@@ -10343,6 +10580,64 @@ const COMMIT_DIFF_CHARS: usize = 24_000;
 
 /// What changed in files (name, committed text, text now), as a unified diff, cut short
 /// past `max` characters.
+/// What a run said about the test `id`: its own part of the output (cargo's "---- id stdout
+/// ----", pytest's "____ name ____", the lines that name it), else the end of the output;
+/// cut to size.
+fn failure_output(output: &str, id: &str) -> String {
+    const MAX: usize = 6_000;
+    let lines: Vec<&str> = output.lines().collect();
+    let name = id.rsplit([':', '.', ' ']).next().unwrap_or(id);
+    let start = lines.iter().position(|l| {
+        let l = l.trim();
+        (l.starts_with("----") && l.contains(id)) || (l.starts_with("___") && l.contains(name))
+    });
+    let part: Vec<&str> = match start {
+        Some(start) => {
+            let end = lines[start + 1..]
+                .iter()
+                .position(|l| {
+                    let l = l.trim();
+                    (l.starts_with("----") && l.ends_with("----")) || l.starts_with("___") || l == "failures:"
+                })
+                .map_or(lines.len(), |i| start + 1 + i);
+            lines[start..end].to_vec()
+        }
+        None => lines[lines.len().saturating_sub(80)..].to_vec(),
+    };
+    let text = part.join("\n");
+    if text.len() <= MAX {
+        return text;
+    }
+    let mut cut = text.len() - MAX;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    format!("[…]\n{}", &text[cut..])
+}
+
+/// How much of the changes a review reads, at most.
+const REVIEW_DIFF_CHARS: usize = 60_000;
+
+/// A review's answer, line by line: (file, line, the line's code, the note). Lines that
+/// aren't what was asked for are left out.
+fn review_findings(answer: &str) -> Vec<(String, usize, String, String)> {
+    answer
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim().trim_end_matches(',')).ok())
+        .filter_map(|v| {
+            let file = v["file"].as_str()?.trim_start_matches("b/").to_string();
+            let note = v["note"].as_str()?.trim().to_string();
+            (!note.is_empty()).then_some((
+                file,
+                v["line"].as_u64().unwrap_or(1) as usize,
+                v["code"].as_str().unwrap_or_default().to_string(),
+                note,
+            ))
+        })
+        .take(8)
+        .collect()
+}
+
 fn changes_as_diff(changes: &[(String, Option<String>, Option<String>)], max: usize) -> String {
     let mut out = String::new();
     for (name, before, after) in changes {
@@ -11741,6 +12036,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::set_suggestions_key))
             .on_action(cx.listener(Self::show_ai_usage))
+            .on_action(cx.listener(Self::show_notes))
+            .on_action(cx.listener(Self::explain_test_failure))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -14892,6 +15189,38 @@ esac
         assert!(diff.contains("--- a/src/a.rs\n+++ b/src/a.rs\n"), "{diff}");
         assert!(diff.contains("-two\n+2\n") && diff.contains("+hello\n"), "{diff}");
         assert!(changes_as_diff(&changes, 20).ends_with("[… more changes left out]\n"));
+    }
+
+    #[test]
+    fn a_failure_is_read_from_its_own_part_of_the_output() {
+        let cargo = "running 2 tests\ntest cart::tests::adds ... FAILED\n\nfailures:\n\n\
+            ---- cart::tests::adds stdout ----\nthread panicked at src/cart.rs:9:5:\nleft: 2\nright: 3\n\n\
+            ---- cart::tests::other stdout ----\nnot this\n\nfailures:\n    cart::tests::adds\n";
+        let part = failure_output(cargo, "cart::tests::adds");
+        assert!(part.starts_with("---- cart::tests::adds stdout ----") && part.contains("right: 3"), "{part}");
+        assert!(!part.contains("not this"));
+        let pytest = "____ test_total ____\n    assert total() == 3\nE   assert 2 == 3\n____ test_other ____\nno\n";
+        let part = failure_output(pytest, "tests/test_cart.py::test_total");
+        assert!(part.contains("E   assert 2 == 3") && !part.contains("no\n"), "{part}");
+        // Not found by name: the end of the run.
+        assert_eq!(failure_output("a\nb\n", "x"), "a\nb");
+    }
+
+    #[test]
+    fn a_review_is_read_line_by_line() {
+        let answer = "Here is what I found:\n\
+            {\"file\": \"b/src/cart.rs\", \"line\": 12, \"code\": \"return x;\", \"note\": \"x can be zero.\"},\n\
+            {\"file\": \"src/order.rs\", \"line\": 3, \"note\": \"  Never saved.  \"}\n\
+            {\"file\": \"src/x.rs\", \"note\": \"\"}\n\
+            not json";
+        assert_eq!(
+            review_findings(answer),
+            [
+                ("src/cart.rs".to_string(), 12, "return x;".to_string(), "x can be zero.".to_string()),
+                ("src/order.rs".to_string(), 3, String::new(), "Never saved.".to_string()),
+            ]
+        );
+        assert!(review_findings("").is_empty());
     }
 
     #[test]

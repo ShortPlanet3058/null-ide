@@ -23,6 +23,7 @@ mod links;
 mod mac_keys;
 mod marks;
 mod meaning;
+mod notes;
 mod numbers;
 mod refactor;
 mod reindent;
@@ -39,6 +40,7 @@ pub use assist::{Block, BlockKind};
 pub use bookmarks::{NextBookmark, PreviousBookmark, ToggleBookmark};
 pub use breakpoints::{BreakWhen, Breakpoint, ToggleBreakpoint};
 pub use completion::CompletionMenu;
+pub use notes::{AddNote, LineNote};
 
 /// Markdown for `html` copied along with `text`, when it's the same words (not left over
 /// from an earlier copy) and says more than the plain text does.
@@ -234,6 +236,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     conflicts::bind_keys(cx);
     breakpoints::bind_keys(cx);
     bookmarks::bind_keys(cx);
+    notes::bind_keys(cx);
     structure::bind_keys(cx);
     numbers::bind_keys(cx);
     counterpart::bind_keys(cx);
@@ -458,6 +461,8 @@ pub enum EditorEvent {
     BreakpointsChanged,
     /// The bookmarks changed (set, removed, or moved by an edit).
     BookmarksChanged,
+    /// A note on a line was written, changed or removed, or notes moved with their lines.
+    NotesChanged,
     /// A right-click in the text, at this place in the window: the workspace shows what can
     /// be done there.
     TextMenu(Point<Pixels>, usize),
@@ -795,6 +800,10 @@ pub struct Editor {
     /// An AI task's changes to this file, being reviewed.
     review: Option<review::Review>,
     note: Option<assist::Note>,
+    /// Notes on this file's lines (`code_notes`), and one being written.
+    line_notes: Vec<LineNote>,
+    line_notes_revision: u64,
+    note_draft: Option<notes::NoteDraft>,
     /// Conversations shown between the lines (a pull request's review comments).
     threads: Vec<assist::Thread>,
     /// The text's width the blocks drawn over it were last sized for.
@@ -1083,6 +1092,9 @@ impl Editor {
             ai_change: None,
             review: None,
             note: None,
+            line_notes: Vec::new(),
+            line_notes_revision: 0,
+            note_draft: None,
             threads: Vec::new(),
             blocks_width: None,
             trace_opened: None,
@@ -1559,6 +1571,7 @@ impl Editor {
         self.first_line_after_edit(cx);
         self.breakpoints_after_edit(cx);
         self.bookmarks_after_edit(cx);
+        self.notes_after_edit(cx);
         // Cursors from before an edit aren't somewhere to go back to.
         self.cursor_history.clear();
         self.close_hover(cx);
@@ -4822,6 +4835,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::quick_fix))
             .on_action(cx.listener(Self::toggle_breakpoint))
             .on_action(cx.listener(Self::toggle_bookmark))
+            .on_action(cx.listener(Self::add_note))
             .on_action(cx.listener(Self::next_bookmark))
             .on_action(cx.listener(Self::previous_bookmark))
             .on_action(cx.listener(Self::expand_selection))

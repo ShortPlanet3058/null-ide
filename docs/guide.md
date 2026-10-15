@@ -364,6 +364,18 @@ Each provider comes with recommended models (one click in Settings → AI) and a
 level: quick by default, more for harder questions. Suggestions while typing always use the
 least thinking, and their own model, a fill-in-the-middle code model where there is one.
 
+**Notes on code.** ⌥⌘N (Ctrl+Alt+N) writes a note on the cursor's line: it sits quietly
+under the line and moves with it as you edit; click it to change it, empty it to remove it.
+Notes are yours: kept in Null's own folder (never in the project, nothing to commit by
+accident), and they find their line again when the file changed elsewhere. **Notes…** in ⌘K
+lists every note in the project. An answer from ⌘I can be kept as a note too ("Keep as note"),
+and asked about further ("Ask a follow-up", which goes with the questions before it).
+
+**Review before committing.** **Review** in the Git panel has AI read the selected changes and
+leave a note on each line it has doubts about (a bug, a missed case), marked "AI"; it never
+changes the code. Reviewing again replaces those notes. After a test fails, **Explain Test
+Failure** in ⌘K opens the failed test with a note on why, from what its run said.
+
 **What the AI reads.** With ⌘I, only what the request needs: the file when it's short, or in
 a long one the lines around the code with an outline of the rest; the definitions that code
 uses from elsewhere in the project (from Null's own index of the project, no language server
