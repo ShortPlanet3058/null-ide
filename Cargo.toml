@@ -2,7 +2,7 @@
 name = "null-ide"
 version = "0.1.1"
 edition = "2024"
-license = "GPL-3.0-only"
+license-file = "LICENSE"
 description = "A calm, fast code editor where nothing gets in your way."
 repository = "https://github.com/ShortPlanet3058/null-ide"
 

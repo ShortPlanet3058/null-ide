@@ -97,7 +97,9 @@ tests and how releases are made.
 
 ## License
 
-Null is free and open source, under the [GNU General Public License 3.0](LICENSE): use it
-for anything, and share it as you like; a changed Null you share must stay open under the
-same license. Copyright © 2026 ShortPlanet3058. Its fonts are under the SIL Open Font
-License (see `assets/fonts`).
+Null is free to use as distributed by the author, but it is proprietary software (All Rights
+Reserved). The source code is public for transparency, but redistribution, reselling, or
+commercial reuse of this codebase is not permitted. See [LICENSE](LICENSE).
+
+Copyright © 2026 ShortPlanet3058. Its fonts are under the SIL Open Font License (see
+`assets/fonts`).
