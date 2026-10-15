@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Null is now proprietary software (All Rights Reserved): free to use as distributed by
+  the author, its code public for transparency, but not to be redistributed, resold or
+  reused (see LICENSE). 0.1.1 and earlier keep the license they were published under.
+- A release lists each package once, under a name that stays the same from version to
+  version.
+
 ## 0.1.1
 
 What testing on fresh Windows, Ubuntu and Mac machines found, installers and uninstalling
