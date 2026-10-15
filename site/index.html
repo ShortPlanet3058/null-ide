@@ -17,7 +17,7 @@
 </head>
 <body>
   <header class="nav" id="nav">
-    <a class="mark" href="#top" aria-label="Null, back to the top"><span class="caret"></span>Null</a>
+    <a class="mark" href="#top" aria-label="Null, back to the top">Null<span class="caret"></span></a>
     <nav aria-label="Sections">
       <a class="hide-s" href="#features">Features</a>
       <a class="hide-s" href="#ai">AI</a>
@@ -28,23 +28,16 @@
   </header>
 
   <main id="top">
-    <!-- The first screen: the app at work behind the words. -->
+    <!-- The first screen: the name, typed; one word under it, retyped as in the editor. -->
     <section class="hero" id="hero">
-      <video class="hero-video" id="hero-video" muted loop playsinline preload="auto" poster="media/hero.jpg" aria-hidden="true">
-        <source src="media/hero.mp4" type="video/mp4">
-      </video>
-      <div class="hero-shade" aria-hidden="true"></div>
-      <div class="hero-copy">
-        <p class="eyebrow rise" style="--d:0">A code editor for macOS, Windows and Linux</p>
-        <h1 class="rise" style="--d:1">The screen belongs<br>to your code.<span class="caret big" aria-hidden="true"></span></h1>
-        <p class="lead rise" style="--d:2">Null is calm and fast. The bars fade while you type, AI waits until you call it, and everything an IDE does is a keystroke away.</p>
-        <div class="buttons rise" style="--d:3">
-          <a class="button primary" id="hero-download" href="#download"><svg class="dl" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8m0 0L4.5 6.5M8 10l3.5-3.5M3 13h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="hero-download-label">Download Null</span></a>
-          <button class="button ghost" type="button" data-trailer><span class="play" aria-hidden="true"></span>Watch the trailer<span class="time">0:54</span></button>
-        </div>
-        <p class="hero-note rise" style="--d:4">Free to use. No account, no telemetry.</p>
+      <h1 class="name rise" style="--d:0" aria-label="Null"><span id="name-text" aria-hidden="true">Null</span><span class="caret" id="name-caret" aria-hidden="true"></span></h1>
+      <p class="tagline rise" style="--d:1">A <span class="word"><span id="word-text">calm</span><span class="caret off" id="word-caret" aria-hidden="true"></span></span> code editor.</p>
+      <div class="buttons rise" style="--d:2">
+        <a class="button primary" id="hero-download" href="#download"><svg class="dl" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8m0 0L4.5 6.5M8 10l3.5-3.5M3 13h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="hero-download-label">Download Null</span></a>
+        <button class="text-button" type="button" data-trailer><span class="play" aria-hidden="true"></span>Watch the trailer</button>
       </div>
-      <a class="scroll-hint" href="#idea" aria-label="Scroll down"><span></span></a>
+      <p class="systems rise" style="--d:3">macOS · Windows · Linux · Free to use</p>
+      <a class="scroll-hint" id="scroll-hint" href="#idea" aria-label="Scroll down"><span></span></a>
     </section>
 
     <!-- The idea, lit word by word as you scroll. -->
@@ -217,7 +210,7 @@
 
   <footer class="foot">
     <div class="foot-row">
-      <a class="mark" href="#top"><span class="caret"></span>Null</a>
+      <a class="mark" href="#top">Null<span class="caret"></span></a>
       <span class="foot-links"><a href="https://github.com/ShortPlanet3058/null-ide">GitHub</a><a href="https://github.com/ShortPlanet3058/null-ide/blob/main/CHANGELOG.md">Changelog</a><a href="privacy.html">Privacy</a><a href="code-signing.html">Code signing</a></span>
     </div>
     <p class="foot-legal">Null is free to use; its code is public, all rights reserved (<a href="https://github.com/ShortPlanet3058/null-ide/blob/main/LICENSE">license</a>).</p>

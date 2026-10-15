@@ -1,6 +1,6 @@
-// Null's site: the nav that steps back, the hero's video, words lit as you scroll, the
-// features' picture that follows the words, the themes live, the platform you're on, and
-// the trailer over the page.
+// Null's site: the nav that steps back, the first screen's code typing itself, words lit
+// as you scroll, the features' picture that follows the words, the themes live, the
+// platform you're on, and the trailer over the page.
 (() => {
   "use strict";
   const $ = (s, root = document) => root.querySelector(s);
@@ -17,17 +17,48 @@
   function navOnScroll() {
     const y = scrollY;
     nav.classList.toggle("solid", y > 40);
+    $("#scroll-hint").classList.toggle("gone", y > 40);
     if (Math.abs(y - lastY) > 6) {
       nav.classList.toggle("away", y > lastY && y > innerHeight * .7 && !nav.matches(":focus-within"));
       lastY = y;
     }
   }
 
-  // ---------- the hero ----------
-  const hero = $("#hero"), heroVideo = $("#hero-video");
-  play(heroVideo);
-  new IntersectionObserver(([e]) => (e.isIntersecting ? play(heroVideo) : heroVideo.pause())).observe(hero);
-  const heroOnScroll = () => hero.style.setProperty("--hp", clamp(scrollY / innerHeight).toFixed(4));
+  // ---------- the first screen: the name typed, then one word retyped, one caret ----------
+  const nameText = $("#name-text"), nameCaret = $("#name-caret");
+  const wordText = $("#word-text"), wordCaret = $("#word-caret"), wordBox = $(".word");
+  const WORDS = ["calm", "fast", "precise", "quiet", "free"];
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const caret = (el, state) => { el.classList.toggle("off", state === "off"); el.classList.toggle("solid", state === "solid"); };
+  async function typeInto(el, text, base) {
+    for (const ch of text) { el.textContent += ch; await wait(base + Math.random() * base * .8); }
+  }
+  async function firstScreen() {
+    if (still) return;
+    nameText.textContent = "";
+    caret(nameCaret, "solid");
+    await wait(700);
+    await typeInto(nameText, "Null", 120);
+    caret(nameCaret, "blink");
+    await wait(2600);
+    // The caret leaves the name for the word, and changes it the way you would.
+    for (let i = 1; ; i = (i + 1) % WORDS.length) {
+      caret(nameCaret, "off");
+      caret(wordCaret, "blink");
+      await wait(900);
+      wordBox.classList.add("sel");
+      await wait(520);
+      wordBox.classList.remove("sel");
+      wordText.textContent = "";
+      caret(wordCaret, "solid");
+      await wait(160);
+      await typeInto(wordText, WORDS[i], 70);
+      caret(wordCaret, "blink");
+      await wait(2800);
+      while (document.hidden) await wait(500);
+    }
+  }
+  firstScreen();
 
   // ---------- the platform you're on ----------
   const ua = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent;
@@ -152,7 +183,6 @@
   function frame() {
     queued = false;
     navOnScroll();
-    heroOnScroll();
     lightWords();
     follow();
   }
