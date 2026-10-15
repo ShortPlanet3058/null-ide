@@ -200,7 +200,7 @@ body.player { display: grid; place-items: center; height: 100vh; }
   <div class="layer" id="noise"><div id="noisebox"></div><div id="shout"><span id="shouttext"></span></div></div>
   <div class="layer" id="intro"><div id="name"><span class="caret" id="namecaret"></span><span id="nametext"></span></div><div id="namesub">A calm, fast code editor.</div></div>
   <div class="layer" id="story"><div id="window"></div></div>
-  <div class="layer" id="md"><div class="shot" id="mdshot"><canvas data-src="../promo/shots/md.jpg"></canvas></div></div>
+  <div class="layer" id="md"><div class="shot" id="mdshot"><canvas data-src="shots/md.jpg"></canvas></div></div>
   <div class="layer" id="quiet"><span id="q1"></span><br><span class="second" id="q2"></span><span class="caret" id="qcaret"></span></div>
   <div class="layer" id="keymapsl"><div id="keymaps"></div></div>
   <div class="layer" id="everywhere"></div>
@@ -221,6 +221,24 @@ const QUERY = new URLSearchParams(location.search);
 const BEAT = 0.4995, BAR = 4 * BEAT;
 const B = k => 0.07 + BAR * k;          // bar k (the first beat is 70 ms in)
 window.DURATION = 54.5;                 // the last hit at B(25), then the card stays
+
+// ---------- clips for the website: ?clip=name, a stretch of the trailer without its words,
+// slowed, with a steady camera of its own: [from, to, speed, [zoom, x, y, zoom at the end, x, y]]
+// (the trailer's camera leaves room for its words) ----------
+const CLIPS = {
+  hero: [B(6) + 0.8, B(11), 0.55, [1.1, 760, 420, 1.18, 770, 430]],
+  calm: [B(6) + 0.75, B(7), 0.55, [1.12, 760, 420, 1.2, 780, 430]],
+  fast: [B(7), B(8), 0.55, [1.2, 760, 400, 1.27, 770, 390]],
+  precise: [B(8), B(9), 0.55, [1.42, 680, 380, 1.52, 670, 370]],
+  run: [B(9), B(10), 0.55, [1.2, 760, 440, 1.28, 760, 470]],
+  commit: [B(10), B(11), 0.55, [1.25, 680, 420, 1.33, 660, 420]],
+  write: [B(11), B(12) - 0.3, 0.55],
+  ai: [B(14), B(18), 0.85, [1.22, 760, 420, 1.3, 760, 430]],
+  themes: [B(18), B(18) + 6 * BEAT, 0.45, [1.17, 760, 420, 1.2, 760, 420]],
+};
+const CLIP = CLIPS[QUERY.get("clip")] || null;
+const BARE = !!CLIP;
+if (CLIP) window.DURATION = (CLIP[1] - CLIP[0]) / CLIP[2];
 
 // ---------- helpers ----------
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
@@ -654,10 +672,16 @@ function renderStory(t) {
   }
   applyTheme(w, theme);
   setHTML(w, windowHTML(state));
-  const [zoom, x, y, sx] = camera(t);
+  let [zoom, x, y, sx] = camera(t);
   const cutAt = SHOTS.reduce((a, s) => (t >= s[0] ? s[0] : a), 0);
-  const z = zoom * (t < B(6) + 0.75 ? (0.94 + 0.06 * enter) : bump(t, cutAt)) * (t >= B(18) ? bump(t, B(18) + Math.floor((t - B(18)) / BEAT) * BEAT) : 1);
-  w.style.transform = `translate(${sx - x * z}px, ${540 - y * z}px) scale(${z})`;
+  let lands = t < B(6) + 0.75 ? (0.94 + 0.06 * enter) : bump(t, cutAt);
+  if (CLIP && CLIP[3]) {
+    const [z0, x0, y0, z1, x1, y1] = CLIP[3], p = inOut(prog(t, CLIP[0], CLIP[1]));
+    zoom = z0 + (z1 - z0) * p; x = x0 + (x1 - x0) * p; y = y0 + (y1 - y0) * p; lands = 1;
+  }
+  const z = zoom * lands * (t >= B(18) ? bump(t, B(18) + Math.floor((t - B(18)) / BEAT) * BEAT) : 1);
+  const at = BARE ? 960 : sx;
+  w.style.transform = `translate(${at - x * z}px, ${540 - y * z}px) scale(${z})`;
 }
 
 // ---------- Markdown: the app itself, panned ----------
@@ -670,7 +694,7 @@ function renderMd(t) {
   box.style.left = "0"; box.style.top = "0";
   box.style.transformOrigin = "0 0";
   const fx = 520 + 360 * inOut(p), fy = 380;
-  box.style.transform = `translate(${1250 - fx * z}px, ${540 - fy * z}px) scale(${z * bump(t, B(11))})`;
+  box.style.transform = `translate(${(BARE ? 960 : 1250) - fx * z}px, ${540 - fy * z}px) scale(${z * bump(t, B(11))})`;
 }
 
 // ---------- the noise, the name, the quiet ----------
@@ -862,7 +886,8 @@ const keysShown = t => KEYS.some(([a, b]) => t >= a && t < b) && !(t >= B(14) &&
 const chipsShown = t => fade(t, B(15), B(15) + 0.2, B(18) - 0.15, B(18));
 
 let measured = false;
-window.render = function (t) {
+window.render = function (clipTime) {
+  const t = CLIP ? CLIP[0] + clipTime * CLIP[2] : clipTime;
   if (!measured) {
     const c = document.createElement("canvas").getContext("2d");
     c.font = "400 18px 'Geist Mono'";
@@ -878,7 +903,7 @@ window.render = function (t) {
   renderEverywhere(t);
   renderTiles(t);
   renderEnd(t);
-  renderWords(t);
+  if (BARE) show("words", 0); else renderWords(t);
 };
 
 buildNoise();

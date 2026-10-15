@@ -8,7 +8,8 @@
 #
 #   scripts/trailer/render.sh             the trailer, 4K and 1080p, in target/trailer
 #   scripts/trailer/render.sh preview     a quick 1080p copy at 30 frames a second
-#   scripts/trailer/render.sh web         the website's copy (site/media/null-trailer.mp4) and its poster
+#   scripts/trailer/render.sh web         the website's videos and pictures (site/media)
+#   scripts/trailer/render.sh clips       only the website's silent loops, not its trailer
 #   scripts/trailer/render.sh 12 30.5     pictures of those moments, in target/trailer-stills
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -16,11 +17,11 @@ repo="$(cd "$here/../.." && pwd)"
 bin="$repo/target/promo-render"
 score="$repo/target/promo-score"
 mkdir -p "$repo/target"
-if [ ! -x "$bin" ] || [ "$repo/scripts/promo/render.swift" -nt "$bin" ]; then
-    swiftc -O -swift-version 5 -o "$bin" "$repo/scripts/promo/render.swift"
+if [ ! -x "$bin" ] || [ "$repo/scripts/trailer/render.swift" -nt "$bin" ]; then
+    swiftc -O -swift-version 5 -o "$bin" "$repo/scripts/trailer/render.swift"
 fi
-if [ ! -x "$score" ] || [ "$repo/scripts/promo/score.swift" -nt "$score" ]; then
-    swiftc -O -swift-version 5 -o "$score" "$repo/scripts/promo/score.swift"
+if [ ! -x "$score" ] || [ "$repo/scripts/trailer/score.swift" -nt "$score" ]; then
+    swiftc -O -swift-version 5 -o "$score" "$repo/scripts/trailer/score.swift"
 fi
 page="$here/trailer.html"
 # The music without bars 8 to 11 (16.05 s to 24.04 s of the track): one downbeat to another.
@@ -39,11 +40,27 @@ case "${1:-}" in
         "$score" "$here/music.mp3" "$out/pictures-preview.mp4" "$out/null-trailer-preview.mp4" "$out/pictures-preview.sounds.json" --pieces "$pieces"
         rm -f "$out/pictures-preview.mp4"
         ;;
-    web)
+    web|clips)
+        # The website's: the trailer with its sound, the hero's moving background, and a
+        # silent loop for each thing it shows (the trailer's own moments, without its words).
         media="$repo/site/media"
-        "$bin" "$page" "$out/pictures-web.mp4" --fps 30 --size 1920x1080 --bitrate 1.5 --poster 51.6 "$media/null-trailer-poster.jpg"
-        "$score" "$here/music.mp3" "$out/pictures-web.mp4" "$media/null-trailer.mp4" "$out/pictures-web.sounds.json" --pieces "$pieces"
-        rm -f "$out/pictures-web.mp4"
+        mkdir -p "$media"
+        if [ "$1" = web ]; then
+            "$bin" "$page" "$out/pictures-web.mp4" --fps 30 --size 1920x1080 --bitrate 2 --poster 51.6 "$media/null-trailer-poster.jpg"
+            "$score" "$here/music.mp3" "$out/pictures-web.mp4" "$media/null-trailer.mp4" "$out/pictures-web.sounds.json" --pieces "$pieces"
+            rm -f "$out/pictures-web.mp4" "$out/pictures-web.sounds.json"
+            # The trailer's card on the page: its nine scenes at once.
+            "$bin" "$page" "$out/card" --stills 49.6 --size 1920x1080
+            sips -s format jpeg -s formatOptions 82 "$out/card/49.60.png" --out "$media/trailer-card.jpg" >/dev/null
+            rm -rf "$out/card"
+        fi
+        "$bin" "$page" "$media/hero.mp4" --query "clip=hero" --fps 30 --size 1600x900 --bitrate 1.6 --poster 1.5 "$media/hero.jpg"
+        for clip in calm fast precise run commit write ai; do
+            "$bin" "$page" "$media/$clip.mp4" --query "clip=$clip" --fps 30 --size 1280x720 --bitrate 1.4 --poster 1.8 "$media/$clip.jpg"
+        done
+        rm -f "$media"/*.sounds.json
+        ls -la "$media"
+        exit
         ;;
     *)
         "$bin" "$page" "$repo/target/trailer-stills" --stills "$(IFS=,; echo "$*")"

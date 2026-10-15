@@ -1,4 +1,4 @@
-// Renders scripts/promo/promo.html to an MP4, frame by frame: the page's `render(t)` draws
+// Renders a page (scripts/trailer/trailer.html) to an MP4, frame by frame: the page's `render(t)` draws
 // the moment `t` (seconds), WebKit takes a picture of it, AVFoundation encodes it. Nothing
 // to install: it's the Mac's own WebKit and video encoder.
 //
@@ -6,7 +6,7 @@
 // The page is laid out at 1920×1080 whatever the size: WebKit draws it at the screen's scale
 // (twice on a Retina), and the film is that picture at --size (3840x2160 for 4K); --also
 // writes a second film at another size from the same pictures. --query passes options to
-// the page (cut=30, vertical); --page is its layout size (1080x1920 for the vertical one).
+// the page (clip=hero, vertical); --page is its layout size (1080x1920 for the vertical one).
 //   render PAGE.html DIR --stills 1.5,12,30   (pictures of those moments, to look at)
 // --bitrate MBPS sets the video's (for the website's small files).
 //
