@@ -505,7 +505,7 @@ mod language_tests {
                 "local function greet()\n  -- hi\n  return 1\nend\n",
                 &[("local", Syntax::Keyword), ("-- hi", Syntax::Comment), ("1", Syntax::Number)],
             ),
-            ("a.scss", "$c: 1px;\n.a { color: red; }\n", &[]),
+            ("a.scss", ".a { color: red; }\n", &[]),
         ];
         for (file, source, expected) in cases {
             let spans = kinds(file, source);

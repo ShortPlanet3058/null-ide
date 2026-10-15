@@ -75,7 +75,6 @@ tree-sitter-c-sharp = "0.23.5"
 tree-sitter-ruby = "0.23.1"
 tree-sitter-php = "0.25.1"
 tree-sitter-lua = "0.5.0"
-tree-sitter-scss = "1.0.0"
 
 # The Mac's own spell checker and color panel. Already built for GPUI: only the parts used are named.
 [target.'cfg(target_os = "macos")'.dependencies]

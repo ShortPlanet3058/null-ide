@@ -109,9 +109,16 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             [tree_sitter_html::HIGHLIGHTS_QUERY],
             None
         ),
-        // (LESS is close enough to CSS for its colours.)
-        language!("CSS", ["css", "less"], [], tree_sitter_css::LANGUAGE, [tree_sitter_css::HIGHLIGHTS_QUERY], None),
-        language!("SCSS", ["scss"], [], tree_sitter_scss::language(), [tree_sitter_scss::HIGHLIGHTS_QUERY], Some("//")),
+        // (SCSS and LESS are close enough to CSS for its colours. SCSS's own grammar doesn't
+        // build on Windows.)
+        language!(
+            "CSS",
+            ["css", "scss", "less"],
+            [],
+            tree_sitter_css::LANGUAGE,
+            [tree_sitter_css::HIGHLIGHTS_QUERY],
+            None
+        ),
         language!("Java", ["java"], [], tree_sitter_java::LANGUAGE, [tree_sitter_java::HIGHLIGHTS_QUERY], Some("//")),
         language!(
             "C#",
@@ -168,8 +175,9 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
     for language in &mut languages {
         language.block_comment = match language.name {
             "HTML" | "Markdown" => Some(("<!--", "-->")),
-            "CSS" | "SCSS" | "Rust" | "JavaScript" | "TypeScript" | "TSX" | "Go" | "C" | "C++" | "Java" | "C#"
-            | "PHP" => Some(("/*", "*/")),
+            "CSS" | "Rust" | "JavaScript" | "TypeScript" | "TSX" | "Go" | "C" | "C++" | "Java" | "C#" | "PHP" => {
+                Some(("/*", "*/"))
+            }
             "Lua" => Some(("--[[", "]]")),
             _ => None,
         };
