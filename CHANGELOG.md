@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Notes on code: ⌥⌘N (Ctrl+Alt+N) writes a note under the cursor's line; it moves with its
+  line and is kept privately in Null's folder, never in the project. Notes… lists them.
+- An answer from ⌘I can be asked about further (each follow-up goes with the questions
+  before it) and kept as a note on the code.
+- Review in the Git panel: AI reads the changes about to be committed and leaves a note on
+  each line it has doubts about, never a change. Explain Test Failure (⌘K) explains the last
+  failed test from what its run said.
 - AI reads less and pays less: ⌘I sends a long file's lines around the code with an outline
   of the rest instead of the whole file, the definitions the code uses from elsewhere in the
   project, and the project's AGENTS.md or CLAUDE.md; the field says what goes and about how

@@ -171,6 +171,8 @@ pub enum GitViewEvent {
     Committed(Result<String, String>, Vec<PathBuf>),
     /// A message written by AI asked for, from these files' changes.
     Draft(Vec<PathBuf>),
+    /// These files' changes read by AI before they're committed: notes where it has doubts.
+    Review(Vec<PathBuf>),
     Push,
     Pull,
     /// A branch to switch to (open files saved first).
@@ -925,6 +927,14 @@ impl GitView {
                                 cx.emit(GitViewEvent::Draft(files));
                             },
                         )))
+                        .child(
+                            ui::link("git-review", "Review", &theme).text_size(px(ui::T_SM)).on_click(cx.listener(
+                                |this, _: &ClickEvent, _, cx| {
+                                    let files = this.files.iter().filter(|f| f.kept).map(|f| f.path.clone()).collect();
+                                    cx.emit(GitViewEvent::Review(files));
+                                },
+                            )),
+                        )
                     })
                     .child(div().flex_1())
                     .child(ui::primary_button("git-commit", commit_label, can_commit, &theme).when(can_commit, |b| {

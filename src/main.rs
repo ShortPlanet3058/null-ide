@@ -13,6 +13,7 @@ mod assets;
 mod basic_syntax;
 mod buffer;
 mod clipboard_history;
+mod code_notes;
 mod color_panel;
 mod colors;
 mod commit_page;
