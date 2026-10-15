@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Language servers install on a computer with nothing else installed: the ones that need
+  Node.js bring their own (downloaded into Null's folder, used only for them), and
+  rust-analyzer, clangd (on Windows and Linux), Markdown's and Lua's are downloaded as
+  programs. Every download is checked against the checksum Null was built with.
+- New languages: Markdown, Lua, PHP, Svelte, Dockerfile, C# and Dart.
+- Java, C#, Ruby, PHP and Lua are coloured by their real grammars (they had only basic
+  colours); SCSS and LESS take CSS's.
+- Language servers start with Null's own search path (Homebrew's Node, nvm's…), even when
+  Null is opened from the Dock; uppercase extensions (`MAIN.CPP`) find their server.
 - Suggestions while typing work with Claude Code and Codex: they come from a fast model of
   their own (Settings → AI → Suggestions come from), since the command line tools take
   seconds to answer. Null asks once where they should come from.

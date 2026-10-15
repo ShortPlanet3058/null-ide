@@ -275,17 +275,29 @@ knows which one each language needs, finds it if it's installed (Xcode's clangd 
 sourcekit-lsp included), and otherwise offers to install it with one click, from the status
 bar or Settings → Language servers, into its own folder rather than the system.
 
+Nothing else needs installing first: servers that are npm packages bring their own Node.js
+when the computer has none (the official build, downloaded into Null's folder and used only
+for them), and servers that are programs of their own are downloaded from their makers'
+releases. Every download is checked against the checksum Null was built with.
+
 | Language | Server | Installed with |
 |---|---|---|
-| Rust | rust-analyzer | rustup |
-| Python | pyright | npm (needs Node.js) |
+| Rust | rust-analyzer | rustup when you have it, else downloaded |
+| Python | pyright | npm |
 | TypeScript, JavaScript | typescript-language-server | npm |
-| C, C++, Objective-C | clangd | comes with Xcode's command line tools |
-| Go | gopls | go |
+| C, C++, Objective-C | clangd | Xcode's command line tools on macOS, else downloaded |
+| Go | gopls | go (needs Go) |
 | Swift | sourcekit-lsp | comes with Xcode |
 | Shell | bash-language-server | npm |
 | HTML, CSS, JSON | vscode-langservers-extracted | npm |
 | YAML | yaml-language-server | npm |
+| Markdown | marksman | downloaded |
+| Lua | lua-language-server | downloaded |
+| PHP | intelephense | npm |
+| Svelte | svelte-language-server | npm |
+| Dockerfile | dockerfile-language-server | npm |
+| C# | csharp-ls | dotnet (needs the .NET SDK) |
+| Dart | the Dart SDK's own | comes with the Dart SDK |
 
 With a server running: ⌘R (or F2) renames a symbol everywhere, right where it's written;
 ⇧F12 lists where it's used (⌘-clicking a definition does too), ⌃⌥H where a function is

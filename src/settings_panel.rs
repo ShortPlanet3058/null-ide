@@ -1035,7 +1035,10 @@ impl SettingsPanel {
                     let detail = match (failed, &can) {
                         (Some(Err(reason)), _) => reason.to_string(),
                         (_, Err(reason)) => reason.clone(),
-                        _ => format!("{} · not installed", server.name),
+                        _ => match crate::servers::install_note(server) {
+                            Some(note) => format!("{} · not installed · {note}", server.name),
+                            None => format!("{} · not installed", server.name),
+                        },
                     };
                     let control = if can.is_ok() {
                         Self::button(("install", i), "Install", &theme)

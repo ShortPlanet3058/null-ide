@@ -67,6 +67,14 @@ ratex-layout = "0.1.14"
 ratex-types = "0.1.14"
 ratex-svg = { version = "0.1.14", features = ["embed-fonts"] }
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+tar = { version = "0.4", default-features = false }
+zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2"] }
+flate2 = "1"
+tree-sitter-java = "0.23.5"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-php = "0.25.1"
+tree-sitter-lua = "0.5.0"
 
 # The Mac's own spell checker and color panel. Already built for GPUI: only the parts used are named.
 [target.'cfg(target_os = "macos")'.dependencies]

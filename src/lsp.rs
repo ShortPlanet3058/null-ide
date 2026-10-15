@@ -131,9 +131,16 @@ impl LanguageServer {
         let mut child = crate::tools::command(program)
             .args(args)
             .current_dir(root)
+            // Where Null looks for programs, so a server finds what it runs in turn (an npm
+            // package's `node`, Null's own when the computer has none).
+            .env("PATH", crate::tools::search_path())
             // A Python project's own environment first, for Python's server (pyright reads its
             // packages from there); other servers keep the PATH they'd have.
-            .envs(if is_python_server(name) { crate::python_env::variables(root) } else { Vec::new() })
+            .envs(if is_python_server(name) {
+                crate::python_env::variables(root, Some(crate::tools::search_path()))
+            } else {
+                Vec::new()
+            })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

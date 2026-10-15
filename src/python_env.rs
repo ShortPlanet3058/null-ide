@@ -243,12 +243,13 @@ pub fn python_for(root: &Path, path: &Path) -> String {
 
 /// What a program started in the project gets, for its environment to come first: its
 /// `bin` at the front of PATH, and `VIRTUAL_ENV` (what activating it sets).
-pub fn variables(root: &Path) -> Vec<(String, String)> {
+/// `path` is what PATH would be otherwise.
+pub fn variables(root: &Path, path: Option<std::ffi::OsString>) -> Vec<(String, String)> {
     let Some(env) = find(root) else { return Vec::new() };
     let bin = python_in(&env).parent().map(Path::to_path_buf).unwrap_or_default();
     let mut vars = vec![("VIRTUAL_ENV".to_string(), env.to_string_lossy().into_owned())];
     // (A folder whose name has a ":" can't go into PATH: left as it was, not emptied.)
-    let path = std::env::var_os("PATH").filter(|p| !p.is_empty());
+    let path = path.filter(|p| !p.is_empty());
     let others = path.as_deref().map(|p| std::env::split_paths(p).collect::<Vec<_>>()).unwrap_or_default();
     if let Ok(joined) = std::env::join_paths(std::iter::once(bin).chain(others)) {
         vars.insert(0, ("PATH".into(), joined.to_string_lossy().into_owned()));
@@ -295,7 +296,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(find(&dir), None);
         assert_eq!(python(&dir), "python3");
-        assert!(variables(&dir).is_empty());
+        assert!(variables(&dir, std::env::var_os("PATH")).is_empty());
         // A folder called venv with no Python in it isn't one.
         std::fs::create_dir_all(dir.join("venv")).unwrap();
         assert_eq!(find(&dir), None);
@@ -303,7 +304,7 @@ mod tests {
         std::fs::write(dir.join(".venv/bin/python"), "").unwrap();
         assert_eq!(find(&dir), Some(dir.join(".venv")));
         assert_eq!(python(&dir), ".venv/bin/python");
-        let vars = variables(&dir);
+        let vars = variables(&dir, std::env::var_os("PATH"));
         assert!(vars[0].1.starts_with(&dir.join(".venv/bin").to_string_lossy().into_owned()));
         assert_eq!(vars[1], ("VIRTUAL_ENV".to_string(), dir.join(".venv").to_string_lossy().into_owned()));
         let activate = |env: &str, shell: &str| activate_command(Path::new(env), shell);
