@@ -4,6 +4,9 @@
   record it frame by frame (opening this file in a browser plays it, silent: Space pauses,
   ← → step, ?t=24 opens it at a moment, a click on the bar seeks).
 
+  ?cut=15 plays the 15-second cut (whole bars of this one, edited on downbeats); ?vertical lays
+  it out at 1080×1920 for phones (the two go together).
+
   It's cut on its music, "Two AM Window" (music.mp3), 120 BPM: a bar is 2 s, B(k) is bar k.
   render.sh takes bars 8 to 11 out of the track's opening groove, so the music here runs:
     bars 0–11   the groove           the noise (0–3), Null (4–5), six things it does (6–11)
@@ -191,6 +194,34 @@ body.player { display: grid; place-items: center; height: 100vh; }
 #cta span { padding: 16px 34px; border-radius: 16px; background: var(--amber); color: #1b1206; font: 600 36px/1 var(--ui); }
 #facts { position: absolute; left: 0; right: 0; top: 806px; text-align: center; font: 500 28px/1.2 var(--ui); color: #6f6e76; }
 
+/* ---------- standing up: 1080×1920 ---------- */
+.vertical #stage { width: 1080px; height: 1920px; }
+.vertical #noisebox { inset: auto; left: -420px; top: 420px; width: 1920px; height: 1080px; }
+.vertical #shout { top: 900px; }
+.vertical #shout span { font-size: 130px; }
+.vertical #name { top: 780px; }
+.vertical #namesub { top: 1030px; }
+.vertical #quiet { top: 800px; font-size: 70px; }
+.vertical #scrim { width: auto; right: 0; background: linear-gradient(180deg, #000 0, #000 33%, rgba(0,0,0,0) 45%, rgba(0,0,0,0) 78%, #000 90%); }
+.vertical #title { left: 80px; right: 80px; top: 200px; bottom: auto; width: auto; justify-content: flex-start; }
+.vertical #tword { font-size: 150px; }
+.vertical #tsub { font-size: 42px; }
+.vertical #keys { left: 0; right: 0; bottom: 150px; justify-content: center; }
+.vertical #chips { left: 80px; bottom: 130px; width: 920px; }
+.vertical #themenames { flex-wrap: wrap; gap: 14px 26px; font-size: 36px; }
+.vertical #keymaps .km { font-size: 110px; }
+.vertical #keymaps .lead { padding: 0 100px; text-align: center; }
+.vertical .os .logo { left: 390px; top: 300px; }
+.vertical .os .osname { left: 0; width: 1080px; top: 660px; }
+.vertical .os .ossub { left: 0; width: 1080px; top: 800px; }
+.vertical .os .frame { left: 69px; top: 1010px; }
+.vertical #tiles .tile { width: 330px; height: 182px; }
+.vertical #tiles .tile > div { transform: scale(0.2171); }
+.vertical #endmark { top: 700px; }
+.vertical #tagline { top: 960px; font-size: 46px; }
+.vertical #cta { top: 1080px; }
+.vertical #facts { top: 1186px; }
+
 #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 6px; background: #111; cursor: pointer; }
 #bar div { height: 100%; background: var(--amber); width: 0; }
 </style>
@@ -216,11 +247,38 @@ body.player { display: grid; place-items: center; height: 100vh; }
 <script>
 "use strict";
 const QUERY = new URLSearchParams(location.search);
+const VERTICAL = QUERY.has("vertical");
+if (VERTICAL) document.body.classList.add("vertical");
+const STAGE_W = VERTICAL ? 1080 : 1920, STAGE_H = VERTICAL ? 1920 : 1080;
 
 // ---------- the music's clock ----------
 const BEAT = 0.4995, BAR = 4 * BEAT;
 const B = k => 0.07 + BAR * k;          // bar k (the first beat is 70 ms in)
 window.DURATION = 54.5;                 // the last hit at B(25), then the card stays
+const FULL = window.DURATION;
+
+// ---------- the 15-second cut: [from, to] stretches of this trailer, whole bars, back to back.
+// render.sh lays the same stretches of the music under it. ----------
+const CUTS = {
+  15: [[B(4), B(5)], [B(6), B(8)], [B(16), B(17)], [B(18), B(19)], [B(24), B(25) + 3]],
+};
+const CUT = CUTS[QUERY.get("cut")] || null;
+const CUT_AT = [];
+if (CUT) {
+  let at = 0;
+  for (const [a, b] of CUT) { CUT_AT.push(at); at += b - a; }
+  window.DURATION = at;
+}
+/** The trailer's moment shown at time `t` of the cut. */
+function cutTime(t) {
+  for (let i = CUT.length - 1; i >= 0; i--) if (t >= CUT_AT[i]) return CUT[i][0] + (t - CUT_AT[i]);
+  return CUT[0][0];
+}
+/** When the cut shows the trailer's moment `t`, or null if it leaves it out. */
+function inCut(t) {
+  for (let i = 0; i < CUT.length; i++) if (t >= CUT[i][0] && t < CUT[i][1]) return CUT_AT[i] + (t - CUT[i][0]);
+  return null;
+}
 
 // ---------- clips for the website: ?clip=name, a stretch of the trailer without its words,
 // slowed, with a steady camera of its own: [from, to, speed, [zoom, x, y, zoom at the end, x, y]]
@@ -680,6 +738,12 @@ function renderStory(t) {
     zoom = z0 + (z1 - z0) * p; x = x0 + (x1 - x0) * p; y = y0 + (y1 - y0) * p; lands = 1;
   }
   const z = zoom * lands * (t >= B(18) ? bump(t, B(18) + Math.floor((t - B(18)) / BEAT) * BEAT) : 1);
+  if (VERTICAL) {
+    // Lower down, under the words, close enough to read on a phone.
+    const zv = z * 1.02;
+    w.style.transform = `translate(${540 - x * zv}px, ${1220 - y * zv}px) scale(${zv})`;
+    return;
+  }
   const at = BARE ? 960 : sx;
   w.style.transform = `translate(${at - x * z}px, ${540 - y * z}px) scale(${z})`;
 }
@@ -694,7 +758,9 @@ function renderMd(t) {
   box.style.left = "0"; box.style.top = "0";
   box.style.transformOrigin = "0 0";
   const fx = 520 + 360 * inOut(p), fy = 380;
-  box.style.transform = `translate(${(BARE ? 960 : 1250) - fx * z}px, ${540 - fy * z}px) scale(${z * bump(t, B(11))})`;
+  box.style.transform = VERTICAL
+    ? `translate(${540 - fx * z * 1.15}px, ${1220 - fy * z * 1.15}px) scale(${z * 1.15 * bump(t, B(11))})`
+    : `translate(${(BARE ? 960 : 1250) - fx * z}px, ${540 - fy * z}px) scale(${z * bump(t, B(11))})`;
 }
 
 // ---------- the noise, the name, the quiet ----------
@@ -703,7 +769,7 @@ function renderNoise(t) {
   const shake = in3(prog(t, B(2), STOP - 0.3));
   const box = $("noisebox");
   const push = 1 + 0.12 * prog(t, 0, STOP) + 0.025 * Math.exp(-((t - B(0)) % BEAT) * 10) * prog(t, B(1), B(3));
-  box.style.transform = `scale(${push})`;
+  box.style.transform = `scale(${push * (VERTICAL ? 1.75 : 1)})`;
   NOISE.forEach(([l, tp, w, h, , , from], i) => {
     const appears = NOISE_AT(i);
     const inP = out3(prog(t, appears, appears + 0.16));
@@ -793,7 +859,9 @@ function renderEverywhere(t) {
     $("logo" + j).style.transform = `scale(${0.6 + 0.4 * l})`;
     $("logo" + j).style.opacity = clamp(local / 0.12);
     const slide = 1 - out3(prog(local, 0.05, 0.45));
-    $("frame" + j).style.transform = `translate(${slide * 500}px, 0) scale(${0.78 + 0.03 * prog(local, 0, BAR)})`;
+    $("frame" + j).style.transform = VERTICAL
+      ? `translate(0, ${slide * 400}px) scale(${0.62 + 0.02 * prog(local, 0, BAR)})`
+      : `translate(${slide * 500}px, 0) scale(${0.78 + 0.03 * prog(local, 0, BAR)})`;
     $("frame" + j).style.opacity = 1 - slide;
   });
 }
@@ -811,7 +879,8 @@ function buildTiles() {
   let html = "";
   for (let k = 0; k < 9; k++) {
     const col = k % 3, row = Math.floor(k / 3);
-    html += `<div class="tile" id="tile${k}" style="left:${45 + col * 615}px;top:${30 + row * 345}px"><div id="tw${k}"></div></div>`;
+    const left = VERTICAL ? 25 + col * 350 : 45 + col * 615, top = VERTICAL ? 655 + row * 205 : 30 + row * 345;
+    html += `<div class="tile" id="tile${k}" style="left:${left}px;top:${top}px"><div id="tw${k}"></div></div>`;
     TILES.push({ k, at: B(24) + order.indexOf(k) * (BAR / 9) });
   }
   $("tiles").innerHTML = html;
@@ -836,7 +905,8 @@ function renderTiles(t) {
 // ---------- the end ----------
 function renderEnd(t) {
   const E = B(25);
-  if (!show("end", fade(t, E - 0.02, E + 0.02, window.DURATION - 0.6, window.DURATION))) return;
+  const last = CUT ? CUT[CUT.length - 1][1] : FULL;
+  if (!show("end", fade(t, E - 0.02, E + 0.02, last - 0.6, last))) return;
   const l = land(prog(t, E, E + 0.55));
   show("endmark", clamp((t - E) / 0.08), `scale(${0.75 + 0.25 * l})`);
   $("endmark").querySelector(".caret").style.opacity = blink(t, E, 0.9);
@@ -886,7 +956,7 @@ const chipsShown = t => fade(t, B(15), B(15) + 0.2, B(18) - 0.15, B(18));
 
 let measured = false;
 window.render = function (clipTime) {
-  const t = CLIP ? CLIP[0] + clipTime * CLIP[2] : clipTime;
+  const t = CLIP ? CLIP[0] + clipTime * CLIP[2] : CUT ? cutTime(clipTime) : clipTime;
   if (!measured) {
     const c = document.createElement("canvas").getContext("2d");
     c.font = "400 18px 'Geist Mono'";
@@ -918,6 +988,7 @@ window.ready = Promise.all([...document.querySelectorAll("canvas[data-src]")].ma
     canvas.getContext("2d").drawImage(img, 0, 0);
   }).catch(() => {});
 }));
+if (CUT) window.SOUNDS = window.SOUNDS.map(([t, kind, gain]) => [inCut(t), kind, gain]).filter(([t]) => t !== null).map(([t, k, g]) => [+t.toFixed(3), k, g]);
 window.SOUNDS.sort((a, b) => a[0] - b[0]);
 
 // ---------- playing it in a browser ----------
@@ -927,9 +998,9 @@ if (!navigator.userAgent.includes("NullFilm")) {
   bar.id = "bar"; bar.innerHTML = "<div></div>";
   document.body.appendChild(bar);
   const fit = () => {
-    const sc = Math.min(innerWidth / 1920, (innerHeight - 8) / 1080);
+    const sc = Math.min(innerWidth / STAGE_W, (innerHeight - 8) / STAGE_H);
     $("stage").style.transform = `scale(${sc})`;
-    $("stage").style.margin = `${(1080 * sc - 1080) / 2}px ${(1920 * sc - 1920) / 2}px`;
+    $("stage").style.margin = `${(STAGE_H * sc - STAGE_H) / 2}px ${(STAGE_W * sc - STAGE_W) / 2}px`;
   };
   addEventListener("resize", fit); fit();
   let t = parseFloat(QUERY.get("t") || "0"), playing = !QUERY.has("t"), last = null;
