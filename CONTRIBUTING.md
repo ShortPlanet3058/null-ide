@@ -5,6 +5,10 @@ Null is written in Rust with [GPUI](https://github.com/zed-industries/zed/tree/m
 [Language Server](https://microsoft.github.io/language-server-protocol/) and
 [Debug Adapter](https://microsoft.github.io/debug-adapter-protocol/) protocols.
 
+Null is proprietary software (see [LICENSE](LICENSE)). Contributions are welcome: by
+sending one (a pull request, a patch), you grant the author the right to use, change,
+sublicense and sell it as part of Null, as the license says.
+
 ## Building
 
 You need [Rust](https://rustup.rs) (stable), and on macOS Xcode. On Linux, the libraries
