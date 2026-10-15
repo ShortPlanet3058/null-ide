@@ -246,18 +246,21 @@ mod tests {
                 }
             }
         });
-        let wait_for = |want: bool| {
+        // (Until that name: for a moment the shell's child is still called `sh`, before it
+        // becomes `sleep`.)
+        let wait_for = |want: Option<&str>| {
             let deadline = Instant::now() + Duration::from_secs(5);
-            while watch.program().is_some() != want && Instant::now() < deadline {
+            let name = || watch.program().map(|(_, name)| name);
+            while name().as_deref() != want && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            watch.program()
+            name()
         };
-        assert_eq!(wait_for(false), None, "at the prompt");
+        assert_eq!(wait_for(None), None, "at the prompt");
         use std::io::Write;
         pty.file().write_all(b"sleep 2\n").unwrap();
-        assert_eq!(wait_for(true).map(|(_, name)| name).as_deref(), Some("sleep"));
-        assert_eq!(wait_for(false), None, "back at the prompt");
+        assert_eq!(wait_for(Some("sleep")).as_deref(), Some("sleep"));
+        assert_eq!(wait_for(None), None, "back at the prompt");
         drop(pty);
         std::fs::remove_dir_all(&dir).ok();
     }
