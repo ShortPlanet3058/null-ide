@@ -7,7 +7,7 @@
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 out="${1:-$repo/target/site}"
-case "$out" in */site|*/_site) ;; *) echo "build-site: OUT should end in /site or /_site" >&2; exit 1 ;; esac
+case "$out" in site|_site|*/site|*/_site) ;; *) echo "build-site: OUT should end in /site or /_site" >&2; exit 1 ;; esac
 rm -rf "$out"
 mkdir -p "$out/images" "$out/fonts" "$out/film/scripts/promo" "$out/film/assets/fonts"
 cp -R "$repo/site/." "$out/"

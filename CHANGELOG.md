@@ -2,8 +2,8 @@
 
 ## 0.1.1
 
-What the first tests on Windows and Linux found, several folders in one window, and a new
-license.
+What testing on fresh Windows, Ubuntu and Mac machines found, installers and uninstalling
+everywhere, several folders in one window, and a new license.
 
 **Windows, from its first tests**
 
