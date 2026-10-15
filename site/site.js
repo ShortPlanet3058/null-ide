@@ -1,209 +1,185 @@
-// Null's site: the hero's scenes, words lit as you scroll, the story played by scrolling,
-// things arriving as they come into view, the platform you're on, the film over the page.
+// Null's site: the nav that steps back, the hero's video, words lit as you scroll, the
+// features' picture that follows the words, the themes live, the platform you're on, and
+// the trailer over the page.
 (() => {
   "use strict";
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+  const play = video => { if (!still) video.play().catch(() => {}); };
+  const load = video => { if (video.dataset.src && !video.src) video.src = video.dataset.src; };
 
-  // ---------- the nav: solid once the page moves ----------
+  // ---------- the nav: solid once the page moves, away while you read on ----------
   const nav = $("#nav");
-  const solid = () => nav.classList.toggle("solid", scrollY > 40);
-  addEventListener("scroll", solid, { passive: true });
-  solid();
-
-  // ---------- the hero: one scene after another ----------
-  const slides = $$(".slide"), copies = $$(".copy"), tabs = $("#hero-tabs");
-  const SCENE = 7000;
-  let current = 0, started = performance.now(), paused = false;
-  slides.forEach((slide, i) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.setAttribute("role", "tab");
-    b.innerHTML = `${slide.dataset.label}<span class="bar"><i></i></span>`;
-    b.addEventListener("click", () => go(i));
-    tabs.appendChild(b);
-  });
-  const bars = $$(".bar i", tabs), buttons = $$("button", tabs);
-  function go(i) {
-    current = (i + slides.length) % slides.length;
-    started = performance.now();
-    slides.forEach((s, k) => {
-      const on = k === current, video = $("video", s);
-      s.classList.toggle("on", on);
-      if (on && !still) {
-        video.preload = "auto";
-        video.currentTime = 0;
-        video.play().catch(() => {});
-      } else if (!on) {
-        setTimeout(() => { if (!s.classList.contains("on")) video.pause(); }, 1200);
-      }
-      // The next one, ready before it's needed.
-      if (k === (current + 1) % slides.length) video.preload = "auto";
-    });
-    copies.forEach((c, k) => c.classList.toggle("on", k === current));
-    buttons.forEach((b, k) => b.setAttribute("aria-selected", k === current));
-    bars.forEach((b, k) => { b.style.width = k < current ? "100%" : "0"; });
-  }
-  function tick(now) {
-    if (!paused && !still) {
-      const p = clamp((now - started) / SCENE);
-      bars[current].style.width = `${p * 100}%`;
-      if (p >= 1) go(current + 1);
+  let lastY = scrollY;
+  function navOnScroll() {
+    const y = scrollY;
+    nav.classList.toggle("solid", y > 40);
+    if (Math.abs(y - lastY) > 6) {
+      nav.classList.toggle("away", y > lastY && y > innerHeight * .7 && !nav.matches(":focus-within"));
+      lastY = y;
     }
-    requestAnimationFrame(tick);
   }
-  // Only while the hero is seen, and the page is shown.
-  new IntersectionObserver(([e]) => { paused = !e.isIntersecting; if (!paused) started = performance.now() - parseFloat(bars[current].style.width || 0) / 100 * SCENE; }, { threshold: 0.2 }).observe($("#hero"));
-  document.addEventListener("visibilitychange", () => { paused = document.hidden; });
-  go(0);
-  requestAnimationFrame(tick);
 
-  // A soft amber light that follows the pointer over the hero.
-  const glow = $("#glow"), hero = $("#hero");
-  hero.addEventListener("pointermove", e => {
-    const r = hero.getBoundingClientRect();
-    glow.style.left = `${e.clientX - r.left}px`;
-    glow.style.top = `${e.clientY - r.top}px`;
-  });
+  // ---------- the hero ----------
+  const hero = $("#hero"), heroVideo = $("#hero-video");
+  play(heroVideo);
+  new IntersectionObserver(([e]) => (e.isIntersecting ? play(heroVideo) : heroVideo.pause())).observe(hero);
+  const heroOnScroll = () => hero.style.setProperty("--hp", clamp(scrollY / innerHeight).toFixed(4));
 
   // ---------- the platform you're on ----------
   const ua = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent;
-  const os = /mac/i.test(ua) && !/iphone|ipad/i.test(navigator.userAgent) ? "mac" : /win/i.test(ua) ? "windows" : /linux/i.test(ua) && !/android/i.test(navigator.userAgent) ? "linux" : null;
+  const phone = /iphone|ipad|android/i.test(navigator.userAgent);
+  const os = phone ? null : /mac/i.test(ua) ? "mac" : /win/i.test(ua) ? "windows" : /linux/i.test(ua) ? "linux" : null;
   if (os) {
     const mine = $(`.platform[data-os="${os}"]`);
     mine.classList.add("mine");
-    const name = { mac: "macOS", windows: "Windows", linux: "Linux" }[os];
-    $("#hero-download").textContent = `Download for ${name}`;
-    $("#hero-download").href = mine.href;
+    $("#hero-download-label").textContent = `Download for ${{ mac: "Mac", windows: "Windows", linux: "Linux" }[os]}`;
+    $("#hero-download").href = $("a.button", mine).href;
   }
-  // The second download in a card (a link inside a link isn't allowed: a span that goes).
-  $$(".platform .alt").forEach(alt => alt.addEventListener("click", e => {
-    e.preventDefault();
-    location.href = alt.dataset.href;
-  }));
   // Keys as this computer names them.
-  if (os && os !== "mac") {
-    $$(".lead, .steps span, .three p, .three .k").forEach(el => {
-      el.innerHTML = el.innerHTML.replace(/⌘/g, "Ctrl+");
-    });
-  }
+  $$(".keys .k").forEach(k => {
+    k.innerHTML = (os === "mac" || (!os && /mac|iphone|ipad/i.test(navigator.userAgent)) ? k.dataset.mac : k.dataset.pc)
+      .split(" ").map(key => `<kbd>${key}</kbd>`).join("");
+  });
 
   // ---------- words lit as you scroll ----------
-  const scrub = $("#scrub");
-  const KEY = new Set(["nothing,", "screen", "back", "code."]);
-  scrub.innerHTML = scrub.textContent.split(/(\s+)/).map(w => (/\s/.test(w) ? w : `<span${KEY.has(w) ? ' class="key"' : ""}>${w}</span>`)).join("");
-  const words = $$("span", scrub);
+  const words = $("#words");
+  const KEY = new Set(["your", "code,"]);
+  words.innerHTML = words.textContent.split(/(\s+)/)
+    .map(w => (/\s/.test(w) ? w : `<span${KEY.has(w) ? ' class="key"' : ""}>${w}</span>`)).join("");
+  const wordSpans = $$("span", words);
   function lightWords() {
-    const r = scrub.getBoundingClientRect();
-    const p = clamp((innerHeight * 0.85 - r.top) / (r.height + innerHeight * 0.35));
-    const lit = Math.round(p * words.length);
-    words.forEach((w, i) => w.classList.toggle("lit", i < lit));
+    const r = words.getBoundingClientRect();
+    if (r.bottom < -100 || r.top > innerHeight + 100) return;
+    const p = still ? 1 : clamp((innerHeight * .78 - r.top) / (r.height + innerHeight * .2));
+    const lit = Math.round(p * wordSpans.length);
+    wordSpans.forEach((w, i) => w.classList.toggle("lit", i < lit));
   }
 
-  // ---------- the story, played by scrolling ----------
-  const story = $("#story"), frame = $("#film"), box = $(".story-frame"), storyBar = $("#story-bar");
-  const steps = $$("#steps li");
-  const B = k => 33.66 + 3.2 * k;            // the film's bars (scripts/promo/promo.html)
-  const FROM = B(0), TO = B(15) - 0.3;
-  let film = null, wanted = FROM, drawn = -1;
-  // Loaded when the story comes near: it's the film's own engine, drawing each moment.
-  new IntersectionObserver(([e], obs) => {
-    if (!e.isIntersecting) return;
-    frame.src = frame.dataset.src;
-    obs.disconnect();
-  }, { rootMargin: "100% 0px" }).observe(story);
-  addEventListener("message", e => {
-    if (e.data === "null-film-ready" && e.source === frame.contentWindow) {
-      film = frame.contentWindow;
-      box.classList.add("ready");
-      drawn = -1;
-    }
+  // ---------- what it does: the picture follows the words ----------
+  const steps = $$(".step"), screen = $("#screen"), ticks = $("#ticks");
+  const shown = steps.map(step => {
+    const v = document.createElement("video");
+    Object.assign(v, { muted: true, loop: true, playsInline: true, preload: "none" });
+    v.setAttribute("muted", ""); v.setAttribute("playsinline", "");
+    v.poster = `media/${step.dataset.clip}.jpg`;
+    v.dataset.src = `media/${step.dataset.clip}.mp4`;
+    screen.appendChild(v);
+    ticks.appendChild(document.createElement("i"));
+    return v;
   });
-  const wide = () => innerWidth > 960;
-  function storyTime() {
-    if (wide()) {
-      const r = story.getBoundingClientRect();
-      return FROM + clamp(-r.top / (r.height - innerHeight)) * (TO - FROM);
+  const tickBars = $$("i", ticks);
+  const wide = matchMedia("(min-width: 961px)");
+  let active = -1;
+  function follow() {
+    if (!wide.matches) return;
+    const box = screen.getBoundingClientRect();
+    if (box.bottom < -200 || box.top > innerHeight + 200) {
+      if (active >= 0) shown[active].pause();
+      return;
     }
-    // On a phone the story plays by itself while it's on screen.
-    return FROM + ((performance.now() / 1000) % (TO - FROM));
-  }
-  steps.forEach(li => li.addEventListener("click", () => {
-    const at = B(+li.dataset.at) + 0.05;
-    if (!wide()) { phoneStart = performance.now() / 1000 - (at - FROM); return; }
-    const top = story.offsetTop + (at - FROM) / (TO - FROM) * (story.offsetHeight - innerHeight);
-    scrollTo({ top, behavior: still ? "auto" : "smooth" });
-  }));
-  let phoneStart = 0;
-  function drawStory() {
-    let t = storyTime();
-    if (!wide()) t = FROM + ((performance.now() / 1000 - phoneStart) % (TO - FROM));
-    if (film && Math.abs(t - drawn) > 0.004) {
-      try { film.render(t); drawn = t; } catch (_) { /* not ready yet */ }
-    }
-    storyBar.style.width = `${(t - FROM) / (TO - FROM) * 100}%`;
+    const mid = innerHeight / 2;
     let on = 0;
-    steps.forEach((li, i) => { if (t >= B(+li.dataset.at)) on = i; });
-    steps.forEach((li, i) => { li.classList.toggle("on", i === on); li.classList.toggle("done", i < on); });
+    steps.forEach((s, i) => { if (s.getBoundingClientRect().top < mid) on = i; });
+    const r = steps[on].getBoundingClientRect();
+    const within = clamp((mid - r.top) / r.height);
+    tickBars.forEach((t, i) => t.style.setProperty("--f", i < on ? 1 : i === on ? within.toFixed(3) : 0));
+    if (on !== active) {
+      steps.forEach((s, i) => s.classList.toggle("on", i === on));
+      shown.forEach((v, i) => {
+        if (i === on) { load(v); v.classList.add("on"); v.currentTime = 0; play(v); }
+        else { v.classList.remove("on"); setTimeout(() => { if (!v.classList.contains("on")) v.pause(); }, 800); }
+      });
+      // The next one, ready before it's needed.
+      if (shown[on + 1]) { load(shown[on + 1]); shown[on + 1].preload = "auto"; }
+      active = on;
+    } else if (shown[on].paused) play(shown[on]);
   }
+
+  // ---------- videos that play while they're seen (the phone's features, AI) ----------
+  const seenVideos = new IntersectionObserver(entries => entries.forEach(e => {
+    const v = e.target;
+    if (e.isIntersecting) { load(v); play(v); } else v.pause();
+  }), { rootMargin: "120px 0px", threshold: .25 });
+  $$(".step-media video, video[data-inview]").forEach(v => seenVideos.observe(v));
+
+  // ---------- the themes, live ----------
+  const THEMES = {
+    Null: { bg: "#000000", surface: "#08080a", fg: "#ebe8e2", muted: "#8b8a92", faint: "#46464e", line: "#1d1d22", raised: "#141418", caret: "#f2b35b", kw: "#c6a6f6", ty: "#87c7e1", fn: "#f1d9a9", st: "#a9d59c", nu: "#f3a37e", co: "#5f626e", pu: "#8d8c96" },
+    Ash: { bg: "#131417", surface: "#18191d", fg: "#e4e3e0", muted: "#8f8f98", faint: "#4d4e56", line: "#26272d", raised: "#212227", caret: "#efb565", kw: "#c4a8f0", ty: "#8ac6dd", fn: "#eed9b0", st: "#acd3a0", nu: "#f0a685", co: "#676a75", pu: "#91909a" },
+    Midnight: { bg: "#0b0e14", surface: "#0f131b", fg: "#dfe4ee", muted: "#8590a6", faint: "#414b60", line: "#1c2230", raised: "#151a24", caret: "#7cc4e8", kw: "#b7a3f2", ty: "#8bd0e6", fn: "#e9d7a8", st: "#a4d4a3", nu: "#f0a682", co: "#58627a", pu: "#8890a3" },
+    Moss: { bg: "#101311", surface: "#141815", fg: "#e2e5dd", muted: "#8c9488", faint: "#474f47", line: "#222823", raised: "#1a1f1b", caret: "#b5cf85", kw: "#d0a6d8", ty: "#8ec9c0", fn: "#e8d39c", st: "#b7d48f", nu: "#eba37c", co: "#606b5f", pu: "#8f968b" },
+    Paper: { bg: "#fcfcfb", surface: "#f4f4f2", fg: "#1d1e22", muted: "#6a6b72", faint: "#b0b1b7", line: "#e6e5e1", raised: "#ffffff", caret: "#b4620c", kw: "#7a3ec8", ty: "#1e6c92", fn: "#8c4a00", st: "#3a7a2e", nu: "#b4461e", co: "#9a9ca3", pu: "#6f7077" },
+    Dune: { bg: "#f6f1e7", surface: "#efe8da", fg: "#2b2620", muted: "#75695a", faint: "#b6aa97", line: "#e2d9c7", raised: "#fbf8f1", caret: "#b5532d", kw: "#8a3f8f", ty: "#2c6e7f", fn: "#8f4a10", st: "#527a26", nu: "#b5532d", co: "#a2967f", pu: "#7a6e5e" },
+  };
+  const names = Object.keys(THEMES), themeWindow = $("#theme-window"), picker = $("#theme-picker");
+  let theme = 0, chosen = false, themeSeen = false;
+  const swatches = names.map((name, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.innerHTML = `<span class="sw" style="background:${THEMES[name].bg};--c:${THEMES[name].caret}"></span>${name}`;
+    b.addEventListener("click", () => { chosen = true; applyTheme(i); });
+    picker.appendChild(b);
+    return b;
+  });
+  function applyTheme(i) {
+    theme = i;
+    const th = THEMES[names[i]];
+    for (const [k, v] of Object.entries(th)) themeWindow.style.setProperty(`--${k}`, v);
+    swatches.forEach((b, k) => b.setAttribute("aria-checked", k === i));
+  }
+  applyTheme(0);
+  // They take turns by themselves while seen, until you pick one.
+  new IntersectionObserver(([e]) => { themeSeen = e.isIntersecting; }, { threshold: .5 }).observe(themeWindow);
+  if (!still) setInterval(() => { if (themeSeen && !chosen && !document.hidden) applyTheme((theme + 1) % names.length); }, 2600);
 
   // ---------- things arriving as they come into view ----------
-  const seen = new IntersectionObserver(entries => {
-    entries.forEach(e => {
-      if (!e.isIntersecting) return;
-      e.target.classList.add("in");
-      seen.unobserve(e.target);
-    });
-  }, { threshold: 0.12, rootMargin: "0px 0px -6% 0px" });
-  $$(".reveal").forEach((el, i) => {
-    // Neighbours in a row arrive one after the other.
-    el.style.transitionDelay = `${(i % 3) * 80}ms`;
-    seen.observe(el);
-  });
-
-  // Numbers counting up, once.
-  const counted = new IntersectionObserver(([e], obs) => {
+  const arrive = new IntersectionObserver(entries => entries.forEach(e => {
     if (!e.isIntersecting) return;
-    obs.disconnect();
-    $$("[data-count]").forEach(el => {
-      const end = +el.dataset.count, t0 = performance.now();
-      const step = now => {
-        const p = still ? 1 : clamp((now - t0) / 1600);
-        const v = Math.round(end * (1 - Math.pow(1 - p, 3)));
-        el.textContent = v.toLocaleString("en-US");
-        if (p < 1) requestAnimationFrame(step);
-      };
-      requestAnimationFrame(step);
-    });
-  }, { threshold: 0.4 });
-  counted.observe($("#numbers"));
+    e.target.classList.add("in");
+    arrive.unobserve(e.target);
+  }), { threshold: .12, rootMargin: "0px 0px -6% 0px" });
+  $$(".platforms .reveal").forEach((el, i) => { el.style.transitionDelay = `${i * 110}ms`; });
+  $$(".reveal").forEach(el => arrive.observe(el));
 
   // ---------- one loop for what follows the scroll ----------
-  function frameLoop() {
+  let queued = false;
+  function frame() {
+    queued = false;
+    navOnScroll();
+    heroOnScroll();
     lightWords();
-    const r = story.getBoundingClientRect();
-    if (r.bottom > -200 && r.top < innerHeight + 200) drawStory();
-    requestAnimationFrame(frameLoop);
+    follow();
   }
-  requestAnimationFrame(frameLoop);
+  const schedule = () => { if (!queued) { queued = true; requestAnimationFrame(frame); } };
+  addEventListener("scroll", schedule, { passive: true });
+  addEventListener("resize", schedule);
+  wide.addEventListener("change", () => { active = -1; schedule(); });
+  frame();
 
-  // ---------- the film, over the page ----------
+  // ---------- the trailer, over the page ----------
   const modal = $("#modal"), modalVideo = $("#modal-video");
-  function openFilm() {
+  let opener = null;
+  function openTrailer(e) {
+    opener = e.currentTarget;
     modal.hidden = false;
+    document.body.style.overflow = "hidden";
     requestAnimationFrame(() => modal.classList.add("open"));
     modalVideo.play().catch(() => {});
     $(".modal-close").focus();
   }
-  function closeFilm() {
+  function closeTrailer() {
     modal.classList.remove("open");
     modalVideo.pause();
-    setTimeout(() => { modal.hidden = true; }, 400);
+    document.body.style.overflow = "";
+    setTimeout(() => { modal.hidden = true; }, 450);
+    if (opener) opener.focus();
   }
-  $$("[data-film]").forEach(b => b.addEventListener("click", openFilm));
-  $(".modal-close").addEventListener("click", closeFilm);
-  modal.addEventListener("click", e => { if (e.target === modal) closeFilm(); });
-  addEventListener("keydown", e => { if (e.key === "Escape" && !modal.hidden) closeFilm(); });
+  $$("[data-trailer]").forEach(b => b.addEventListener("click", openTrailer));
+  $(".modal-close").addEventListener("click", closeTrailer);
+  modal.addEventListener("click", e => { if (e.target === modal) closeTrailer(); });
+  addEventListener("keydown", e => { if (e.key === "Escape" && !modal.hidden) closeTrailer(); });
 })();
