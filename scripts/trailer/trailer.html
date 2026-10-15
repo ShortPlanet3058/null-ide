@@ -1,0 +1,931 @@
+<!doctype html>
+<!--
+  Null's trailer. Every frame is drawn by render(t) from the time alone, so render.sh can
+  record it frame by frame (opening this file in a browser plays it, silent: Space pauses,
+  ← → step, ?t=24 opens it at a moment, a click on the bar seeks).
+
+  It's cut on its music, "Two AM Window" (music.mp3), 120 BPM: a bar is 2 s, B(k) is bar k.
+  render.sh takes bars 8 to 11 out of the track's opening groove, so the music here runs:
+    bars 0–11   the groove           the noise (0–3), Null (4–5), six things it does (6–11)
+    bars 12–13  silence              "And AI? Only when you ask."
+    bars 14–17  the breakdown        AI, in the code
+    bars 18–24  the drop             themes, keys, macOS · Windows · Linux, everything at once
+    bar 25      the last hit         the name, null-ide.com
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Null trailer</title>
+<style>
+@font-face { font-family: "Instrument Sans"; font-weight: 400; src: url("../../assets/fonts/instrument-sans/InstrumentSans-Regular.ttf"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 500; src: url("../../assets/fonts/instrument-sans/InstrumentSans-Medium.ttf"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 600; src: url("../../assets/fonts/instrument-sans/InstrumentSans-SemiBold.ttf"); }
+@font-face { font-family: "Instrument Sans"; font-weight: 700; src: url("../../assets/fonts/instrument-sans/InstrumentSans-Bold.ttf"); }
+@font-face { font-family: "Geist Mono"; font-weight: 400; src: url("../../assets/fonts/geist-mono/GeistMono-Regular.ttf"); }
+@font-face { font-family: "Geist Mono"; font-weight: 500; src: url("../../assets/fonts/geist-mono/GeistMono-Medium.ttf"); }
+
+:root { --ui: "Instrument Sans", -apple-system, sans-serif; --mono: "Geist Mono", ui-monospace, Menlo, monospace; --amber: #f2b35b; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #000; overflow: hidden; }
+body.player { display: grid; place-items: center; height: 100vh; }
+#stage { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #000; color: #ebe8e2; font-family: var(--ui); -webkit-font-smoothing: antialiased; transform-origin: center; }
+.layer { position: absolute; inset: 0; visibility: hidden; }
+.caret { display: inline-block; position: relative; width: 5px; background: var(--amber); border-radius: 2px; box-shadow: 0 0 26px rgba(242,179,91,.6); }
+.dot { color: var(--amber); }
+
+/* ---------- the noise ---------- */
+#noisebox { position: absolute; inset: 0; transform-origin: 960px 540px; }
+#noise .c { position: absolute; background: #121216; border: 1px solid #26262d; color: #74737b; font: 500 15px/1 var(--ui); overflow: hidden; }
+#noise .bare { background: none; border: none; overflow: visible; }
+#noise .row { display: flex; align-items: center; gap: 18px; height: 100%; padding: 0 14px; white-space: nowrap; }
+#noise .ico { width: 22px; height: 22px; border-radius: 5px; background: #2a2a31; flex: none; }
+#noise .col { display: flex; flex-direction: column; align-items: center; gap: 20px; padding-top: 16px; }
+#noise .tab { padding: 0 16px; height: 100%; display: flex; align-items: center; border-right: 1px solid #26262d; }
+#noise .line { height: 10px; border-radius: 3px; background: #24242a; margin: 10px 14px; }
+#noise .head { font: 600 13px/1 var(--ui); letter-spacing: .08em; color: #8b8a92; padding: 14px; }
+#noise .toast { background: #1b1b21; border: 1px solid #34343c; border-radius: 10px; color: #c9c7cf; font: 500 17px/1.35 var(--ui); padding: 16px 18px; box-shadow: 0 12px 40px rgba(0,0,0,.6); height: 100%; }
+#noise .toast b { display: block; color: #ebe8e2; font-weight: 600; margin-bottom: 6px; }
+#noise .btns { display: flex; gap: 10px; margin-top: 12px; }
+#noise .btn { background: #2e2e36; border-radius: 6px; padding: 6px 12px; font-size: 14px; color: #ebe8e2; }
+#noise .btn.blue { background: #3b6fd8; color: #fff; }
+#noise .badge { display: inline-block; background: #d9534f; color: #fff; border-radius: 9px; padding: 2px 7px; font-size: 12px; }
+#noise .modal { background: #18181d; border: 1px solid #3a3a42; border-radius: 14px; box-shadow: 0 30px 90px rgba(0,0,0,.75); color: #c9c7cf; font: 400 18px/1.5 var(--ui); padding: 26px 30px; height: 100%; }
+#noise .modal h3 { margin: 0 0 12px; font: 600 26px/1.2 var(--ui); color: #ebe8e2; }
+#noise .code { font: 400 15px/26px var(--mono); color: #4d4d55; padding: 12px 18px; white-space: pre; }
+#noise .ai { background: #1d1830; border: 1px solid #4b3f86; color: #cdbff7; border-radius: 10px; padding: 12px 16px; font: 500 17px/1.35 var(--ui); box-shadow: 0 12px 40px rgba(0,0,0,.6); height: 100%; }
+#noise .ai b { color: #e7defd; }
+#noise .ghost { font: italic 400 16px/1 var(--mono); color: #6c6680; white-space: nowrap; }
+#noise .spin { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #8d7fe0; border-right-color: transparent; vertical-align: -2px; margin-right: 8px; }
+#shout { position: absolute; left: 0; right: 0; top: 430px; text-align: center; }
+#shout span { display: inline-block; padding: 18px 46px 28px; border-radius: 26px; background: rgba(0,0,0,.82); font: 700 150px/1 var(--ui); letter-spacing: -0.035em; color: #fff; box-shadow: 0 30px 120px rgba(0,0,0,.9); }
+
+/* ---------- the name, and the quiet ---------- */
+#name { position: absolute; left: 0; right: 0; top: 400px; display: flex; justify-content: center; align-items: center; gap: 30px; font: 600 200px/1 var(--ui); letter-spacing: -0.035em; }
+#name .caret { width: 10px; height: 180px; border-radius: 5px; }
+#namesub { position: absolute; left: 0; right: 0; top: 650px; text-align: center; font: 400 48px/1.2 var(--ui); color: #9a99a1; }
+#quiet { position: absolute; left: 0; right: 0; top: 440px; text-align: center; font: 500 76px/1.35 var(--ui); letter-spacing: -0.02em; }
+#quiet .caret { height: 74px; vertical-align: -10px; margin-left: 10px; }
+#quiet .second { color: #9a99a1; }
+
+/* ---------- titles, keys ---------- */
+#scrim { position: absolute; left: 0; top: 0; bottom: 0; width: 1000px; background: linear-gradient(90deg, #000 0, #000 62%, rgba(0,0,0,0)); }
+#title { position: absolute; left: 120px; top: 0; bottom: 0; display: flex; flex-direction: column; justify-content: center; width: 760px; }
+#tword { font: 700 168px/0.92 var(--ui); letter-spacing: -0.045em; }
+#tsub { margin-top: 26px; font: 400 40px/1.25 var(--ui); color: #9a99a1; }
+#tsub b { font-weight: 500; color: #ebe8e2; }
+#keys { position: absolute; left: 120px; bottom: 96px; display: flex; }
+#keys .pill { display: flex; align-items: center; gap: 10px; }
+.key { min-width: 60px; height: 60px; padding: 0 18px; display: grid; place-items: center; border-radius: 12px; background: #17171c; border: 1px solid #34343c; border-bottom-width: 3px; font: 500 28px/1 var(--ui); color: #ebe8e2; }
+.key-alt { margin: 0 4px 0 14px; font: 400 23px/1 var(--ui); color: #66656d; }
+
+/* ---------- the window ---------- */
+#window { position: absolute; left: 0; top: 0; width: 1520px; height: 840px; border-radius: 14px; overflow: hidden; background: var(--bg); color: var(--fg); box-shadow: 0 40px 140px rgba(0,0,0,.9), 0 0 0 1px rgba(255,255,255,.09); transform-origin: 0 0; }
+.titlebar { position: absolute; left: 0; right: 0; top: 0; height: 50px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.light { position: absolute; top: 19px; width: 13px; height: 13px; border-radius: 50%; }
+.menu { position: absolute; left: 20px; top: 13px; color: var(--muted); font-size: 20px; line-height: 1; }
+.tabs { position: absolute; left: 104px; top: 8px; display: flex; gap: 6px; }
+.ftab { height: 34px; padding: 0 14px; display: flex; align-items: center; gap: 12px; border-radius: 8px; font-size: 16px; color: var(--muted); }
+.ftab.on { background: var(--raised); color: var(--fg); }
+.ftab .x { color: var(--muted); font-size: 13px; }
+.ctl { position: absolute; top: 0; right: 0; display: flex; }
+.ctl span { width: 54px; height: 50px; display: grid; place-items: center; color: var(--muted); }
+.sidebar { position: absolute; left: 0; top: 50px; bottom: 36px; width: 350px; border-right: 1px solid var(--line); background: var(--bg); }
+.segments { position: absolute; left: 16px; right: 16px; top: 14px; height: 40px; border: 1px solid var(--line); border-radius: 10px; display: flex; align-items: center; padding: 3px; font-size: 15px; color: var(--muted); }
+.segments span { padding: 7px 11px; border-radius: 7px; white-space: nowrap; }
+.segments span.on { background: var(--raised); color: var(--fg); }
+.project { position: absolute; left: 20px; font: 600 14px/1 var(--ui); letter-spacing: .04em; color: var(--muted); }
+.tree { position: absolute; left: 8px; right: 8px; font-size: 16px; }
+.tree div { height: 33px; display: flex; align-items: center; gap: 10px; border-radius: 8px; padding-left: 14px; color: var(--muted); }
+.tree div.on { background: var(--sel-row); color: var(--fg); }
+.tree .dot2 { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+.tree .on .dot2 { background: var(--caret); }
+.tree .chev { width: 10px; font-size: 13px; }
+.git .sub { position: absolute; left: 20px; top: 70px; display: flex; gap: 20px; font-size: 16px; color: var(--muted); }
+.git .sub .on { color: var(--fg); }
+.git .box { position: absolute; left: 16px; right: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.git .msg { padding: 14px 16px; font-size: 16px; line-height: 1.5; min-height: 90px; }
+.git .ph { color: var(--faint); }
+.git .acts { display: flex; justify-content: space-between; align-items: center; padding: 0 12px 12px; font-size: 15px; color: var(--muted); }
+.git .commit { border: 1px solid var(--line-2); border-radius: 8px; padding: 7px 14px; color: var(--fg); }
+.git .commit.go { background: var(--caret); color: var(--bg); border-color: var(--caret); }
+.git .incommit { position: absolute; left: 20px; right: 20px; font-size: 15px; }
+.git .incommit .h { font: 600 13px/1 var(--ui); letter-spacing: .04em; color: var(--muted); margin-bottom: 14px; }
+.git .file { display: flex; align-items: center; gap: 10px; font-size: 16px; }
+.git .cb { width: 16px; height: 16px; border-radius: 4px; background: var(--muted); color: var(--bg); font-size: 12px; display: grid; place-items: center; }
+.status { position: absolute; left: 0; right: 0; bottom: 0; height: 36px; display: flex; align-items: center; gap: 22px; padding: 0 22px; font-size: 15px; color: var(--muted); border-top: 1px solid var(--line); background: var(--bg); }
+.status .grow { flex: 1; }
+.status .aidot { width: 7px; height: 7px; border-radius: 50%; background: var(--caret); box-shadow: 0 0 10px var(--caret); }
+.code { position: absolute; left: 351px; right: 0; top: 51px; overflow: hidden; font: 400 18px/33px var(--mono); }
+.r { position: absolute; left: 0; right: 0; height: 33px; white-space: pre; }
+.r .n { position: absolute; left: 0; width: 64px; text-align: right; color: var(--faint); }
+.r .t { position: absolute; left: 100px; }
+.r.cur .n { color: var(--fg); }
+.r.cur { background: rgba(255,255,255,.025); }
+.r.del { background: var(--del); }
+.r.del .t span { color: var(--faint) !important; }
+.r.del .t .struck { text-decoration: line-through; text-decoration-color: var(--faint); }
+.r.add { background: var(--add); }
+.r.add::before { content: ""; position: absolute; left: 76px; top: 0; bottom: 0; width: 3px; background: var(--modified); }
+.hint { position: absolute; left: 100px; display: flex; gap: 8px; align-items: center; font: 400 15px/1 var(--ui); color: var(--muted); }
+.hint .k { border: 1px solid var(--line-2); border-radius: 6px; padding: 5px 7px; font-size: 13px; color: var(--fg); margin-left: 10px; }
+.hint .k:first-child { margin-left: 0; }
+.prompt { position: absolute; left: 100px; width: 780px; height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 12px; border-radius: 9px; background: var(--raised); border: 1px solid var(--caret-half); font: 400 18px/1 var(--ui); }
+.prompt .star { color: var(--caret); }
+.prompt .grow { flex: 1; color: var(--fg); }
+.prompt .ph { color: var(--faint); }
+.prompt .hintr { color: var(--muted); font-size: 15px; }
+.k-kw { color: var(--kw); } .k-ty { color: var(--ty); } .k-fn { color: var(--fn); } .k-st { color: var(--st); }
+.k-nu { color: var(--nu); } .k-co { color: var(--co); } .k-pu { color: var(--pu); } .k-at { color: var(--at); } .k-ma { color: var(--fn); }
+.codecaret { position: absolute; width: 2px; height: 25px; background: var(--caret); }
+.term { position: absolute; left: 351px; right: 0; bottom: 37px; border-top: 1px solid var(--line); background: var(--bg); overflow: hidden; }
+.term .h { position: absolute; left: 20px; top: 14px; font-size: 16px; display: flex; gap: 10px; }
+.term .h span:last-child { color: var(--muted); }
+.term .out { position: absolute; left: 18px; right: 18px; font: 400 17px/27px var(--mono); white-space: pre; }
+.g { color: #86d6a2; } .red { color: #e88d8d; } .b { font-weight: 500; }
+.tcaret { display: inline-block; width: 10px; height: 20px; background: var(--caret); vertical-align: -4px; }
+.palette { position: absolute; left: 330px; width: 860px; top: 70px; border-radius: 16px; background: var(--raised); border: 1px solid var(--line-2); box-shadow: 0 30px 90px rgba(0,0,0,.55); overflow: hidden; }
+.palette .q { height: 72px; display: flex; align-items: center; padding: 0 30px; font: 400 25px/1 var(--ui); border-bottom: 1px solid var(--line); position: relative; }
+.palette .q .ph { color: var(--faint); }
+.palette .q .r2 { position: absolute; right: 30px; font-size: 17px; color: var(--muted); }
+.palette .item { height: 54px; margin: 6px 9px; padding: 0 22px; display: flex; align-items: center; gap: 14px; border-radius: 10px; font-size: 19px; }
+.palette .item.on { background: var(--sel-row); }
+.palette .m { color: var(--caret); }
+.palette .w { margin-left: auto; color: var(--muted); font-size: 16px; }
+.notice { position: absolute; right: 24px; bottom: 54px; padding: 12px 18px; border-radius: 10px; background: var(--raised); border: 1px solid var(--line-2); font-size: 16px; box-shadow: 0 16px 40px rgba(0,0,0,.5); }
+
+/* ---------- pictures of the app ---------- */
+.shot { position: absolute; border-radius: 14px; overflow: hidden; box-shadow: 0 40px 140px rgba(0,0,0,.9), 0 0 0 1px rgba(255,255,255,.09); background: #000; }
+.shot canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+
+/* ---------- AI's providers ---------- */
+#chips { position: absolute; left: 120px; bottom: 96px; width: 760px; display: flex; flex-wrap: wrap; gap: 12px; }
+#chips span { padding: 10px 18px; border-radius: 12px; border: 1px solid #2c2c33; background: #0d0d10; font: 500 23px/1 var(--ui); color: #ebe8e2; }
+#chips i { font-style: normal; color: #66656d; font-size: 17px; margin-left: 8px; }
+
+/* ---------- themes, keys ---------- */
+#themenames { display: flex; gap: 22px; margin-top: 30px; font: 500 30px/1 var(--ui); color: #4d4c55; }
+#themenames span.on { color: #ebe8e2; }
+#keymaps { position: absolute; left: 0; right: 0; top: 0; bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 26px; }
+#keymaps .km { font: 700 120px/1 var(--ui); letter-spacing: -0.04em; color: #2a2a31; }
+#keymaps .km.on { color: #fff; }
+#keymaps .lead { font: 400 40px/1.2 var(--ui); color: #9a99a1; margin-top: 18px; }
+
+/* ---------- everywhere ---------- */
+.os { position: absolute; inset: 0; visibility: hidden; }
+.os .logo { position: absolute; left: 160px; top: 290px; width: 300px; height: 300px; display: grid; place-items: center; }
+.os .logo svg { width: 100%; height: 100%; overflow: visible; }
+.os .osname { position: absolute; left: 120px; top: 640px; width: 640px; text-align: center; font: 700 120px/1 var(--ui); letter-spacing: -0.04em; }
+.os .ossub { position: absolute; left: 120px; top: 790px; width: 640px; text-align: center; font: 400 34px/1.25 var(--ui); color: #9a99a1; }
+.os .frame { position: absolute; left: 820px; top: 180px; width: 1520px; height: 840px; transform-origin: 0 0; }
+
+/* ---------- everything at once ---------- */
+#tiles .tile { position: absolute; width: 560px; height: 310px; border-radius: 10px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.8), 0 0 0 1px rgba(255,255,255,.1); background: #000; }
+#tiles .tile > div { position: absolute; left: 0; top: 0; width: 1520px; height: 840px; transform: scale(0.3684); transform-origin: 0 0; }
+#tiles .tile canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+
+/* ---------- the end ---------- */
+#endmark { position: absolute; left: 0; right: 0; top: 310px; display: flex; justify-content: center; align-items: center; gap: 34px; font: 600 210px/1 var(--ui); letter-spacing: -0.035em; }
+#endmark .caret { width: 11px; height: 190px; border-radius: 5px; }
+#tagline { position: absolute; left: 0; right: 0; top: 580px; text-align: center; font: 400 50px/1.2 var(--ui); color: #b9b7bf; }
+#cta { position: absolute; left: 0; right: 0; top: 700px; display: flex; justify-content: center; }
+#cta span { padding: 16px 34px; border-radius: 16px; background: var(--amber); color: #1b1206; font: 600 36px/1 var(--ui); }
+#facts { position: absolute; left: 0; right: 0; top: 806px; text-align: center; font: 500 28px/1.2 var(--ui); color: #6f6e76; }
+
+#bar { position: fixed; left: 0; right: 0; bottom: 0; height: 6px; background: #111; cursor: pointer; }
+#bar div { height: 100%; background: var(--amber); width: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="layer" id="noise"><div id="noisebox"></div><div id="shout"><span id="shouttext"></span></div></div>
+  <div class="layer" id="intro"><div id="name"><span class="caret" id="namecaret"></span><span id="nametext"></span></div><div id="namesub">A calm, fast code editor.</div></div>
+  <div class="layer" id="story"><div id="window"></div></div>
+  <div class="layer" id="md"><div class="shot" id="mdshot"><canvas data-src="../promo/shots/md.jpg"></canvas></div></div>
+  <div class="layer" id="quiet"><span id="q1"></span><br><span class="second" id="q2"></span><span class="caret" id="qcaret"></span></div>
+  <div class="layer" id="keymapsl"><div id="keymaps"></div></div>
+  <div class="layer" id="everywhere"></div>
+  <div class="layer" id="tiles"></div>
+  <div class="layer" id="words"><div id="scrim"></div><div id="title"><div id="tword"></div><div id="tsub"></div></div><div id="keys"></div><div id="chips"></div></div>
+  <div class="layer" id="end">
+    <div id="endmark"><span class="caret"></span><span>Null</span></div>
+    <div id="tagline">A calm, fast code editor.</div>
+    <div id="cta"><span>null-ide.com</span></div>
+    <div id="facts">Free to use&nbsp;&nbsp;·&nbsp;&nbsp;macOS&nbsp;&nbsp;·&nbsp;&nbsp;Windows&nbsp;&nbsp;·&nbsp;&nbsp;Linux</div>
+  </div>
+</div>
+<script>
+"use strict";
+const QUERY = new URLSearchParams(location.search);
+
+// ---------- the music's clock ----------
+const BEAT = 0.4995, BAR = 4 * BEAT;
+const B = k => 0.07 + BAR * k;          // bar k (the first beat is 70 ms in)
+window.DURATION = 54.5;                 // the last hit at B(25), then the card stays
+
+// ---------- helpers ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const out3 = x => 1 - Math.pow(1 - x, 3);
+const out5 = x => 1 - Math.pow(1 - x, 5);
+const inOut = x => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const in3 = x => x * x * x;
+const fade = (t, a, b, c, d) => Math.min(out3(prog(t, a, b)), 1 - in3(prog(t, c, d)));
+const blink = (t, since = -1, still = 0.5) => (t - since < still ? 1 : ((t - since - still) % 1.0) < 0.5 ? 1 : 0);
+/** A little overshoot as something lands: 0 → 1, past 1, settling. */
+const land = x => (x <= 0 ? 0 : x >= 1 ? 1 : 1 + Math.sin(x * Math.PI * 1.2) * (1 - x) * 0.35 - Math.pow(1 - x, 3));
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function show(id, o, transform) {
+  const el = typeof id === "string" ? $(id) : id;
+  el.style.opacity = o;
+  el.style.visibility = o > 0.001 ? "visible" : "hidden";
+  if (transform !== undefined) el.style.transform = transform;
+  return o > 0.001;
+}
+function setHTML(id, html) { const el = typeof id === "string" ? $(id) : id; if (el.dataset.h !== html) { el.innerHTML = html; el.dataset.h = html; } }
+
+// Sounds the trailer asks for (score.swift makes and mixes them): [time, kind, loudness].
+window.SOUNDS = [];
+const sound = (t, kind, gain = 1) => window.SOUNDS.push([+t.toFixed(3), kind, gain]);
+function seeded(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+/** Someone typing `text` from `start`: each character its own (repeatable) moment, a key sound each. */
+function typing(text, start, perChar, seed = 7, gain = 0.45) {
+  const r = seeded(seed), at = [];
+  let time = start;
+  for (const ch of text) {
+    time += perChar * (0.55 + r() * 0.9) + (ch === " " ? perChar * 0.4 : 0) + (ch === "\n" ? perChar * 3 : 0);
+    at.push(time);
+    if (gain > 0) sound(time, ch === "\n" ? "enter" : "key", gain * (0.75 + r() * 0.5));
+  }
+  return {
+    text, at, start, end: time,
+    shown(t) { let n = 0; while (n < at.length && at[n] <= t) n++; return text.slice(0, n); },
+    last(t) { let l = start; for (const a of at) if (a <= t) l = a; return l; },
+  };
+}
+/** Keys pressed, shown under the title: [from, to, keys, on Windows and Linux]. */
+const KEYS = [];
+function press(t, keys, alt = "", hold = 0.8) { KEYS.push([t - 0.08, t + hold, keys, alt]); sound(t, "press", 0.7); }
+
+// ---------- Rust colours ----------
+const KW = new Set("pub fn let const struct impl match if else self Self use mut as return for in where enum crate mod async await".split(" "));
+function colour(src) {
+  const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|(#\[[^\]]*\])|(\b\d[\d_]*\b)|(\b[a-z_][a-z0-9_]*!)|(\b[A-Za-z_][A-Za-z0-9_]*\b)(?=\s*\()|(\b[A-Za-z_][A-Za-z0-9_]*\b)|([^\sA-Za-z0-9_])/g;
+  let out = "", last = 0, m;
+  while ((m = re.exec(src))) {
+    out += esc(src.slice(last, m.index));
+    const [w] = m;
+    let cls;
+    if (m[1]) cls = "co"; else if (m[2]) cls = "st"; else if (m[3]) cls = "at"; else if (m[4]) cls = "nu"; else if (m[5]) cls = "ma";
+    else if (m[6]) cls = KW.has(w) ? "kw" : /^[A-Z]/.test(w) ? "ty" : "fn";
+    else if (m[7]) cls = KW.has(w) ? "kw" : /^[A-Z]/.test(w) || /^(u8|u32|u64|str|bool)$/.test(w) ? "ty" : null;
+    else cls = "pu";
+    out += cls ? `<span class="k-${cls}">${esc(w)}</span>` : esc(w);
+    last = m.index + w.length;
+  }
+  return out + esc(src.slice(last));
+}
+
+// ---------- Null's six themes (src/theme.rs) ----------
+const THEMES = {
+  Null: { bg: "#000000", surface: "#08080a", fg: "#ebe8e2", muted: "#8b8a92", faint: "#46464e", line: "#1d1d22", line2: "#2c2c33", raised: "#141418", caret: "#f2b35b", kw: "#c6a6f6", ty: "#87c7e1", fn: "#f1d9a9", st: "#a9d59c", nu: "#f3a37e", co: "#5f626e", pu: "#8d8c96", at: "#9aa6ba" },
+  Ash: { bg: "#131417", surface: "#18191d", fg: "#e4e3e0", muted: "#8f8f98", faint: "#4d4e56", line: "#26272d", line2: "#33343b", raised: "#212227", caret: "#efb565", kw: "#c4a8f0", ty: "#8ac6dd", fn: "#eed9b0", st: "#acd3a0", nu: "#f0a685", co: "#676a75", pu: "#91909a", at: "#9ca7b8" },
+  Midnight: { bg: "#0b0e14", surface: "#0f131b", fg: "#dfe4ee", muted: "#8590a6", faint: "#414b60", line: "#1c2230", line2: "#283044", raised: "#151a24", caret: "#7cc4e8", kw: "#b7a3f2", ty: "#8bd0e6", fn: "#e9d7a8", st: "#a4d4a3", nu: "#f0a682", co: "#58627a", pu: "#8890a3", at: "#9aa8c2" },
+  Moss: { bg: "#101311", surface: "#141815", fg: "#e2e5dd", muted: "#8c9488", faint: "#474f47", line: "#222823", line2: "#2e352f", raised: "#1a1f1b", caret: "#b5cf85", kw: "#d0a6d8", ty: "#8ec9c0", fn: "#e8d39c", st: "#b7d48f", nu: "#eba37c", co: "#606b5f", pu: "#8f968b", at: "#a2ad9c" },
+  Paper: { bg: "#fcfcfb", surface: "#f4f4f2", fg: "#1d1e22", muted: "#6a6b72", faint: "#b0b1b7", line: "#e6e5e1", line2: "#d9d8d3", raised: "#ffffff", caret: "#b4620c", kw: "#7a3ec8", ty: "#1e6c92", fn: "#8c4a00", st: "#3a7a2e", nu: "#b4461e", co: "#9a9ca3", pu: "#6f7077", at: "#5c6b82" },
+  Dune: { bg: "#f6f1e7", surface: "#efe8da", fg: "#2b2620", muted: "#75695a", faint: "#b6aa97", line: "#e2d9c7", line2: "#d6ccb8", raised: "#fbf8f1", caret: "#b5532d", kw: "#8a3f8f", ty: "#2c6e7f", fn: "#8f4a10", st: "#527a26", nu: "#b5532d", co: "#a2967f", pu: "#7a6e5e", at: "#6a6455" },
+};
+const THEME_NAMES = Object.keys(THEMES);
+function applyTheme(el, name = "Null") {
+  const th = THEMES[name], set = (k, v) => el.style.setProperty(k, v);
+  if (el.dataset.theme === name) return;
+  el.dataset.theme = name;
+  set("--bg", th.bg); set("--surface", th.surface); set("--fg", th.fg); set("--muted", th.muted); set("--faint", th.faint);
+  set("--line", th.line); set("--line-2", th.line2); set("--raised", th.raised); set("--caret", th.caret);
+  set("--caret-half", th.caret + "80"); set("--sel-row", th.caret + "24");
+  for (const k of ["kw", "ty", "fn", "st", "nu", "co", "pu", "at"]) set("--" + k, th[k]);
+  const light = name === "Paper" || name === "Dune";
+  set("--add", light ? "rgba(40,150,80,.12)" : "rgba(104,201,140,.12)"); set("--del", light ? "rgba(200,60,60,.10)" : "rgba(238,104,104,.11)"); set("--modified", "#7fa8e0");
+}
+
+// ---------- the shop ----------
+const CART = [
+  "use crate::price::Cents;", "",
+  "/// Orders at or above this ship for free.",
+  "const FREE_SHIPPING: Cents = Cents(50_00);",
+  "const SHIPPING: Cents = Cents(4_90);", "",
+  "#[derive(Debug, Clone)]", "pub struct Item {", "    pub name: String,", "    pub price: Cents,", "    pub quantity: u32,", "}", "",
+  "#[derive(Debug, Default)]", "pub struct Cart {", "    items: Vec<Item>,", "}", "",
+  "impl Cart {", "    pub fn add(&mut self, item: Item) {", "        self.items.push(item);", "    }", "",
+];
+const SUBTOTAL = ["    /// What the items cost together, before shipping.", "    pub fn subtotal(&self) -> Cents {", "        self.items.iter().map(|i| i.price * i.quantity).sum()", "    }", ""];
+const SHIPPING_FN = ["    pub fn shipping(&self) -> Cents {", "        SHIPPING", "    }", "}"];
+const FIXED = ["        if self.subtotal() >= FREE_SHIPPING {", "            Cents(0)", "        } else {", "            SHIPPING", "        }"];
+const CART_DONE = CART.concat(SUBTOTAL, SHIPPING_FN);
+const SHIP_LINE = CART_DONE.indexOf(SHIPPING_FN[0]);
+const CART_FIXED = CART_DONE.slice(0, SHIP_LINE + 1).concat(FIXED, CART_DONE.slice(SHIP_LINE + 2));
+const TEST = [
+  "use shop::cart::{Cart, Item};", "use shop::price::Cents;", "",
+  "#[test]", "fn adds_items() {", "    let mut cart = Cart::default();", "    cart.add(Item::new(\"Mug\", Cents(12_00), 1));", "    assert_eq!(cart.subtotal(), Cents(12_00));", "}", "",
+  "#[test]", "fn free_shipping_above_50() {", "    let mut cart = Cart::default();", "    cart.add(Item::new(\"Lamp\", Cents(64_00), 1));", "    assert_eq!(cart.shipping(), Cents(0));", "}",
+];
+const RUN = [
+  "<span class='g b'>   Compiling</span> shop v0.1.0", "<span class='g b'>    Finished</span> test profile in 0.31s", "",
+  "running 4 tests", "test cart::adds_items ... <span class='g'>ok</span>", "test cart::empty_cart_costs_nothing ... <span class='g'>ok</span>",
+  "test cart::subtotal_counts_quantities ... <span class='g'>ok</span>", "test cart::free_shipping_above_50 ... <span class='g'>ok</span>", "",
+  "test result: <span class='g'>ok</span>. 4 passed; 0 failed",
+];
+
+// ---------- the timeline ----------
+const T = {
+  name: typing("Null", B(4) + 0.5, 0.1, 3, 0.6),
+  code: typing(SUBTOTAL[2].trimStart(), B(6) + 0.2, 0.017, 5),
+  query: typing("tests", B(7) + 0.3, 0.07, 9),
+  multi: typing("(crate)", B(8) + 1.05, 0.06, 19),
+  cmd: typing("cargo test", B(9) + 0.25, 0.04, 21),
+  draft: typing("Free shipping above 50 €\nOrders of FREE_SHIPPING or more ship free.", B(10) + 0.35, 0.008, 17, 0),
+  q1: typing("And AI?", B(12) + 0.35, 0.09, 23, 0.6),
+  q2: typing("Only when you ask.", B(13) + 0.1, 0.06, 29, 0.6),
+  ask: typing("free shipping above 50 €", B(14) + 0.45, 0.045, 13),
+};
+press(B(7) + 0.05, ["⌘", "P"], "Ctrl+P");
+press(B(7) + 1.35, ["↵"]);
+press(B(8) + 0.25, ["⌘", "D"], "Ctrl+D", 0.5);
+press(B(8) + 0.75, ["⌘", "D"], "Ctrl+D", 0.4);
+press(B(9) + 0.05, ["⌃", "`"], "Ctrl+J");
+press(T.cmd.end + 0.12, ["↵"], "", 0.5);
+press(B(10) + 1.2, ["⌘", "↵"], "Ctrl+Enter");
+press(B(14) + 0.1, ["⌘", "I"], "Ctrl+I");
+press(T.ask.end + 0.25, ["↵"]);
+press(B(17), ["⇥"], "Tab");
+sound(B(4) - 0.28, "whoosh", 1);
+sound(B(17) + 0.05, "tick", 1);
+sound(B(10) + 1.25, "tick", 0.8);
+
+/** The big words, left: [from, to, word, under it]. */
+const TITLES = [
+  [B(6) + 0.12, B(7), "Calm", "The bars fade while you write."],
+  [B(7) + 0.06, B(8), "Fast", "Any file, one keystroke away."],
+  [B(8) + 0.06, B(9), "Precise", "Many cursors, one edit."],
+  [B(9) + 0.06, B(10), "Run", "The terminal, one key away."],
+  [B(10) + 0.06, B(11), "Commit", "Git, built in."],
+  [B(11) + 0.06, B(12) - 0.3, "Write", "Markdown, with a live preview."],
+  [B(14) + 0.1, B(18), "AI", "When you ask. Nowhere when you don't."],
+  [B(18) + 0.04, B(19.5), "Six themes", ""],
+];
+
+// ---------- the noise: everything an editor can throw at you, one thing per half beat ----------
+const NOISE = [
+  // [left, top, width, height, html, bare, from (slide direction)]
+  [0, 0, 1920, 36, `<div class="row">${"File Edit Selection View Go Run Terminal Window Help".split(" ").map(w => `<span>${w}</span>`).join("")}</div>`, 0],
+  [394, 156, 1036, 570, `<div class="code">use crate::price::Cents;\n\nconst FREE_SHIPPING: Cents = Cents(50_00);\nconst SHIPPING: Cents = Cents(4_90);\n\n#[derive(Debug, Clone)]\npub struct Item {\n    pub name: String,\n    pub price: Cents,\n    pub quantity: u32,\n}\n\nimpl Cart {\n    pub fn add(&mut self, item: Item) {</div>`, 0],
+  [0, 36, 1920, 48, `<div class="row">${Array(14).fill('<span class="ico"></span>').join("")}<span style="margin-left:auto;background:#1d1d23;border:1px solid #2e2e36;border-radius:7px;padding:8px 160px 8px 12px">Search…</span><span>▶ Run</span><span>Debug ▾</span><span>Sign in to sync</span></div>`, 0],
+  [0, 84, 64, 966, `<div class="col">${Array(10).fill('<span class="ico"></span>').join("")}<span class="badge" id="nb1">12</span></div>`, 0],
+  [64, 84, 330, 966, `<div class="head">EXPLORER</div>${Array(9).fill('<div class="line"></div>').join("")}<div class="head">OPEN EDITORS <span class="badge">9</span></div>${Array(5).fill('<div class="line"></div>').join("")}<div class="head">OUTLINE</div>${Array(4).fill('<div class="line"></div>').join("")}<div class="head">TIMELINE</div><div class="head">NPM SCRIPTS</div>`, 0],
+  [394, 84, 1126, 42, `<div class="row" style="padding:0;gap:0">${["cart.rs", "lib.rs", "price.rs", "README.md", "Cargo.toml", "settings.json", "Welcome", "Release Notes", "untitled-3"].map(n => `<span class="tab">${n} ✕</span>`).join("")}</div>`, 0],
+  [394, 126, 1126, 30, `<div class="row" style="font-size:14px">src › cart.rs › impl Cart › fn add › item  ·  ⚑ 2 references  ·  ✎ You, 3 days ago</div>`, 0],
+  [1430, 156, 90, 570, Array(30).fill(0).map((_, i) => `<div style="height:4px;margin:6px 10px;width:${30 + ((i * 37) % 50)}px;background:#2a2a31"></div>`).join(""), 0],
+  [394, 726, 1126, 324, `<div class="row" style="height:42px;border-bottom:1px solid #26262d;font-size:14px;letter-spacing:.05em">PROBLEMS <span class="badge" id="nb2">12</span> OUTPUT  DEBUG CONSOLE  TERMINAL  PORTS  GIT LOG  TEST RESULTS</div><div class="code" style="color:#5e5d66">warning: unused import: \`std::fmt\`\n  --> src/lib.rs:3:5\nwarning: field \`quantity\` is never read\nerror[E0308]: mismatched types\n[Info  - 10:42:13] Indexing workspace… <span id="nb3">37</span>%\n[Info  - 10:42:14] Downloading telemetry config…</div>`, 0],
+  [0, 1050, 1920, 30, `<div class="row" style="font-size:13px;background:#1e3a6e;color:#d6e2ff;height:30px">⑂ main*  ⟳ 0↓ 3↑  ⊗ 4  ⚠ <span id="nb4">37</span>  ·  Ln 1, Col 1  ·  Spaces: 4  ·  UTF-8  ·  LF  ·  {} Rust  ·  🔔 <span id="nb5">3</span>  ·  Indexing…  ·  ☁ Sync off</div>`, 0],
+  [1460, 640, 440, 140, `<div class="toast"><b>A new version is available</b>Restart to update now?<div class="btns"><span class="btn blue">Restart</span><span class="btn">Later</span><span class="btn">Release notes</span></div></div>`, 1, "right"],
+  [1460, 795, 440, 120, `<div class="toast"><b>Recommended extensions</b>12 extensions are recommended for this file type.<div class="btns"><span class="btn blue">Install all</span><span class="btn">Show</span></div></div>`, 1, "right"],
+  [300, 90, 520, 110, `<div class="toast"><b>Sign in to sync your settings</b><div class="btns"><span class="btn blue">Sign in</span><span class="btn">Not now</span></div></div>`, 1, "up"],
+  [610, 200, 700, 300, `<div class="modal"><h3>What's new in version 2.84</h3>• A redesigned activity bar with 6 new panels<br>• Smarter notifications (now with sounds)<br>• Personalised tips, every time you open a file<br>• Sign in to unlock cloud settings sync</div>`, 1],
+  [120, 640, 460, 150, `<div class="toast"><b>💡 Tip of the day</b>Did you know you can customise 4,000 settings?<div class="btns"><span class="btn">Next tip</span><span class="btn">Close</span></div></div>`, 1, "left"],
+  [1460, 930, 440, 110, `<div class="toast"><b>Your session expires in 5 minutes</b><div class="btns"><span class="btn blue">Stay signed in</span></div></div>`, 1, "right"],
+  [820, 860, 560, 92, `<div class="toast" style="background:#2a2116;border-color:#5a4520;color:#e9cf9f"><b style="color:#f6dcaa">Your trial ends in 3 days</b>Upgrade to keep using premium features.</div>`, 1, "up"],
+  [1080, 300, 420, 120, `<div class="toast"><b>★ Enjoying the editor?</b>Rate us on the marketplace!<div class="btns"><span class="btn">★★★★★</span></div></div>`, 1, "right"],
+  [1520, 84, 400, 556, `<div class="head">✦ ASSISTANT <span class="badge">NEW</span></div><div class="toast" style="margin:10px 14px;height:auto">How can I help you today? I can explain, refactor, write tests…</div><div class="toast" style="margin:10px 14px;height:auto">⚡ Upgrade for faster answers</div>`, 0],
+  [560, 520, 820, 30, `<div class="ghost">fn calculate_total_with_tax_and_shipping_and_discount_v2(&amp;self) -&gt; …  ⇥ accept</div>`, 1],
+  [700, 250, 380, 60, `<div class="ai"><b>✦ Fix with AI</b>  ·  ✦ Explain  ·  ✦ Test</div>`, 1],
+  [430, 560, 520, 96, `<div class="ai"><b>✦ Want me to explain this file?</b><div class="btns"><span class="btn" style="background:#4b3f86">Explain</span><span class="btn">Don't ask again</span></div></div>`, 1, "up"],
+  [960, 420, 520, 70, `<div class="ai"><span class="spin" id="spin1"></span><b>Agent is editing 14 files…</b></div>`, 1, "right"],
+  [140, 360, 480, 96, `<div class="ai"><b>✦ Let AI write your commit message?</b><div class="btns"><span class="btn" style="background:#4b3f86">Generate</span></div></div>`, 1, "left"],
+  [1180, 520, 330, 52, `<div class="ai">✦ Ask AI  <span style="color:#7d70b8">⌘L</span></div>`, 1],
+  [620, 700, 640, 110, `<div class="ai"><b>✦ You've used 80% of your AI credits</b>Upgrade to Pro for unlimited completions.</div>`, 1, "up"],
+  [300, 210, 360, 52, `<div class="ai">✦ 3 suggestions available</div>`, 1],
+];
+const NOISE_AT = i => B(0) + 0.02 + i * (B(3.75) - B(0)) / NOISE.length;
+const STOP = B(4);
+const SHOUTS = [[B(2), "Panels."], [B(2) + 2 * BEAT, "Pop-ups."], [B(3), "Badges."], [B(3) + 2 * BEAT, "Bots."]];
+const COUNTERS = [["nb1", 12, 99], ["nb2", 12, 999], ["nb3", 37, 99], ["nb4", 37, 999], ["nb5", 3, 99]];
+function buildNoise() {
+  $("noisebox").innerHTML = NOISE.map(([l, tp, w, h, html, bare], i) =>
+    `<div class="c ${bare ? "bare" : ""}" id="n${i}" style="left:${l}px;top:${tp}px;width:${w}px;height:${h}px">${html}</div>`).join("");
+  NOISE.forEach(([, , , , , , from], i) => sound(NOISE_AT(i), from ? "pop" : "thock", from ? 0.45 : 0.3));
+}
+
+// ---------- the window, from what a scene says ----------
+const SVG = {
+  min: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.5 8h9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+  max: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="3.5" y="3.5" width="9" height="9" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>',
+  close: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5l7 7m0-7l-7 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  branch: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="4.5" cy="3.5" r="1.6"/><circle cx="4.5" cy="12.5" r="1.6"/><circle cx="11.5" cy="5.5" r="1.6"/><path d="M4.5 5.1v5.8M11.5 7.1c0 2.4-2 3-5 3.9"/></svg>',
+};
+const TREE = [["⌄ src", 0], ["cart.rs", 1], ["lib.rs", 1], ["price.rs", 1], ["⌄ tests", 0], ["cart.rs", 1, "test"], ["Cargo.toml", 0], ["README.md", 0]];
+const treeHTML = items => items.map(([n, d, on]) => `<div class="${on ? "on" : ""}" style="padding-left:${14 + d * 22}px">${n.startsWith("⌄") ? `<span class="chev">⌄</span>${n.slice(2)}` : `<span class="dot2"></span>${n}`}</div>`).join("");
+let charW = 10.8;
+
+/** The window's inside, from a scene's state. */
+function windowHTML(s) {
+  const lh = 33, codeBottom = 37 + (s.term ? s.term.h : 0);
+  const mac = (s.chrome || "mac") === "mac";
+  let h = `<div class="titlebar">`;
+  h += mac
+    ? `<div class="light" style="left:22px;background:#fe5f57"></div><div class="light" style="left:46px;background:#febc2e"></div><div class="light" style="left:70px;background:#28c840"></div>`
+    : `<div class="menu">≡</div><div class="ctl"><span>${SVG.min}</span><span>${SVG.max}</span><span>${SVG.close}</span></div>`;
+  h += `<div class="tabs" style="left:${mac ? 104 : 56}px;opacity:${0.35 + 0.65 * s.bars}">${s.tabs.map(([n, on]) => `<div class="ftab ${on ? "on" : ""}"><span>${n}</span>${on ? '<span class="x">✕</span>' : ""}</div>`).join("")}</div></div>`;
+  h += `<div class="sidebar" style="opacity:${s.bars}"><div class="segments">${["Files", "Outline", "Tests", "Search", "Git 1"].map(n => `<span class="${(s.sidebar === "git") === (n === "Git 1") ? "on" : ""}">${n}</span>`).join("")}</div>`;
+  if (s.sidebar === "git") {
+    const g = s.git;
+    h += `<div class="git"><div class="sub"><span class="on">Changes</span><span>History</span><span>Branches</span></div>
+      <div class="box" style="top:108px;padding:14px 16px;font-size:16px;display:flex;gap:10px;align-items:center">${SVG.branch}<span>main</span><span style="margin-left:auto;color:var(--muted)">${g.ahead ? "↑1" : ""}</span></div>
+      <div class="box" style="top:170px"><div class="msg">${g.message ? g.message : '<span class="ph">Commit message</span><br><span class="ph" style="font-size:15px">Body: what and why (optional)</span>'}</div>
+      <div class="acts"><span style="color:${g.drafting ? "var(--caret)" : "var(--muted)"}">✦ Draft</span><span class="commit ${g.go ? "go" : ""}">Commit 1 file ⌘↵</span></div></div>
+      <div class="incommit" style="top:340px;opacity:${g.files}"><div class="h">IN THIS COMMIT</div><div class="file"><span class="cb">✓</span><span>cart.rs</span><span style="color:var(--muted)">src</span><span style="margin-left:auto;color:#86d6a2">+9</span><span style="color:#e88d8d">−1</span></div></div></div>`;
+  } else {
+    h += `<div class="project" style="top:76px">SHOP</div><div class="tree" style="top:102px">${treeHTML(TREE.map(([n, d, k]) => [n, d, s.active === "test" ? k === "test" : n === "cart.rs" && !k]))}</div>`;
+  }
+  h += `</div><div class="code" style="bottom:${codeBottom}px">`;
+  let y = 10 - s.scroll * lh, caretY = null, caretN = 1;
+  const tops = [];
+  s.rows.forEach((r, i) => {
+    const rh = (r.h === undefined ? 1 : r.h) * lh;
+    tops[i] = y;
+    if (rh < 0.5) return;
+    const top = y;
+    y += rh;
+    if (r.caret) caretN = r.n;
+    if (top > 900 || top + rh < -40) return;
+    if (r.prompt) { h += `<div class="prompt" style="top:${top + 6}px;opacity:${r.o}">${r.prompt}</div>`; return; }
+    if (r.hint) { h += `<div class="hint" style="top:${top + 8}px;opacity:${clamp(rh / lh)}"><span class="k">⇥</span>keep<span class="k">Esc</span>undo<span class="k">⌘I</span>adjust</div>`; return; }
+    const text = r.cls === "del" ? r.text.match(/^\s*/)[0] + `<span class="struck">${colour(r.text.trim())}</span>` : colour(r.text);
+    const bg = r.fadeBg !== undefined ? `background:rgba(104,201,140,${0.12 * r.fadeBg});` : "";
+    h += `<div class="r ${r.cls || ""} ${r.caret ? "cur" : ""}" style="top:${top}px;height:${rh}px;overflow:hidden;${bg}${r.alpha !== undefined ? `opacity:${r.alpha};` : ""}"><span class="n">${r.n || ""}</span><span class="t">${text}</span></div>`;
+    if (r.caret) caretY = top;
+  });
+  if (caretY !== null && s.caretOn !== false) h += `<div class="codecaret" style="left:${100 + s.caretCol * charW}px;top:${caretY + 4}px;opacity:${s.caretBlink}"></div>`;
+  for (const [row, col] of s.carets || []) h += `<div class="codecaret" style="left:${100 + col * charW}px;top:${tops[row] + 4}px;opacity:${s.caretBlink}"></div>`;
+  h += `</div>`;
+  if (s.term) {
+    const tm = s.term, lines = tm.lines.slice(-Math.max(1, Math.floor((tm.h - 60) / 27)));
+    h += `<div class="term" style="height:${tm.h}px"><div class="h"><span>Terminal</span><span>shop</span></div><div class="out" style="top:52px">${lines.join("\n")}</div></div>`;
+  }
+  const st = s.status || {};
+  h += `<div class="status" style="opacity:${0.3 + 0.7 * s.bars}"><span style="display:flex;align-items:center;gap:7px">${SVG.branch}main</span><span>${st.crumbs || ""}</span><span class="grow"></span>
+    ${st.ai ? `<span class="aidot" style="opacity:${st.ai}"></span>` : ""}<span>${s.carets && s.carets.length ? `${s.carets.length + 1} cursors` : `Ln ${caretN}, Col ${s.caretCol + 1}`}</span><span>Rust</span></div>`;
+  if (s.notice) h += `<div class="notice" style="opacity:${s.notice[1]}">${s.notice[0]}</div>`;
+  if (s.dim) h += `<div style="position:absolute;inset:0;background:#000;opacity:${s.dim.toFixed(3)}"></div>`;
+  return h + (s.overlay || "");
+}
+
+const rowsOf = (lines, start = 1) => lines.map((text, i) => ({ text, n: start + i }));
+const baseState = () => ({ tabs: [["cart.rs", true]], active: "cart", bars: 1, rows: [], scroll: 0, caretCol: 4, caretBlink: 1, sidebar: "files", status: { crumbs: "src/cart.rs › Cart" } });
+
+// ---------- the story: one scene a bar ----------
+function storyState(t) {
+  const s = baseState();
+  if (t < B(7)) {
+    // Calm: writing a line, the bars fading away while the hands are busy.
+    const typed = T.code.shown(t);
+    const lines = CART.concat(SUBTOTAL.slice(0, 2), ["        " + typed]);
+    s.rows = rowsOf(lines.concat(SUBTOTAL.slice(3), SHIPPING_FN));
+    s.rows[lines.length - 1].caret = true;
+    s.caretCol = 8 + typed.length;
+    s.scroll = 9;
+    s.caretBlink = blink(t, T.code.last(t), 0.4);
+    s.bars = t < T.code.start ? 1 : 1 - 0.88 * out3(prog(t, T.code.start, T.code.start + 0.45));
+    s.status.crumbs = "src/cart.rs › subtotal";
+  } else if (t < B(8)) {
+    // Fast: ⌘P, "tests", ↵.
+    const opened = t > B(7) + 1.35;
+    const p = fade(t, B(7) + 0.06, B(7) + 0.2, B(7) + 1.35, B(7) + 1.48);
+    s.rows = rowsOf(opened ? TEST : CART_DONE);
+    s.scroll = opened ? 0 : 9;
+    if (opened) { s.tabs = [["cart.rs", false], ["cart.rs  tests", true]]; s.active = "test"; s.rows[13].caret = true; s.status.crumbs = "tests/cart.rs › free_shipping_above_50"; }
+    else s.rows[CART.length + 2].caret = true;
+    s.caretBlink = blink(t, B(7) + 1.4, 0.5);
+    if (p > 0) {
+      const q = T.query.shown(t);
+      const hits = q.length >= 2
+        ? [["<span class='m'>tests</span>/cart.rs", "tests"], ["src/cart.rs", "src"], ["README.md", ""]]
+        : [["cart.rs", "src"], ["lib.rs", "src"], ["price.rs", "src"], ["cart.rs", "tests"], ["README.md", ""]];
+      s.overlay = `<div class="palette" style="opacity:${p};transform:translateY(${(1 - p) * -10}px)"><div class="q"><span style="display:inline-block;width:2px;height:28px;background:var(--caret);margin-right:2px;opacity:${blink(t, T.query.last(t), 0.4)}"></span>${q ? esc(q) : '<span class="ph">Go to file, @ for a symbol</span>'}<span class="r2">↵ open</span></div>
+        ${hits.map((h, i) => `<div class="item ${i === 0 ? "on" : ""}"><span>${h[0]}</span><span class="w">${h[1]}</span></div>`).join("")}<div style="height:6px"></div></div>`;
+    }
+  } else if (t < B(9)) {
+    // Precise: three fields, three cursors, one edit.
+    const typed = T.multi.shown(t);
+    const lines = CART_DONE.slice();
+    for (const i of [8, 9, 10]) lines[i] = lines[i].replace("pub ", `pub${typed} `);
+    s.rows = rowsOf(lines);
+    s.scroll = 2;
+    s.rows[8].caret = true;
+    s.caretCol = 7 + typed.length;
+    s.carets = [];
+    if (t > B(8) + 0.25) s.carets.push([9, 7 + typed.length]);
+    if (t > B(8) + 0.75) s.carets.push([10, 7 + typed.length]);
+    s.caretBlink = blink(t, Math.max(T.multi.last(t), B(8) + 0.75), 0.5);
+    s.status.crumbs = "src/cart.rs › Item";
+  } else if (t < B(10)) {
+    // Run: the terminal, the tests, all green.
+    s.rows = rowsOf(CART_DONE);
+    s.scroll = 12;
+    s.rows[SHIP_LINE].caret = true;
+    s.caretOn = false;
+    const open = out3(prog(t, B(9) + 0.02, B(9) + 0.25));
+    const cmd = T.cmd.shown(t), ran = t > T.cmd.end + 0.12;
+    const lines = [`shop % ${cmd}${ran ? "" : `<span class="tcaret" style="opacity:${blink(t, T.cmd.last(t), 0.4)}"></span>`}`];
+    if (ran) {
+      const n = Math.floor(prog(t, T.cmd.end + 0.2, B(10) - 0.3) * RUN.length + 0.0001);
+      lines.push(...RUN.slice(0, n));
+      if (n >= RUN.length) lines.push(`shop % <span class="tcaret"></span>`);
+    }
+    s.term = { h: 380 * open, lines };
+    s.status.crumbs = "src/cart.rs › shipping";
+  } else {
+    // Commit: the message drafted, ⌘↵.
+    s.rows = rowsOf(CART_FIXED);
+    s.scroll = SHIP_LINE - 6;
+    s.rows[SHIP_LINE + 1].caret = true;
+    s.caretCol = 8;
+    s.sidebar = "git";
+    const draft = T.draft.shown(t).split("\n");
+    const committed = t > B(10) + 1.25;
+    s.git = {
+      message: committed ? "" : draft[0] ? esc(draft[0]) + (draft[1] !== undefined ? `<br><span style="color:var(--muted);font-size:15px">${esc(draft[1])}</span>` : "") : "",
+      drafting: t > B(10) + 0.2 && t < T.draft.end,
+      go: t > B(10) + 1.05 && !committed,
+      files: committed ? 0 : 1,
+      ahead: committed,
+    };
+    s.status.crumbs = "src/cart.rs › shipping";
+    if (committed) s.notice = ["Committed 4e1a9c2: Free shipping above 50 €.", out3(prog(t, B(10) + 1.25, B(10) + 1.45))];
+  }
+  return s;
+}
+
+/** AI, in the code: ⌘I, a sentence, the change shown, ⇥. */
+function aiState(t) {
+  const s = baseState();
+  const thinkFrom = T.ask.end + 0.25, changeAt = B(15) + 1.2, kept = inOut(prog(t, B(17), B(17) + 0.4));
+  const open = out3(prog(t, changeAt, changeAt + 0.5));
+  const promptO = fade(t, B(14) + 0.1, B(14) + 0.3, changeAt - 0.2, changeAt);
+  let n = 1;
+  CART_DONE.forEach((text, i) => {
+    if (i === SHIP_LINE + 1 && open > 0) {
+      s.rows.push({ text, cls: "del", h: open * (1 - kept), alpha: 1 - kept });
+      FIXED.forEach((a, j) => s.rows.push({ text: a, cls: kept > 0.5 ? "" : "add", h: open, n: n++, fadeBg: 1 - kept, caret: j === 0 }));
+      s.rows.push({ hint: true, h: open * (1 - kept) * 1.3 });
+      return;
+    }
+    s.rows.push({ text, n: n++, caret: i === SHIP_LINE + 1 && open === 0 });
+    if (i === SHIP_LINE && promptO > 0) {
+      const ask = T.ask.shown(t), thinking = t > thinkFrom;
+      const inner = thinking
+        ? `<span class="star" style="opacity:${0.45 + 0.55 * Math.abs(Math.sin(t * 5))}">✦</span><span class="grow" style="color:var(--muted)">Thinking…</span>`
+        : `<span class="star">✦</span><span class="grow">${ask ? esc(ask) + `<span style="display:inline-block;width:2px;height:20px;background:var(--caret);vertical-align:-4px;margin-left:2px;opacity:${blink(t, T.ask.last(t), 0.4)}"></span>` : '<span class="ph">Describe a change, or ask a question</span>'}</span><span class="hintr">${ask ? "↵ change" : ""}</span>`;
+      s.rows.push({ prompt: inner, h: promptO * 1.6, o: promptO });
+    }
+  });
+  s.scroll = SHIP_LINE - 7;
+  s.caretCol = 8;
+  s.caretOn = promptO < 0.5;
+  s.caretBlink = blink(t, changeAt, 0.6);
+  s.status.crumbs = "src/cart.rs › shipping";
+  s.status.ai = 1;
+  s.bars = 1 - 0.85 * fade(t, B(14) + 0.3, B(14) + 0.8, B(17) + 0.3, B(17) + 0.9);
+  return s;
+}
+
+/** The finished code, still: for themes, other systems, the tiles. */
+function stillState(extra = {}) {
+  const s = baseState();
+  s.rows = rowsOf(CART_FIXED);
+  s.scroll = SHIP_LINE - 9;
+  s.rows[SHIP_LINE + 1].caret = true;
+  s.caretCol = 8;
+  s.status.crumbs = "src/cart.rs › shipping";
+  return Object.assign(s, extra);
+}
+
+/** Where the camera looks: [from, zoom, x, y, zoom at the end, x, y] in window coordinates,
+ *  each shot cut on its beat and drifting to its end. SX: where on screen that point sits. */
+const SHOTS = [
+  [B(6), 1.0, 760, 420, 1.45, 800, 600, 960],
+  [B(6) + 0.75, 1.45, 800, 600, 1.52, 820, 600, 1320],
+  [B(7), 1.06, 760, 330, 1.14, 760, 300, 1400],
+  [B(8), 1.75, 560, 360, 1.95, 540, 350, 1250],
+  [B(9), 1.38, 615, 610, 1.48, 615, 620, 1400],
+  [B(10), 1.36, 300, 300, 1.48, 300, 290, 1300],
+  [B(14), 1.45, 620, 360, 1.62, 640, 420, 1250],
+  [B(18), 1.0, 700, 420, 1.08, 700, 420, 1330],
+];
+const SHOT_END = [B(6) + 0.75, B(7), B(8), B(9), B(10), B(11), B(18), B(19.5)];
+function camera(t) {
+  let i = -1;
+  SHOTS.forEach((s, j) => { if (t >= s[0]) i = j; });
+  if (i < 0) return [1, 760, 420, 960];
+  const [a, z0, x0, y0, z1, x1, y1, sx] = SHOTS[i];
+  const p = i === 0 ? out5(prog(t, a, SHOT_END[i])) : prog(t, a, SHOT_END[i]);
+  const e = i === 0 ? p : 0.5 - 0.5 * Math.cos(Math.PI * p);
+  // The first: from the window whole to its code. The others: a beat's push in.
+  const prev = i === 1 ? SHOTS[0] : null;
+  const fromSX = prev ? prev[7] : sx;
+  const sxNow = i === 1 ? fromSX + (sx - fromSX) * out3(prog(t, a, a + 0.35)) : sx;
+  return [z0 + (z1 - z0) * e, x0 + (x1 - x0) * e, y0 + (y1 - y0) * e, sxNow];
+}
+/** On a cut, the picture lands: a small scale bump, fading in a quarter of a second. */
+function bump(t, at) { const p = prog(t, at, at + 0.28); return p <= 0 || p >= 1 ? 1 : 1.035 - 0.035 * out3(p); }
+
+function renderStory(t) {
+  const inStory = (t >= B(6) - 0.05 && t < B(11)) || (t >= B(14) && t < B(19.5));
+  const enter = out3(prog(t, B(6) - 0.05, B(6) + 0.35));
+  if (!show("story", inStory ? (t < B(7) ? enter : 1) : 0)) return;
+  const w = $("window");
+  let state, theme = "Null";
+  if (t < B(11)) state = storyState(t);
+  else if (t < B(18)) state = aiState(t);
+  else {
+    // The themes, one a beat.
+    const k = clamp(Math.floor((t - B(18)) / BEAT), 0, THEME_NAMES.length - 1);
+    theme = THEME_NAMES[k];
+    state = stillState();
+  }
+  applyTheme(w, theme);
+  setHTML(w, windowHTML(state));
+  const [zoom, x, y, sx] = camera(t);
+  const cutAt = SHOTS.reduce((a, s) => (t >= s[0] ? s[0] : a), 0);
+  const z = zoom * (t < B(6) + 0.75 ? (0.94 + 0.06 * enter) : bump(t, cutAt)) * (t >= B(18) ? bump(t, B(18) + Math.floor((t - B(18)) / BEAT) * BEAT) : 1);
+  w.style.transform = `translate(${sx - x * z}px, ${540 - y * z}px) scale(${z})`;
+}
+
+// ---------- Markdown: the app itself, panned ----------
+function renderMd(t) {
+  if (!show("md", fade(t, B(11) - 0.02, B(11) + 0.12, B(12) - 0.35, B(12) + 0.15))) return;
+  const p = prog(t, B(11), B(12));
+  const z = 1.05 + 0.18 * p;
+  const box = $("mdshot");
+  box.style.width = "1400px"; box.style.height = "875px";
+  box.style.left = "0"; box.style.top = "0";
+  box.style.transformOrigin = "0 0";
+  const fx = 520 + 360 * inOut(p), fy = 380;
+  box.style.transform = `translate(${1250 - fx * z}px, ${540 - fy * z}px) scale(${z * bump(t, B(11))})`;
+}
+
+// ---------- the noise, the name, the quiet ----------
+function renderNoise(t) {
+  if (!show("noise", t < STOP + 0.02 ? 1 : 0)) return;
+  const shake = in3(prog(t, B(2), STOP - 0.3));
+  const box = $("noisebox");
+  const push = 1 + 0.12 * prog(t, 0, STOP) + 0.025 * Math.exp(-((t - B(0)) % BEAT) * 10) * prog(t, B(1), B(3));
+  box.style.transform = `scale(${push})`;
+  NOISE.forEach(([l, tp, w, h, , , from], i) => {
+    const appears = NOISE_AT(i);
+    const inP = out3(prog(t, appears, appears + 0.16));
+    const q = in3(prog(t, STOP - 0.3 + (i % 5) * 0.01, STOP - 0.02));
+    const cx = l + w / 2, cy = tp + h / 2, slide = 1 - inP;
+    const sx = from === "right" ? 220 * slide : from === "left" ? -220 * slide : 0, sy = from === "up" ? 100 * slide : 8 * slide;
+    const jx = Math.sin(t * 37 + i * 1.7) * 6 * shake, jy = Math.cos(t * 41 + i * 2.3) * 4 * shake;
+    const el = $("n" + i);
+    el.style.opacity = inP * (1 - q);
+    el.style.visibility = inP > 0 && q < 1 ? "visible" : "hidden";
+    el.style.transform = `translate(${sx + jx + (960 - cx) * q}px, ${sy + jy + (540 - cy) * q}px) scale(${(0.94 + 0.06 * inP) * (1 - 0.98 * q)})`;
+  });
+  for (const [id, a, b] of COUNTERS) {
+    const v = Math.round(a + (b - a) * in3(prog(t, B(1), STOP - 0.3)));
+    $(id).textContent = id === "nb3" ? v : v > 999 ? "999+" : v;
+  }
+  $("spin1").style.transform = `rotate(${t * 540}deg)`;
+  // The words, on the beats.
+  let word = "", o = 0, sc = 1;
+  for (const [a, text] of SHOUTS) {
+    if (t >= a && t < a + 2 * BEAT) { word = text; const p = prog(t, a, a + 0.18); o = t > STOP - 0.32 ? 0 : 1; sc = 1.25 - 0.25 * out3(p); }
+  }
+  setHTML("shouttext", word);
+  show("shout", word ? o : 0, `scale(${sc})`);
+}
+
+function renderIntro(t) {
+  if (!show("intro", fade(t, STOP - 0.01, STOP + 0.02, B(6) - 0.2, B(6) + 0.1))) return;
+  const typed = T.name.shown(t);
+  $("nametext").textContent = typed;
+  $("namecaret").style.opacity = blink(t, Math.max(STOP, T.name.last(t)), 0.35);
+  $("namecaret").style.order = typed ? 0 : 0;
+  show("nametext", typed ? 1 : 0, `translateX(${typed ? 0 : 0}px)`);
+  show("namesub", out3(prog(t, B(5) + 0.05, B(5) + 0.5)), `translateY(${(1 - out3(prog(t, B(5) + 0.05, B(5) + 0.55))) * 18}px)`);
+  // Leaving: pulled into the window coming in.
+  const leave = in3(prog(t, B(6) - 0.25, B(6) + 0.1));
+  $("intro").style.transform = `scale(${1 + 0.35 * leave})`;
+}
+
+function renderQuiet(t) {
+  if (!show("quiet", fade(t, B(12) - 0.05, B(12) + 0.1, B(14) - 0.2, B(14) + 0.02))) return;
+  $("q1").textContent = T.q1.shown(t);
+  $("q2").textContent = T.q2.shown(t);
+  $("qcaret").style.opacity = blink(t, Math.max(B(12), T.q2.last(t), T.q1.last(t)), 0.4);
+}
+
+// ---------- keys, as you already know them ----------
+const KEYMAPS = ["VS Code", "JetBrains", "Sublime Text", "Zed", "Vim"];
+function renderKeymaps(t) {
+  const a = B(19.5);
+  if (!show("keymapsl", fade(t, a - 0.02, a + 0.1, B(21) - 0.15, B(21)))) return;
+  const k = clamp(Math.floor((t - a) / (BEAT * 1.2)), 0, KEYMAPS.length - 1);
+  const html = KEYMAPS.map((n, i) => `<div class="km ${i === k ? "on" : ""}" style="transform:scale(${i === k ? bump(t, a + k * BEAT * 1.2) * 1.0 : 0.82})">${n}</div>`).join("");
+  setHTML("keymaps", html + `<div class="lead">Your keys: the ones your hands already know.</div>`);
+}
+
+// ---------- everywhere: the system's own logo, and Null in its window ----------
+const LOGOS = {
+  mac: `<svg viewBox="0 0 100 120"><path fill="#ebe8e2" d="M51 30c-9-6-36-8-39 22-2 22 15 52 28 52 5 0 7-3 11-3s6 3 11 3c10 0 21-17 25-30-14-6-15-27-2-34-6-9-15-11-21-10-6 0-9 3-13 0z"/><path fill="#ebe8e2" d="M53 25c-1-11 7-20 17-21 1 11-8 21-17 21z"/></svg>`,
+  windows: `<svg viewBox="0 0 100 100"><g fill="#ebe8e2"><rect x="4" y="4" width="44" height="44" rx="2"/><rect x="52" y="4" width="44" height="44" rx="2"/><rect x="4" y="52" width="44" height="44" rx="2"/><rect x="52" y="52" width="44" height="44" rx="2"/></g></svg>`,
+  linux: `<svg viewBox="0 0 100 120"><ellipse cx="50" cy="76" rx="31" ry="38" fill="#ebe8e2"/><ellipse cx="50" cy="82" rx="19" ry="28" fill="#000"/><circle cx="50" cy="32" r="22" fill="#ebe8e2"/><ellipse cx="42" cy="29" rx="5" ry="6.5" fill="#000"/><ellipse cx="58" cy="29" rx="5" ry="6.5" fill="#000"/><circle cx="43" cy="30" r="2" fill="#ebe8e2"/><circle cx="57" cy="30" r="2" fill="#ebe8e2"/><ellipse cx="50" cy="42" rx="10" ry="5.5" fill="#f2b35b"/><ellipse cx="34" cy="113" rx="15" ry="6.5" fill="#f2b35b"/><ellipse cx="66" cy="113" rx="15" ry="6.5" fill="#f2b35b"/></svg>`,
+};
+const SYSTEMS = [
+  ["mac", "macOS", "Intel and Apple silicon."],
+  ["windows", "Windows", "An installer, and null in your terminal."],
+  ["linux", "Linux", "A .deb, or anywhere else."],
+];
+const OS_AT = i => B(21) + i * BAR;
+function buildEverywhere() {
+  $("everywhere").innerHTML = SYSTEMS.map(([kind, name, sub], i) =>
+    `<div class="os" id="os${i}"><div class="logo" id="logo${i}">${LOGOS[kind]}</div><div class="osname">${name}</div><div class="ossub">${sub}</div><div class="frame" id="frame${i}"><div id="osw${i}" style="position:absolute;inset:0;border-radius:14px;overflow:hidden;box-shadow:0 40px 140px rgba(0,0,0,.9),0 0 0 1px rgba(255,255,255,.1)"></div></div></div>`).join("");
+  SYSTEMS.forEach(([kind], i) => {
+    const w = $("osw" + i);
+    applyTheme(w, "Null");
+    w.style.background = "var(--bg)"; w.style.color = "var(--fg)";
+    w.innerHTML = windowHTML(stillState({ chrome: kind === "mac" ? "mac" : "win" }));
+    sound(OS_AT(i), "thock", 0.6);
+  });
+}
+function renderEverywhere(t) {
+  if (!show("everywhere", t >= OS_AT(0) - 0.02 && t < B(24) ? 1 : 0)) return;
+  const i = clamp(Math.floor((t - OS_AT(0)) / BAR), 0, 2);
+  SYSTEMS.forEach((_, j) => {
+    if (j !== i) { show("os" + j, 0); return; }
+    show("os" + j, 1);
+    const local = t - OS_AT(j);
+    const l = land(prog(local, 0, 0.45));
+    $("logo" + j).style.transform = `scale(${0.6 + 0.4 * l})`;
+    $("logo" + j).style.opacity = clamp(local / 0.12);
+    const slide = 1 - out3(prog(local, 0.05, 0.45));
+    $("frame" + j).style.transform = `translate(${slide * 500}px, 0) scale(${0.78 + 0.03 * prog(local, 0, BAR)})`;
+    $("frame" + j).style.opacity = 1 - slide;
+  });
+}
+
+// ---------- everything at once ----------
+const TILES = [];
+function buildTiles() {
+  const states = [
+    () => storyState(B(6) + 1.5), () => storyState(B(7) + 1.0), () => storyState(B(8) + 1.7),
+    () => storyState(B(9) + 1.8), () => aiState(B(16)), () => storyState(B(10) + 0.95),
+    () => stillState(), () => stillState(), () => stillState({ chrome: "win" }),
+  ];
+  const themes = ["Null", "Null", "Midnight", "Null", "Null", "Moss", "Paper", "Dune", "Ash"];
+  const order = [4, 0, 8, 2, 6, 1, 7, 3, 5];
+  let html = "";
+  for (let k = 0; k < 9; k++) {
+    const col = k % 3, row = Math.floor(k / 3);
+    html += `<div class="tile" id="tile${k}" style="left:${45 + col * 615}px;top:${30 + row * 345}px"><div id="tw${k}"></div></div>`;
+    TILES.push({ k, at: B(24) + order.indexOf(k) * (BAR / 9) });
+  }
+  $("tiles").innerHTML = html;
+  for (let k = 0; k < 9; k++) {
+    const el = $("tw" + k);
+    applyTheme(el, themes[k]);
+    el.style.background = "var(--bg)"; el.style.color = "var(--fg)";
+    el.innerHTML = windowHTML(states[k]());
+  }
+  TILES.forEach(({ at }) => sound(at, "swish", 0.35));
+}
+function renderTiles(t) {
+  if (!show("tiles", t >= B(24) - 0.02 && t < B(25) + 0.05 ? 1 : 0)) return;
+  const away = in3(prog(t, B(25) - 0.3, B(25)));
+  for (const { k, at } of TILES) {
+    const p = out3(prog(t, at, at + 0.22));
+    show("tile" + k, p * (1 - away), `scale(${(1.25 - 0.25 * p) * (1 - 0.3 * away)})`);
+  }
+  $("tiles").style.transform = `scale(${1 + 0.03 * prog(t, B(24), B(25))})`;
+}
+
+// ---------- the end ----------
+function renderEnd(t) {
+  const E = B(25);
+  if (!show("end", fade(t, E - 0.02, E + 0.02, window.DURATION - 0.6, window.DURATION))) return;
+  const l = land(prog(t, E, E + 0.55));
+  show("endmark", clamp((t - E) / 0.08), `scale(${0.75 + 0.25 * l})`);
+  $("endmark").querySelector(".caret").style.opacity = blink(t, E, 0.9);
+  show("tagline", out3(prog(t, E + 0.5, E + 1.0)), `translateY(${(1 - out3(prog(t, E + 0.5, E + 1.0))) * 16}px)`);
+  show("cta", out3(prog(t, E + 0.9, E + 1.35)), `scale(${0.94 + 0.06 * out3(prog(t, E + 0.9, E + 1.35))})`);
+  show("facts", out3(prog(t, E + 1.2, E + 1.7)));
+}
+
+// ---------- words over the picture ----------
+function renderWords(t) {
+  let title = null;
+  for (const tt of TITLES) if (t >= tt[0] && t < tt[1]) title = tt;
+  let o = 0, y = 0, html = "", sub = "";
+  if (title) {
+    const [a, b, word, s] = title;
+    o = Math.min(out3(prog(t, a, a + 0.18)), 1 - in3(prog(t, b - 0.14, b)));
+    y = (1 - out3(prog(t, a, a + 0.3))) * 40;
+    html = word === "AI" || word === "Six themes" ? `${word}<span class="dot">.</span>` : `${word}<span class="dot">.</span>`;
+    sub = s;
+    if (word === "Six themes") {
+      const k = clamp(Math.floor((t - B(18)) / BEAT), 0, THEME_NAMES.length - 1);
+      sub = `<div id="themenames">${THEME_NAMES.map((n, i) => `<span class="${i === k ? "on" : ""}">${n}</span>`).join("")}</div>`;
+    }
+  }
+  const scrim = o > 0 ? Math.max(o, 0) : 0;
+  show("words", Math.max(o, keysShown(t) ? 1 : 0, chipsShown(t) ? 1 : 0));
+  show("scrim", scrim);
+  setHTML("tword", html);
+  setHTML("tsub", sub);
+  show("title", o, `translateY(${y}px)`);
+  // Keys.
+  let kh = "", ko = 0, ks = 1;
+  for (const [a, b, keys, alt] of KEYS) {
+    const f = fade(t, a, a + 0.08, b - 0.15, b);
+    if (f > 0) { kh = `<div class="pill">${keys.map(k => `<span class="key">${k}</span>`).join("")}${alt ? `<span class="key-alt">${alt}</span>` : ""}</div>`; ko = f; ks = 1 - 0.07 * Math.sin(Math.PI * prog(t, a + 0.08, a + 0.24)); }
+  }
+  setHTML("keys", kh);
+  show("keys", ko * (t >= B(14) && t < B(18) ? 0 : 1), `scale(${ks})`);
+  // AI's providers, under its title.
+  if (show("chips", chipsShown(t))) {
+    const list = [["Claude Code", "your plan"], ["Codex", "your plan"], ["Claude API"], ["OpenAI"], ["Gemini"], ["Mistral"], ["Groq"], ["OpenRouter"], ["NVIDIA"], ["Ollama", "on your computer"]];
+    setHTML("chips", list.map(([n, w2], i) => `<span style="opacity:${out3(prog(t, B(15) + i * 0.12, B(15) + 0.25 + i * 0.12)).toFixed(2)}">${n}${w2 ? `<i>${w2}</i>` : ""}</span>`).join(""));
+  }
+}
+const keysShown = t => KEYS.some(([a, b]) => t >= a && t < b) && !(t >= B(14) && t < B(18));
+const chipsShown = t => fade(t, B(15), B(15) + 0.2, B(18) - 0.15, B(18));
+
+let measured = false;
+window.render = function (t) {
+  if (!measured) {
+    const c = document.createElement("canvas").getContext("2d");
+    c.font = "400 18px 'Geist Mono'";
+    charW = c.measureText("0000000000").width / 10;
+    measured = true;
+  }
+  renderNoise(t);
+  renderIntro(t);
+  renderStory(t);
+  renderMd(t);
+  renderQuiet(t);
+  renderKeymaps(t);
+  renderEverywhere(t);
+  renderTiles(t);
+  renderEnd(t);
+  renderWords(t);
+};
+
+buildNoise();
+applyTheme($("window"));
+buildEverywhere();
+buildTiles();
+window.ready = Promise.all([...document.querySelectorAll("canvas[data-src]")].map(canvas => {
+  const img = new Image();
+  img.src = canvas.dataset.src;
+  return img.decode().then(() => {
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+  }).catch(() => {});
+}));
+window.SOUNDS.sort((a, b) => a[0] - b[0]);
+
+// ---------- playing it in a browser ----------
+if (!navigator.userAgent.includes("NullFilm")) {
+  document.body.classList.add("player");
+  const bar = document.createElement("div");
+  bar.id = "bar"; bar.innerHTML = "<div></div>";
+  document.body.appendChild(bar);
+  const fit = () => {
+    const sc = Math.min(innerWidth / 1920, (innerHeight - 8) / 1080);
+    $("stage").style.transform = `scale(${sc})`;
+    $("stage").style.margin = `${(1080 * sc - 1080) / 2}px ${(1920 * sc - 1920) / 2}px`;
+  };
+  addEventListener("resize", fit); fit();
+  let t = parseFloat(QUERY.get("t") || "0"), playing = !QUERY.has("t"), last = null;
+  addEventListener("keydown", e => {
+    if (e.key === " ") playing = !playing;
+    if (e.key === "ArrowRight") t = Math.min(DURATION, t + (e.shiftKey ? 0.1 : 1));
+    if (e.key === "ArrowLeft") t = Math.max(0, t - (e.shiftKey ? 0.1 : 1));
+  });
+  bar.addEventListener("click", e => { t = DURATION * e.clientX / innerWidth; });
+  document.fonts.ready.then(() => {
+    const frame = now => {
+      if (playing && last !== null) t = (t + (now - last) / 1000) % DURATION;
+      last = now;
+      window.render(t);
+      bar.firstChild.style.width = (100 * t / DURATION) + "%";
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  });
+}
+</script>
+</body>
+</html>
