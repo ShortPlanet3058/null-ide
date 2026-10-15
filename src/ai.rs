@@ -348,6 +348,9 @@ pub struct AiSettings {
     /// too slow for them. `Off` is names from the file only; unset, the same as answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestions: Option<ProviderId>,
+    /// Tokens a month, read and written together; reached, no more requests until the next.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_token_limit: Option<u64>,
     #[serde(flatten)]
     pub providers: HashMap<String, ProviderSettings>,
 }
@@ -359,6 +362,7 @@ impl Default for AiSettings {
             provider: ProviderId::Off,
             completions: false,
             suggestions: None,
+            monthly_token_limit: None,
             providers: HashMap::new(),
         }
     }
@@ -374,6 +378,7 @@ struct AiSettingsFile {
     provider: ProviderId,
     completions: bool,
     suggestions: Option<ProviderId>,
+    monthly_token_limit: Option<u64>,
     #[serde(flatten)]
     providers: HashMap<String, ProviderSettings>,
 }
@@ -385,6 +390,7 @@ impl Default for AiSettingsFile {
             provider: ProviderId::Off,
             completions: false,
             suggestions: None,
+            monthly_token_limit: None,
             providers: HashMap::new(),
         }
     }
@@ -397,6 +403,7 @@ impl From<AiSettingsFile> for AiSettings {
             provider: file.provider,
             completions: file.completions,
             suggestions: file.suggestions,
+            monthly_token_limit: file.monthly_token_limit,
             providers: file.providers,
         }
     }
@@ -572,6 +579,10 @@ fn make_default_keyring() -> Result<(), String> {
 #[derive(Clone, Default)]
 pub struct Prompt {
     pub system: String,
+    /// What stays the same from one request to the next (the project's conventions, the
+    /// file): sent first, so providers can take it from their cache, and marked for it
+    /// where that's asked for (Anthropic's).
+    pub context: String,
     pub user: String,
     /// A different model than the provider's usual one (a fast one for suggestions).
     pub model: Option<String>,
@@ -581,6 +592,13 @@ pub struct Prompt {
     pub effort: Option<Effort>,
     /// More varied answers (for another option); the usual when unset.
     pub temperature: Option<f32>,
+}
+
+impl Prompt {
+    /// The context and the request as one message, context first.
+    pub fn user_text(&self) -> String {
+        if self.context.is_empty() { self.user.clone() } else { format!("{}\n\n{}", self.context, self.user) }
+    }
 }
 
 pub enum AiEvent {
@@ -691,6 +709,7 @@ pub fn ask(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)
     // Text hidden in characters that show nothing isn't the person's to give the model.
     let prompt = &Prompt {
         system: crate::editor::invisible::without_hidden(&prompt.system).0,
+        context: crate::editor::invisible::without_hidden(&prompt.context).0,
         user: crate::editor::invisible::without_hidden(&prompt.user).0,
         ..prompt.clone()
     };
@@ -707,6 +726,7 @@ pub fn ask(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)
 
 fn ask_inner(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
     let id = settings.active();
+    within_limit(settings.monthly_token_limit)?;
     let effort = prompt.effort.filter(|e| id.efforts().contains(e)).unwrap_or(settings.effort(id));
     let model = prompt.model.clone().or_else(|| settings.model(id));
     match id {
@@ -734,6 +754,20 @@ fn ask_inner(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&st
             openai_compatible(id, &base, &model, key.as_deref(), effort, prompt, on_text)
         }
     }
+}
+
+/// The monthly limit, if one is set: reached, nothing more is sent until next month.
+pub(crate) fn within_limit(limit: Option<u64>) -> Result<(), String> {
+    let Some(limit) = limit.filter(|l| *l > 0) else { return Ok(()) };
+    let used = crate::ai_usage::this_months().usage.total();
+    if used < limit {
+        return Ok(());
+    }
+    Err(format!(
+        "This month's AI limit is reached: {} of {} tokens. Raise it in Settings → AI.",
+        crate::ai_usage::short(used),
+        crate::ai_usage::short(limit)
+    ))
 }
 
 pub(crate) fn missing_key(id: ProviderId) -> String {
@@ -810,9 +844,15 @@ fn chat_body(id: ProviderId, base: &str, model: &str, effort: Effort, prompt: &P
         "stream": true,
         "messages": [
             { "role": "system", "content": prompt.system },
-            { "role": "user", "content": prompt.user },
+            { "role": "user", "content": prompt.user_text() },
         ],
     });
+    // The tokens used, in the last chunk, where the service documents asking for it.
+    let openai_like = matches!(id, ProviderId::OpenRouter | ProviderId::Groq)
+        || (id == ProviderId::OpenaiCompatible && base.contains("api.openai.com"));
+    if openai_like {
+        body["stream_options"] = json!({ "include_usage": true });
+    }
     let max_tokens = prompt.max_tokens.unwrap_or(4096);
     // OpenAI's own reasoning models reject `temperature` and the old `max_tokens`.
     let openai = id == ProviderId::OpenaiCompatible && base.contains("api.openai.com");
@@ -871,17 +911,21 @@ fn openai_compatible(
     if status >= 400 {
         return Err(error_message(status, &body.read_to_string().unwrap_or_default()));
     }
+    let mut usage = None;
     read_sse(body.into_reader(), |data| {
         if data == "[DONE]" {
             return false;
         }
-        if let Ok(event) = serde_json::from_str::<Value>(data)
-            && let Some(text) = event["choices"][0]["delta"]["content"].as_str()
-        {
-            on_text(text);
+        if let Ok(event) = serde_json::from_str::<Value>(data) {
+            if let Some(text) = event["choices"][0]["delta"]["content"].as_str() {
+                on_text(text);
+            }
+            usage = crate::ai_usage::Usage::from_openai(&event["usage"]).or(usage);
         }
         true
-    })
+    })?;
+    usage.into_iter().for_each(crate::ai_usage::record);
+    Ok(())
 }
 
 /// Claude through the Messages API. Streams text; declined requests fall back to the
@@ -896,6 +940,14 @@ fn claude_body(model: &str, effort: Effort, prompt: &Prompt) -> Value {
         "system": prompt.system,
         "messages": [{ "role": "user", "content": prompt.user }],
     });
+    // The context in a block of its own, cached: the next request about the same file
+    // reads it from there (cheaper, sooner). Too small to cache, it's just sent.
+    if !prompt.context.is_empty() {
+        body["messages"][0]["content"] = json!([
+            { "type": "text", "text": prompt.context, "cache_control": { "type": "ephemeral" } },
+            { "type": "text", "text": prompt.user },
+        ]);
+    }
     // Opus and Sonnet take an effort level; Haiku 4.5 refuses the field (and thinks only
     // when given a token budget, which suggestions don't want).
     if !model.contains("haiku") && effort != Effort::Auto {
@@ -928,19 +980,27 @@ fn claude_api(
     }
     let mut refused = false;
     let mut failure = None;
+    let mut usage = crate::ai_usage::Usage::default();
     read_sse(body.into_reader(), |data| {
         let Ok(event) = serde_json::from_str::<Value>(data) else { return true };
         match event["type"].as_str() {
+            Some("message_start") => usage = crate::ai_usage::Usage::from_anthropic(&event["message"]["usage"]),
             Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
                 on_text(event["delta"]["text"].as_str().unwrap_or_default());
             }
-            Some("message_delta") if event["delta"]["stop_reason"] == "refusal" => refused = true,
+            Some("message_delta") => {
+                usage.output = event["usage"]["output_tokens"].as_u64().unwrap_or(usage.output);
+                refused |= event["delta"]["stop_reason"] == "refusal";
+            }
             Some("error") => failure = event["error"]["message"].as_str().map(str::to_owned),
             Some("message_stop") => return false,
             _ => {}
         }
         true
     })?;
+    if usage.total() > 0 {
+        crate::ai_usage::record(usage);
+    }
     if let Some(message) = failure {
         return Err(format!("The Claude API reported an error: {message}"));
     }
@@ -1060,7 +1120,7 @@ fn claude_code(
     if !matches!(effort, Effort::Auto | Effort::Off) {
         args.extend(["--effort".into(), effort.key().into()]);
     }
-    let mut child = spawn_cli("claude", &args, &prompt.user)?;
+    let mut child = spawn_cli("claude", &args, &prompt.user_text())?;
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut streamed = false;
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -1070,8 +1130,13 @@ fn claude_code(
                 streamed = true;
                 on_text(event["event"]["delta"]["text"].as_str().unwrap_or_default());
             }
-            // Without partial messages, the full answer arrives once at the end.
-            Some("result") if !streamed => on_text(event["result"].as_str().unwrap_or_default()),
+            Some("result") => {
+                // Without partial messages, the full answer arrives once at the end.
+                if !streamed {
+                    on_text(event["result"].as_str().unwrap_or_default());
+                }
+                crate::ai_usage::record(crate::ai_usage::Usage::from_anthropic(&event["usage"]));
+            }
             _ => {}
         }
     }
@@ -1092,7 +1157,7 @@ fn codex(model: Option<String>, effort: Effort, prompt: &Prompt, on_text: &mut d
         args.extend(["-c".into(), format!("model_reasoning_effort=\"{}\"", effort.key())]);
     }
     args.push("-".into());
-    let input = format!("{}\n\n{}", prompt.system, prompt.user);
+    let input = format!("{}\n\n{}", prompt.system, prompt.user_text());
     let mut child = spawn_cli("codex", &args, &input)?;
     // Codex prints progress on stderr and only the final message on stdout.
     let mut answer = String::new();
@@ -1379,6 +1444,7 @@ pub fn log_request(
 }
 
 fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Result<(), String> {
+    within_limit(settings.monthly_token_limit)?;
     let id = settings.active();
     let model = settings.completion_model(id).ok_or("No model for suggestions")?;
     let base = settings.base_url(id).unwrap_or_default();
@@ -1410,6 +1476,9 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
                     on_text(text);
                 }
                 if event["done"].as_bool() == Some(true) {
+                    let input = event["prompt_eval_count"].as_u64().unwrap_or(0);
+                    let output = event["eval_count"].as_u64().unwrap_or(0);
+                    crate::ai_usage::record(crate::ai_usage::Usage { input, cached: 0, output });
                     break;
                 }
             }
@@ -1437,6 +1506,7 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
             if status >= 400 {
                 return Err(error_message(status, &body.read_to_string().unwrap_or_default()));
             }
+            let mut usage = None;
             read_sse(body.into_reader(), |data| {
                 if data == "[DONE]" {
                     return false;
@@ -1446,9 +1516,12 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
                     if let Some(text) = choice["delta"]["content"].as_str().or(choice["text"].as_str()) {
                         on_text(text);
                     }
+                    usage = crate::ai_usage::Usage::from_openai(&event["usage"]).or(usage);
                 }
                 true
-            })
+            })?;
+            usage.into_iter().for_each(crate::ai_usage::record);
+            Ok(())
         }
         ProviderId::Nvidia | ProviderId::OpenaiCompatible => {
             let format = FimFormat::for_model(&model).ok_or("Not a fill-in-the-middle model")?;
@@ -1476,17 +1549,21 @@ fn fill(settings: &AiSettings, fim: &Fim, on_text: &mut dyn FnMut(&str)) -> Resu
             if status >= 400 {
                 return Err(error_message(status, &body.read_to_string().unwrap_or_default()));
             }
+            let mut usage = None;
             read_sse(body.into_reader(), |data| {
                 if data == "[DONE]" {
                     return false;
                 }
-                if let Ok(event) = serde_json::from_str::<Value>(data)
-                    && let Some(text) = event["choices"][0]["text"].as_str()
-                {
-                    on_text(text);
+                if let Ok(event) = serde_json::from_str::<Value>(data) {
+                    if let Some(text) = event["choices"][0]["text"].as_str() {
+                        on_text(text);
+                    }
+                    usage = crate::ai_usage::Usage::from_openai(&event["usage"]).or(usage);
                 }
                 true
-            })
+            })?;
+            usage.into_iter().for_each(crate::ai_usage::record);
+            Ok(())
         }
         _ => Err("Not a fill-in-the-middle provider".into()),
     }
@@ -1523,6 +1600,25 @@ mod request_tests {
 
         assert_eq!(chat_body(ProviderId::Gemini, "", "g", Effort::Off, &prompt())["reasoning_effort"], "minimal");
         assert_eq!(chat_body(ProviderId::OpenRouter, "", "o", Effort::Off, &prompt())["reasoning"]["effort"], "none");
+    }
+
+    /// The part that stays the same comes first, cached where that's asked for, and the
+    /// tokens used come back where the service needs asking.
+    #[test]
+    fn context_goes_first_to_be_cached() {
+        let with_context = Prompt { context: "the file".into(), ..prompt() };
+        let claude = claude_body("claude-sonnet-5-5", Effort::Low, &with_context);
+        let blocks = &claude["messages"][0]["content"];
+        assert_eq!(blocks[0]["text"], "the file");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(blocks[1]["text"], "u");
+        // Nothing to cache: the request as it was.
+        assert_eq!(claude_body("claude-sonnet-5-5", Effort::Low, &prompt())["messages"][0]["content"], "u");
+        let chat = chat_body(ProviderId::Mistral, "", "m", Effort::Auto, &with_context);
+        assert_eq!(chat["messages"][1]["content"], "the file\n\nu");
+        assert!(chat.get("stream_options").is_none(), "not a field Mistral documents");
+        let openai = chat_body(ProviderId::OpenaiCompatible, "https://api.openai.com/v1", "g", Effort::Auto, &prompt());
+        assert_eq!(openai["stream_options"]["include_usage"], true);
     }
 
     #[test]

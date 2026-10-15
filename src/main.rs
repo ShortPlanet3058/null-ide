@@ -6,7 +6,9 @@
 
 mod ai;
 mod ai_agent;
+mod ai_context;
 mod ai_task;
+mod ai_usage;
 mod assets;
 mod basic_syntax;
 mod buffer;

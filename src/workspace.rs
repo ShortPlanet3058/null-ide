@@ -202,6 +202,8 @@ actions!(
         SetApiKey,
         /// The key of the provider suggestions come from, when not the provider of answers.
         SetSuggestionsKey,
+        /// How many tokens AI used: the last request, and this month.
+        ShowAiUsage,
     ]
 );
 
@@ -5321,6 +5323,7 @@ impl Workspace {
         }
         if settings.ai.ready() {
             commands.push((Ai, "Ask About This File…".into(), Box::new(AskAi)));
+            commands.push((Ai, "AI Usage".into(), Box::new(ShowAiUsage)));
             if self.active.is_some() {
                 commands.push((Ai, "Edit with AI…".into(), Box::new(crate::editor::InlineAssist)));
             }
@@ -7534,6 +7537,26 @@ impl Workspace {
     fn set_api_key(&mut self, _: &SetApiKey, window: &mut Window, cx: &mut Context<Self>) {
         let provider = cx.global::<Settings>().ai.provider;
         self.ask_for_key(provider, window, cx);
+    }
+
+    fn show_ai_usage(&mut self, _: &ShowAiUsage, _: &mut Window, cx: &mut Context<Self>) {
+        use crate::ai_usage::short;
+        let month = crate::ai_usage::this_months();
+        let last = crate::ai_usage::last().map_or(String::new(), |u| {
+            let cached = if u.cached > 0 { format!(" ({} from cache)", short(u.cached)) } else { String::new() };
+            format!(" Last request: {} read{cached}, {} written.", short(u.input), short(u.output))
+        });
+        let limit =
+            cx.global::<Settings>().ai.monthly_token_limit.map_or(String::new(), |l| format!(" Limit: {}.", short(l)));
+        self.show_notice(
+            format!(
+                "This month: {} tokens in {} requests ({} from cache).{last}{limit}",
+                short(month.usage.total()),
+                month.requests,
+                short(month.usage.cached)
+            ),
+            cx,
+        );
     }
 
     fn set_suggestions_key(&mut self, _: &SetSuggestionsKey, window: &mut Window, cx: &mut Context<Self>) {
@@ -11717,6 +11740,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_all_commands))
             .on_action(cx.listener(Self::set_api_key))
             .on_action(cx.listener(Self::set_suggestions_key))
+            .on_action(cx.listener(Self::show_ai_usage))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))

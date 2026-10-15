@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- AI reads less and pays less: ⌘I sends a long file's lines around the code with an outline
+  of the rest instead of the whole file, the definitions the code uses from elsewhere in the
+  project, and the project's AGENTS.md or CLAUDE.md; the field says what goes and about how
+  many tokens. What stays the same is sent first and cached (Anthropic's cache is asked
+  for; AI tasks cache their conversation as it grows).
+- Tokens are counted: Settings → AI → AI usage, "AI Usage" in ⌘K, and an optional monthly
+  limit.
 - Language servers install on a computer with nothing else installed: the ones that need
   Node.js bring their own (downloaded into Null's folder, used only for them), and
   rust-analyzer, clangd (on Windows and Linux), Markdown's and Lua's are downloaded as

@@ -478,8 +478,11 @@ impl Editor {
                  project, and well-known idioms. No explanation, no markdown, no fences. If nothing obvious \
                  comes next, reply with nothing."
             ),
+            // What the project defines and the other files stay the same while typing goes
+            // on: first, where a provider's cache can keep them.
+            context: format!("{chat_outline}{chat_context}").trim_end().to_string(),
             user: format!(
-                "{chat_outline}{chat_context}File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {:?}",
+                "File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {:?}",
                 self.language_name(),
                 prefix,
                 suffix,
