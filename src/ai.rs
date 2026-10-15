@@ -127,6 +127,24 @@ impl ProviderId {
         ProviderId::OpenRouter,
     ];
 
+    /// A command line tool on the computer (Claude Code, Codex): seconds to start each time.
+    pub fn is_cli(self) -> bool {
+        matches!(self, ProviderId::ClaudeCode | ProviderId::Codex)
+    }
+
+    /// Where suggestions while typing can come from: quick enough to answer between two
+    /// keystrokes. (Not the command line tools.)
+    pub const FOR_SUGGESTIONS: [ProviderId; 8] = [
+        ProviderId::Mistral,
+        ProviderId::Nvidia,
+        ProviderId::Ollama,
+        ProviderId::Groq,
+        ProviderId::Gemini,
+        ProviderId::OpenRouter,
+        ProviderId::Claude,
+        ProviderId::OpenaiCompatible,
+    ];
+
     /// Whether this provider takes an API key (Ollama and the CLIs don't).
     pub fn uses_api_key(self) -> bool {
         !matches!(self, ProviderId::Off | ProviderId::Ollama | ProviderId::ClaudeCode | ProviderId::Codex)
@@ -326,13 +344,23 @@ pub struct AiSettings {
     pub provider: ProviderId,
     /// Ghost completions: the AI's guess at what comes next, shown faintly at the caret.
     pub completions: bool,
+    /// Where those guesses come from, when not from `provider`: the command line tools are
+    /// too slow for them. `Off` is names from the file only; unset, the same as answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestions: Option<ProviderId>,
     #[serde(flatten)]
     pub providers: HashMap<String, ProviderSettings>,
 }
 
 impl Default for AiSettings {
     fn default() -> Self {
-        Self { enabled: false, provider: ProviderId::Off, completions: false, providers: HashMap::new() }
+        Self {
+            enabled: false,
+            provider: ProviderId::Off,
+            completions: false,
+            suggestions: None,
+            providers: HashMap::new(),
+        }
     }
 }
 
@@ -345,13 +373,20 @@ struct AiSettingsFile {
     enabled: Option<bool>,
     provider: ProviderId,
     completions: bool,
+    suggestions: Option<ProviderId>,
     #[serde(flatten)]
     providers: HashMap<String, ProviderSettings>,
 }
 
 impl Default for AiSettingsFile {
     fn default() -> Self {
-        Self { enabled: None, provider: ProviderId::Off, completions: false, providers: HashMap::new() }
+        Self {
+            enabled: None,
+            provider: ProviderId::Off,
+            completions: false,
+            suggestions: None,
+            providers: HashMap::new(),
+        }
     }
 }
 
@@ -361,6 +396,7 @@ impl From<AiSettingsFile> for AiSettings {
             enabled: file.enabled.unwrap_or(file.provider != ProviderId::Off),
             provider: file.provider,
             completions: file.completions,
+            suggestions: file.suggestions,
             providers: file.providers,
         }
     }
@@ -375,6 +411,27 @@ impl AiSettings {
     /// Whether AI can be asked: on, with a provider chosen. What shows anything AI.
     pub fn ready(&self) -> bool {
         self.active() != ProviderId::Off
+    }
+
+    /// Where suggestions while typing would come from, switches aside: the one chosen for
+    /// them, else the provider of answers; never a command line tool (Off then: names only).
+    pub fn suggestion_provider(&self) -> ProviderId {
+        let source = self.suggestions.unwrap_or(self.provider);
+        if source.is_cli() { ProviderId::Off } else { source }
+    }
+
+    /// These settings as suggestions use them: their provider in `provider`, so everything
+    /// that asks goes there. None when suggestions don't come from an AI.
+    pub fn for_suggestions(&self) -> Option<AiSettings> {
+        let source = self.suggestion_provider();
+        (self.enabled && self.completions && source != ProviderId::Off)
+            .then(|| AiSettings { provider: source, ..self.clone() })
+    }
+
+    /// Suggestions are wanted while answers come from a command line tool, and where they
+    /// should come from hasn't been said: worth asking, once.
+    pub fn suggestions_unchosen(&self) -> bool {
+        self.enabled && self.completions && self.provider.is_cli() && self.suggestions.is_none()
     }
 
     pub fn model(&self, id: ProviderId) -> Option<String> {
@@ -1538,6 +1595,38 @@ mod tests {
         assert_eq!(settings.base_url(ProviderId::Nvidia).as_deref(), Some("https://integrate.api.nvidia.com/v1"));
         assert_eq!(settings.model(ProviderId::Claude).as_deref(), Some("claude-opus-5-5"));
         assert_eq!(settings.model(ProviderId::ClaudeCode), None);
+    }
+
+    #[test]
+    fn suggestions_never_come_from_a_command_line_tool() {
+        let read = |json: &str| serde_json::from_str::<AiSettings>(json).unwrap();
+        // From the provider of answers, when it's quick enough.
+        let api = read(r#"{"provider": "mistral", "completions": true}"#);
+        assert_eq!(api.for_suggestions().map(|s| s.active()), Some(ProviderId::Mistral));
+        // Claude Code is too slow: none until a source is chosen, and that's worth asking.
+        let cli = read(r#"{"provider": "claude_code", "completions": true}"#);
+        assert_eq!(cli.suggestion_provider(), ProviderId::Off);
+        assert!(cli.for_suggestions().is_none());
+        assert!(cli.suggestions_unchosen());
+        // Chosen: suggestions go there, answers stay with Claude Code.
+        let chosen = read(r#"{"provider": "claude_code", "completions": true, "suggestions": "nvidia"}"#);
+        let quick = chosen.for_suggestions().unwrap();
+        assert_eq!((quick.active(), chosen.active()), (ProviderId::Nvidia, ProviderId::ClaudeCode));
+        assert!(!chosen.suggestions_unchosen());
+        // Names only is an answer too.
+        let names = read(r#"{"provider": "codex", "completions": true, "suggestions": "off"}"#);
+        assert!(names.for_suggestions().is_none() && !names.suggestions_unchosen());
+        // A tool chosen for suggestions (by hand, in the file) counts as none.
+        assert!(
+            read(r#"{"provider": "nvidia", "completions": true, "suggestions": "codex"}"#).for_suggestions().is_none()
+        );
+        // Off is off.
+        assert!(read(r#"{"provider": "mistral", "completions": false}"#).for_suggestions().is_none());
+        assert!(read(r#"{"provider": "mistral", "enabled": false, "completions": true}"#).for_suggestions().is_none());
+        // Kept in the file as it was chosen.
+        let json = serde_json::to_value(&chosen).unwrap();
+        assert_eq!(json["suggestions"], "nvidia");
+        assert!(serde_json::to_value(&api).unwrap().get("suggestions").is_none());
     }
 
     #[test]

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Suggestions while typing work with Claude Code and Codex: they come from a fast model of
+  their own (Settings → AI → Suggestions come from), since the command line tools take
+  seconds to answer. Null asks once where they should come from.
 - Null is now proprietary software (All Rights Reserved): free to use as distributed by
   the author, its code public for transparency, but not to be redistributed, resold or
   reused (see LICENSE). 0.1.1 and earlier keep the license they were published under.

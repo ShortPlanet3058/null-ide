@@ -325,8 +325,12 @@ Settings) turns it off entirely.
   it, ⌥→ takes the next word, ⌘→ the rest of the line, ⌥⇥ shows another option; typing along
   keeps it, and deleting back brings an earlier one straight back. It knows what the whole
   project defines (a local index, no AI) and the other open files. They come from a code model made to fill in the middle
-  (StarCoder2 on NVIDIA, Qwen2.5-Coder on Ollama; changeable in Settings → AI), which sees the
+  (Codestral on Mistral, Qwen2.5-Coder on Ollama; changeable in Settings → AI), which sees the
   file and the files it includes or imports, and can write a whole body after `{` or `:`.
+  They can come from another provider than answers (Settings → AI → Suggestions come from).
+  Claude Code and Codex take seconds to answer, too slow between two keystrokes: with them,
+  Null asks once where suggestions should come from (Mistral's free Codestral, Ollama on
+  your computer, another key you have, or names from the file only).
   `NULL_AI_LOG=<file>` logs how long each request takes.
 
 Choose where answers come from in Settings → AI:
