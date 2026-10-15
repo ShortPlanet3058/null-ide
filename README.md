@@ -63,11 +63,14 @@ Get the latest version from the [releases page](https://github.com/ShortPlanet30
 | | |
 |---|---|
 | **macOS** 11 or later, Intel and Apple silicon | Open the `.dmg` and drag Null to Applications. The first time, right-click Null and choose **Open**. |
-| **Windows** 10 and 11 | Unzip anywhere and run `null.exe`. |
-| **Linux** x86-64, X11 or Wayland | Unpack, then run `./install.sh`: Null goes in `~/.local/bin` and your applications menu. |
+| **Windows** 10 and 11 | Run the installer (`…-setup.exe`, no administrator needed): Null in the Start menu, `null` in your terminals, "Open with Null" on folders. Or unzip the `.zip` anywhere and run `null.exe`. |
+| **Linux** x86-64, X11 or Wayland | Ubuntu and Debian: `sudo apt install ./null-linux-amd64.deb`. Elsewhere, unpack the `.tar.gz` and run `./install.sh` (Null in `~/.local/bin` and your applications menu). |
 
-From a terminal, **Install Shell Command** (in ⌘K) adds `null`: `null .` opens the folder
-you're in, `null src/main.rs:42` a file at a line, and `null --wait` makes Null git's editor.
+From a terminal, `null .` opens the folder you're in, `null src/main.rs:42` a file at a line,
+and `null --wait` makes Null git's editor (on the Mac, and with the `.zip`, **Install Shell
+Command** in ⌘K adds `null` first).
+
+To remove Null, see [Uninstalling](docs/guide.md#uninstalling).
 
 Null is young: used every day on the Mac, new on Windows and Linux. If something's wrong,
 please [open an issue](https://github.com/ShortPlanet3058/null-ide/issues).

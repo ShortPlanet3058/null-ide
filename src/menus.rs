@@ -87,6 +87,7 @@ pub fn set(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::action("Install Shell Command", crate::workspace::InstallShellCommand),
+                MenuItem::action("Uninstall Null…", crate::workspace::UninstallNull),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),

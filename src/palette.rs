@@ -74,6 +74,85 @@ pub enum PaletteKind {
     Ex,
     /// Every command, listed with nothing typed (the menu bar's place off the Mac).
     Commands,
+    /// A path typed, for when the system has no file dialog to show (Linux without a
+    /// desktop portal): what's in the folder typed so far, listed.
+    Path(PathFor),
+}
+
+/// What a typed path is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathFor {
+    /// A folder, as the project in this window.
+    Folder,
+    /// A folder, in a window of its own.
+    NewWindow,
+    /// A folder, beside those in this window.
+    AddFolder,
+    /// A file (or a folder) to open.
+    File,
+    /// A program to debug.
+    Program,
+}
+
+impl PathFor {
+    fn files_too(self) -> bool {
+        matches!(self, PathFor::File | PathFor::Program)
+    }
+}
+
+/// What the folder `typed` points into holds, starting with what was typed so far: its
+/// folders (and files, with `files_too`), the typed folder itself first when it is one.
+/// `~` is the home folder; a path that isn't absolute is from it.
+pub fn path_candidates(typed: &str, home: &Path, files_too: bool) -> Vec<PathBuf> {
+    let typed = typed.trim();
+    let expand = |t: &str| -> PathBuf {
+        if t.is_empty() || t == "~" {
+            home.to_path_buf()
+        } else if let Some(rest) = t.strip_prefix("~/").or_else(|| t.strip_prefix("~\\")) {
+            home.join(rest)
+        } else if Path::new(t).is_absolute() {
+            PathBuf::from(t)
+        } else {
+            home.join(t)
+        }
+    };
+    // Split as typed (a path would drop a last `.`, typed to see hidden folders).
+    let (folder, start) = match typed.rfind(['/', '\\']) {
+        Some(i) => (&typed[..=i], &typed[i + 1..]),
+        None if typed == "~" => ("~", ""),
+        None => ("", typed),
+    };
+    let dir = expand(folder);
+    let start = start.to_lowercase();
+    let expanded = expand(typed);
+    let into = start.is_empty();
+    let mut found: Vec<(bool, bool, String, PathBuf)> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_dir = path.is_dir();
+            if !is_dir && !files_too {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let lower = name.to_lowercase();
+            // (Hidden ones only once a dot is typed.)
+            if lower.starts_with('.') && !start.starts_with('.') {
+                return None;
+            }
+            let begins = lower.starts_with(&start);
+            (begins || (!start.is_empty() && lower.contains(&start))).then_some((!begins, !is_dir, lower, path))
+        })
+        .collect();
+    found.sort();
+    let mut paths: Vec<PathBuf> = found.into_iter().map(|(.., p)| p).take(60).collect();
+    if !into && start != "." && start != ".." && expanded.is_dir() {
+        paths.retain(|p| *p != expanded);
+        paths.insert(0, expanded);
+    }
+    paths
 }
 
 /// The lines added and removed a file change shows when it isn't text (no lines).
@@ -118,6 +197,8 @@ impl PaletteKind {
             PaletteKind::Projects => "Open a recent project",
             PaletteKind::Ex => ":",
             PaletteKind::Commands => "Commands",
+            PaletteKind::Path(f) if f.files_too() => "A file's path: ~/code/app/main.rs",
+            PaletteKind::Path(_) => "A folder's path: ~/code/app",
         }
     }
 }
@@ -272,6 +353,12 @@ fn quick_for(name: &str) -> Option<Quick> {
     })
 }
 
+/// Whether the action picks one value of its quick setting (a theme, a line spacing).
+fn picks_a_value(name: &str) -> bool {
+    let name = name.rsplit("::").next().unwrap_or(name);
+    (name.starts_with("Use") && name.ends_with("Theme")) || name.ends_with("LineSpacing")
+}
+
 /// What the palette starts with.
 pub struct PaletteOptions {
     pub kind: PaletteKind,
@@ -370,6 +457,8 @@ pub enum PaletteEvent {
     OpenProjectInNewWindow(PathBuf),
     /// Settings opened, looking for this.
     SearchSettings(String),
+    /// A path typed (no file dialog on this system), and what it's for.
+    PathChosen(PathFor, PathBuf),
 }
 
 pub struct Palette {
@@ -533,6 +622,13 @@ impl Palette {
             PaletteKind::Branch => self.branch_rows(&query),
             PaletteKind::Run => self.task_rows(&query),
             PaletteKind::Projects => self.project_rows(&query),
+            PaletteKind::Path(f) => {
+                let home = crate::tools::home_dir().unwrap_or_default();
+                self.projects = path_candidates(&query, &home, f.files_too());
+                for i in 0..self.projects.len() {
+                    self.push(Item::Project(i), Vec::new(), false);
+                }
+            }
         }
         self.selected = 0;
         // ↵ goes somewhere: past the branch you're on.
@@ -718,10 +814,10 @@ impl Palette {
         let mut found = rank_files(&self.files, query, &recent);
         // Only those shown sorted (the best first), not every match.
         if found.len() > MAX_RESULTS {
-            found.select_nth_unstable_by_key(MAX_RESULTS, |(score, i, _)| (std::cmp::Reverse(*score), *i));
+            found.select_nth_unstable_by_key(MAX_RESULTS, |(score, i, _)| sort_key(*score, &self.files[*i], *i));
             found.truncate(MAX_RESULTS);
         }
-        found.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
+        found.sort_by_key(|(score, i, _)| sort_key(*score, &self.files[*i], *i));
         for (_, i, highlights) in found.into_iter().take(MAX_RESULTS) {
             self.push(Item::File(i), highlights, false);
         }
@@ -745,7 +841,13 @@ impl Palette {
         for (i, c) in self.commands.iter().enumerate() {
             // A command a quick setting stands in for: its own name finds that setting
             // ("toggle sidebar" finds Sidebar), shown once.
-            if let Some(quick) = quick_for(c.action.name()).filter(listed) {
+            // (One that picks a value, typed by that value's name — "paper" — is listed as
+            // itself: Enter on the row would only step to the next theme.)
+            let names_its_value = picks_a_value(c.action.name())
+                && Quick::ALL
+                    .iter()
+                    .all(|q| quick_for(c.action.name()) != Some(*q) || fuzzy::score(q.label(), query).is_none());
+            if let Some(quick) = quick_for(c.action.name()).filter(listed).filter(|_| !names_its_value) {
                 let also = || also_called(c.action.name()).and_then(|words| fuzzy::score(words, query));
                 if let Some((score, _)) = fuzzy::score(&c.label, query).or_else(also) {
                     match found.iter_mut().find(|(_, item, _)| *item == Item::Quick(quick)) {
@@ -913,6 +1015,16 @@ impl Palette {
             | PaletteKind::Branch
             | PaletteKind::Run
             | PaletteKind::Projects => {}
+            PaletteKind::Path(f) => {
+                let chosen = match self.rows.get(ix).map(|r| r.item) {
+                    Some(Item::Project(i)) => Some(self.projects[i].clone()),
+                    _ => None,
+                };
+                if let Some(path) = chosen {
+                    cx.emit(PaletteEvent::PathChosen(f, path));
+                }
+                return;
+            }
         }
         let Some(item) = self.rows.get(ix).map(|r| r.item) else { return };
         match item {
@@ -1348,6 +1460,7 @@ impl Palette {
             }
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
+            PaletteKind::Path(_) => "↵ choose",
             PaletteKind::Ex => "↵ run",
             PaletteKind::Run => "↵ run",
             PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window · ⌘⌫ off the list",
@@ -1364,6 +1477,12 @@ impl Palette {
             },
         }
     }
+}
+
+/// The order of ⌘P's files: the best score first, then the shorter name (the source
+/// before what's built from it: test_cart.py before test_cart.cpython-312.pyc).
+fn sort_key(score: i32, file: &FileEntry, i: usize) -> (std::cmp::Reverse<i32>, usize, usize) {
+    (std::cmp::Reverse(score), file.relative.len() - file.name_start, i)
 }
 
 /// The files matching `query`, each with its score (`recent` ones a little higher), its
@@ -1750,6 +1869,47 @@ mod tests {
     }
 
     use super::*;
+
+    /// The source file comes before what's built from it: `test_cart` finds test_cart.py
+    /// first, not __pycache__/test_cart.cpython-312.pyc.
+    #[test]
+    fn the_shorter_name_wins_a_tie() {
+        let root = std::path::PathBuf::from("/p");
+        let roots = crate::roots::ProjectRoots::new(root.clone());
+        let files: Vec<FileEntry> = ["__pycache__/test_cart.cpython-312.pyc", "test_cart.py", "cart.py"]
+            .iter()
+            .map(|f| FileEntry::new(root.join(f), &roots))
+            .collect();
+        let mut found = rank_files(&files, "test_cart", &Default::default());
+        found.sort_by_key(|(score, i, _)| sort_key(*score, &files[*i], *i));
+        assert_eq!(files[found[0].1].relative, "test_cart.py");
+    }
+
+    /// A path typed with no file dialog: what's in the folder typed so far, listed.
+    #[test]
+    fn a_typed_path_lists_what_the_folder_holds() {
+        let home = crate::tools::test_dir("typed-path");
+        let _ = std::fs::remove_dir_all(&home);
+        for d in ["code/app", "code/api", "code/.hidden", "notes"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("code/readme.md"), "").unwrap();
+        let names = |typed: &str, files: bool| -> Vec<String> {
+            path_candidates(typed, &home, files)
+                .iter()
+                .map(|p| p.strip_prefix(&home).unwrap().display().to_string().replace('\\', "/"))
+                .collect()
+        };
+        assert_eq!(names("", false), ["code", "notes"]);
+        assert_eq!(names("~/code/", false), ["code/api", "code/app"]);
+        assert_eq!(names("code/ap", false), ["code/api", "code/app"]);
+        assert_eq!(names("code/pp", false), ["code/app"], "within a name too");
+        assert_eq!(names("code", false), ["code"]);
+        assert_eq!(names("code/", true), ["code/api", "code/app", "code/readme.md"]);
+        assert_eq!(names("code/.", false), ["code/.hidden"]);
+        assert!(names(&home.join("code/").display().to_string(), false).contains(&"code/app".to_string()));
+        std::fs::remove_dir_all(&home).ok();
+    }
     use gpui::TestAppContext;
 
     actions!(test, [One, Two]);
@@ -1769,6 +1929,12 @@ mod tests {
                 category: Category::View,
                 label: "Move Tab to the Right Side".into(),
                 action: Box::new(crate::workspace::MoveTabRight),
+                keys: None,
+            },
+            Command {
+                category: Category::View,
+                label: "Use Paper Theme".into(),
+                action: Box::new(crate::workspace::UsePaperTheme),
                 keys: None,
             },
         ];
@@ -1837,6 +2003,11 @@ mod tests {
         assert_eq!(items(cx, &p), ["Duplicate Line"]);
         type_query(cx, &p, "lines");
         assert!(items(cx, &p).contains(&"Duplicate Line".to_string()), "a category's name: what's in it");
+        // A theme by its name: that theme, not the row that steps through them.
+        type_query(cx, &p, "paper");
+        assert_eq!(items(cx, &p), ["Use Paper Theme"]);
+        type_query(cx, &p, "theme");
+        assert_eq!(items(cx, &p), ["quick: Theme"]);
         // What a command is also called: splitting is moving a tab to a side.
         type_query(cx, &p, "split");
         assert_eq!(items(cx, &p), ["Move Tab to the Right Side"]);

@@ -7,6 +7,9 @@ Ctrl+Alt+J, folding Ctrl+Shift+[ and ], the terminal Ctrl+J, Join Lines Ctrl+Shi
 Shortcuts on digits and symbols follow your keyboard: on Windows they're on the key in the
 same place as on an American keyboard (on a French AZERTY, the terminal is also Ctrl+ù,
 comments Ctrl+:, tab 1 Ctrl+&), and on Linux an AZERTY's digit row works without Shift.
+On Linux, where the desktop keeps Ctrl+Alt+T and Ctrl+Alt+arrows for itself, the test at
+the cursor is Ctrl+Shift+F10 (debugged: Ctrl+Shift+F9) and a cursor above or below is
+Ctrl+Shift+↑/↓; back and forward are Alt+←/→ everywhere off the Mac.
 Menus and ⌘K always show the keys as they are on your computer, and for the keymap you
 picked.
 
@@ -366,3 +369,19 @@ Font License 1.1 (see `assets/fonts/*/OFL.txt`). Any installed font can be used 
 one in Settings → Appearance, or set `code_font` and `ui_font` in the JSON. Ligatures (`->`
 as an arrow) show with fonts that keep them in their columns, such as JetBrains Mono, Fira
 Code or Cascadia Code; Geist Mono's would shift the code, so Null leaves them off.
+
+## Uninstalling
+
+Each way of removing Null asks whether your settings, saved API keys, history and language
+servers go too; by default they stay, for if you come back.
+
+- **Mac**: ⌘K › Uninstall Null… (also in the Null menu): Null quits, goes to the Trash, and
+  takes the `null` command with it. Dragged to the Trash instead, it leaves those behind.
+- **Windows**: Settings › Apps › Installed apps › Null › Uninstall.
+- **Linux**, from the `.deb`: `sudo apt remove null-editor` (your settings stay); from the
+  `.tar.gz`: `~/.local/share/null/uninstall.sh`.
+
+Where things are kept: settings in `~/.config/null` (`%APPDATA%\Null` on Windows); history,
+sessions and language servers in `~/Library/Application Support/Null` on the Mac,
+`~/.local/share/null` on Linux, `%LOCALAPPDATA%\Null` on Windows; API keys in the system's
+keychain.

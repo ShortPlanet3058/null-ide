@@ -264,7 +264,57 @@ fn window_bounds(saved: Option<session::WindowState>, cx: &App) -> WindowBounds 
     }
 }
 
+/// What `null --help` says.
+const HELP: &str = "Null, a calm, fast code editor.
+
+  null                  the last project (from a terminal: the folder you're in)
+  null PATH             a folder as the project, or a file in it
+  null FILE:LINE[:COL]  a file at a line (and column)
+  null A B ...          several folders in one window
+  null --wait FILE      returns once the file's tab is closed (git's editor)
+  null --version        Null's version
+";
+
+/// `--version` and `--help`, answered in the terminal (Null not started); and on Linux, no
+/// display to open a window on said, not waited on forever.
+fn answered_in_the_terminal() -> bool {
+    let first = std::env::args().nth(1);
+    let answer = match first.as_deref() {
+        Some("--version" | "-V") => format!("Null {}", env!("CARGO_PKG_VERSION")),
+        Some("--help" | "-h") => HELP.trim_end().to_string(),
+        // (For the uninstallers, when asked to delete everything: not in --help.)
+        Some("--forget-keys") => match ai::forget_api_keys() {
+            1 => "Deleted 1 saved API key.".to_string(),
+            n => format!("Deleted {n} saved API keys."),
+        },
+        _ => {
+            if cfg!(all(unix, not(target_os = "macos")))
+                && std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty())
+                && std::env::var_os("WAYLAND_DISPLAY").is_none_or(|d| d.is_empty())
+            {
+                eprintln!("Null needs a graphical session: neither DISPLAY nor WAYLAND_DISPLAY is set.");
+                std::process::exit(1);
+            }
+            return false;
+        }
+    };
+    // (On Windows Null has no console of its own: the one it was started from, if any.)
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn AttachConsole(process: u32) -> i32;
+        }
+        // SAFETY: a plain Win32 call with no pointers; it fails harmlessly with no console.
+        unsafe { AttachConsole(u32::MAX) };
+    }
+    println!("{answer}");
+    true
+}
+
 fn main() {
+    if answered_in_the_terminal() {
+        return;
+    }
     trace::start();
     trace::mark("main");
     crash::record();
@@ -602,23 +652,38 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
     };
     let opened = cx.open_window(options, |window, cx| {
         cx.new(|cx| {
-            let mut workspace = Workspace::new(root, window, cx);
+            let workspace = Workspace::new(root, window, cx);
             window.focus(&workspace.focus_handle(cx));
-            workspace.restore_session(session, window, cx);
-            if let Some(file) = file {
-                open_at(&mut workspace, file, place, window, cx);
-            }
-            if !cx.global::<settings::Settings>().welcomed {
-                workspace.show_welcome(window, cx);
-            }
             workspace
         })
     });
-    if let Err(error) = opened {
-        eprintln!("null: couldn't open a window: {error}");
-        // Nothing open, nothing would ever close: don't stay running out of sight.
-        if cx.windows().is_empty() {
-            cx.quit();
+    match opened {
+        // The project's files once the window is up: on Linux (GNOME over remote desktop,
+        // drawn without a graphics card) a window whose first frame had a file in it was
+        // never drawn again until a key or the mouse came.
+        Ok(handle) => {
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
+                handle
+                    .update(cx, |workspace, window, cx| {
+                        workspace.restore_session(session, window, cx);
+                        if let Some(file) = file {
+                            open_at(workspace, file, place, window, cx);
+                        }
+                        if !cx.global::<settings::Settings>().welcomed {
+                            workspace.show_welcome(window, cx);
+                        }
+                    })
+                    .ok();
+            })
+            .detach();
+        }
+        Err(error) => {
+            eprintln!("null: couldn't open a window: {error}");
+            // Nothing open, nothing would ever close: don't stay running out of sight.
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
         }
     }
 }

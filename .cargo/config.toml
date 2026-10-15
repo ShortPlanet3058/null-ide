@@ -1,0 +1,8 @@
+# On Windows, Microsoft's C runtime goes into null.exe: a fresh Windows doesn't have
+# VCRUNTIME140.dll (it comes with other software, the Visual C++ Redistributable), and
+# without it Null wouldn't start at all.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

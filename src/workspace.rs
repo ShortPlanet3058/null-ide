@@ -8,7 +8,7 @@ use crate::git;
 use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
 use crate::lsp_store::{LspStore, Readiness};
 use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
-use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, format_keys};
+use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, PathFor, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::AutoSave;
 use crate::settings::{self, DEFAULT_FONT_SIZE, Settings};
@@ -86,6 +86,7 @@ actions!(
         GoToLastEdit,
         ShowWelcome,
         InstallShellCommand,
+        UninstallNull,
         ReviewAiTask,
         StopAiTask,
         KeepAllTaskChanges,
@@ -104,6 +105,7 @@ actions!(
         ToggleInlayHints,
         ToggleCodeLens,
         ShowServerLog,
+        InstallLanguageServer,
         ToggleBracketColours,
         ToggleProblemsAtLineEnds,
         ToggleFocusMode,
@@ -217,8 +219,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", ToggleSidebar, ctx),
         KeyBinding::new("alt-secondary-enter", ToggleFocusMode, ctx),
         KeyBinding::new("secondary-shift-b", RunTask, ctx),
-        KeyBinding::new("alt-secondary-t", RunTestAtCursor, ctx),
-        KeyBinding::new("alt-shift-secondary-t", DebugTestAtCursor, ctx),
+        // (Ctrl+Alt+T opens a terminal on Linux desktops: JetBrains' keys there.)
+        KeyBinding::new(
+            if cfg!(all(unix, not(target_os = "macos"))) { "ctrl-shift-f10" } else { "alt-secondary-t" },
+            RunTestAtCursor,
+            ctx,
+        ),
+        KeyBinding::new(
+            if cfg!(all(unix, not(target_os = "macos"))) { "ctrl-shift-f9" } else { "alt-shift-secondary-t" },
+            DebugTestAtCursor,
+            ctx,
+        ),
         KeyBinding::new("alt-secondary-o", OpenRecent, ctx),
         KeyBinding::new("secondary-shift-n", NewWindow, ctx),
         KeyBinding::new("f5", StartDebugging, ctx),
@@ -1089,6 +1100,8 @@ impl Workspace {
         cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_git(cx);
+                // (Drawn again: a desktop that shows a window late may have missed its frame.)
+                window.refresh();
             } else {
                 // ⌃ let go elsewhere (another Space, Mission Control): the tab reached stays.
                 this.settle_switch();
@@ -3613,6 +3626,61 @@ impl Workspace {
     /// Installs `null`, to open files and folders from a terminal: `null .`, `null a.rs`.
     /// Into /usr/local/bin when it can write there, else ~/.local/bin; on Windows a
     /// `null.cmd` in Null's own folder.
+    /// The Mac has no uninstaller: Null.app does it. The app goes to the Trash and the `null`
+    /// command away, then Null quits; the settings, saved API keys, history and language
+    /// servers go too if asked (else they stay, for coming back).
+    fn uninstall(&mut self, _: &UninstallNull, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(app) = app_bundle() else {
+            self.show_notice("Only the app (Null.app) uninstalls itself.".into(), cx);
+            return;
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Uninstall Null?",
+            Some(
+                "Null quits and goes to the Trash. Your settings, saved API keys, history and language servers can stay, for if you come back, or go too.",
+            ),
+            &["Uninstall", "Uninstall and Delete My Settings", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let everything = match answer.await {
+                Ok(0) => false,
+                Ok(1) => true,
+                _ => return,
+            };
+            // (The system's Trash, as the Finder does it; Null runs on from there until it quits.)
+            let mut removing = crate::fs_ops::move_to_trash(&app);
+            if removing.is_ok() {
+                remove_shell_command();
+            }
+            if removing.is_ok() && everything {
+                crate::ai::forget_api_keys();
+                let folders: Vec<PathBuf> = crate::settings::Settings::path()
+                    .and_then(|p| p.parent().map(Path::to_path_buf))
+                    .into_iter()
+                    .chain(crate::tools::data_dir())
+                    .collect();
+                // (After Null has quit: it writes its session on the way out.)
+                removing = std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(REMOVE_AFTER_QUIT)
+                    .arg("sh")
+                    .arg(std::process::id().to_string())
+                    .args(&folders)
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+            }
+            this.update_in(cx, |this, window, cx| match removing {
+                Ok(()) => window.dispatch_action(Box::new(Quit), cx),
+                Err(error) => this.show_notice(format!("Couldn't uninstall: {error}"), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn install_shell_command(&mut self, _: &InstallShellCommand, _: &mut Window, cx: &mut Context<Self>) {
         let Ok(exe) = std::env::current_exe() else { return };
         let (dir, target, result) = if cfg!(windows) {
@@ -3641,7 +3709,7 @@ impl Workspace {
                     format!("\"{}\" \"$@\" &", exe.display()),
                 ),
             };
-            let script = shell_script(&launch, &waiting, &all);
+            let script = shell_script(&exe.display().to_string(), &launch, &waiting, &all);
             let home = crate::tools::home_dir().unwrap_or_default();
             let system = PathBuf::from("/usr/local/bin");
             let writable = |dir: &Path| {
@@ -3759,6 +3827,8 @@ impl Workspace {
         session.window = self.window_state;
         self.restore_session(session, window, cx);
         self.schedule_session_save(cx);
+        // (With no tab open, nothing else names the new project in the title.)
+        self.refresh_title(window, cx);
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -4023,7 +4093,9 @@ impl Workspace {
     /// "file — project" in the title bar, and the close button's unsaved dot.
     fn refresh_title(&self, window: &mut Window, cx: &App) {
         // (Several folders: all their names, `api + web`.)
-        let names: Vec<String> = self.roots.all().iter().map(|r| self.roots.label(r)).collect();
+        // (No folder open, Null's own empty one: no name.)
+        let names: Vec<String> =
+            self.roots.all().iter().filter(|r| !crate::session::is_scratch(r)).map(|r| self.roots.label(r)).collect();
         let project = (!names.is_empty()).then(|| names.join(" + "));
         let editor = self.active_editor().map(|e| e.read(cx));
         let title = match (editor.map(|e| e.file_name()), project) {
@@ -4283,8 +4355,8 @@ impl Workspace {
             multiple: false,
             prompt: Some("Open in New Window".into()),
         });
-        cx.spawn_in(window, async move |_, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::NewWindow, cx) else { return };
             if let Some(folder) = paths.into_iter().next() {
                 cx.update(|_, cx| crate::open_project_window(folder, None, cx)).ok();
             }
@@ -4632,7 +4704,7 @@ impl Workspace {
             prompt: Some("Open".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::File, cx) else { return };
             let Some(path) = paths.into_iter().next() else { return };
             this.update_in(cx, |this, window, cx| this.open_path(path, window, cx)).ok();
         })
@@ -4658,7 +4730,7 @@ impl Workspace {
             prompt: Some("Add to Window".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::AddFolder, cx) else { return };
             this.update_in(cx, |this, window, cx| this.add_roots(paths, window, cx)).ok();
         })
         .detach();
@@ -4757,6 +4829,30 @@ impl Workspace {
         .detach();
     }
 
+    /// What a file dialog chose; when the system has none (its answer an error), the path
+    /// typed instead, and nothing for now.
+    fn chosen<E, C>(
+        answer: Result<Result<Option<Vec<PathBuf>>, E>, C>,
+        this: &gpui::WeakEntity<Self>,
+        purpose: PathFor,
+        cx: &mut gpui::AsyncWindowContext,
+    ) -> Option<Vec<PathBuf>> {
+        match answer {
+            Ok(Ok(paths)) => paths,
+            _ => {
+                this.update_in(cx, |this, window, cx| this.type_a_path(purpose, window, cx)).ok();
+                None
+            }
+        }
+    }
+
+    /// No file dialog on this system (Linux without a desktop portal, as on a bare window
+    /// manager): the path typed instead, with what's in the folders listed on the way.
+    fn type_a_path(&mut self, purpose: PathFor, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_notice("This system has no file dialog (no desktop portal): type the path instead.".into(), cx);
+        self.open_palette_with(PaletteKind::Path(purpose), None, Vec::new(), window, cx);
+    }
+
     /// A folder as the project, in this window.
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -4766,7 +4862,7 @@ impl Workspace {
             prompt: Some("Open Folder".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::Folder, cx) else { return };
             let Some(path) = paths.into_iter().next() else { return };
             this.update_in(cx, |this, window, cx| this.open_path(path, window, cx)).ok();
         })
@@ -5047,6 +5143,16 @@ impl Workspace {
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
+        // What the status bar offers, for the keyboard too.
+        if let Some(Readiness::Missing { server } | Readiness::InstallFailed { server }) =
+            self.active_editor().and_then(|e| e.read(cx).readiness(cx))
+        {
+            commands.push((App, format!("Install {} Language Server", server.label), Box::new(InstallLanguageServer)));
+        }
+        // (Windows and Linux have their own uninstallers.)
+        if cfg!(target_os = "macos") && app_bundle().is_some() {
+            commands.push((App, "Uninstall Null…".into(), Box::new(UninstallNull)));
+        }
         if self.is_split() {
             commands.push((View, "Join Sides".into(), Box::new(JoinSides)));
         }
@@ -5379,6 +5485,19 @@ impl Workspace {
                     panel.update(cx, |panel, cx| panel.search_for(&query, cx));
                 }
             }
+            PaletteEvent::PathChosen(purpose, path) => {
+                let path = path.clone();
+                this.close_palette(window, cx);
+                match purpose {
+                    PathFor::Folder | PathFor::File => this.open_path(path, window, cx),
+                    PathFor::NewWindow => crate::open_project_window(path, None, cx),
+                    PathFor::AddFolder => this.add_roots(vec![path], window, cx),
+                    PathFor::Program => {
+                        this.debug_program = Some(path.clone());
+                        this.debug(path, cx);
+                    }
+                }
+            }
             PaletteEvent::OpenProjectInNewWindow(path) => {
                 let path = path.clone();
                 this.close_palette(window, cx);
@@ -5478,8 +5597,10 @@ impl Workspace {
                 this.close_palette(window, cx);
                 let here = this.here(cx);
                 this.remember_place(here);
-                if let Some(editor) = this.active_editor() {
+                if let Some(editor) = this.active_editor().cloned() {
                     editor.update(cx, |editor, cx| editor.go_to_line(line, cx));
+                    // The keys go where the caret went (not back to a list that had them).
+                    window.focus(&editor.focus_handle(cx));
                 }
             }
             PaletteEvent::Run(action) => {
@@ -7341,7 +7462,11 @@ impl Workspace {
     }
 
     fn use_ai(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
-        settings::update(cx, |s| s.ai.provider = provider);
+        // (Choosing where answers come from is wanting AI.)
+        settings::update(cx, |s| {
+            s.ai.provider = provider;
+            s.ai.enabled = true;
+        });
         let hint = if provider.uses_api_key() && crate::ai::known_key(provider) == Some(false) {
             " Add a key with “AI: Set API Key”."
         } else {
@@ -7627,7 +7752,7 @@ impl Workspace {
             prompt: Some("Debug".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(paths) = Self::chosen(paths.await, &this, PathFor::Program, cx) else { return };
             let Some(program) = paths.into_iter().next() else { return };
             this.update(cx, |this, cx| {
                 this.debug_program = Some(program.clone());
@@ -10230,6 +10355,8 @@ fn cmd_script(exe: &Path) -> String {
          rem null --wait <file> returns once its tab is closed (git's editor).\r\n\
          setlocal\r\n\
          set \"wait=\"\r\n\
+         if \"%~1\"==\"--version\" (\"{exe}\" --version & exit /b)\r\n\
+         if \"%~1\"==\"--help\" (\"{exe}\" --help & exit /b)\r\n\
          if \"%~1\"==\"--wait\" set \"wait=1\"\r\n\
          if defined wait shift\r\n\
          if \"%~1\"==\"\" (start \"\" \"{exe}\" \"%CD%\\.\" & exit /b)\r\n\
@@ -10252,6 +10379,7 @@ fn git_bash_script(exe: &Path) -> String {
     let exe = exe.display().to_string().replace('\\', "/");
     format!(
         "#!/bin/sh\n# Opens files and folders in Null from Git Bash: `null .`, `null a.rs:42`, `null --wait <file>`.\n\
+         case \"$1\" in --version|-V|--help|-h) exec \"{exe}\" \"$1\" ;; esac\n\
          wait=\n\
          [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
@@ -10272,11 +10400,37 @@ fn git_bash_script(exe: &Path) -> String {
     )
 }
 
-fn shell_script(launch: &str, waiting: &str, all: &str) -> String {
+/// The Null.app this Null runs from, when it's one.
+fn app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf)
+}
+
+/// Words in every `null` script Install Shell Command writes: what makes one Null's to remove.
+const SHELL_SCRIPT_MARK: &str = "Opens files and folders in Null";
+
+/// Removes the `null` command Install Shell Command put on the Mac (Null's own only).
+fn remove_shell_command() {
+    let home = crate::tools::home_dir().unwrap_or_default();
+    for path in [PathBuf::from("/usr/local/bin/null"), home.join(".local/bin/null")] {
+        if std::fs::read_to_string(&path).is_ok_and(|text| text.contains(SHELL_SCRIPT_MARK)) {
+            std::fs::remove_file(&path).ok();
+        }
+    }
+}
+
+/// Run as `sh -c REMOVE_AFTER_QUIT sh PID FOLDER…`: once Null (PID) has quit, the folders
+/// are deleted.
+const REMOVE_AFTER_QUIT: &str = r#"pid=$1; shift
+while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+for folder in "$@"; do rm -rf "$folder"; done"#;
+
+fn shell_script(exe: &str, launch: &str, waiting: &str, all: &str) -> String {
     format!(
         "#!/bin/sh\n# Opens files and folders in Null: `null .`, `null src/main.rs`, `null a.rs:42`.\n\
          # `null --wait <file>` returns once its tab is closed (git's editor: GIT_EDITOR=\"null --wait\").\n\
          # `null api web`: several folders, one window.\n\
+         case \"$1\" in --version|-V|--help|-h) exec \"{exe}\" \"$1\" ;; esac\n\
          wait=\n\
          [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
@@ -10430,6 +10584,14 @@ impl Render for Workspace {
             .then(|| crate::trace::step(|| "window first laid out".into()))
             .flatten();
         ui::apply_zoom(window, cx);
+        // While the welcome shows, the keys are its own: a file the session reopened behind
+        // it took them once, and typing went to a project out of sight.
+        if let Some((welcome, _)) = &self.welcome {
+            let handle = welcome.focus_handle(cx);
+            if !handle.contains_focused(window, cx) {
+                window.focus(&handle);
+            }
+        }
         // The menu bar's toggles say what they'll do in the window in front.
         if window.is_window_active() {
             let settings = cx.global::<Settings>();
@@ -10547,6 +10709,8 @@ impl Render for Workspace {
                     )
                 }
             }
+            // (No folder open: Null's own scratch folder isn't one to show.)
+            None if crate::session::is_scratch(&root) => (Vec::new(), (0, 0)),
             None => {
                 let home = crate::tools::home_dir();
                 let shown = match home.as_ref().and_then(|h| root.strip_prefix(h).ok()) {
@@ -11344,6 +11508,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::bring_back_changes))
             .on_action(cx.listener(|this, _: &ShowWelcome, window, cx| this.show_welcome(window, cx)))
             .on_action(cx.listener(Self::install_shell_command))
+            .on_action(cx.listener(Self::uninstall))
             .on_action(cx.listener(Self::review_ai_task))
             .on_action(cx.listener(Self::stop_ai_task))
             .on_action(cx.listener(Self::keep_all_task_changes))
@@ -11407,6 +11572,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::start_debugging))
             .on_action(cx.listener(Self::show_server_log))
+            .on_action(cx.listener(|this, _: &InstallLanguageServer, _, cx| this.install_language_server(cx)))
             .on_action(cx.listener(|this, _: &ToggleStopOnErrors, _, cx| {
                 // Where the program fails (a Rust panic, a thrown exception): stopped at.
                 let on = !this.debugger.read(cx).stop_on_errors;
@@ -11933,6 +12099,65 @@ mod tests {
     }
 
     /// Revert to Saved: the saved text back, the file clean; ⌘Z brings the changes back.
+    /// The welcome keeps the keys while it shows, even when a file opened behind it takes them.
+    #[gpui::test]
+    fn the_welcome_keeps_the_keys(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("welcome-keys");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.show_welcome(window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        editor.update_in(cx, |e, window, cx| window.focus(&e.focus_handle(cx)));
+        workspace.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let welcome = workspace.read_with(cx, |w, _| w.welcome.as_ref().map(|(w, _)| w.clone()).unwrap());
+        cx.update(|window, cx| {
+            assert!(welcome.focus_handle(cx).contains_focused(window, cx), "the file behind took the keys")
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Going to a line from a list that had the keys (the Git panel's branches): the keys
+    /// go to the code, where the caret went.
+    #[gpui::test]
+    fn going_to_a_line_gives_the_code_the_keys(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("go-to-line-focus");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("a.txt"), window, cx));
+        cx.run_until_parked();
+        let elsewhere = cx.update(|_, cx| cx.focus_handle());
+        cx.update(|window, _| window.focus(&elsewhere));
+        workspace.update_in(cx, |w, window, cx| w.go_to_line(&GoToLine, window, cx));
+        cx.run_until_parked();
+        let palette = workspace.read_with(cx, |w, _| w.palette.as_ref().map(|(p, _)| p.clone()).unwrap());
+        palette.update(cx, |_, cx| cx.emit(PaletteEvent::GoToLine(3)));
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        cx.update(|window, cx| assert!(editor.focus_handle(cx).is_focused(window), "the keys stayed in the list"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[gpui::test]
     fn revert_to_saved_takes_the_file_back(cx: &mut gpui::TestAppContext) {
         let dir = crate::tools::test_dir("revert-saved");
@@ -13540,14 +13765,26 @@ mod tests {
         let dir = crate::tools::test_dir("cmd");
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("log");
-        // A stand-in for Null that writes down what it was given.
+        // A stand-in for Null that says what it was given (not `echo`: GNU's answers
+        // `--version` with its own).
+        let fake = dir.join("fake-null");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$*\"\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let script = shell_script(
+            &fake.display().to_string(),
             &format!("echo \"$p\" >> \"{}\"", log.display()),
             &format!("echo \"wait $p\" >> \"{}\"", log.display()),
             &format!("echo \"all $*\" >> \"{}\"", log.display()),
         );
         let command = dir.join("null");
         std::fs::write(&command, script).unwrap();
+        // `--version` goes to Null itself (here `echo`), opening nothing.
+        let version = crate::tools::command("sh").arg(&command).arg("--version").current_dir(&dir).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "--version");
+        assert!(!log.exists());
         let run = crate::tools::command("sh").arg(&command).args(["new.txt", "."]).current_dir(&dir).status();
         assert!(run.unwrap().success());
         let given = std::fs::read_to_string(&log).unwrap();

@@ -235,12 +235,13 @@ impl Welcome {
         // A key typed for the provider goes to the keychain, never to the settings file.
         let key = self.key.read(cx).text().trim().to_string();
         let provider = cx.global::<Settings>().ai.provider;
-        if !key.is_empty()
-            && provider.uses_api_key()
-            && cx.global::<Settings>().ai.enabled
-            && let Err(error) = ai::store_api_key(provider, &key)
-        {
-            eprintln!("null: couldn't save the key: {error}");
+        if !key.is_empty() && provider.uses_api_key() && cx.global::<Settings>().ai.enabled {
+            // (Off the window's thread: the key store can ask something first.)
+            std::thread::spawn(move || {
+                if let Err(error) = ai::store_api_key(provider, &key) {
+                    eprintln!("null: couldn't save the key: {error}");
+                }
+            });
         }
         settings::update(cx, |s| {
             s.welcomed = true;

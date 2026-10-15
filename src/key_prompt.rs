@@ -39,13 +39,21 @@ impl KeyPrompt {
 
     fn save(&mut self, _: &SaveKey, _: &mut Window, cx: &mut Context<Self>) {
         let key = self.input.read(cx).text().to_string();
-        let label = self.provider.label();
-        let message = match ai::store_api_key(self.provider, &key) {
-            Ok(()) if key.trim().is_empty() => format!("Removed the {label} key."),
-            Ok(()) => format!("Kept the {label} key in {}.", crate::ai::KEY_STORE),
-            Err(err) => format!("Couldn't save the key: {err}"),
-        };
-        cx.emit(KeyPromptEvent::Finished(message));
+        let provider = self.provider;
+        // Off the window's thread: the key store can ask something first (on Linux with no
+        // keyring yet, the password of the one it makes), and Null keeps answering meanwhile.
+        cx.spawn(async move |this, cx| {
+            let saving = key.clone();
+            let result = cx.background_executor().spawn(async move { ai::store_api_key(provider, &saving) }).await;
+            let label = provider.label();
+            let message = match result {
+                Ok(()) if key.trim().is_empty() => format!("Removed the {label} key."),
+                Ok(()) => format!("Kept the {label} key in {}.", crate::ai::KEY_STORE),
+                Err(err) => format!("Couldn't save the key: {err}"),
+            };
+            this.update(cx, |_, cx| cx.emit(KeyPromptEvent::Finished(message))).ok();
+        })
+        .detach();
     }
 
     fn cancel(&mut self, _: &CancelKey, _: &mut Window, cx: &mut Context<Self>) {
