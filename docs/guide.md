@@ -3,8 +3,15 @@
 Everything Null does, and how to reach it. Shortcuts are written as on the Mac; on Windows
 and Linux, ⌘ is Ctrl, ⌥ is Alt and ⌃ is Ctrl, and a few differ to keep out of the way of
 the system's own (Find Next is F3, tabs are Ctrl+PgUp / Ctrl+PgDn, bookmarks Ctrl+Alt+L /
-Ctrl+Alt+J, folding Ctrl+Shift+[ and ]). Menus and ⌘K always show the keys as they are on
-your computer, and for the keymap you picked.
+Ctrl+Alt+J, folding Ctrl+Shift+[ and ], the terminal Ctrl+J, Join Lines Ctrl+Shift+J).
+Shortcuts on digits and symbols follow your keyboard: on Windows they're on the key in the
+same place as on an American keyboard (on a French AZERTY, the terminal is also Ctrl+ù,
+comments Ctrl+:, tab 1 Ctrl+&), and on Linux an AZERTY's digit row works without Shift.
+On Linux, where the desktop keeps Ctrl+Alt+T and Ctrl+Alt+arrows for itself, the test at
+the cursor is Ctrl+Shift+F10 (debugged: Ctrl+Shift+F9) and a cursor above or below is
+Ctrl+Shift+↑/↓; back and forward are Alt+←/→ everywhere off the Mac.
+Menus and ⌘K always show the keys as they are on your computer, and for the keymap you
+picked.
 
 ## Getting around
 
@@ -50,6 +57,23 @@ A command is named as ⌘K lists it (or as in the code, `editor::SelectAllOccurr
 `null` takes a shortcut away, everywhere in the window (the terminal and the files too).
 Menus and ⌘K show your keys; one that can't be understood, or that would type a character
 (`x`, a space), is named when settings.json is saved.
+
+## Several folders in one window
+
+A window can hold several folders, each a heading in the files with its own under it:
+**Add Folder to Window…** (⌘K or File) picks one or more, a folder dropped from the Finder or
+Explorer onto the files asks whether to add it or copy it in, and `null api web` opens them
+together. A heading's menu has **Remove Folder from Window** (nothing on disk changes).
+
+Across them all: ⌘P lists every folder's files (`web/app/page.tsx`), project search searches
+them, ⌘T knows their symbols, and the files show git's marks. Each folder gets its own
+language servers. Git follows the file you're in: the Git panel shows that folder's
+repository, with a picker of the others at its top, and the status bar its branch. A new
+terminal, ⌘⇧B's tasks, F5 and AI tasks work in the folder of the file at hand; tests are found
+in every folder and run in their own.
+
+The window remembers its folders: open its first one again (or pick it in Recent) and the
+others come back with it.
 
 ## Writing
 
@@ -345,3 +369,19 @@ Font License 1.1 (see `assets/fonts/*/OFL.txt`). Any installed font can be used 
 one in Settings → Appearance, or set `code_font` and `ui_font` in the JSON. Ligatures (`->`
 as an arrow) show with fonts that keep them in their columns, such as JetBrains Mono, Fira
 Code or Cascadia Code; Geist Mono's would shift the code, so Null leaves them off.
+
+## Uninstalling
+
+Each way of removing Null asks whether your settings, saved API keys, history and language
+servers go too; by default they stay, for if you come back.
+
+- **Mac**: ⌘K › Uninstall Null… (also in the Null menu): Null quits, goes to the Trash, and
+  takes the `null` command with it. Dragged to the Trash instead, it leaves those behind.
+- **Windows**: Settings › Apps › Installed apps › Null › Uninstall.
+- **Linux**, from the `.deb`: `sudo apt remove null-editor` (your settings stay); from the
+  `.tar.gz`: `~/.local/share/null/uninstall.sh`.
+
+Where things are kept: settings in `~/.config/null` (`%APPDATA%\Null` on Windows); history,
+sessions and language servers in `~/Library/Application Support/Null` on the Mac,
+`~/.local/share/null` on Linux, `%LOCALAPPDATA%\Null` on Windows; API keys in the system's
+keychain.

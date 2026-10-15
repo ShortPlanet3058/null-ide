@@ -156,6 +156,8 @@ pub fn graph(commits: &[git::LogCommit]) -> Vec<GraphRow> {
 }
 
 pub enum GitViewEvent {
+    /// With several folders: this one's repository picked, for git to act on.
+    PickRepo(PathBuf),
     /// A commit clicked in the history: shown.
     ShowCommit(git::LogCommit),
     /// A pull request (by number) clicked: shown.
@@ -165,8 +167,8 @@ pub enum GitViewEvent {
     Open(PathBuf),
     /// Commit asked for: the open files are saved first (then `commit` runs).
     CommitAsked,
-    /// Committed (its short id), or why not.
-    Committed(Result<String, String>),
+    /// Committed (its short id), or why not; and the files that went in whole.
+    Committed(Result<String, String>, Vec<PathBuf>),
     /// A message written by AI asked for, from these files' changes.
     Draft(Vec<PathBuf>),
     Push,
@@ -194,6 +196,8 @@ impl EventEmitter<GitViewEvent> for GitView {}
 
 pub struct GitView {
     root: PathBuf,
+    /// The window's folders when it has several (each its repository), to pick from.
+    repos: Vec<PathBuf>,
     focus_handle: FocusHandle,
     /// None until read: then whether this is a repository.
     pub repository: Option<bool>,
@@ -331,6 +335,7 @@ impl GitView {
         ];
         Self {
             root,
+            repos: Vec::new(),
             focus_handle: cx.focus_handle(),
             repository: None,
             files: Vec::new(),
@@ -367,6 +372,37 @@ impl GitView {
             pr_base,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The window's folders, when it has several: a picker of their repositories shows.
+    pub fn set_repos(&mut self, repos: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.repos = repos;
+        cx.notify();
+    }
+
+    /// With several folders: which one's repository git shows, picked by its name.
+    fn render_repos(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.repos.len() < 2 {
+            return None;
+        }
+        let theme = cx.global::<Theme>().clone();
+        let repos = self.repos.clone();
+        let pieces = self.repos.iter().enumerate().map(|(i, repo)| {
+            let on = *repo == self.root;
+            let repo = repo.clone();
+            ui::segment(on, &theme)
+                .id(("git-repo", i))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .truncate()
+                .cursor_pointer()
+                .when(!on, |p| p.hover(|s| s.text_color(theme.foreground)))
+                .child(crate::roots::ProjectRoots::label_among(&repos, &repo))
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::PickRepo(repo.clone()))))
+        });
+        Some(div().px(px(12.)).pt(px(10.)).child(ui::segmented(&theme).children(pieces)).into_any_element())
     }
 
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -531,7 +567,10 @@ impl GitView {
         }
         if let Some(file) = self.files.iter().find(|f| f.status == FileStatus::Conflicted) {
             let name = file.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            cx.emit(GitViewEvent::Committed(Err(format!("{name} still has conflicts: resolve them first."))));
+            cx.emit(GitViewEvent::Committed(
+                Err(format!("{name} still has conflicts: resolve them first.")),
+                Vec::new(),
+            ));
             return;
         }
         self.committing = true;
@@ -542,6 +581,7 @@ impl GitView {
         let root = self.root.clone();
         let kept: Vec<PathBuf> = self.files.iter().filter(|f| f.kept).map(|f| f.path.clone()).collect();
         let left_out: Vec<PathBuf> = self.files.iter().filter(|f| !f.kept).map(|f| f.path.clone()).collect();
+        let whole: Vec<PathBuf> = self.files.iter().filter(|f| f.kept && !f.partly()).map(|f| f.path.clone()).collect();
         // Each part chosen with its lines, as listed: the file saved since must still have
         // those changes, or the choices would land on others.
         type Chosen = Vec<(Range<usize>, bool)>;
@@ -585,7 +625,7 @@ impl GitView {
                     this.body.update(cx, |input, cx| input.set_text("", cx));
                     // What was left out stays left out for the next one.
                 }
-                cx.emit(GitViewEvent::Committed(result));
+                cx.emit(GitViewEvent::Committed(result, whole));
                 this.refresh(cx);
             })
             .ok();
@@ -621,7 +661,7 @@ impl GitView {
     fn render_history(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return ui::empty_state("This folder isn't a git repository", &theme).into_any_element();
+            return ui::empty_state(git::not_a_repository(), &theme).into_any_element();
         }
         let query = self.filter.read(cx).text().trim().to_lowercase();
         self.history_shown = (0..self.history.len())
@@ -823,7 +863,7 @@ impl GitView {
     fn render_changes(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.global::<Theme>().clone();
         if self.repository == Some(false) {
-            return ui::empty_state("This folder isn't a git repository", &theme).into_any_element();
+            return ui::empty_state(git::not_a_repository(), &theme).into_any_element();
         }
         let ai = cx.global::<crate::settings::Settings>().ai.ready();
         let kept = self.kept_count();
@@ -1070,6 +1110,7 @@ impl Render for GitView {
             self.focus_message = false;
             window.focus(&self.summary.focus_handle(cx));
         }
+        let repos = self.render_repos(cx);
         let tabs = self.render_tabs(cx);
         let shown = match self.tab {
             Tab::Changes => self.render_changes(cx),
@@ -1083,6 +1124,7 @@ impl Render for GitView {
             .flex()
             .flex_col()
             .text_size(px(ui::T_MD))
+            .children(repos)
             .child(tabs)
             .child(div().flex_1().min_h_0().child(shown))
     }

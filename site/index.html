@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Null — a calm, fast code editor</title>
+  <meta name="description" content="Null is a free, open-source code editor for macOS, Windows and Linux: the screen belongs to your code, and AI stays out of the way until you call it.">
+  <meta name="theme-color" content="#000000">
+  <meta property="og:title" content="Null — a calm, fast code editor">
+  <meta property="og:description" content="The screen belongs to your code. AI is there when you call it, and nowhere when it's off.">
+  <meta property="og:image" content="media/null-film-poster.jpg">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="nav" id="nav">
+    <a class="mark" href="#top" aria-label="Null"><span class="caret"></span>Null</a>
+    <nav>
+      <a href="#story">Story</a>
+      <a href="#features">Features</a>
+      <a href="#ai">AI</a>
+      <a href="https://github.com/ShortPlanet3058/null-ide/blob/main/docs/guide.md">Guide</a>
+      <a class="nav-cta" href="#download">Download</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <!-- The hero: a scene of the app behind each line, one after the other. -->
+    <section class="hero" id="hero" aria-roledescription="carousel">
+      <div class="slides" aria-hidden="true">
+        <div class="slide on" data-label="Null"><video muted playsinline preload="auto" poster="media/calm.jpg" src="media/calm.mp4"></video></div>
+        <div class="slide" data-label="Fast"><video muted playsinline preload="none" poster="media/fast.jpg" src="media/fast.mp4"></video></div>
+        <div class="slide" data-label="AI on call"><video muted playsinline preload="none" poster="media/ai.jpg" src="media/ai.mp4"></video></div>
+        <div class="slide" data-label="Everywhere"><video muted playsinline preload="none" poster="media/everywhere.jpg" src="media/everywhere.mp4"></video></div>
+      </div>
+      <div class="hero-shade"></div>
+      <div class="hero-glow" id="glow"></div>
+      <div class="hero-content">
+        <div class="hero-copy" id="hero-copy">
+          <div class="copy on">
+            <p class="eyebrow">Free and open source · macOS, Windows and Linux</p>
+            <h1>A calm, fast code editor.</h1>
+            <p class="lead">The screen belongs to your code. Everything an IDE should do is a keystroke away, and out of sight until then.</p>
+          </div>
+          <div class="copy">
+            <p class="eyebrow">Fast</p>
+            <h1>Everything, one keystroke away.</h1>
+            <p class="lead">Native, drawn on the GPU. ⌘P lists a 42,000-file project in a quarter of a second; ⌘K changes any setting or runs any command.</p>
+          </div>
+          <div class="copy">
+            <p class="eyebrow">AI on call</p>
+            <h1>AI when you ask. Nowhere when you don't.</h1>
+            <p class="lead">Describe a change in your own words: it's written into your code as a diff to keep or undo. Off until you turn it on.</p>
+          </div>
+          <div class="copy">
+            <p class="eyebrow">Everywhere</p>
+            <h1>On the Mac, Windows and Linux.</h1>
+            <p class="lead">The same quiet window on each, with six themes and the keys your hands already know.</p>
+          </div>
+        </div>
+        <div class="buttons">
+          <a class="button primary" href="#download" id="hero-download">Download Null</a>
+          <button class="button ghost" type="button" data-film><span class="play"></span>Watch the film</button>
+        </div>
+      </div>
+      <div class="hero-tabs" role="tablist" id="hero-tabs"></div>
+    </section>
+
+    <!-- The idea, word by word as you scroll. -->
+    <section class="statement" aria-label="The idea">
+      <p class="scrub" id="scrub">Most editors fill the screen with everything at once: panels, badges, notifications, pop-ups. Null starts with nothing, and gives the screen back to your code.</p>
+    </section>
+
+    <!-- One change, start to finish: the film's story, played by scrolling. -->
+    <section class="story" id="story">
+      <div class="story-pin">
+        <div class="story-text">
+          <p class="eyebrow">One change, start to finish</p>
+          <h2>Without leaving the keyboard.</h2>
+          <ol class="steps" id="steps">
+            <li data-at="0"><b>Write</b><span>The bars fade while you type, and come back when you stop.</span></li>
+            <li data-at="2"><b>Find</b><span>⌘P to any file, @ for any symbol.</span></li>
+            <li data-at="4"><b>Run</b><span>The terminal is one key away; tests run from the code.</span></li>
+            <li data-at="8"><b>Ask</b><span>AI is off until you want it. Then ⌘I, in plain words.</span></li>
+            <li data-at="11"><b>Keep</b><span>Every change is shown in place: ⇥ keeps it, Esc undoes it.</span></li>
+            <li data-at="13"><b>Commit</b><span>The lines you mean, with a message drafted for you.</span></li>
+          </ol>
+        </div>
+        <div class="story-frame">
+          <img class="story-poster" src="media/calm.jpg" alt="">
+          <iframe id="film" title="Null, writing a change: scroll to play it" data-src="film/scripts/promo/promo.html?embed&amp;nocaptions" tabindex="-1"></iframe>
+          <div class="story-progress"><div id="story-bar"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- What it does. -->
+    <section class="features" id="features">
+      <div class="section-head reveal">
+        <p class="eyebrow">Everything an IDE should do</p>
+        <h2>Out of sight until you need it.</h2>
+        <p class="lead">Code intelligence for Rust, Python, TypeScript, Go, C, C++, Swift and more: the language server is found, or installed for you in one click.</p>
+      </div>
+      <div class="bento">
+        <article class="card wide reveal"><div class="pic"><img loading="lazy" src="media/stills/commit.jpg" style="--zoom:1.8;--focus:8% 30%" alt="The Git panel with a commit message drafted"></div><div class="txt"><h3>Git in one panel</h3><p>Commit whole files or just the lines you mean. History with its graph, branches, conflicts resolved in place, pull requests.</p></div></article>
+        <article class="card reveal"><div class="pic"><img loading="lazy" src="media/stills/run.jpg" style="--zoom:1.9;--focus:60% 82%" alt="The terminal running the tests"></div><div class="txt"><h3>Terminal and tests</h3><p>Tests found and run from the code; errors in the terminal join the problems list.</p></div></article>
+        <article class="card reveal"><div class="pic"><img loading="lazy" src="media/stills/debug.jpg" style="--zoom:1.5;--focus:48% 50%" alt="Stopped at a breakpoint, values shown in the code"></div><div class="txt"><h3>A debugger in the code</h3><p>Breakpoints, and values shown where they are, not in a pane.</p></div></article>
+        <article class="card reveal"><div class="pic"><img loading="lazy" src="media/stills/md.jpg" style="--zoom:1.55;--focus:88% 28%" alt="Markdown with its live preview and a diagram"></div><div class="txt"><h3>Markdown, previewed</h3><p>Tables, formulas and diagrams, live beside the text.</p></div></article>
+        <article class="card reveal"><div class="pic"><img loading="lazy" src="media/stills/tasks.jpg" style="--zoom:1.45;--focus:45% 38%" alt="An AI task's changes to review"></div><div class="txt"><h3>Bigger tasks, in the background</h3><p>Claude Code or Codex does the work; you review every change, file by file.</p></div></article>
+        <article class="card reveal"><div class="pic"><img loading="lazy" src="media/stills/folders.jpg" style="--zoom:1.75;--focus:8% 30%" alt="Two projects in one window"></div><div class="txt"><h3>Several folders, one window <em>next release</em></h3><p>Each with its own files, git and language servers.</p></div></article>
+        <article class="card wide reveal"><div class="pic"><img loading="lazy" src="media/stills/themes.jpg" style="--zoom:1.45;--focus:55% 26%" alt="The six themes in Settings"></div><div class="txt"><h3>Six themes</h3><p>True black by default, with an amber caret; dark and light ones too. Bars that fade while you type.</p></div></article>
+        <article class="card reveal"><div class="pic"><img loading="lazy" src="media/stills/keyboard.jpg" style="--zoom:1.7;--focus:62% 22%" alt="Keymap presets in Settings"></div><div class="txt"><h3>Keys you already know</h3><p>VS Code, JetBrains, Sublime Text, Zed, or Vim.</p></div></article>
+        <article class="card reveal"><div class="pic"><img loading="lazy" src="media/stills/vim.jpg" style="--zoom:1.5;--focus:42% 82%" alt="Vim's visual mode in Null"></div><div class="txt"><h3>Vim, properly</h3><p>Modes, motions, text objects, registers, macros.</p></div></article>
+        <article class="card plain reveal"><div class="txt"><h3>Never lose work</h3><p>Unsaved changes survive a crash, every save is kept for a month, and files changed on disk are never silently written over.</p></div></article>
+        <article class="card plain full reveal"><div class="txt"><h3>Private</h3><p>No telemetry, no accounts. Nothing leaves your computer unless you ask it to.</p></div></article>
+      </div>
+      <div class="numbers reveal" id="numbers">
+        <div><b data-count="42000">0</b><span>files listed in a quarter of a second</span></div>
+        <div><b data-count="14">0</b><span>languages highlighted, more coloured</span></div>
+        <div><b data-count="6">0</b><span>themes, and six sets of keys</span></div>
+        <div><b data-count="3">0</b><span>platforms, one quiet window</span></div>
+      </div>
+    </section>
+
+    <!-- AI your way. -->
+    <section class="ai" id="ai">
+      <div class="section-head reveal">
+        <p class="eyebrow">AI your way</p>
+        <h2>A tool, not a co-pilot.</h2>
+        <p class="lead">Off until you turn it on. When it's on, it never changes your code without showing you the change.</p>
+      </div>
+      <div class="marquee" aria-label="Where answers can come from">
+        <div class="track"><span>Claude Code <i>your Claude plan</i></span><span>Codex <i>your ChatGPT plan</i></span><span>Claude API</span><span>OpenAI</span><span>Gemini <i>free tier</i></span><span>Mistral <i>free tier</i></span><span>Groq <i>free tier</i></span><span>OpenRouter</span><span>NVIDIA</span><span>Ollama <i>on your computer</i></span></div>
+        <div class="track" aria-hidden="true"><span>Claude Code <i>your Claude plan</i></span><span>Codex <i>your ChatGPT plan</i></span><span>Claude API</span><span>OpenAI</span><span>Gemini <i>free tier</i></span><span>Mistral <i>free tier</i></span><span>Groq <i>free tier</i></span><span>OpenRouter</span><span>NVIDIA</span><span>Ollama <i>on your computer</i></span></div>
+      </div>
+      <div class="three">
+        <div class="reveal"><span class="k">⌘I</span><h3>Change code where it is</h3><p>Describe a change; it's written in as a diff to keep with ⇥ or undo with Esc.</p></div>
+        <div class="reveal"><span class="k">✦</span><h3>Bigger tasks, reviewed</h3><p>Hand a task to Claude Code or Codex. Its changes come back as a list to review, change by change.</p></div>
+        <div class="reveal"><span class="k">○</span><h3>Or none at all</h3><p>With AI off there's no button, no badge, no dot. Just your code.</p></div>
+      </div>
+    </section>
+
+    <!-- The film. -->
+    <section class="film" id="film-section">
+      <div class="section-head reveal">
+        <p class="eyebrow">The film</p>
+        <h2>Null in a minute and three quarters.</h2>
+      </div>
+      <button class="film-card reveal" type="button" data-film aria-label="Watch the film">
+        <img loading="lazy" src="media/null-film-poster.jpg" alt="">
+        <span class="film-play"><span class="play"></span></span>
+      </button>
+    </section>
+
+    <!-- Download. -->
+    <section class="download" id="download">
+      <div class="section-head reveal">
+        <p class="eyebrow">Download</p>
+        <h2>Free, and yours.</h2>
+        <p class="lead">The latest version, built from the source on GitHub by its public release workflow.</p>
+      </div>
+      <div class="platforms">
+        <a class="platform reveal" data-os="mac" href="https://github.com/ShortPlanet3058/null-ide/releases/latest/download/Null-macos.dmg">
+          <span class="os">macOS</span><span class="req">11 or later · Intel and Apple silicon</span><span class="how">Open the .dmg and drag Null to Applications.</span><span class="get">Download .dmg</span>
+        </a>
+        <a class="platform reveal" data-os="windows" href="https://github.com/ShortPlanet3058/null-ide/releases/latest/download/null-windows-x86_64-setup.exe">
+          <span class="os">Windows</span><span class="req">10 and 11 · x86-64</span><span class="how">Run the installer: no administrator needed. It adds Null to the Start menu, <code>null</code> to your terminals and "Open with Null" to folders.</span><span class="get">Download installer</span>
+          <span class="alt" data-href="https://github.com/ShortPlanet3058/null-ide/releases/latest/download/null-windows-x86_64.zip">or the .zip, to run from anywhere</span>
+        </a>
+        <a class="platform reveal" data-os="linux" href="https://github.com/ShortPlanet3058/null-ide/releases/latest/download/null-linux-amd64.deb">
+          <span class="os">Linux</span><span class="req">x86-64 · X11 or Wayland</span><span class="how">Ubuntu and Debian: <code>sudo apt install ./null-linux-amd64.deb</code>, and <code>null</code> works in every terminal.</span><span class="get">Download .deb</span>
+          <span class="alt" data-href="https://github.com/ShortPlanet3058/null-ide/releases/latest/download/null-linux-x86_64.tar.gz">or the .tar.gz for other distributions (./install.sh)</span>
+        </a>
+      </div>
+      <p class="small reveal">Every version and its notes: <a href="https://github.com/ShortPlanet3058/null-ide/releases">releases</a> ·
+        <a href="https://github.com/ShortPlanet3058/null-ide/blob/main/CHANGELOG.md">changelog</a> ·
+        <a href="https://github.com/ShortPlanet3058/null-ide">source</a> · <a href="code-signing.html">code signing policy</a> · <a href="privacy.html">privacy</a></p>
+    </section>
+  </main>
+
+  <section class="open reveal" aria-label="Open source">
+    <p class="eyebrow">Open source</p>
+    <h2>Made in the open.</h2>
+    <p class="lead">Every line of Null is on GitHub: read it, build it, report a problem or suggest what comes next.</p>
+    <div class="buttons">
+      <a class="button primary" href="https://github.com/ShortPlanet3058/null-ide">
+        <svg width="20" height="20" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        View Null on GitHub
+      </a>
+      <a class="button ghost" href="https://github.com/ShortPlanet3058/null-ide/issues">Report a problem</a>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <div class="foot-row">
+      <span>Null is free software under the <a href="https://github.com/ShortPlanet3058/null-ide/blob/main/LICENSE">GNU GPL 3.0</a>.</span>
+      <span><a href="https://github.com/ShortPlanet3058/null-ide">GitHub</a> · <a href="https://github.com/ShortPlanet3058/null-ide/issues">Report a problem</a> · <a href="code-signing.html">Code signing</a> · <a href="privacy.html">Privacy</a></span>
+    </div>
+  </footer>
+
+  <!-- The film, over the page. -->
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Null, the film" hidden>
+    <button class="modal-close" type="button" aria-label="Close">✕</button>
+    <video id="modal-video" controls playsinline preload="none" poster="media/null-film-poster.jpg" src="media/null-film.mp4"></video>
+  </div>
+
+  <script src="site.js"></script>
+</body>
+</html>

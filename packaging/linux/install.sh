@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs Null for this person on Linux: the binary into ~/.local/bin, its icon and its
 # entry in the applications menu (as the `null` command, and "Open With"). Nothing
-# system-wide, nothing downloaded.
+# system-wide, nothing downloaded. ~/.local/share/null/uninstall.sh removes it again.
 #
 #     ./install.sh                    from the release's folder: its own `null`
 #     packaging/linux/install.sh      from the source: built first
@@ -22,4 +22,26 @@ install -Dm644 "$icon" "$data/icons/hicolor/scalable/apps/null.svg"
 mkdir -p "$data/applications"
 sed "s|^Exec=null |Exec=$HOME/.local/bin/null |" "$desktop" > "$data/applications/null.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database "$data/applications" || true
+# (Kept where it outlives the download: removing Null is one command.)
+install -Dm755 "$here/uninstall.sh" "$data/null/uninstall.sh"
 echo "Installed Null: ~/.local/bin/null and its menu entry"
+echo "To remove it: $data/null/uninstall.sh"
+
+# `null` in a terminal: ~/.local/bin on the PATH. Ubuntu's ~/.profile adds it only at the
+# next login, and zsh never reads that file: the line added to the shell's own file.
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) exit 0 ;;
+esac
+line='export PATH="$HOME/.local/bin:$PATH"  # added by the Null installer'
+added=
+for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    [ -f "$rc" ] || continue
+    grep -qs '/.local/bin' "$rc" && continue
+    printf '\n%s\n' "$line" >> "$rc"
+    added="$added ${rc##*/}"
+done
+if [ -n "$added" ]; then
+    echo "Added ~/.local/bin to the PATH in$added: open a new terminal and \`null .\` works."
+else
+    echo "~/.local/bin isn't on your PATH: add it to your shell's settings to type \`null\`."
+fi

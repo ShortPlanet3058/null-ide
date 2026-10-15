@@ -130,8 +130,10 @@ enum StepKind {
     Look,
     Type,
     Keys,
-    /// How present AI is, and (once it's on) where its answers come from.
+    /// How present AI is.
     Presence,
+    /// Where its answers come from: a step of its own, once AI is wanted.
+    Provider,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,8 +204,13 @@ impl Welcome {
         cx.notify();
     }
 
-    fn steps(_: &App) -> Vec<StepKind> {
-        vec![StepKind::Look, StepKind::Type, StepKind::Keys, StepKind::Presence]
+    /// The steps as things stand: where answers come from only once AI is on.
+    fn steps(cx: &App) -> Vec<StepKind> {
+        let mut steps = vec![StepKind::Look, StepKind::Type, StepKind::Keys, StepKind::Presence];
+        if cx.global::<Settings>().ai.enabled {
+            steps.push(StepKind::Provider);
+        }
+        steps
     }
 
     fn next(&mut self, _: &WelcomeNext, _: &mut Window, cx: &mut Context<Self>) {
@@ -228,12 +235,13 @@ impl Welcome {
         // A key typed for the provider goes to the keychain, never to the settings file.
         let key = self.key.read(cx).text().trim().to_string();
         let provider = cx.global::<Settings>().ai.provider;
-        if !key.is_empty()
-            && provider.uses_api_key()
-            && cx.global::<Settings>().ai.enabled
-            && let Err(error) = ai::store_api_key(provider, &key)
-        {
-            eprintln!("null: couldn't save the key: {error}");
+        if !key.is_empty() && provider.uses_api_key() && cx.global::<Settings>().ai.enabled {
+            // (Off the window's thread: the key store can ask something first.)
+            std::thread::spawn(move || {
+                if let Err(error) = ai::store_api_key(provider, &key) {
+                    eprintln!("null: couldn't save the key: {error}");
+                }
+            });
         }
         settings::update(cx, |s| {
             s.welcomed = true;
@@ -457,6 +465,7 @@ impl Welcome {
             .h(px(42.))
             .flex_none()
             .flex()
+            .map(crate::window_frame::frame_bar)
             .child(
                 div()
                     .flex_1()
@@ -572,24 +581,17 @@ impl Welcome {
                             }))
                     },
                 ));
-                // Where answers come from: asked only once AI is wanted.
-                let providers = (now != Presence::Off).then(|| {
-                        div()
-                            .pt(px(10.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .child(div().text_size(px(15.)).text_color(theme.muted).child(
-                                "Where answers come from: a plan you have, an API key (free tiers included), or this computer.",
-                            ))
-                            .child(self.provider_step(&settings, &theme, cx))
-                    });
                 (
                     "How present should AI be?",
                     "It never opens a panel on its own, and never changes code without showing you the change.",
-                    div().flex().flex_col().gap(px(14.)).child(choices).children(providers).into_any_element(),
+                    choices.into_any_element(),
                 )
             }
+            StepKind::Provider => (
+                "Where should answers come from?",
+                "A plan you already have, an API key from any of these (free tiers included), or this computer.",
+                self.provider_step(&settings, &theme, cx),
+            ),
         };
         let last = n + 1 == steps.len();
         let dot = |i: usize| -> Hsla { if i == n { theme.caret } else { theme.line_strong } };
@@ -601,35 +603,39 @@ impl Welcome {
             .child(Self::top_bar(Some((n, count)), &theme, window))
             .child(
                 // (Scrolls when a step is taller than the window: AI's, with its providers.)
-                div()
-                    .id("welcome-step")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .justify_center()
-                    .px(px(28.))
-                    .child(
-                        div()
-                            .my_auto()
-                            .py(px(12.))
-                            .w(px(720.))
-                            .max_w_full()
-                            .flex()
-                            .flex_col()
-                            .gap(px(14.))
-                            .opacity(0.3 + 0.7 * eased)
-                            .ml(px(14. * (1. - eased)))
-                            .child(
-                                div()
-                                    .text_size(px(30.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child(title),
-                            )
-                            .child(div().pb(px(10.)).text_size(px(15.)).text_color(theme.muted).child(sub.to_string()))
-                            .child(body),
-                    ),
+                // (Centred while it fits; taller, from its top: auto margins would lift it out of
+                // view, as on a Windows screen scaled up.)
+                div().id("welcome-step").flex_1().min_h_0().overflow_y_scroll().child(
+                    div()
+                        .min_h(gpui::relative(1.))
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .items_center()
+                        .px(px(28.))
+                        .child(
+                            div()
+                                .py(px(12.))
+                                .w(px(720.))
+                                .max_w_full()
+                                .flex()
+                                .flex_col()
+                                .gap(px(14.))
+                                .opacity(0.3 + 0.7 * eased)
+                                .ml(px(14. * (1. - eased)))
+                                .child(
+                                    div()
+                                        .text_size(px(30.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.foreground)
+                                        .child(title),
+                                )
+                                .child(
+                                    div().pb(px(10.)).text_size(px(15.)).text_color(theme.muted).child(sub.to_string()),
+                                )
+                                .child(body),
+                        ),
+                ),
             )
             .child(
                 // Lined up with the step above: same width, same edges.

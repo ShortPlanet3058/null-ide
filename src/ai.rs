@@ -112,6 +112,21 @@ impl ProviderId {
         }
     }
 
+    /// Every provider, Off first.
+    pub const ALL: [ProviderId; 11] = [
+        ProviderId::Off,
+        ProviderId::Nvidia,
+        ProviderId::Ollama,
+        ProviderId::OpenaiCompatible,
+        ProviderId::Claude,
+        ProviderId::ClaudeCode,
+        ProviderId::Codex,
+        ProviderId::Mistral,
+        ProviderId::Groq,
+        ProviderId::Gemini,
+        ProviderId::OpenRouter,
+    ];
+
     /// Whether this provider takes an API key (Ollama and the CLIs don't).
     pub fn uses_api_key(self) -> bool {
         !matches!(self, ProviderId::Off | ProviderId::Ollama | ProviderId::ClaudeCode | ProviderId::Codex)
@@ -205,8 +220,8 @@ impl ProviderId {
             ],
             ProviderId::Nvidia => &[
                 Recommended { model: "nvidia/nemotron-3-super-120b-a12b", note: "balanced" },
-                Recommended { model: "deepseek-ai/deepseek-v4.1-flash", note: "fast" },
-                Recommended { model: "mistralai/codestral-22b-instruct-v0.1", note: "for code" },
+                Recommended { model: "nvidia/nemotron-3.5-lightning-30b-a3b", note: "fast" },
+                Recommended { model: "z-ai/glm-5.3", note: "stronger, slower" },
             ],
             ProviderId::Ollama => &[
                 Recommended { model: "qwen2.5-coder:7b", note: "for code" },
@@ -219,10 +234,8 @@ impl ProviderId {
     /// code models where the provider has them: fast, and they continue the code.
     pub fn recommended_for_suggestions(self) -> &'static [Recommended] {
         match self {
-            ProviderId::Nvidia => &[
-                Recommended { model: "bigcode/starcoder2-15b", note: "fills in code" },
-                Recommended { model: "google/codegemma-7b", note: "fills in code, faster" },
-            ],
+            // (Its fill-in-the-middle models are gone from the free tier.)
+            ProviderId::Nvidia => &[Recommended { model: "nvidia/nemotron-3.5-lightning-30b-a3b", note: "fastest" }],
             ProviderId::Ollama => &[
                 Recommended { model: "qwen2.5-coder:1.5b", note: "fills in code" },
                 Recommended { model: "qwen2.5-coder:7b", note: "better, slower" },
@@ -276,6 +289,15 @@ impl Effort {
     }
 }
 
+/// Models Null once suggested that no longer answer (NVIDIA's free tier, October 2026): a
+/// saved one gives way to the provider's default.
+const RETIRED: &[&str] = &[
+    "deepseek-ai/deepseek-v4.1-flash",
+    "mistralai/codestral-22b-instruct-v0.1",
+    "bigcode/starcoder2-15b",
+    "google/codegemma-7b",
+];
+
 /// Per-provider overrides, e.g. `"nvidia": { "model": "qwen/qwen3-coder-480b-a35b-instruct" }`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -296,9 +318,10 @@ pub struct ProviderSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "AiSettingsFile")]
 pub struct AiSettings {
-    /// The master switch: when off, no AI appears anywhere, whatever the provider.
+    /// The master switch: when off, no AI appears anywhere, whatever the provider. Off
+    /// until it's turned on.
     pub enabled: bool,
     pub provider: ProviderId,
     /// Ghost completions: the AI's guess at what comes next, shown faintly at the caret.
@@ -309,7 +332,37 @@ pub struct AiSettings {
 
 impl Default for AiSettings {
     fn default() -> Self {
-        Self { enabled: true, provider: ProviderId::Off, completions: false, providers: HashMap::new() }
+        Self { enabled: false, provider: ProviderId::Off, completions: false, providers: HashMap::new() }
+    }
+}
+
+/// AI's settings as a file has them. Files only hold what differs from the defaults, and
+/// AI used to be on by default: a file with a provider chosen but no `enabled` was someone
+/// using AI, and it stays on for them.
+#[derive(Deserialize)]
+#[serde(default)]
+struct AiSettingsFile {
+    enabled: Option<bool>,
+    provider: ProviderId,
+    completions: bool,
+    #[serde(flatten)]
+    providers: HashMap<String, ProviderSettings>,
+}
+
+impl Default for AiSettingsFile {
+    fn default() -> Self {
+        Self { enabled: None, provider: ProviderId::Off, completions: false, providers: HashMap::new() }
+    }
+}
+
+impl From<AiSettingsFile> for AiSettings {
+    fn from(file: AiSettingsFile) -> Self {
+        Self {
+            enabled: file.enabled.unwrap_or(file.provider != ProviderId::Off),
+            provider: file.provider,
+            completions: file.completions,
+            providers: file.providers,
+        }
     }
 }
 
@@ -328,7 +381,7 @@ impl AiSettings {
         self.providers
             .get(id.key())
             .and_then(|p| p.model.clone())
-            .filter(|m| !m.is_empty())
+            .filter(|m| !m.is_empty() && !RETIRED.contains(&m.as_str()))
             .or(id.default_model().map(str::to_owned))
     }
 
@@ -337,7 +390,7 @@ impl AiSettings {
         self.providers
             .get(id.key())
             .and_then(|p| p.completion_model.clone())
-            .filter(|m| !m.is_empty())
+            .filter(|m| !m.is_empty() && !RETIRED.contains(&m.as_str()))
             .or_else(|| id.recommended_for_suggestions().first().map(|r| r.model.to_string()))
     }
 
@@ -402,6 +455,19 @@ pub fn known_key(id: ProviderId) -> Option<bool> {
     keys.as_ref().and_then(|k| k.get(id.key())).map(Option::is_some)
 }
 
+/// Deletes every API key Null saved in the system's keychain (when it's uninstalled):
+/// how many there were.
+pub fn forget_api_keys() -> usize {
+    if cfg!(test) || crate::system_clipboard::kept_apart() {
+        return 0;
+    }
+    ProviderId::ALL
+        .into_iter()
+        .filter(|id| id.uses_api_key())
+        .filter(|id| keyring::Entry::new(KEYCHAIN_SERVICE, id.key()).is_ok_and(|e| e.delete_credential().is_ok()))
+        .count()
+}
+
 pub fn store_api_key(id: ProviderId, key: &str) -> Result<(), String> {
     // (Nor changes it: a key typed in one is the person's to keep or not.)
     if crate::system_clipboard::kept_apart() {
@@ -409,11 +475,41 @@ pub fn store_api_key(id: ProviderId, key: &str) -> Result<(), String> {
     }
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, id.key()).map_err(|e| e.to_string())?;
     let key = key.trim();
-    if key.is_empty() { entry.delete_credential().or(Ok(())) } else { entry.set_password(key) }
-        .map_err(|e: keyring::Error| e.to_string())?;
+    let keep = |entry: &keyring::Entry| {
+        if key.is_empty() { entry.delete_credential().or(Ok(())) } else { entry.set_password(key) }
+    };
+    match keep(&entry) {
+        // Linux with no keyring yet (a first login over remote desktop, a bare window
+        // manager): the usual one made (the desktop asks for its password), then again.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        Err(keyring::Error::NoStorageAccess(_)) => {
+            make_default_keyring()?;
+            keep(&entry).map_err(|e| no_keyring(e.to_string()))?;
+        }
+        result => result.map_err(|e| no_keyring(e.to_string()))?,
+    }
     let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
     keys.get_or_insert_with(HashMap::new).insert(id.key(), (!key.is_empty()).then(|| key.to_string()));
     Ok(())
+}
+
+/// What went wrong keeping a key, and the way round it: the provider's environment
+/// variable, read before the key store.
+fn no_keyring(error: String) -> String {
+    format!("{error}. The key can also come from its environment variable (as NVIDIA_API_KEY).")
+}
+
+/// The Secret Service's default keyring, made when there's none ("Login", as GNOME's is):
+/// the desktop asks for the password that locks it.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn make_default_keyring() -> Result<(), String> {
+    use secret_service::{EncryptionType, blocking::SecretService};
+    let failed = |e: secret_service::Error| no_keyring(format!("No keyring to keep it in ({e})"));
+    let service = SecretService::connect(EncryptionType::Dh).map_err(failed)?;
+    if service.get_default_collection().is_ok() {
+        return Ok(());
+    }
+    service.create_collection("Login", "default").map(|_| ()).map_err(failed)
 }
 
 #[derive(Clone, Default)]
@@ -547,7 +643,8 @@ pub fn ask(settings: &AiSettings, prompt: &Prompt, on_text: &mut dyn FnMut(&str)
         first.get_or_insert_with(|| started.elapsed());
         on_text(text)
     });
-    log_request(settings, "ask", started, first, &result);
+    let model = prompt.model.clone().or_else(|| settings.model(settings.active()));
+    log_request(settings, "ask", model.as_deref(), started, first, &result);
     result
 }
 
@@ -589,6 +686,32 @@ pub(crate) fn missing_key(id: ProviderId) -> String {
 
 pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().http_status_as_error(false).build().into()
+}
+
+/// How long a hosted service may take to start a streamed answer. NVIDIA's free models can
+/// hold a request in a queue for minutes, with nothing to show for it.
+const START_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The agent for a streamed answer from `base`: it gives up on a hosted service that hasn't
+/// started answering in time. A model on this computer may be loading first, so it gets as
+/// long as it needs.
+fn streaming_agent(base: &str) -> ureq::Agent {
+    ureq::Agent::config_builder().http_status_as_error(false).timeout_recv_response(start_limit(base)).build().into()
+}
+
+fn start_limit(base: &str) -> Option<std::time::Duration> {
+    let local = ["localhost", "127.0.0.1", "[::1]"].iter().any(|host| base.contains(host));
+    (!local).then_some(START_WITHIN)
+}
+
+/// Why a request to `service` got no answer.
+fn unreached(service: &str, error: ureq::Error) -> String {
+    match error {
+        ureq::Error::Timeout(_) => format!(
+            "{service} hasn't started answering in a minute: it may be busy. Try again, or choose another model in Settings → AI."
+        ),
+        error => format!("Couldn't reach {service}: {error}"),
+    }
 }
 
 /// The message inside a provider's error response, or the raw body.
@@ -675,17 +798,16 @@ fn openai_compatible(
         crate::ollama::ensure_running(base);
     }
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-    let mut request = agent().post(&url).header("Content-Type", "application/json");
+    let mut request = streaming_agent(base).post(&url).header("Content-Type", "application/json");
     if let Some(key) = key {
         request = request.header("Authorization", &format!("Bearer {key}"));
     }
     let body = chat_body(id, base, model, effort, prompt);
-    let response = request.send_json(&body).map_err(|e| {
-        if id == ProviderId::Ollama {
+    let response = request.send_json(&body).map_err(|e| match e {
+        e if id == ProviderId::Ollama && !matches!(e, ureq::Error::Timeout(_)) => {
             format!("Couldn't reach Ollama at {base}. Is it running? ({e})")
-        } else {
-            format!("Couldn't reach {}: {e}", id.label())
         }
+        e => unreached(id.label(), e),
     })?;
     let status = response.status().as_u16();
     let mut body = response.into_body();
@@ -734,14 +856,14 @@ fn claude_api(
     on_text: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     let body = claude_body(model, effort, prompt);
-    let response = agent()
+    let response = streaming_agent("https://api.anthropic.com")
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
         .header("anthropic-beta", "server-side-fallback-2026-07-01")
         .header("content-type", "application/json")
         .send_json(&body)
-        .map_err(|e| format!("Couldn't reach the Claude API: {e}"))?;
+        .map_err(|e| unreached("the Claude API", e))?;
     let status = response.status().as_u16();
     let mut body = response.into_body();
     if status >= 400 {
@@ -1159,7 +1281,7 @@ pub fn stream_fim(settings: AiSettings, fim: Fim) -> futures::channel::mpsc::Unb
                 first.get_or_insert_with(|| started.elapsed());
                 text_tx.unbounded_send(AiEvent::Text(text.to_string())).ok();
             });
-            log_request(&settings, "fill", started, first, &result);
+            log_request(&settings, "fill", None, started, first, &result);
             tx.unbounded_send(match result {
                 Ok(()) => AiEvent::Done,
                 Err(message) => AiEvent::Failed(message),
@@ -1171,16 +1293,22 @@ pub fn stream_fim(settings: AiSettings, fim: Fim) -> futures::channel::mpsc::Unb
 }
 
 /// With `NULL_AI_LOG=<file>`, one line per request: how long until the first text, how long in all.
+/// (`model`: the one asked, when it isn't the one for suggestions.)
 pub fn log_request(
     settings: &AiSettings,
     kind: &str,
+    model: Option<&str>,
     started: std::time::Instant,
     first: Option<std::time::Duration>,
     result: &Result<(), String>,
 ) {
     let Some(path) = std::env::var_os("NULL_AI_LOG") else { return };
     let id = settings.active();
-    let model = settings.completion_model(id).or_else(|| settings.model(id)).unwrap_or_default();
+    let model = model
+        .map(str::to_owned)
+        .or_else(|| settings.completion_model(id))
+        .or_else(|| settings.model(id))
+        .unwrap_or_default();
     let line = format!(
         "{kind} {} {model}: first text {}, total {:.0?}{}\n",
         id.key(),
@@ -1351,18 +1479,9 @@ mod request_tests {
 
     #[test]
     fn every_provider_has_a_default_model_and_valid_thinking_default() {
-        for id in [
-            ProviderId::Nvidia,
-            ProviderId::Ollama,
-            ProviderId::OpenaiCompatible,
-            ProviderId::Claude,
-            ProviderId::ClaudeCode,
-            ProviderId::Codex,
-            ProviderId::Mistral,
-            ProviderId::Groq,
-            ProviderId::Gemini,
-            ProviderId::OpenRouter,
-        ] {
+        let keys: std::collections::HashSet<_> = ProviderId::ALL.iter().map(|id| id.key()).collect();
+        assert_eq!(keys.len(), ProviderId::ALL.len(), "each provider once");
+        for id in ProviderId::ALL.into_iter().filter(|id| *id != ProviderId::Off) {
             assert!(id.default_model().is_some() || matches!(id, ProviderId::ClaudeCode | ProviderId::Codex), "{id:?}");
             let efforts = id.efforts();
             assert!(efforts.is_empty() || efforts.contains(&id.default_effort()), "{id:?}");
@@ -1373,6 +1492,42 @@ mod request_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AI is off until turned on; a file from when it was on by default (a provider, no
+    /// `enabled`) keeps it on; turned off stays off.
+    #[test]
+    fn a_retired_model_gives_way_to_the_default() {
+        let settings: AiSettings = serde_json::from_str(
+            r#"{ "provider": "nvidia", "nvidia": { "model": "deepseek-ai/deepseek-v4.1-flash", "completion_model": "bigcode/starcoder2-15b" } }"#,
+        )
+        .unwrap();
+        assert_eq!(settings.model(ProviderId::Nvidia).as_deref(), ProviderId::Nvidia.default_model());
+        assert_eq!(
+            settings.completion_model(ProviderId::Nvidia).as_deref(),
+            Some("nvidia/nemotron-3.5-lightning-30b-a3b")
+        );
+        // Suggestions then come from a chat model.
+        assert!(!fim_available(&AiSettings { enabled: true, ..settings }));
+    }
+
+    #[test]
+    fn hosted_services_must_start_answering_in_time() {
+        assert_eq!(start_limit("https://integrate.api.nvidia.com/v1"), Some(START_WITHIN));
+        assert_eq!(start_limit("https://api.anthropic.com"), Some(START_WITHIN));
+        // A local model may be loading first.
+        assert_eq!(start_limit("http://localhost:11434/v1"), None);
+        assert_eq!(start_limit("http://127.0.0.1:8000/v1"), None);
+    }
+
+    #[test]
+    fn ai_is_off_until_turned_on() {
+        let read = |json: &str| serde_json::from_str::<AiSettings>(json).unwrap();
+        assert!(!AiSettings::default().enabled);
+        assert!(!read("{}").enabled);
+        assert!(read(r#"{"provider": "claude_code"}"#).enabled, "someone already using AI");
+        assert!(!read(r#"{"provider": "claude_code", "enabled": false}"#).enabled);
+        assert!(read(r#"{"enabled": true}"#).enabled);
+    }
 
     #[test]
     fn settings_fill_in_defaults_and_read_overrides() {
@@ -1418,7 +1573,7 @@ mod live_tests {
     #[test]
     #[ignore]
     fn nvidia_streams_an_answer() {
-        let settings = AiSettings { provider: ProviderId::Nvidia, ..Default::default() };
+        let settings = AiSettings { enabled: true, provider: ProviderId::Nvidia, ..Default::default() };
         let prompt = Prompt {
             system: "Answer with one word.".into(),
             user: "What color is the sky on a clear day?".into(),

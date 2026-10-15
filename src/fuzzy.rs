@@ -54,6 +54,7 @@ pub fn score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
     let mut score = 0;
     let mut from = 0;
     let mut last: Option<usize> = None;
+    let mut unbroken = true;
     for (qi, &q) in query.iter().enumerate() {
         let next = (from..chars.len()).find(|&i| lower[i] == q)?;
         // Continuing a run beats jumping; otherwise prefer the start of a word
@@ -71,12 +72,20 @@ pub fn score(candidate: &str, query: &str) -> Option<(i32, Vec<usize>)> {
         }
         match last {
             Some(l) if l + 1 == i => score += 5,
-            Some(l) => score -= ((i - l - 1) as i32).min(5),
+            Some(l) => {
+                unbroken = false;
+                score -= ((i - l - 1) as i32).min(5)
+            }
             None => score -= (i as i32).min(10),
         }
         positions.push(chars[i].0);
         last = Some(i);
         from = i + 1;
+    }
+    // What was typed, found as it was typed (`cart` in cart.rs), beats the same letters
+    // spread out, even onto the starts of words (Cargo.toml).
+    if unbroken && query.len() > 1 {
+        score += 2 * query.len() as i32;
     }
     Some((score, positions))
 }
@@ -100,6 +109,14 @@ mod tests {
         {
             assert_eq!(fits(candidate, &folded(query)), score(candidate, query).is_some(), "{candidate} / {query}");
         }
+    }
+
+    /// `cart` finds cart.rs before Cargo.toml.
+    #[test]
+    fn letters_typed_together_rank_first() {
+        let cart = score("cart.rs", "cart").unwrap().0;
+        let cargo = score("Cargo.toml", "cart").unwrap().0;
+        assert!(cart > cargo, "{cart} vs {cargo}");
     }
 
     #[test]

@@ -128,6 +128,12 @@ pub fn run(cx: &mut App) {
                     }
                 }),
                 "switch" => handle.update(cx, |workspace, window, cx| workspace.switch_tab(false, true, window, cx)),
+                // `roots api web`: those folders of the project's, the window's folders.
+                "roots" => handle.update(cx, |workspace, window, cx| {
+                    let base = workspace.root(cx).to_path_buf();
+                    let paths = arg.split_whitespace().map(|a| base.join(a)).collect();
+                    workspace.qa_roots(paths, window, cx)
+                }),
                 "rows" => handle.update(cx, |workspace, _, cx| {
                     if let Some(editor) = workspace.qa_editor() {
                         let editor = editor.read(cx);
@@ -141,6 +147,8 @@ pub fn run(cx: &mut App) {
                     // (A path from the project's folder, as a file of it is written.)
                     "open" => {
                         let path = workspace.root(cx).join(arg);
+                        // (`../web/a.tsx`, another folder of the window's: its real path.)
+                        let path = dunce::canonicalize(&path).unwrap_or(path);
                         workspace.open_file(path, window, cx)
                     }
                     "run" => workspace.qa_run(arg.to_string(), window, cx),

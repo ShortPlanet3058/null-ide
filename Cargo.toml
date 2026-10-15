@@ -1,8 +1,8 @@
 [package]
 name = "null-ide"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-only"
 description = "A calm, fast code editor where nothing gets in your way."
 repository = "https://github.com/ShortPlanet3058/null-ide"
 
@@ -83,12 +83,18 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 libc = "0.2"
 
 # Null's icon and version built into null.exe (see build.rs). Already in the build.
+# (Already there, under keyring: to make the desktop's keyring when it has none.)
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+secret-service = { version = "5", features = ["crypto-rust"] }
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
 
 [dev-dependencies]
 # Lets tests run real views and actions without opening windows.
 gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
+# (Already in the build, with gpui: names the map a keyboard mapper of a test's returns.)
+gpui_collections = "0.2.2"
 
 # Debug builds keep line numbers for backtraces but not full debug info: target/ once
 # reached 77 GB of it on a small disk.

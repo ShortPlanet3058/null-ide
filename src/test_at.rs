@@ -51,6 +51,15 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
         "Python" => {
             let python = crate::python_env::python_for(root, path);
             let package = crate::python_env::owner_for(root, path).map(|(dir, _)| dir);
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            if !uses_pytest(root, path, &text) {
+                return Some(match package.filter(|p| p != root) {
+                    Some(package) => {
+                        format!("{python} -m unittest discover -v -s {}", quote(&relative(root, &package)))
+                    }
+                    None => format!("{python} -m unittest discover -v"),
+                });
+            }
             Some(match package.filter(|p| p != root) {
                 Some(package) => format!("{python} -m pytest {}", quote(&relative(root, &package))),
                 None => format!("{python} -m pytest"),
@@ -308,6 +317,33 @@ pub fn results(output: &str) -> Vec<(String, bool)> {
             }
             continue;
         }
+        // unittest -v: "test_total (tests.test_cart.TestCart.test_total) ... ok" (before
+        // Python 3.11 without the test's name in the brackets), as pytest's id.
+        if let Some((head, outcome)) = trimmed.split_once(" ... ")
+            && let Some((name, dotted)) = head.split_once(" (")
+            && let Some(dotted) = dotted.strip_suffix(')')
+            && !name.contains(' ')
+            && dotted.contains('.')
+        {
+            let mut parts: Vec<&str> = dotted.split('.').collect();
+            if parts.last() == Some(&name) {
+                parts.pop();
+            }
+            // The classes, then the module (classes start with a capital).
+            let classes = parts.iter().rev().take_while(|p| p.starts_with(char::is_uppercase)).count();
+            let (module, classes) = parts.split_at(parts.len() - classes);
+            let mut id = format!("{}.py", module.join(std::path::MAIN_SEPARATOR_STR));
+            for part in classes.iter().chain([&name]) {
+                id.push_str("::");
+                id.push_str(part);
+            }
+            match outcome.trim() {
+                "ok" => found.push((id, true)),
+                "FAIL" | "ERROR" => found.push((id, false)),
+                _ => {}
+            }
+            continue;
+        }
         // go -v: "--- PASS: TestTotal (0.00s)"
         if let Some(rest) = trimmed.strip_prefix("--- PASS: ").or_else(|| trimmed.strip_prefix("--- FAIL: ")) {
             let name = rest.split_whitespace().next().unwrap_or("").to_string();
@@ -420,16 +456,21 @@ pub fn find(language: &str, root: &Path, path: &Path, text: &str, tree: &Tree, b
         }
         "Python" => {
             let relative = relative(root, path);
+            let python = crate::python_env::python_for(root, path);
+            let pytest = uses_pytest(root, path, text);
             match byte {
                 Some(byte) => {
                     let (id, name) = python_test(text, tree, byte)?;
-                    let python = crate::python_env::python_for(root, path);
-                    let command = format!("{python} -m pytest {}", quote(&format!("{relative}::{id}")));
+                    let command = if pytest {
+                        format!("{python} -m pytest {}", quote(&format!("{relative}::{id}")))
+                    } else {
+                        let test = format!("{}.{}", unittest_module(&relative), id.replace("::", "."));
+                        format!("{python} -m unittest -v {}", quote(&test))
+                    };
                     Some(TestRun { command, name })
                 }
-                None => {
-                    Some(all(format!("{} -m pytest {}", crate::python_env::python_for(root, path), quote(&relative))))
-                }
+                None if pytest => Some(all(format!("{python} -m pytest {}", quote(&relative)))),
+                None => Some(all(format!("{python} -m unittest -v {}", quote(&unittest_module(&relative))))),
             }
         }
         "JavaScript" | "TypeScript" | "TSX" => {
@@ -578,6 +619,41 @@ fn go_tests(text: &str, tree: &Tree) -> Vec<(String, std::ops::Range<usize>)> {
             (!rest.starts_with(|c: char| c.is_lowercase())).then(|| (name.to_string(), n.start_byte()..n.end_byte()))
         })
         .collect()
+}
+
+/// Whether Python tests run with pytest here: the project says so (a conftest.py, its
+/// settings, its requirements), the file imports it, or its tests are bare functions (only
+/// pytest runs those). Else a file of unittest's TestCases runs with unittest, which comes
+/// with Python: pytest may not be installed at all.
+fn uses_pytest(root: &Path, path: &Path, text: &str) -> bool {
+    let imports = |module: &str| {
+        text.lines().any(|l| {
+            let l = l.trim_start();
+            l.starts_with(&format!("import {module}")) || l.starts_with(&format!("from {module}"))
+        })
+    };
+    if imports("pytest") || !imports("unittest") {
+        return true;
+    }
+    let says_pytest = |file: PathBuf| std::fs::read_to_string(file).is_ok_and(|t| t.contains("pytest"));
+    let mut dir = path.parent();
+    while let Some(d) = dir.filter(|d| d.starts_with(root)) {
+        if d.join("conftest.py").is_file() || d.join("pytest.ini").is_file() {
+            return true;
+        }
+        let settings = ["pyproject.toml", "setup.cfg", "tox.ini", "requirements.txt", "requirements-dev.txt"];
+        if settings.iter().any(|f| says_pytest(d.join(f))) {
+            return true;
+        }
+        dir = d.parent();
+    }
+    false
+}
+
+/// unittest's name for a test file: `tests/test_cart.py` is `tests.test_cart`.
+fn unittest_module(relative: &str) -> String {
+    let module = relative.strip_suffix(".py").unwrap_or(relative);
+    module.replace(['/', '\\'], ".")
 }
 
 /// pytest's id for the test at `byte` ("TestCart::test_total"), and its name.
@@ -819,6 +895,25 @@ mod tests {
         assert!(has("cart counts", true) && has("basket empties", true), "{results:?}");
     }
 
+    /// unittest -v's lines, as pytest's ids (how the tests list knows them).
+    #[test]
+    fn unittest_results_are_read_as_pytest_ids() {
+        let output = "test_total (tests.test_cart.TestCart.test_total) ... ok\n\
+            test_empty (tests.test_cart.TestCart.test_empty) ... FAIL\n\
+            test_old (test_cart.TestCart) ... ERROR\n\
+            test_skip (test_cart.TestCart.test_skip) ... skipped 'later'\n\
+            Ran 4 tests in 0.001s\n";
+        let sep = std::path::MAIN_SEPARATOR_STR;
+        assert_eq!(
+            results(output),
+            [
+                (format!("tests{sep}test_cart.py::TestCart::test_total"), true),
+                (format!("tests{sep}test_cart.py::TestCart::test_empty"), false),
+                ("test_cart.py::TestCart::test_old".to_string(), false),
+            ]
+        );
+    }
+
     /// A title as written, its quotes and escapes read; one made as it runs isn't a test to find.
     #[test]
     fn js_titles_are_read_as_they_run() {
@@ -873,6 +968,21 @@ mod tests {
         let run = at("Python", &root, "tests/test_cart.py", py, "assert").unwrap();
         assert_eq!(run.command, "python3 -m pytest tests/test_cart.py::TestCart::test_total");
         assert_eq!(at("Python", &root, "tests/test_cart.py", py, "pass").unwrap().name, "test_free");
+
+        // unittest's TestCases, with no sign of pytest: unittest, which comes with Python.
+        let unit = "import unittest\n\nclass TestCart(unittest.TestCase):\n    def test_total(self):\n        self.assertTrue(1)\n";
+        let root = project("py-unit", &[("tests/test_cart.py", unit)]);
+        let run = at("Python", &root, "tests/test_cart.py", unit, "assertTrue").unwrap();
+        assert_eq!(run.command, "python3 -m unittest -v tests.test_cart.TestCart.test_total");
+        let every = every_test("Python", &root, &root.join("tests/test_cart.py")).unwrap();
+        assert_eq!(every, "python3 -m unittest discover -v");
+        // The same file in a project that uses pytest: pytest.
+        let root = project(
+            "py-unit-pytest",
+            &[("tests/test_cart.py", unit), ("pyproject.toml", "[tool.pytest.ini_options]\n")],
+        );
+        let run = at("Python", &root, "tests/test_cart.py", unit, "assertTrue").unwrap();
+        assert_eq!(run.command, "python3 -m pytest tests/test_cart.py::TestCart::test_total");
 
         let js = "describe('cart', () => {\n  it('adds (two) items', () => {\n    expect(1).toBe(1);\n  });\n});\n";
         let root =

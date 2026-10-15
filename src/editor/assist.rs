@@ -1114,6 +1114,7 @@ mod tests {
             // (A provider chosen: ⌘I opens only when AI can answer.)
             let mut settings = Settings::default();
             settings.ai.provider = crate::ai::ProviderId::Ollama;
+            settings.ai.enabled = true;
             cx.set_global(settings);
             cx.set_global(Theme::oled());
             cx.set_global(crate::fonts::Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
@@ -1245,6 +1246,8 @@ mod tests {
         let (e, cx) = editor(cx, "def compute_moving_average(xs):\n    return 0\n\n");
         cx.update(|_, cx| {
             let mut settings = Settings::default();
+            // (AI on, as suggestions while typing need, but no provider chosen.)
+            settings.ai.enabled = true;
             settings.ai.completions = true;
             cx.set_global(settings);
         });

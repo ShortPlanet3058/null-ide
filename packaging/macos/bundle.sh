@@ -58,6 +58,12 @@ case "$mode" in
         dmg="target/release/Null-$version.dmg"
         stage=target/release/dmg
         rm -rf "$stage" "$dmg"
+        # (On CI the two builds' leftovers filled the disk before the image was made.)
+        if [ -n "${CI:-}" ]; then
+            for arch in x86_64 aarch64; do
+                rm -rf "target/$arch-apple-darwin/release/deps" "target/$arch-apple-darwin/release/build"
+            done
+        fi
         mkdir -p "$stage"
         cp -R "$app" "$stage/"
         ln -s /Applications "$stage/Applications"

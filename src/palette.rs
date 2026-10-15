@@ -72,6 +72,87 @@ pub enum PaletteKind {
     Projects,
     /// Vim's command line (:w, :q, :42, :%s/a/b/g).
     Ex,
+    /// Every command, listed with nothing typed (the menu bar's place off the Mac).
+    Commands,
+    /// A path typed, for when the system has no file dialog to show (Linux without a
+    /// desktop portal): what's in the folder typed so far, listed.
+    Path(PathFor),
+}
+
+/// What a typed path is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathFor {
+    /// A folder, as the project in this window.
+    Folder,
+    /// A folder, in a window of its own.
+    NewWindow,
+    /// A folder, beside those in this window.
+    AddFolder,
+    /// A file (or a folder) to open.
+    File,
+    /// A program to debug.
+    Program,
+}
+
+impl PathFor {
+    fn files_too(self) -> bool {
+        matches!(self, PathFor::File | PathFor::Program)
+    }
+}
+
+/// What the folder `typed` points into holds, starting with what was typed so far: its
+/// folders (and files, with `files_too`), the typed folder itself first when it is one.
+/// `~` is the home folder; a path that isn't absolute is from it.
+pub fn path_candidates(typed: &str, home: &Path, files_too: bool) -> Vec<PathBuf> {
+    let typed = typed.trim();
+    let expand = |t: &str| -> PathBuf {
+        if t.is_empty() || t == "~" {
+            home.to_path_buf()
+        } else if let Some(rest) = t.strip_prefix("~/").or_else(|| t.strip_prefix("~\\")) {
+            home.join(rest)
+        } else if Path::new(t).is_absolute() {
+            PathBuf::from(t)
+        } else {
+            home.join(t)
+        }
+    };
+    // Split as typed (a path would drop a last `.`, typed to see hidden folders).
+    let (folder, start) = match typed.rfind(['/', '\\']) {
+        Some(i) => (&typed[..=i], &typed[i + 1..]),
+        None if typed == "~" => ("~", ""),
+        None => ("", typed),
+    };
+    let dir = expand(folder);
+    let start = start.to_lowercase();
+    let expanded = expand(typed);
+    let into = start.is_empty();
+    let mut found: Vec<(bool, bool, String, PathBuf)> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_dir = path.is_dir();
+            if !is_dir && !files_too {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let lower = name.to_lowercase();
+            // (Hidden ones only once a dot is typed.)
+            if lower.starts_with('.') && !start.starts_with('.') {
+                return None;
+            }
+            let begins = lower.starts_with(&start);
+            (begins || (!start.is_empty() && lower.contains(&start))).then_some((!begins, !is_dir, lower, path))
+        })
+        .collect();
+    found.sort();
+    let mut paths: Vec<PathBuf> = found.into_iter().map(|(.., p)| p).take(60).collect();
+    if !into && start != "." && start != ".." && expanded.is_dir() {
+        paths.retain(|p| *p != expanded);
+        paths.insert(0, expanded);
+    }
+    paths
 }
 
 /// The lines added and removed a file change shows when it isn't text (no lines).
@@ -115,6 +196,9 @@ impl PaletteKind {
             PaletteKind::Run => "Run a task, or type a command",
             PaletteKind::Projects => "Open a recent project",
             PaletteKind::Ex => ":",
+            PaletteKind::Commands => "Commands",
+            PaletteKind::Path(f) if f.files_too() => "A file's path: ~/code/app/main.rs",
+            PaletteKind::Path(_) => "A folder's path: ~/code/app",
         }
     }
 }
@@ -269,11 +353,18 @@ fn quick_for(name: &str) -> Option<Quick> {
     })
 }
 
+/// Whether the action picks one value of its quick setting (a theme, a line spacing).
+fn picks_a_value(name: &str) -> bool {
+    let name = name.rsplit("::").next().unwrap_or(name);
+    (name.starts_with("Use") && name.ends_with("Theme")) || name.ends_with("LineSpacing")
+}
+
 /// What the palette starts with.
 pub struct PaletteOptions {
     pub kind: PaletteKind,
     pub commands: Vec<Command>,
-    pub root: PathBuf,
+    /// The window's folders: its files listed from them all.
+    pub roots: crate::roots::ProjectRoots,
     /// Files opened lately, most recent first (the current one left out).
     pub recent_files: Vec<PathBuf>,
     /// Names of the actions run lately, most recent first; they rank higher.
@@ -302,8 +393,10 @@ pub(crate) struct FileEntry {
 }
 
 impl FileEntry {
-    fn new(path: PathBuf, root: &Path) -> Self {
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+    /// As shown and searched: inside its folder (with that folder's name first when the
+    /// window has several).
+    fn new(path: PathBuf, roots: &crate::roots::ProjectRoots) -> Self {
+        let relative = roots.display(&path);
         let name_start = relative.rfind(['/', '\\']).map_or(0, |i| i + 1);
         Self { path, relative, name_start }
     }
@@ -364,6 +457,8 @@ pub enum PaletteEvent {
     OpenProjectInNewWindow(PathBuf),
     /// Settings opened, looking for this.
     SearchSettings(String),
+    /// A path typed (no file dialog on this system), and what it's for.
+    PathChosen(PathFor, PathBuf),
 }
 
 pub struct Palette {
@@ -387,7 +482,7 @@ pub struct Palette {
     projects: Vec<PathBuf>,
     /// Symbols of the open file: their line is enough, and moving through them shows each.
     in_file: bool,
-    root: PathBuf,
+    roots: crate::roots::ProjectRoots,
     rows: Vec<Row>,
     selected: usize,
     /// Where the pointer was when the keyboard last moved the selection.
@@ -414,13 +509,13 @@ impl Palette {
         // project that took 1.4 s), and the rows updated if they've changed.
         let mut listed = None;
         if kind == PaletteKind::Files {
-            let root = options.root.clone();
+            let roots = options.roots.clone();
             let hide = cx.global::<crate::settings::Settings>().hidden_paths();
-            let key = (root.clone(), hide.clone());
+            let key = (roots.all().to_vec(), hide.clone());
             listed =
                 LISTED.lock().ok().and_then(|last| last.as_ref().filter(|(k, _)| *k == key).map(|(_, f)| f.clone()));
             cx.spawn(async move |this, cx| {
-                let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
+                let files = cx.background_executor().spawn(async move { list_files_in(&roots, &hide) }).await;
                 if let Ok(mut last) = LISTED.lock() {
                     *last = Some((key, files.clone()));
                 }
@@ -452,7 +547,7 @@ impl Palette {
             .into_iter()
             .filter(|p| p.is_file())
             .take(MAX_RECENT)
-            .map(|p| FileEntry::new(p, &options.root))
+            .map(|p| FileEntry::new(p, &options.roots))
             .collect();
         let mut palette = Self {
             kind,
@@ -474,7 +569,7 @@ impl Palette {
             branches: options.branches,
             tasks: options.tasks,
             projects: options.projects,
-            root: options.root.clone(),
+            roots: options.roots.clone(),
             rows: Vec::new(),
             selected: 0,
             pointer_anchor: None,
@@ -515,11 +610,25 @@ impl Palette {
             }
             PaletteKind::Files => self.file_rows(split_place(&query).0),
             PaletteKind::Quick => self.quick_rows(&query),
+            // Nothing typed: every command, as listed; typed, as ⌘K finds them.
+            PaletteKind::Commands if query.is_empty() => {
+                for i in 0..self.commands.len() {
+                    self.push(Item::Command(i), Vec::new(), false);
+                }
+            }
+            PaletteKind::Commands => self.quick_rows(&query),
             PaletteKind::Line | PaletteKind::Task | PaletteKind::Ex => {}
             PaletteKind::Locations => self.location_rows(&query),
             PaletteKind::Branch => self.branch_rows(&query),
             PaletteKind::Run => self.task_rows(&query),
             PaletteKind::Projects => self.project_rows(&query),
+            PaletteKind::Path(f) => {
+                let home = crate::tools::home_dir().unwrap_or_default();
+                self.projects = path_candidates(&query, &home, f.files_too());
+                for i in 0..self.projects.len() {
+                    self.push(Item::Project(i), Vec::new(), false);
+                }
+            }
         }
         self.selected = 0;
         // ↵ goes somewhere: past the branch you're on.
@@ -576,7 +685,7 @@ impl Palette {
                 continue;
             }
             let location = &self.locations[i];
-            let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+            let file = self.roots.display(&location.path);
             if fuzzy::score(&format!("{} {file}", location.text), query).is_some() {
                 let highlights = fuzzy::score(&location.text, query).map(|(_, h)| h).unwrap_or_default();
                 self.push(Item::Location(i), highlights, false);
@@ -705,10 +814,10 @@ impl Palette {
         let mut found = rank_files(&self.files, query, &recent);
         // Only those shown sorted (the best first), not every match.
         if found.len() > MAX_RESULTS {
-            found.select_nth_unstable_by_key(MAX_RESULTS, |(score, i, _)| (std::cmp::Reverse(*score), *i));
+            found.select_nth_unstable_by_key(MAX_RESULTS, |(score, i, _)| sort_key(*score, &self.files[*i], *i));
             found.truncate(MAX_RESULTS);
         }
-        found.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
+        found.sort_by_key(|(score, i, _)| sort_key(*score, &self.files[*i], *i));
         for (_, i, highlights) in found.into_iter().take(MAX_RESULTS) {
             self.push(Item::File(i), highlights, false);
         }
@@ -732,7 +841,13 @@ impl Palette {
         for (i, c) in self.commands.iter().enumerate() {
             // A command a quick setting stands in for: its own name finds that setting
             // ("toggle sidebar" finds Sidebar), shown once.
-            if let Some(quick) = quick_for(c.action.name()).filter(listed) {
+            // (One that picks a value, typed by that value's name — "paper" — is listed as
+            // itself: Enter on the row would only step to the next theme.)
+            let names_its_value = picks_a_value(c.action.name())
+                && Quick::ALL
+                    .iter()
+                    .all(|q| quick_for(c.action.name()) != Some(*q) || fuzzy::score(q.label(), query).is_none());
+            if let Some(quick) = quick_for(c.action.name()).filter(listed).filter(|_| !names_its_value) {
                 let also = || also_called(c.action.name()).and_then(|words| fuzzy::score(words, query));
                 if let Some((score, _)) = fuzzy::score(&c.label, query).or_else(also) {
                     match found.iter_mut().find(|(_, item, _)| *item == Item::Quick(quick)) {
@@ -805,12 +920,20 @@ impl Palette {
     }
 
     fn adjust(&mut self, step: isize, cx: &mut Context<Self>) {
+        if let Some(Item::Quick(quick)) = self.selected_item() {
+            self.adjust_quick(quick, step, cx);
+        }
+    }
+
+    /// A quick setting stepped one way (`step` −1) or the other (+1): by ← → on its row, or a
+    /// click on its arrows.
+    fn adjust_quick(&mut self, quick: Quick, step: isize, cx: &mut Context<Self>) {
         let settings = cx.global::<Settings>();
-        let action: Box<dyn Action> = match self.selected_item() {
-            Some(Item::Quick(Quick::Theme)) => theme_action(next_theme(settings.theme, step)),
-            Some(Item::Quick(Quick::TextSize)) if step > 0 => Box::new(crate::workspace::IncreaseFontSize),
-            Some(Item::Quick(Quick::TextSize)) => Box::new(crate::workspace::DecreaseFontSize),
-            Some(Item::Quick(Quick::LineSpacing)) => crate::workspace::spacing_action(settings.line_spacing.step(step)),
+        let action: Box<dyn Action> = match quick {
+            Quick::Theme => theme_action(next_theme(settings.theme, step)),
+            Quick::TextSize if step > 0 => Box::new(crate::workspace::IncreaseFontSize),
+            Quick::TextSize => Box::new(crate::workspace::DecreaseFontSize),
+            Quick::LineSpacing => crate::workspace::spacing_action(settings.line_spacing.step(step)),
             _ => return,
         };
         cx.emit(PaletteEvent::Apply(action));
@@ -887,10 +1010,21 @@ impl Palette {
             }
             PaletteKind::Files
             | PaletteKind::Quick
+            | PaletteKind::Commands
             | PaletteKind::Locations
             | PaletteKind::Branch
             | PaletteKind::Run
             | PaletteKind::Projects => {}
+            PaletteKind::Path(f) => {
+                let chosen = match self.rows.get(ix).map(|r| r.item) {
+                    Some(Item::Project(i)) => Some(self.projects[i].clone()),
+                    _ => None,
+                };
+                if let Some(path) = chosen {
+                    cx.emit(PaletteEvent::PathChosen(f, path));
+                }
+                return;
+            }
         }
         let Some(item) = self.rows.get(ix).map(|r| r.item) else { return };
         match item {
@@ -951,7 +1085,25 @@ impl Palette {
     }
 
     /// The control at the right of a quick setting, showing its current value.
-    fn quick_control(&self, quick: Quick, window: &Window, cx: &App) -> AnyElement {
+    fn quick_control(&self, quick: Quick, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        // Its arrows (or − +) step it, as ← → do; a click there isn't a click on the row.
+        let step = |label: &'static str, by: isize, cx: &mut Context<Self>| {
+            let theme = cx.global::<Theme>();
+            div()
+                .id(SharedString::from(format!("quick-{}-{by}", quick.label())))
+                .cursor_pointer()
+                .child(ui::key_cap(label, theme))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.adjust_quick(quick, by, cx);
+                }))
+        };
+        let (less, more) = match quick {
+            Quick::TextSize => (Some(step("−", -1, cx)), Some(step("+", 1, cx))),
+            Quick::Theme | Quick::LineSpacing => (Some(step("←", -1, cx)), Some(step("→", 1, cx))),
+            _ => (None, None),
+        };
         let theme = cx.global::<Theme>();
         let settings = cx.global::<Settings>();
         let keys = |action: &dyn Action| {
@@ -963,13 +1115,13 @@ impl Palette {
             // Six are too many to show at once: the current one, and ←→ for the others.
             Quick::Theme => row
                 .text_size(px(ui::T_SM))
-                .child(ui::key_cap("←", theme))
+                .children(less)
                 .child(div().min_w(px(64.)).text_center().text_color(theme.foreground).child(settings.theme.label()))
-                .child(ui::key_cap("→", theme))
+                .children(more)
                 .into_any_element(),
             Quick::TextSize => row
                 .text_size(px(ui::T_SM))
-                .child(ui::key_cap("−", theme))
+                .children(less)
                 .child(
                     div()
                         .w(px(26.))
@@ -977,11 +1129,11 @@ impl Palette {
                         .text_color(theme.foreground)
                         .child(format!("{}", settings.font_size)),
                 )
-                .child(ui::key_cap("+", theme))
+                .children(more)
                 .into_any_element(),
             Quick::LineSpacing => row
                 .text_size(px(ui::T_SM))
-                .child(ui::key_cap("←", theme))
+                .children(less)
                 .child(
                     div()
                         .min_w(px(64.))
@@ -989,7 +1141,7 @@ impl Palette {
                         .text_color(theme.foreground)
                         .child(settings.line_spacing.label()),
                 )
-                .child(ui::key_cap("→", theme))
+                .children(more)
                 .into_any_element(),
             Quick::AllSettings => row.children(keys(&crate::workspace::OpenSettings)).into_any_element(),
             _ => {
@@ -1183,8 +1335,7 @@ impl Palette {
                     let place = if self.in_file {
                         format!("{}", location.position.line + 1)
                     } else {
-                        let file =
-                            location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+                        let file = self.roots.display(&location.path);
                         format!("{file}:{}", location.position.line + 1)
                     };
                     (
@@ -1199,7 +1350,7 @@ impl Palette {
                         Some(div().text_color(dim).child(place).into_any_element()),
                     )
                 } else {
-                    let file = location.path.strip_prefix(&self.root).unwrap_or(&location.path).display().to_string();
+                    let file = self.roots.display(&location.path);
                     let marked = highlights_in(&location.text, 0);
                     let text = StyledText::new(location.text.clone()).with_highlights(marked);
                     // Code shows in the code font; a problem's message in the interface one.
@@ -1309,6 +1460,7 @@ impl Palette {
             }
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
+            PaletteKind::Path(_) => "↵ choose",
             PaletteKind::Ex => "↵ run",
             PaletteKind::Run => "↵ run",
             PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window · ⌘⌫ off the list",
@@ -1317,7 +1469,7 @@ impl Palette {
                 Some(Item::NewBranch) => "↵ create",
                 _ => "↵ switch",
             },
-            PaletteKind::Quick => match self.selected_item() {
+            PaletteKind::Quick | PaletteKind::Commands => match self.selected_item() {
                 Some(Item::Quick(q)) if q.is_choice() => "←→ change",
                 Some(Item::Quick(Quick::AllSettings)) | Some(Item::Command(_)) => "↵ run",
                 Some(Item::Quick(_)) => "↵ switch",
@@ -1325,6 +1477,12 @@ impl Palette {
             },
         }
     }
+}
+
+/// The order of ⌘P's files: the best score first, then the shorter name (the source
+/// before what's built from it: test_cart.py before test_cart.cpython-312.pyc).
+fn sort_key(score: i32, file: &FileEntry, i: usize) -> (std::cmp::Reverse<i32>, usize, usize) {
+    (std::cmp::Reverse(score), file.relative.len() - file.name_start, i)
 }
 
 /// The files matching `query`, each with its score (`recent` ones a little higher), its
@@ -1380,19 +1538,19 @@ fn rank_files(files: &[FileEntry], query: &str, recent: &HashSet<PathBuf>) -> Ve
     }
 }
 
-/// The project's files as ⌘P last listed them (with the `hide` setting then).
-type Listed = ((PathBuf, Vec<String>), Vec<FileEntry>);
+/// The project's files as ⌘P last listed them (its folders, the `hide` setting then).
+type Listed = ((Vec<PathBuf>, Vec<String>), Vec<FileEntry>);
 static LISTED: std::sync::Mutex<Option<Listed>> = std::sync::Mutex::new(None);
 
 /// The project's files listed a moment after it opens (in the background), so the first
 /// ⌘P shows them at once.
-pub(crate) fn list_files_soon(root: PathBuf, cx: &mut App) {
+pub(crate) fn list_files_soon(roots: crate::roots::ProjectRoots, cx: &mut App) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
         // (The settings now: the project's own, read since it opened.)
         let Ok(hide) = cx.update(|cx| cx.global::<crate::settings::Settings>().hidden_paths()) else { return };
-        let key = (root.clone(), hide.clone());
-        let files = cx.background_executor().spawn(async move { list_files(&root, &hide) }).await;
+        let key = (roots.all().to_vec(), hide.clone());
+        let files = cx.background_executor().spawn(async move { list_files_in(&roots, &hide) }).await;
         if let Ok(mut last) = LISTED.lock() {
             // (Unless ⌘P has listed them meanwhile.)
             if last.as_ref().is_none_or(|(k, _)| *k != key) {
@@ -1403,9 +1561,33 @@ pub(crate) fn list_files_soon(root: PathBuf, cx: &mut App) {
     .detach();
 }
 
+/// Every file in the window's folders, each as [`list_files`] lists them, folder after folder.
+pub(crate) fn list_files_in(roots: &crate::roots::ProjectRoots, hide: &[String]) -> Vec<FileEntry> {
+    if !roots.several() {
+        return list_files_under(roots.primary(), roots, hide);
+    }
+    // (Each folder its share of the most listed: a big first one doesn't leave the others out.)
+    let share = MAX_FILES / roots.all().len();
+    roots
+        .all()
+        .iter()
+        .flat_map(|root| {
+            let mut files = list_files_under(root, roots, hide);
+            files.truncate(share);
+            files
+        })
+        .collect()
+}
+
 /// Every file in the project, respecting `.gitignore` and the `hide` setting, sorted by path.
-/// Its folders are read side by side (one by one, 42,000 files took 1.4 s).
+#[cfg(test)]
 pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
+    list_files_under(root, &crate::roots::ProjectRoots::new(root.to_path_buf()), hide)
+}
+
+/// The files in `root` (one of `roots`), as shown among them all. Its folders are read side
+/// by side (one by one, 42,000 files took 1.4 s).
+fn list_files_under(root: &Path, roots: &crate::roots::ProjectRoots, hide: &[String]) -> Vec<FileEntry> {
     use ignore::WalkState;
     let hidden = crate::project_index::hidden_rules(root, hide);
     let found: std::sync::Mutex<Vec<FileEntry>> = std::sync::Mutex::new(Vec::new());
@@ -1428,7 +1610,7 @@ pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
                 if found.len() >= MAX_FILES * 4 {
                     return WalkState::Quit;
                 }
-                found.push(FileEntry::new(entry.into_path(), root));
+                found.push(FileEntry::new(entry.into_path(), roots));
                 WalkState::Continue
             })
         });
@@ -1470,6 +1652,13 @@ pub fn format_keys(binding: &KeyBinding) -> String {
                 "down" => "↓".to_string(),
                 "left" => "←".to_string(),
                 "right" => "→".to_string(),
+                // (Linux's names for an AZERTY's keys.)
+                "eacute" => "É".to_string(),
+                "egrave" => "È".to_string(),
+                "ccedilla" => "Ç".to_string(),
+                "agrave" => "À".to_string(),
+                "ugrave" => "Ù".to_string(),
+                "section" => "§".to_string(),
                 key if key.chars().count() == 1 => key.to_uppercase(),
                 key => key[..1].to_uppercase() + &key[1..],
             };
@@ -1680,6 +1869,47 @@ mod tests {
     }
 
     use super::*;
+
+    /// The source file comes before what's built from it: `test_cart` finds test_cart.py
+    /// first, not __pycache__/test_cart.cpython-312.pyc.
+    #[test]
+    fn the_shorter_name_wins_a_tie() {
+        let root = std::path::PathBuf::from("/p");
+        let roots = crate::roots::ProjectRoots::new(root.clone());
+        let files: Vec<FileEntry> = ["__pycache__/test_cart.cpython-312.pyc", "test_cart.py", "cart.py"]
+            .iter()
+            .map(|f| FileEntry::new(root.join(f), &roots))
+            .collect();
+        let mut found = rank_files(&files, "test_cart", &Default::default());
+        found.sort_by_key(|(score, i, _)| sort_key(*score, &files[*i], *i));
+        assert_eq!(files[found[0].1].relative, "test_cart.py");
+    }
+
+    /// A path typed with no file dialog: what's in the folder typed so far, listed.
+    #[test]
+    fn a_typed_path_lists_what_the_folder_holds() {
+        let home = crate::tools::test_dir("typed-path");
+        let _ = std::fs::remove_dir_all(&home);
+        for d in ["code/app", "code/api", "code/.hidden", "notes"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("code/readme.md"), "").unwrap();
+        let names = |typed: &str, files: bool| -> Vec<String> {
+            path_candidates(typed, &home, files)
+                .iter()
+                .map(|p| p.strip_prefix(&home).unwrap().display().to_string().replace('\\', "/"))
+                .collect()
+        };
+        assert_eq!(names("", false), ["code", "notes"]);
+        assert_eq!(names("~/code/", false), ["code/api", "code/app"]);
+        assert_eq!(names("code/ap", false), ["code/api", "code/app"]);
+        assert_eq!(names("code/pp", false), ["code/app"], "within a name too");
+        assert_eq!(names("code", false), ["code"]);
+        assert_eq!(names("code/", true), ["code/api", "code/app", "code/readme.md"]);
+        assert_eq!(names("code/.", false), ["code/.hidden"]);
+        assert!(names(&home.join("code/").display().to_string(), false).contains(&"code/app".to_string()));
+        std::fs::remove_dir_all(&home).ok();
+    }
     use gpui::TestAppContext;
 
     actions!(test, [One, Two]);
@@ -1701,11 +1931,17 @@ mod tests {
                 action: Box::new(crate::workspace::MoveTabRight),
                 keys: None,
             },
+            Command {
+                category: Category::View,
+                label: "Use Paper Theme".into(),
+                action: Box::new(crate::workspace::UsePaperTheme),
+                keys: None,
+            },
         ];
         let options = PaletteOptions {
             kind,
             commands,
-            root: PathBuf::from("/nonexistent"),
+            roots: crate::roots::ProjectRoots::new(PathBuf::from("/nonexistent")),
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             line_count: Some(10),
@@ -1767,6 +2003,11 @@ mod tests {
         assert_eq!(items(cx, &p), ["Duplicate Line"]);
         type_query(cx, &p, "lines");
         assert!(items(cx, &p).contains(&"Duplicate Line".to_string()), "a category's name: what's in it");
+        // A theme by its name: that theme, not the row that steps through them.
+        type_query(cx, &p, "paper");
+        assert_eq!(items(cx, &p), ["Use Paper Theme"]);
+        type_query(cx, &p, "theme");
+        assert_eq!(items(cx, &p), ["quick: Theme"]);
         // What a command is also called: splitting is moving a tab to a side.
         type_query(cx, &p, "split");
         assert_eq!(items(cx, &p), ["Move Tab to the Right Side"]);
@@ -1791,7 +2032,7 @@ mod tests {
         let options = PaletteOptions {
             kind: PaletteKind::Locations,
             commands: Vec::new(),
-            root: PathBuf::from("/p"),
+            roots: crate::roots::ProjectRoots::new(PathBuf::from("/p")),
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             line_count: None,
@@ -1822,7 +2063,7 @@ mod tests {
         let options = PaletteOptions {
             kind: PaletteKind::Branch,
             commands: Vec::new(),
-            root: PathBuf::from("/p"),
+            roots: crate::roots::ProjectRoots::new(PathBuf::from("/p")),
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             line_count: None,
@@ -1863,7 +2104,7 @@ mod tests {
         let options = PaletteOptions {
             kind: PaletteKind::Run,
             commands: Vec::new(),
-            root: PathBuf::from("/p"),
+            roots: crate::roots::ProjectRoots::new(PathBuf::from("/p")),
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             line_count: None,

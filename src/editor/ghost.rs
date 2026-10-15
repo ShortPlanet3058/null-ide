@@ -564,7 +564,7 @@ impl Editor {
                             // That model or endpoint can't fill: use the chat model from now on.
                             mark_fill_failed(&settings);
                         } else {
-                            ai::log_request(&settings, "chat", started, None, &Err(message));
+                            ai::log_request(&settings, "chat", None, started, None, &Err(message));
                         }
                         return;
                     }
@@ -610,7 +610,7 @@ impl Editor {
                 }
             }
             if !request.use_fill {
-                ai::log_request(&settings, "chat", started, None, &Ok(()));
+                ai::log_request(&settings, "chat", None, started, None, &Ok(()));
             }
         }));
     }

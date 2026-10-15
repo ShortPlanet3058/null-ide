@@ -154,12 +154,22 @@ fn jetbrains_platform_keys() -> Vec<KeyBinding> {
             KeyBinding::new("alt-down", ShrinkSelection, editor),
         ]
     } else {
-        vec![
-            KeyBinding::new("ctrl-alt-left", GoBack, workspace),
-            KeyBinding::new("ctrl-alt-right", GoForward, workspace),
-            KeyBinding::new("ctrl-w", ExpandSelection, editor),
-            KeyBinding::new("ctrl-shift-w", ShrinkSelection, editor),
-        ]
+        // (Not on Linux, where Ctrl+Alt+←→ switch workspaces: Alt+←→ go back and forth too.)
+        let back_and_forth = if cfg!(windows) {
+            vec![
+                KeyBinding::new("ctrl-alt-left", GoBack, workspace),
+                KeyBinding::new("ctrl-alt-right", GoForward, workspace),
+            ]
+        } else {
+            Vec::new()
+        };
+        back_and_forth
+            .into_iter()
+            .chain([
+                KeyBinding::new("ctrl-w", ExpandSelection, editor),
+                KeyBinding::new("ctrl-shift-w", ShrinkSelection, editor),
+            ])
+            .collect()
     }
 }
 
@@ -198,8 +208,114 @@ pub fn register(keymap: Keymap, cx: &mut App) {
     crate::palette::bind_keys(cx);
     cx.bind_keys(keymap.overrides());
     crate::menus::bind_keys(cx);
-    // Yours, last: they win.
+    localize(cx);
+    // Yours, last: they win (as you wrote or recorded them, on your keyboard).
     crate::user_keys::register(cx);
+}
+
+/// Shortcuts on digits and symbols, where the keyboard has them. They're written as on
+/// an American keyboard; elsewhere a symbol can be on another key, behind Shift or AltGr,
+/// or nowhere (a French AZERTY has no ` key, its digits need Shift). The Mac's own
+/// shortcuts already follow the keyboard; on Windows they go to the same place as on an
+/// American keyboard, as Windows' own apps have them (Ctrl+ù for the terminal on an
+/// AZERTY), and on Linux the AZERTY digit row works without Shift.
+fn localize(cx: &mut App) {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let bindings: Vec<KeyBinding> = cx.key_bindings().borrow().bindings().cloned().collect();
+    let layout = cx.keyboard_layout().name().to_string();
+    let mapper = cx.keyboard_mapper().clone();
+    let local = if cfg!(windows) {
+        bindings.iter().map(|b| in_place(b, mapper.as_ref())).collect()
+    } else {
+        with_digit_row(bindings, &layout)
+    };
+    cx.clear_key_bindings();
+    cx.bind_keys(local);
+}
+
+/// `keys` as a preset's binding of them reads once localized (Windows moves symbols).
+pub fn as_bound(keys: &str, cx: &App) -> String {
+    let Ok(binding) = KeyBinding::load(keys, Box::new(gpui::NoAction), None, false, None, &gpui::DummyKeyboardMapper)
+    else {
+        return keys.to_string();
+    };
+    let binding = if cfg!(windows) { in_place(&binding, cx.keyboard_mapper().as_ref()) } else { binding };
+    binding.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>().join(" ")
+}
+
+/// A key that's a digit or a symbol: where it is depends on the keyboard.
+fn on_layout(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_digit() || c.is_ascii_punctuation())
+}
+
+fn source(binding: &KeyBinding) -> String {
+    binding.keystrokes().iter().map(|k| k.inner().unparse()).collect::<Vec<_>>().join(" ")
+}
+
+/// `binding` on the keys at an American keyboard's places (Windows' keyboard mapper).
+fn in_place(binding: &KeyBinding, mapper: &dyn gpui::PlatformKeyboardMapper) -> KeyBinding {
+    if !binding.keystrokes().iter().any(|k| on_layout(&k.inner().key)) {
+        return binding.clone();
+    }
+    let action = binding.action().boxed_clone();
+    KeyBinding::load(&source(binding), action, binding.predicate(), true, binding.action_input(), mapper)
+        .unwrap_or_else(|_| binding.clone())
+}
+
+/// What the digit row types without Shift on a French or Belgian AZERTY, as Linux names
+/// the keys; None elsewhere (their digits need no Shift).
+fn azerty_digits(layout: &str) -> Option<[&'static str; 10]> {
+    let layout = layout.to_lowercase();
+    let other = ["canada", "switzerland", "swiss", "bepo", "bépo", "dvorak", "qwerty", "us"];
+    if other.iter().any(|o| layout.contains(o)) {
+        return None;
+    }
+    if layout.starts_with("belgian") || layout.contains("belgium") {
+        Some(["agrave", "&", "eacute", "\"", "'", "(", "section", "egrave", "!", "ccedilla"])
+    } else if layout.starts_with("french") {
+        Some(["agrave", "&", "eacute", "\"", "'", "(", "-", "egrave", "_", "ccedilla"])
+    } else {
+        None
+    }
+}
+
+/// On an AZERTY, Ctrl+1 is Ctrl+Shift+&: each Ctrl+digit gets the key as typed without
+/// Shift too, unless that key already does something (Ctrl+- stays smaller text).
+fn with_digit_row(bindings: Vec<KeyBinding>, layout: &str) -> Vec<KeyBinding> {
+    let Some(row) = azerty_digits(layout) else { return bindings };
+    let taken: std::collections::HashSet<String> = bindings.iter().map(source).collect();
+    let mut twins = Vec::new();
+    for binding in &bindings {
+        let [stroke] = binding.keystrokes() else { continue };
+        let stroke = stroke.inner();
+        let Some(digit) = stroke.key.chars().next().and_then(|c| c.to_digit(10)).filter(|_| stroke.key.len() == 1)
+        else {
+            continue;
+        };
+        if stroke.modifiers.shift {
+            continue;
+        }
+        let twin = gpui::Keystroke { key: row[digit as usize].to_string(), key_char: None, ..stroke.clone() };
+        let written = twin.unparse();
+        if taken.contains(&written) {
+            continue;
+        }
+        let action = binding.action().boxed_clone();
+        if let Ok(twin) = KeyBinding::load(
+            &written,
+            action,
+            binding.predicate(),
+            false,
+            binding.action_input(),
+            &gpui::DummyKeyboardMapper,
+        ) {
+            twins.push(twin);
+        }
+    }
+    bindings.into_iter().chain(twins).collect()
 }
 
 #[cfg(test)]
@@ -305,5 +421,67 @@ mod tests {
             let (bindings, _) = keymap.bindings_for_input(&[stroke], &context);
             assert_eq!(bindings.first().map(|b| b.action().name()), Some(DuplicateLineDown.name()));
         });
+    }
+
+    /// On a French AZERTY under Linux, Ctrl+& is Ctrl+1 (the digit needs Shift there),
+    /// unless the key already does something; other keyboards keep their keys.
+    #[test]
+    fn an_azerty_has_its_digit_row() {
+        use crate::workspace::{DecreaseFontSize, GoToTab, SplitTerminal};
+        let keys = || {
+            vec![
+                KeyBinding::new("ctrl-1", GoToTab(1), Some("Workspace")),
+                KeyBinding::new("ctrl-2", GoToTab(2), Some("Workspace")),
+                KeyBinding::new("ctrl-6", GoToTab(6), Some("Workspace")),
+                KeyBinding::new("ctrl--", DecreaseFontSize, Some("Workspace")),
+                KeyBinding::new("ctrl-shift-5", SplitTerminal, Some("Terminal")),
+            ]
+        };
+        let written = |bindings: Vec<KeyBinding>| bindings.iter().map(source).collect::<Vec<_>>();
+        let french = written(with_digit_row(keys(), "French"));
+        assert_eq!(&french[5..], ["ctrl-&", "ctrl-eacute"]);
+        let belgian = written(with_digit_row(keys(), "Belgian"));
+        assert!(belgian.contains(&"ctrl-section".to_string()), "{belgian:?}");
+        for layout in ["English (US)", "French (Canada)", "German", "unknown"] {
+            assert_eq!(with_digit_row(keys(), layout).len(), 5, "{layout}");
+        }
+    }
+
+    /// Windows: a digit or symbol goes to the key in its American place on the keyboard
+    /// at hand (here an AZERTY's); letters and named keys stay as they are.
+    #[test]
+    fn symbols_go_where_an_american_keyboard_has_them() {
+        struct Azerty;
+        impl gpui::PlatformKeyboardMapper for Azerty {
+            fn map_key_equivalent(
+                &self,
+                mut keystroke: gpui::Keystroke,
+                use_key_equivalents: bool,
+            ) -> gpui::KeybindingKeystroke {
+                if use_key_equivalents {
+                    let place = match keystroke.key.as_str() {
+                        "1" => "&",
+                        "`" => "ù",
+                        "/" => ":",
+                        other => other,
+                    };
+                    keystroke.key = place.to_string();
+                }
+                gpui::KeybindingKeystroke::from_keystroke(keystroke)
+            }
+            fn get_key_equivalents(&self) -> Option<&gpui_collections::HashMap<char, char>> {
+                None
+            }
+        }
+        let placed = |keys: &str| {
+            let binding = KeyBinding::new(keys, ToggleTerminal, Some("Workspace"));
+            source(&in_place(&binding, &Azerty))
+        };
+        assert_eq!(placed("ctrl-`"), "ctrl-ù");
+        assert_eq!(placed("ctrl-1"), "ctrl-&");
+        assert_eq!(placed("ctrl-k ctrl-/"), "ctrl-k ctrl-:");
+        assert_eq!(placed("ctrl-j"), "ctrl-j");
+        assert_eq!(placed("ctrl-shift-pageup"), "ctrl-shift-pageup");
+        assert!(on_layout("1") && on_layout("`") && !on_layout("a") && !on_layout("f1"));
     }
 }

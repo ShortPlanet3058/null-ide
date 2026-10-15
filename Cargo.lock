@@ -3813,7 +3813,7 @@ dependencies = [
 
 [[package]]
 name = "null-ide"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
@@ -3822,6 +3822,7 @@ dependencies = [
  "embed-resource",
  "futures",
  "gpui",
+ "gpui_collections",
  "ignore",
  "image",
  "keyring",
@@ -3839,6 +3840,7 @@ dependencies = [
  "regex",
  "resvg",
  "ropey",
+ "secret-service",
  "serde",
  "serde_json",
  "sha2 0.10.9",
