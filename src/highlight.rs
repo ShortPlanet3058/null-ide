@@ -481,6 +481,42 @@ mod language_tests {
     }
 
     #[test]
+    fn highlights_the_languages_that_had_only_basic_colours() {
+        type Expected = &'static [(&'static str, Syntax)];
+        let cases: [(&str, &str, Expected); 6] = [
+            (
+                "A.java",
+                "class A {\n  // hi\n  int n = 1;\n  String s = \"x\";\n}\n",
+                &[("class", Syntax::Keyword), ("// hi", Syntax::Comment), ("1", Syntax::Number)],
+            ),
+            (
+                "A.cs",
+                "public class A {\n  // hi\n  int n = 1;\n}\n",
+                &[("public", Syntax::Keyword), ("// hi", Syntax::Comment), ("1", Syntax::Number)],
+            ),
+            ("a.rb", "def greet\n  # hi\n  \"x\"\nend\n", &[("def", Syntax::Keyword), ("# hi", Syntax::Comment)]),
+            (
+                "a.php",
+                "<?php\nfunction greet() {\n  // hi\n  return 1;\n}\n",
+                &[("function", Syntax::Keyword), ("// hi", Syntax::Comment), ("1", Syntax::Number)],
+            ),
+            (
+                "a.lua",
+                "local function greet()\n  -- hi\n  return 1\nend\n",
+                &[("local", Syntax::Keyword), ("-- hi", Syntax::Comment), ("1", Syntax::Number)],
+            ),
+            ("a.scss", "$c: 1px;\n.a { color: red; }\n", &[]),
+        ];
+        for (file, source, expected) in cases {
+            let spans = kinds(file, source);
+            assert!(!spans.is_empty(), "{file}: no colours");
+            for (text, kind) in expected {
+                assert!(spans.iter().any(|(t, s)| t == text && s == kind), "{file}: {text} as {kind:?} in {spans:?}");
+            }
+        }
+    }
+
+    #[test]
     fn highlights_typescript_with_javascript_rules() {
         let spans = kinds("a.ts", "const n: number = 1;\ninterface A {}\n");
         assert!(spans.contains(&("const".into(), Syntax::Keyword)), "{spans:?}");

@@ -269,9 +269,9 @@ mod tests {
             assert_eq!(e.language_name(), PLAIN);
             e.edit(0..0, "#!/bin/bash\necho hi\n", super::super::EditKind::Other, cx);
             assert_eq!(e.language_name(), "Shell");
-            // Chosen: Ruby, over the first line; Plain Text, no colours.
-            e.choose_language(by_name("Ruby"), cx);
-            assert_eq!((e.language_name(), e.chosen_language()), ("Ruby", Some("Ruby")));
+            // Chosen: Kotlin, over the first line; Plain Text, no colours.
+            e.choose_language(by_name("Kotlin"), cx);
+            assert_eq!((e.language_name(), e.chosen_language()), ("Kotlin", Some("Kotlin")));
             assert!(e.basic_syntax().is_some());
             e.choose_language(by_name(PLAIN), cx);
             assert!(e.language().is_none() && e.basic_syntax().is_none());

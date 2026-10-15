@@ -109,7 +109,35 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
             [tree_sitter_html::HIGHLIGHTS_QUERY],
             None
         ),
-        language!("CSS", ["css"], [], tree_sitter_css::LANGUAGE, [tree_sitter_css::HIGHLIGHTS_QUERY], None),
+        // (LESS is close enough to CSS for its colours.)
+        language!("CSS", ["css", "less"], [], tree_sitter_css::LANGUAGE, [tree_sitter_css::HIGHLIGHTS_QUERY], None),
+        language!("SCSS", ["scss"], [], tree_sitter_scss::language(), [tree_sitter_scss::HIGHLIGHTS_QUERY], Some("//")),
+        language!("Java", ["java"], [], tree_sitter_java::LANGUAGE, [tree_sitter_java::HIGHLIGHTS_QUERY], Some("//")),
+        language!(
+            "C#",
+            ["cs", "csx"],
+            [],
+            tree_sitter_c_sharp::LANGUAGE,
+            [tree_sitter_c_sharp::HIGHLIGHTS_QUERY],
+            Some("//")
+        ),
+        language!(
+            "Ruby",
+            ["rb", "rake", "gemspec", "ru"],
+            ["Gemfile", "Rakefile", "Guardfile", "Podfile", "Fastfile"],
+            tree_sitter_ruby::LANGUAGE,
+            [tree_sitter_ruby::HIGHLIGHTS_QUERY],
+            Some("#")
+        ),
+        language!(
+            "PHP",
+            ["php", "phtml"],
+            [],
+            tree_sitter_php::LANGUAGE_PHP,
+            [tree_sitter_php::HIGHLIGHTS_QUERY],
+            Some("//")
+        ),
+        language!("Lua", ["lua"], [], tree_sitter_lua::LANGUAGE, [tree_sitter_lua::HIGHLIGHTS_QUERY], Some("--")),
         language!("Go", ["go"], [], tree_sitter_go::LANGUAGE, [tree_sitter_go::HIGHLIGHTS_QUERY], Some("//")),
         language!("C", ["c", "h"], [], tree_sitter_c::LANGUAGE, [tree_sitter_c::HIGHLIGHT_QUERY], Some("//")),
         language!(
@@ -140,7 +168,9 @@ static LANGUAGES: LazyLock<Vec<Language>> = LazyLock::new(|| {
     for language in &mut languages {
         language.block_comment = match language.name {
             "HTML" | "Markdown" => Some(("<!--", "-->")),
-            "CSS" | "Rust" | "JavaScript" | "TypeScript" | "TSX" | "Go" | "C" | "C++" => Some(("/*", "*/")),
+            "CSS" | "SCSS" | "Rust" | "JavaScript" | "TypeScript" | "TSX" | "Go" | "C" | "C++" | "Java" | "C#"
+            | "PHP" => Some(("/*", "*/")),
+            "Lua" => Some(("--[[", "]]")),
             _ => None,
         };
     }
