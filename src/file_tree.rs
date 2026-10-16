@@ -507,9 +507,8 @@ impl FileTree {
     /// Expands folders again, as they were last time.
     pub fn expand_folders(&mut self, folders: &[PathBuf], cx: &mut Context<Self>) {
         // (A server's folders aren't asked about one by one: a gone one just lists nothing.)
-        let inside = |p: &PathBuf| {
-            self.roots.iter().any(|r| p.starts_with(r)) && (crate::remote::is_remote(p) || p.is_dir())
-        };
+        let inside =
+            |p: &PathBuf| self.roots.iter().any(|r| p.starts_with(r)) && (crate::remote::is_remote(p) || p.is_dir());
         let folders: Vec<PathBuf> = folders.iter().filter(|p| inside(p)).cloned().collect();
         self.expanded.extend(folders);
         self.rebuild();

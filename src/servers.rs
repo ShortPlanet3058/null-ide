@@ -677,10 +677,8 @@ pub fn install_for(server: &Server, root: &Path) -> Result<(), String> {
         ));
     }
     let script = install_script(server)?;
-    let output = linux
-        .command("sh", &["-c", &script])
-        .output()
-        .map_err(|e| format!("Couldn't reach {}: {e}", linux.name()))?;
+    let output =
+        linux.command("sh", &["-c", &script]).output().map_err(|e| format!("Couldn't reach {}: {e}", linux.name()))?;
     forget_found(&linux, server.program);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -8051,9 +8051,11 @@ impl Workspace {
             self.past_notices.remove(0);
         }
         self.past_notices.push((message.clone(), std::time::SystemTime::now()));
+        // (A longer one, as why a server can't be reached and what to do, stays to be read.)
+        let shown_for = Duration::from_secs((4 + message.chars().count() as u64 / 25).min(10));
         self.notice = Some((message, Instant::now()));
         self.notice_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(4)).await;
+            cx.background_executor().timer(shown_for).await;
             this.update(cx, |this, cx| {
                 this.notice = None;
                 cx.notify();

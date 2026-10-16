@@ -53,12 +53,7 @@ impl Meta {
         };
         #[cfg(not(unix))]
         let executable = false;
-        Meta {
-            dir: meta.is_dir(),
-            len: meta.len(),
-            modified: meta.modified().ok(),
-            executable,
-        }
+        Meta { dir: meta.is_dir(), len: meta.len(), modified: meta.modified().ok(), executable }
     }
 
     fn of_remote(meta: remote::Meta) -> Meta {

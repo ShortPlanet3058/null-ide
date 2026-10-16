@@ -129,7 +129,11 @@ fn copy_name(path: &Path, dir: &Path) -> Result<PathBuf, String> {
     // A folder's whole name (`my.app`), a file's without its extension.
     let whole = |p: &Path| p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let is_dir = crate::project_fs::is_dir(path);
-    let stem = if is_dir { whole(path) } else { path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() };
+    let stem = if is_dir {
+        whole(path)
+    } else {
+        path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    };
     let ext = if is_dir { None } else { path.extension().map(|e| e.to_string_lossy().into_owned()) };
     let name = |n: usize| {
         let copy = if n == 1 { format!("{stem} copy") } else { format!("{stem} copy {n}") };

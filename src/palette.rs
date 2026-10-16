@@ -1312,7 +1312,9 @@ impl Palette {
             }
             Item::Server(i) => (
                 div().text_size(px(ui::T_MD)).text_color(dim).child("›").into_any_element(),
-                StyledText::new(self.servers[i].clone()).with_highlights(highlights_in(&self.servers[i], 0)).into_any_element(),
+                StyledText::new(self.servers[i].clone())
+                    .with_highlights(highlights_in(&self.servers[i], 0))
+                    .into_any_element(),
                 None,
             ),
             Item::ServerTyped => (

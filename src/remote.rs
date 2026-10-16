@@ -595,10 +595,7 @@ pub fn metadata(at: &RemotePath) -> io::Result<Meta> {
 /// What's in a folder (but `.` and `..`), each with what `stat` says; links followed, broken
 /// ones left out.
 pub fn read_dir(at: &RemotePath) -> io::Result<Vec<(String, Meta)>> {
-    let script = format!(
-        "cd -- {} || exit 1; set -- * .[!.]* ..?*; st \"$@\" 2>/dev/null; exit 0",
-        quote(&at.path)
-    );
+    let script = format!("cd -- {} || exit 1; set -- * .[!.]* ..?*; st \"$@\" 2>/dev/null; exit 0", quote(&at.path));
     let output = run_ok(&at.host, &script)?;
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(text
@@ -628,7 +625,10 @@ pub fn copy(from: &RemotePath, to: &RemotePath) -> io::Result<()> {
 
 /// The path with links followed (it must be there).
 pub fn canonicalize(at: &RemotePath) -> io::Result<RemotePath> {
-    let output = run_ok(&at.host, &format!("cd -- {} 2>/dev/null && pwd -P || readlink -f -- {}", quote(&at.path), quote(&at.path)))?;
+    let output = run_ok(
+        &at.host,
+        &format!("cd -- {} 2>/dev/null && pwd -P || readlink -f -- {}", quote(&at.path), quote(&at.path)),
+    )?;
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !path.starts_with('/') {
         return Err(io::Error::new(io::ErrorKind::NotFound, "not found"));
@@ -780,7 +780,10 @@ mod tests {
     #[cfg(unix)]
     fn a_session_answers_in_frames_whatever_is_printed() {
         let output = run(TEST_HOST, "printf 'one\\ntwo'; printf 'oops' >&2; exit 3").unwrap();
-        assert_eq!((output.status, output.stdout.as_slice(), output.stderr.as_slice()), (3, &b"one\ntwo"[..], &b"oops"[..]));
+        assert_eq!(
+            (output.status, output.stdout.as_slice(), output.stderr.as_slice()),
+            (3, &b"one\ntwo"[..], &b"oops"[..])
+        );
         // (A script printing the frame's form isn't taken for a frame.)
         let output = run(TEST_HOST, "echo 'NULL 0 0 0'; true").unwrap();
         assert_eq!(output.stdout, b"NULL 0 0 0\n");
