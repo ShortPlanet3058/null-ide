@@ -1322,7 +1322,7 @@ impl Workspace {
                 let root = this.tree.read(cx).root().to_path_buf();
                 crate::settings::use_project(&root, cx);
                 // What's typed in its terminal is for Linux's shell when its folder's in WSL.
-                crate::shell::set_wsl_project(crate::wsl::is_wsl(&root));
+                crate::shell::set_linux_project(crate::wsl::is_wsl(&root) || crate::remote::is_remote(&root));
             }
             if window.is_window_active()
                 && let Some(message) = this.notice_on_return.take()
@@ -3874,7 +3874,7 @@ impl Workspace {
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let path = crate::wsl::plain(path);
-        crate::shell::set_wsl_project(crate::wsl::is_wsl(&path));
+        crate::shell::set_linux_project(crate::wsl::is_wsl(&path) || crate::remote::is_remote(&path));
         self.roots = crate::roots::ProjectRoots::new(path.clone());
         self.git_root = path.clone();
         self.git_view.update(cx, |view, cx| view.set_repos(Vec::new(), cx));

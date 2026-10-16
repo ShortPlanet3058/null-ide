@@ -420,14 +420,21 @@ impl Shell {
         // (On Windows: PowerShell, whatever a `$SHELL` from Git Bash says.)
         // A folder inside WSL: the person's own shell there, started in its Linux path.
         let wsl = crate::wsl::of(&cwd);
-        let shell = if wsl.is_some() {
+        // A folder on a server: ssh there, its shell in the folder (in a terminal, ssh can
+        // ask for a passphrase or a password itself).
+        let server = crate::remote::of(&cwd).map(|r| crate::remote::terminal(&r.host, &r.path));
+        let shell = if let Some((program, _)) = &server {
+            Some(program.to_string_lossy().into_owned())
+        } else if wsl.is_some() {
             Some("wsl.exe".to_string())
         } else if cfg!(windows) {
             Some(crate::shell::windows_program())
         } else {
             std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell)
         };
-        let args: Vec<String> = if let Some(wsl) = &wsl {
+        let args: Vec<String> = if let Some((_, args)) = server.clone() {
+            args
+        } else if let Some(wsl) = &wsl {
             vec!["-d".into(), wsl.distro.clone(), "--cd".into(), wsl.linux.clone()]
         } else if cfg!(windows) {
             // The system can't say which folder PowerShell is in: its prompt says it, in the
@@ -450,7 +457,11 @@ impl Shell {
             // A login shell, like a terminal app opens, so PATH and the prompt are set up.
             shell: shell.map(|program| tty::Shell::new(program, args)),
             // (wsl.exe is given its folder: Windows starts it in its own.)
-            working_directory: if wsl.is_some() { crate::tools::home_dir() } else { Some(cwd.clone()) },
+            working_directory: if wsl.is_some() || server.is_some() {
+                crate::tools::home_dir()
+            } else {
+                Some(cwd.clone())
+            },
             drain_on_exit: false,
             env,
             #[cfg(target_os = "windows")]
@@ -882,6 +893,10 @@ impl TerminalView {
             folder.or_else(|| self.shell_pid.and_then(crate::terminal_watch::folder_of)).filter(|f| f.is_dir())
         {
             return folder;
+        }
+        // A shell on a server: its title says its folder there (`me@host: ~/proj`).
+        if let Some(remote) = crate::remote::of(&self.root) {
+            return crate::remote::folder_in_title(&remote.host, &self.title).unwrap_or_else(|| self.root.clone());
         }
         // A shell inside WSL: its title says its Linux folder (`me@host: ~/proj`).
         if let Some(wsl) = crate::wsl::of(&self.root) {

@@ -617,11 +617,29 @@ pub fn canonicalize(at: &RemotePath) -> io::Result<RemotePath> {
     Ok(RemotePath { host: at.host.clone(), path })
 }
 
-/// The home folder on `host` (connecting, if it isn't yet: the first thing asked of a server).
+/// The home folder on `host` (connecting, if it isn't yet: the first thing asked of a
+/// server); asked once.
 pub fn home(host: &str) -> io::Result<String> {
+    static HOMES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    if let Some((_, home)) = HOMES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(h, _)| h == host) {
+        return Ok(home.clone());
+    }
     let output = run_ok(host, "printf '%s' \"$HOME\"")?;
     let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if home.starts_with('/') { Ok(home) } else { Ok("/".into()) }
+    let home = if home.starts_with('/') { home } else { "/".into() };
+    HOMES.lock().unwrap_or_else(|e| e.into_inner()).push((host.to_string(), home.clone()));
+    Ok(home)
+}
+
+/// The folder a shell on `host` says it's in, in its title (bash's `me@host: ~/proj`).
+pub fn folder_in_title(host: &str, title: &str) -> Option<PathBuf> {
+    let shown = title.rsplit_once(": ").map_or(title, |(_, f)| f).trim();
+    let inside = match shown.strip_prefix('~') {
+        Some(rest) => format!("{}{rest}", home(host).ok()?),
+        None if shown.starts_with('/') => shown.to_string(),
+        None => return None,
+    };
+    Some(path(host, &inside))
 }
 
 #[cfg(test)]
