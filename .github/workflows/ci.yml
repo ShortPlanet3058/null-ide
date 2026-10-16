@@ -16,8 +16,10 @@ on:
       - ".github/workflows/site.yml"
   workflow_dispatch:
 
+# (A draft's run, which builds nothing, has a group of its own: pushed as the pull request
+# is marked ready, it would cancel the ready one's.)
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event.pull_request.draft || false }}
   cancel-in-progress: true
 
 env:
