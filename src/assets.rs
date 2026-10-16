@@ -23,7 +23,10 @@ const ICONS: &[(&str, &[u8])] = &[
 /// The languages' logos (see `file_icons`).
 macro_rules! lang {
     ($name:literal) => {
-        (concat!("icons/lang/", $name, ".svg"), include_bytes!(concat!("../assets/icons/lang/", $name, ".svg")) as &[u8])
+        (
+            concat!("icons/lang/", $name, ".svg"),
+            include_bytes!(concat!("../assets/icons/lang/", $name, ".svg")) as &[u8],
+        )
     };
 }
 

@@ -1827,7 +1827,13 @@ impl FileTree {
                     .when(active, |r| r.bg(theme.accent_soft))
                     .when(selected && !active, |r| r.bg(theme.hairline))
                     .when(!active && !selected, |r| r.hover(|s| s.bg(ui::hover(theme))))
-                    .child(marker(&entry.path, entry.is_dir, turn, if active { theme.foreground } else { theme.muted }, dot));
+                    .child(marker(
+                        &entry.path,
+                        entry.is_dir,
+                        turn,
+                        if active { theme.foreground } else { theme.muted },
+                        dot,
+                    ));
                 if editing_this(&path) {
                     let edit = self.edit.as_ref().unwrap();
                     row_el.key_context("TreeEdit").child(name_field(edit)).into_any_element()

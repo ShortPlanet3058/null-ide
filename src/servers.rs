@@ -574,7 +574,8 @@ pub fn install(server: &Server) -> Result<(), String> {
     match server.install {
         Install::Npm(packages) => {
             let npm = crate::node_runtime::npm()?;
-            let mut args = vec!["install", "--prefix", ".", "--no-audit", "--no-fund", "--loglevel=error"];
+            let mut args =
+                vec!["install", "--prefix", ".", "--no-audit", "--no-fund", "--no-update-notifier", "--loglevel=error"];
             args.extend(packages);
             run(&npm, &args, &[])
         }
@@ -732,7 +733,7 @@ fn install_script(server: &Server) -> Result<String, String> {
             format!(
                 "set -e; {home}if ! command -v npm >/dev/null 2>&1; then mkdir -p \"$N/node\"; {}\
                  untar \"$t\" \"$N/node\" 1; rm -f \"$t\"; fi; \
-                 cd \"$N/servers\"; npm install --prefix . --no-audit --no-fund --loglevel=error {}",
+                 cd \"$N/servers\"; npm install --prefix . --no-audit --no-fund --no-update-notifier --loglevel=error {}",
                 fetch_checked(node.url, node.sha256),
                 packages.join(" ")
             )

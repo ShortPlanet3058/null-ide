@@ -197,7 +197,8 @@ mod tests {
         for name in NAMES {
             assert!(dir.join(format!("{name}.svg")).is_file(), "no {name}.svg");
         }
-        let svgs = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "svg"));
+        let svgs =
+            std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "svg"));
         assert_eq!(svgs.count(), NAMES.len());
     }
 }
