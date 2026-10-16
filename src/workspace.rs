@@ -217,6 +217,9 @@ actions!(
     ]
 );
 
+/// Where ssh's answer goes (see `askpass`).
+type SshAnswer = futures::channel::oneshot::Sender<Option<String>>;
+
 /// ⌘1…⌘8: the tab at that place on the side in use; ⌘9: its last one.
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = workspace, no_json)]
@@ -522,6 +525,23 @@ fn test_programs(messages: &str, of_src: bool) -> Vec<PathBuf> {
 
 /// Of the test `programs`, the one that has test `id` (each is asked for its list, and
 /// given 10 seconds to answer).
+/// cargo with `args`, in `dir`: on its server for a folder on one.
+fn cargo_in(dir: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    if let Some(remote) = crate::remote::of(dir) {
+        return crate::remote::command(&remote.host, Some(&remote.path), "cargo", args).output();
+    }
+    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
+    crate::tools::command(cargo).args(args).current_dir(dir).output()
+}
+
+/// A path cargo printed, run for `dir`, as Null reaches it (a server's in Null's form).
+fn printed_in(dir: &Path, path: PathBuf) -> PathBuf {
+    match crate::remote::of(dir) {
+        Some(remote) => crate::remote::path(&remote.host, &path.to_string_lossy()),
+        None => path,
+    }
+}
+
 fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathBuf> {
     if programs.len() == 1 {
         return programs.first().cloned();
@@ -532,6 +552,13 @@ fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathB
 fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
     use std::io::Read;
     use std::process::Stdio;
+    // On a server: asked there (10 seconds at most).
+    if let (Some(remote), Some(on)) = (crate::remote::of(cwd), crate::remote::of(program)) {
+        let q = crate::remote::quote;
+        let script = format!("cd {} && timeout 10 {} --list --exact {}", q(&remote.path), q(&on.path), q(id));
+        return crate::remote::run(&remote.host, &script)
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l == format!("{id}: test")));
+    }
     let Ok(mut child) = crate::tools::command(program)
         .args(["--list", "--exact", id])
         .current_dir(cwd)
@@ -575,7 +602,7 @@ fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
 }
 
 fn cargo_program(root: &Path) -> Option<PathBuf> {
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let manifest = crate::project_fs::read_to_string(&root.join("Cargo.toml")).ok()?;
     let mut section = String::new();
     let (mut package, mut bin) = (None, None);
     for line in manifest.lines() {
@@ -596,7 +623,8 @@ fn cargo_program(root: &Path) -> Option<PathBuf> {
         }
     }
     let name = bin.or(package)?;
-    let exe = if cfg!(windows) { format!("{name}.exe") } else { name };
+    // (A server's: Linux's, no .exe.)
+    let exe = if cfg!(windows) && !crate::remote::is_remote(root) { format!("{name}.exe") } else { name };
     Some(root.join("target").join("debug").join(exe))
 }
 
@@ -968,6 +996,10 @@ pub struct Workspace {
     ignore_rules: Vec<(PathBuf, ignore::gitignore::Gitignore)>,
     /// The AI answer panel, while open.
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
+    /// What ssh asks, asked here (see `askpass`): the one shown, with whoever waits for its
+    /// answer (the same question asked again meanwhile, all of them), then those after it.
+    ssh_prompt: Option<(Entity<crate::ssh_prompt::SshPrompt>, Subscription, Vec<SshAnswer>)>,
+    ssh_questions: std::collections::VecDeque<crate::askpass::Ask>,
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
     /// The notices shown lately, newest last (Recent Notices lists them).
@@ -1259,6 +1291,8 @@ impl Workspace {
             pending_commands: Vec::new(),
             ignore_rules,
             key_prompt: None,
+            ssh_prompt: None,
+            ssh_questions: std::collections::VecDeque::new(),
             notice: None,
             past_notices: Vec::new(),
             notice_on_return: None,
@@ -3910,7 +3944,7 @@ impl Workspace {
         // Another project's tests: looked for again, if they show.
         self.tests = None;
         self.tests_task = None;
-        self.testable = !crate::remote::is_remote(&path) && Self::looks_testable(&path);
+        self.testable = Self::looks_testable(&path);
         self.results_waiting.clear();
         // What was debugged there isn't Debug Again here, nor a build for it run here.
         self.debugged_test = None;
@@ -3930,8 +3964,7 @@ impl Workspace {
         if self.sidebar_tests {
             self.find_tests(cx);
         }
-        // (A server's Python environment isn't one Null can run here.)
-        self.python_env = if crate::remote::is_remote(&path) { None } else { crate::python_env::find(&path) };
+        self.python_env = crate::python_env::find(&path);
         self.python_env_here = None;
         let mut session = crate::session::Session::load(&path);
         session.window = self.window_state;
@@ -4995,6 +5028,27 @@ impl Workspace {
                         found[1..].iter().map(|(_, d)| format!("\\\\wsl.localhost\\{d}")).collect();
                     this.show_notice(format!("Other distributions: {}", others.join(", ")), cx);
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The server's folder Null last closed on, reopened once the server answers (meanwhile
+    /// the window is Null's own empty folder); not when another folder was opened meanwhile.
+    pub fn reopen_server_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(server) = crate::remote::of(&path) else { return };
+        self.show_notice(format!("Connecting to {}…", server.host), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let host = server.host.clone();
+            let reached = cx.background_executor().spawn(async move { crate::remote::connect(&host) }).await;
+            this.update_in(cx, |this, window, cx| match reached {
+                Ok(_) if crate::session::is_scratch(this.roots.primary()) => {
+                    this.notice = None;
+                    this.open_path(path, window, cx);
+                }
+                Ok(_) => {}
+                Err(error) => this.show_notice(format!("{error} The folder is in Open Recent."), cx),
             })
             .ok();
         })
@@ -7032,7 +7086,10 @@ impl Workspace {
         // The terminal reports the command from its first program on (`(cd web && npx jest x)`
         // comes back as `npx jest x`): ours if it ends ours.
         let ours = self.tests_running.as_ref().is_some_and(|(command, _)| {
-            *command == ran.command || (ran.command.len() >= 8 && command.ends_with(ran.command.as_str()))
+            *command == ran.command
+                || (ran.command.len() >= 8 && command.ends_with(ran.command.as_str()))
+                // (A prompt Null doesn't know the end of, `➜  app git:(main) ✗`, still before it.)
+                || (command.len() >= 8 && ran.command.ends_with(command.as_str()))
         });
         let running = if ours { self.tests_running.take().map(|(_, which)| which) } else { None };
         if results.is_empty() && running.is_none() {
@@ -7059,8 +7116,8 @@ impl Workspace {
             let status = if passed { TestStatus::Passed } else { TestStatus::Failed };
             // The ones run, when it was from the list; any of that name, when typed.
             let targets: Vec<&(PathBuf, String)> = match &running {
-                Some(which) => which.iter().filter(|(_, n)| *n == id).collect(),
-                None => known.iter().filter(|(_, n)| *n == id).collect(),
+                Some(which) => which.iter().filter(|(_, n)| crate::test_at::same_test(n, &id)).collect(),
+                None => known.iter().filter(|(_, n)| crate::test_at::same_test(n, &id)).collect(),
             };
             for target in targets {
                 self.test_status.insert(target.clone(), status);
@@ -7563,7 +7620,7 @@ impl Workspace {
             "spec",
             "__tests__",
         ];
-        let signs = |dir: &Path| SIGNS.iter().any(|name| dir.join(name).exists());
+        let signs = |dir: &Path| SIGNS.iter().any(|name| crate::project_fs::exists(&dir.join(name)));
         let test_file = |name: &str| {
             name.starts_with("test_") && name.ends_with(".py")
                 || name.ends_with("_test.py")
@@ -7574,17 +7631,13 @@ impl Workspace {
         if signs(root) {
             return true;
         }
-        let Ok(entries) = std::fs::read_dir(root) else { return false };
-        entries.flatten().take(500).any(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(entries) = crate::project_fs::read_dir(root) else { return false };
+        entries.into_iter().take(500).any(|(path, meta)| {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             if name.starts_with('.') || name == "node_modules" || name == "target" {
                 return false;
             }
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => signs(&entry.path()),
-                Ok(_) => test_file(&name),
-                Err(_) => false,
-            }
+            if meta.is_dir() { signs(&path) } else { test_file(&name) }
         })
     }
 
@@ -8049,6 +8102,49 @@ impl Workspace {
         self.show_notice(format!("{tool} is too slow for suggestions as you type: choose where they come from."), cx);
     }
 
+    /// What ssh asks, asked in this window: now, or after the question already shown (the
+    /// same question again waits for the same answer).
+    pub fn ask_for_ssh(&mut self, ask: crate::askpass::Ask, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((prompt, _, waiting)) = &mut self.ssh_prompt {
+            if prompt.read(cx).asks(&ask.prompt) {
+                waiting.push(ask.answer);
+            } else {
+                self.ssh_questions.push_back(ask);
+            }
+            return;
+        }
+        if self.focus_before_palette.is_none() {
+            self.focus_before_palette = window.focused(cx);
+        }
+        let prompt = cx.new(|cx| crate::ssh_prompt::SshPrompt::new(ask.prompt, cx));
+        let subscription = cx.subscribe_in(&prompt, window, |this, _, event, window, cx| {
+            let crate::ssh_prompt::SshPromptEvent::Answered(answer) = event;
+            this.answer_ssh(answer.clone(), window, cx);
+        });
+        window.focus(&prompt.focus_handle(cx));
+        window.activate_window();
+        self.ssh_prompt = Some((prompt, subscription, vec![ask.answer]));
+        cx.notify();
+    }
+
+    /// ssh's question answered (or not): told to all who asked it, and the next one asked.
+    fn answer_ssh(&mut self, answer: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, _, waiting)) = self.ssh_prompt.take() {
+            for sender in waiting {
+                let _ = sender.send(answer.clone());
+            }
+        }
+        match self.ssh_questions.pop_front() {
+            Some(next) => self.ask_for_ssh(next, window, cx),
+            None => {
+                if let Some(focus) = self.focus_before_palette.take() {
+                    window.focus(&focus);
+                }
+                cx.notify();
+            }
+        }
+    }
+
     fn ask_for_key(&mut self, provider: ProviderId, window: &mut Window, cx: &mut Context<Self>) {
         if !provider.uses_api_key() {
             let message = match provider {
@@ -8357,16 +8453,13 @@ impl Workspace {
             let built = cx
                 .background_executor()
                 .spawn(async move {
-                    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
                     // (Its messages say where each program went: a target folder set
                     // elsewhere, a workspace's.)
-                    let built = crate::tools::command(cargo)
-                        .args(&cargo_args)
-                        .arg("--message-format=json-render-diagnostics")
-                        .current_dir(&cwd)
-                        .output();
+                    let mut args: Vec<&str> = cargo_args.iter().map(String::as_str).collect();
+                    args.push("--message-format=json-render-diagnostics");
+                    let built = cargo_in(&cwd, &args);
                     // Rust's own formatters, so its strings and collections show their contents.
-                    (built, crate::debugger::rust_formatters())
+                    (built, crate::debugger::rust_formatters_for(&cwd))
                 })
                 .await;
             let (built, formatters) = built;
@@ -8376,11 +8469,11 @@ impl Workspace {
                     // `cargo test --no-run`: its one test program (a plain program is built
                     // beside it for the tests to run, but isn't what's debugged).
                     match &test_programs(&messages, false)[..] {
-                        [only] => Some(only.clone()),
+                        [only] => Some(printed_in(&root, only.clone())),
                         _ => None,
                     }
                 } else {
-                    built_program(&messages, usual.as_deref()).or(usual)
+                    built_program(&messages, usual.as_deref()).map(|p| printed_in(&root, p)).or(usual)
                 }
             });
             this.update(cx, |this, cx| {
@@ -8394,7 +8487,9 @@ impl Workspace {
                     (Err(error), _) => Some(format!("Couldn't run cargo: {error}\n")),
                     (_, None) if tests => Some("Couldn't tell which test program to debug: name one target.\n".into()),
                     (_, None) => Some("Couldn't tell which program this project builds.\n".into()),
-                    (_, Some(p)) if !p.is_file() => Some(format!("{} wasn't built.\n", p.display())),
+                    (_, Some(p)) if !crate::project_fs::is_file(p) => {
+                        Some(format!("{} wasn't built.\n", crate::remote::shown(p)))
+                    }
                     _ => None,
                 };
                 match message {
@@ -8449,17 +8544,18 @@ impl Workspace {
             let found = cx
                 .background_executor()
                 .spawn(async move {
-                    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
-                    let built = crate::tools::command(cargo)
-                        .args(["test", "--no-run", "--message-format=json-render-diagnostics"])
-                        .args(&target)
-                        .current_dir(&krate)
-                        .output();
+                    let mut args = vec!["test", "--no-run", "--message-format=json-render-diagnostics"];
+                    args.extend(target.iter().map(String::as_str));
+                    let built = cargo_in(&krate, &args);
                     let program = built.as_ref().ok().filter(|o| o.status.success()).and_then(|output| {
                         let messages = String::from_utf8_lossy(&output.stdout);
-                        program_with_test(&test_programs(&messages, target.is_empty()), &id, &krate)
+                        let programs: Vec<PathBuf> = test_programs(&messages, target.is_empty())
+                            .into_iter()
+                            .map(|p| printed_in(&krate, p))
+                            .collect();
+                        program_with_test(&programs, &id, &krate)
                     });
-                    (built, program, crate::debugger::rust_formatters())
+                    (built, program, crate::debugger::rust_formatters_for(&krate))
                 })
                 .await;
             let (built, program, formatters) = found;
@@ -9068,9 +9164,13 @@ impl Workspace {
     fn add_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // In a Python project with its own environment: made the shell's, as activating does.
         let root = self.roots.root_for(&dir).to_path_buf();
+        let linux = crate::wsl::is_wsl(&dir) || crate::remote::is_remote(&dir);
         let activate =
             self.roots.contains(&dir).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
-                let shell = if cfg!(windows) {
+                // (Inside WSL or on a server: a POSIX shell there, whichever it is.)
+                let shell = if linux {
+                    "sh".to_string()
+                } else if cfg!(windows) {
                     crate::shell::windows_program()
                 } else {
                     std::env::var("SHELL")
@@ -9079,9 +9179,14 @@ impl Workspace {
                         .or_else(crate::terminal_watch::account_shell)
                         .unwrap_or_default()
                 };
+                // (An environment without its activate script: nothing typed, rather than an error.)
+                let folder = if cfg!(windows) && !linux { "Scripts" } else { "bin" };
+                if !crate::project_fs::exists(&env.join(folder).join("activate")) {
+                    return None;
+                }
                 // From where the shell starts: short when it's the project's folder.
                 let env = env.strip_prefix(&dir).map(Path::to_path_buf).unwrap_or(env);
-                crate::python_env::activate_command(&env, &shell)
+                crate::python_env::activate_command(&env, &shell, linux)
             });
         let shell = match Shell::start(dir) {
             Ok(shell) => shell,
@@ -9130,6 +9235,8 @@ impl Workspace {
                     this.results_waiting.push(ran.clone());
                 } else {
                     this.read_test_results(ran);
+                    // (How they did, shown now: nothing else may draw the window again soon.)
+                    cx.notify();
                 }
                 this.read_reported(ran, cx);
                 // `poetry install`, `poetry env use`: Poetry's environments are kept outside
@@ -11546,7 +11653,10 @@ impl Render for Workspace {
         let tab_menu = self.render_tab_menu(cx);
         let text_menu = self.render_text_menu(cx);
         let tab_switcher = self.render_tab_switcher(cx);
-        let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
+        let overlay: Option<AnyElement> = if let Some((prompt, ..)) = &self.ssh_prompt {
+            // (What ssh asks waits on nothing else: a connection hangs on it.)
+            Some(prompt.clone().into_any_element())
+        } else if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
             Some(panel.clone().into_any_element())
@@ -12423,6 +12533,10 @@ impl Render for Workspace {
                                     return;
                                 }
                                 this.key_prompt = None;
+                                // (ssh's question, clicked away: not answered.)
+                                if this.ssh_prompt.is_some() {
+                                    return this.answer_ssh(None, window, cx);
+                                }
                                 this.close_palette(window, cx);
                             }),
                         )

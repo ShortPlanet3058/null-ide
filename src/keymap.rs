@@ -196,6 +196,7 @@ pub fn register(keymap: Keymap, cx: &mut App) {
     crate::project_search::bind_keys(cx);
     crate::terminal::bind_keys(cx);
     crate::key_prompt::bind_keys(cx);
+    crate::ssh_prompt::bind_keys(cx);
     crate::text_input::bind_keys(cx);
     crate::git_view::bind_keys(cx);
     crate::commit_page::bind_keys(cx);

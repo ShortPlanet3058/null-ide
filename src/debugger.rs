@@ -244,6 +244,18 @@ pub fn inline_values(lines: &[(usize, String)], locals: &[(String, String)]) -> 
 
 /// For a Rust program: the lldb command that teaches it Rust's types (so a `&str` or a
 /// `String` shows its text), from the toolchain's own formatters, when they're there.
+/// The same, for a program in `dir`: its server's Rust, for a folder on one.
+pub fn rust_formatters_for(dir: &Path) -> Option<String> {
+    let Some(remote) = crate::remote::of(dir) else { return rust_formatters() };
+    let script = format!(
+        "PATH=\"{}\"; s=$(rustc --print sysroot) && f=\"$s/lib/rustlib/etc/lldb_lookup.py\" && [ -f \"$f\" ] && printf '%s' \"$f\"",
+        crate::remote::path_inside()
+    );
+    let found = crate::remote::run(&remote.host, &script).ok().filter(|o| o.success())?;
+    let script = String::from_utf8_lossy(&found.stdout).trim().to_string();
+    (!script.is_empty()).then(|| format!("command script import \"{script}\""))
+}
+
 pub fn rust_formatters() -> Option<String> {
     let rustc = crate::tools::find("rustc")?;
     let output = crate::tools::command(rustc).args(["--print", "sysroot"]).output().ok()?;
@@ -371,7 +383,7 @@ impl Debugger {
             self.output.clear();
         }
         self.program = Some(program.clone());
-        let Some(adapter_path) = crate::dap::find_adapter() else {
+        let Some(adapter_path) = crate::dap::find_adapter_for(&cwd) else {
             self.state = DebugState::Idle;
             return self.append_output(&format!("{}\n", crate::dap::GET_ADAPTER), cx);
         };

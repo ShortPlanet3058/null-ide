@@ -8,9 +8,19 @@ use std::path::{Path, PathBuf};
 /// where many keep their secrets as `NAME=value` lines.)
 const FOLDERS: [&str; 3] = [".venv", "venv", "env"];
 
-/// The environment's own Python, inside it.
+/// The environment's own Python, inside it (Linux's layout inside WSL and on a server,
+/// whatever this computer is).
 fn python_in(env: &Path) -> PathBuf {
-    if cfg!(windows) { env.join("Scripts").join("python.exe") } else { env.join("bin").join("python") }
+    if cfg!(windows) && !on_linux(env) {
+        env.join("Scripts").join("python.exe")
+    } else {
+        env.join("bin").join("python")
+    }
+}
+
+/// Whether `path` is on a Linux system of its own (inside WSL, on a server).
+fn on_linux(path: &Path) -> bool {
+    crate::wsl::is_wsl(path) || crate::remote::is_remote(path)
 }
 
 /// The environment of the project at `root`: a folder of its with a Python in it, else
@@ -19,7 +29,11 @@ pub fn find(root: &Path) -> Option<PathBuf> {
     if let Some(found) = MEMO.with(|memo| memo.borrow().as_ref().and_then(|m| m.get(root).cloned())) {
         return found;
     }
-    let found = FOLDERS.iter().map(|f| root.join(f)).find(|env| python_in(env).exists()).or_else(|| poetry(root));
+    let found = FOLDERS
+        .iter()
+        .map(|f| root.join(f))
+        .find(|env| crate::project_fs::exists(&python_in(env)))
+        .or_else(|| poetry(root));
     MEMO.with(|memo| {
         if let Some(memo) = memo.borrow_mut().as_mut() {
             memo.insert(root.to_path_buf(), found.clone());
@@ -83,6 +97,10 @@ pub fn label(env: &Path, root: &Path) -> String {
 /// `virtualenvs` folder, named after the project and its folder
 /// (`name-<hash of the folder>-py3.12`).
 fn poetry(root: &Path) -> Option<PathBuf> {
+    // (A server's Poetry keeps its environments there, not in this computer's folder.)
+    if crate::remote::is_remote(root) {
+        return None;
+    }
     let pyproject = std::fs::read_to_string(root.join("pyproject.toml")).ok()?;
     let local = std::fs::read_to_string(root.join("poetry.toml")).unwrap_or_default();
     let name = poetry_name(&pyproject, root.join("poetry.lock").exists())?;
@@ -234,6 +252,8 @@ pub fn python_for(root: &Path, path: &Path) -> String {
         Some(env) => {
             let python = python_in(&env);
             let relative = python.strip_prefix(root).unwrap_or(&python).to_string_lossy().into_owned();
+            // (Inside WSL or on a server, its shell takes `/`.)
+            let relative = if on_linux(root) { relative.replace('\\', "/") } else { relative };
             crate::shell::program(&relative, crate::shell::kind())
         }
         // (On Windows `python3` is often only the Store's stand-in: `python` there.)
@@ -259,12 +279,13 @@ pub fn variables(root: &Path, path: Option<std::ffi::OsString>) -> Vec<(String, 
 
 /// What a terminal's shell types to make the environment its own: its `activate`, for
 /// that shell, from where it is. None for a shell it doesn't know.
-pub fn activate_command(env: &Path, shell: &str) -> Option<String> {
+/// With `linux`, the environment is a Linux one (inside WSL, on a server), whatever this is.
+pub fn activate_command(env: &Path, shell: &str, linux: bool) -> Option<String> {
     // (`pwsh.exe` on Windows: the name without it.)
     let name = Path::new(shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let folder = if cfg!(windows) { "Scripts" } else { "bin" };
+    let folder = if cfg!(windows) && !linux { "Scripts" } else { "bin" };
     let script = |file: &str| {
-        let path = env.join(folder).join(file).to_string_lossy().into_owned();
+        let path = env.join(folder).join(file).to_string_lossy().replace(if linux { '\\' } else { '\0' }, "/");
         let kind = if matches!(name.as_str(), "pwsh" | "powershell") {
             crate::shell::Kind::PowerShell
         } else {
@@ -289,6 +310,25 @@ pub fn activate_command(env: &Path, shell: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A project on a server: its environment found there, its Python as the server has it.
+    #[test]
+    fn a_server_s_project_environment_is_found_there() {
+        let dir = dunce::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("null-pyenv-remote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".venv/bin")).unwrap();
+        std::fs::write(dir.join(".venv/bin/python"), "").unwrap();
+        let root = crate::remote::path(crate::remote::TEST_HOST, &dir.to_string_lossy());
+        assert_eq!(find(&root), Some(root.join(".venv")));
+        assert_eq!(
+            crate::shell::path_text(&interpreter(&root.join(".venv"))),
+            format!("{}/.venv/bin/python", dir.display())
+        );
+        assert_eq!(activate_command(Path::new(".venv"), "sh", true).as_deref(), Some(" . .venv/bin/activate"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_project_s_environment_is_found() {
         let dir = crate::tools::test_dir("python-env");
@@ -307,7 +347,7 @@ mod tests {
         let vars = variables(&dir, std::env::var_os("PATH"));
         assert!(vars[0].1.starts_with(&dir.join(".venv/bin").to_string_lossy().into_owned()));
         assert_eq!(vars[1], ("VIRTUAL_ENV".to_string(), dir.join(".venv").to_string_lossy().into_owned()));
-        let activate = |env: &str, shell: &str| activate_command(Path::new(env), shell);
+        let activate = |env: &str, shell: &str| activate_command(Path::new(env), shell, false);
         assert_eq!(activate("/p/.venv", "/bin/zsh").as_deref(), Some(" source /p/.venv/bin/activate"));
         assert_eq!(activate(".venv", "/bin/zsh").as_deref(), Some(" source .venv/bin/activate"));
         assert_eq!(

@@ -74,8 +74,76 @@ fn given_path(dir: &Path, path: &Path) -> String {
     }
 }
 
+/// git run in `dir` with `args`, waited for. A folder on a server: through the connection
+/// already open to it (a new ssh each time took a second on Windows, which can't share one).
+fn output(dir: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    output_with(dir, args, &[])
+}
+
+fn output_with(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> std::io::Result<std::process::Output> {
+    output_given(dir, args, env, None)
+}
+
+/// As `output_with`, git reading `input`.
+fn output_given(
+    dir: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    input: Option<&[u8]>,
+) -> std::io::Result<std::process::Output> {
+    let Some(remote) = crate::remote::of(dir) else {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut command = command(dir);
+        command.envs(env.iter().copied()).args(args);
+        let Some(input) = input else { return command.output() };
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input)?;
+        }
+        return child.wait_with_output();
+    };
+    // (What git reads, given in the script: decoded on the way in.)
+    let mut script = if input.is_some() { "base64 -d <<'NULL_END' | (".to_string() } else { "(".to_string() };
+    script.push_str(&format!(
+        "cd {} || exit 128; PATH=\"{}\"; export PATH; GIT_LITERAL_PATHSPECS=1 GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0",
+        crate::remote::quote(&remote.path),
+        crate::remote::path_inside()
+    ));
+    for (key, value) in env {
+        script.push_str(&format!(" {key}={}", crate::remote::quote(value)));
+    }
+    script.push_str(" git");
+    for arg in args {
+        script.push(' ');
+        script.push_str(&crate::remote::quote(arg));
+    }
+    script.push(')');
+    if let Some(input) = input {
+        script.push('\n');
+        script.push_str(&crate::remote::encoded_lines(input));
+        script.push_str("NULL_END");
+    }
+    let ran = crate::remote::run(&remote.host, &script)?;
+    Ok(std::process::Output { status: exit_status(ran.status), stdout: ran.stdout, stderr: ran.stderr })
+}
+
+/// An exit code as the system's status of a process that ended so.
+fn exit_status(code: i32) -> std::process::ExitStatus {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw((code & 0xff) << 8)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code as u32)
+    }
+}
+
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = command(dir).args(args).output().ok()?;
+    let output = output(dir, args).ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -84,7 +152,7 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 /// /tmp, which is /private/tmp on macOS) still finds it.
 pub fn committed_text(path: &Path, encoding: crate::encoding::Encoding) -> Option<String> {
     let name = path.file_name()?.to_str()?;
-    let output = command(path.parent()?).args(["show", &format!("HEAD:./{name}")]).output().ok()?;
+    let output = output(path.parent()?, &["show", &format!("HEAD:./{name}")]).ok()?;
     // In the file's own encoding, so a Windows-1252 file compares with its accents.
     output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
 }
@@ -212,19 +280,7 @@ pub fn commit_parts(
 
 /// git, given `input` to read.
 fn run_with_input(dir: &Path, args: &[&str], input: &[u8]) -> Result<String, String> {
-    use std::io::Write;
-    use std::process::Stdio;
-    let mut child = command(dir)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Couldn't run git: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input).map_err(|e| format!("Couldn't run git: {e}"))?;
-    }
-    let output = child.wait_with_output().map_err(|e| format!("Couldn't run git: {e}"))?;
+    let output = output_given(dir, args, &[], Some(input)).map_err(|e| format!("Couldn't run git: {e}"))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
@@ -469,7 +525,7 @@ pub fn commit_files(root: &Path, id: &str, first_parent: Option<&str>) -> Vec<Co
 
 /// A file (by its path from the repository's top) as commit `rev` has it.
 pub fn text_at(root: &Path, rev: &str, path: &str) -> Option<String> {
-    let output = command(root).args(["show", &format!("{rev}:{path}")]).output().ok()?;
+    let output = output(root, &["show", &format!("{rev}:{path}")]).ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -504,7 +560,7 @@ fn with_mainline<'a>(root: &Path, args: &[&'a str], id: &'a str) -> Vec<&'a str>
 /// The file as it was in `commit`, in its own encoding.
 pub fn file_at(path: &Path, commit: &FileCommit, encoding: crate::encoding::Encoding) -> Option<String> {
     let top = printed_path(path.parent()?, &git(path.parent()?, &["rev-parse", "--show-toplevel"])?);
-    let output = command(&top).args(["show", &format!("{}:{}", commit.hash, commit.path)]).output().ok()?;
+    let output = output(&top, &["show", &format!("{}:{}", commit.hash, commit.path)]).ok()?;
     output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
 }
 
@@ -646,10 +702,7 @@ pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String
 /// isn't in this repository, so asking for the object itself would say no).
 fn in_last_commit(path: &Path) -> bool {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return false };
-    command(dir)
-        .args(["ls-tree", "HEAD", "--", name])
-        .output()
-        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+    output(dir, &["ls-tree", "HEAD", "--", name]).is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// A branch to switch to.
@@ -976,8 +1029,7 @@ fn joined(root: &Path, result: Result<String, String>) -> Result<Vec<PathBuf>, S
 
 /// git, with nothing to open an editor for a message: the one it has is taken.
 fn run_without_editor(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output =
-        command(dir).env("GIT_EDITOR", "true").args(args).output().map_err(|e| format!("Couldn't run git: {e}"))?;
+    let output = output_with(dir, args, &[("GIT_EDITOR", "true")]).map_err(|e| format!("Couldn't run git: {e}"))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
@@ -1194,19 +1246,11 @@ pub struct LineBlame {
 /// unsaved edits don't shift the lines). None for a line not committed yet, or a file
 /// git doesn't follow.
 pub fn blame_line(path: &Path, text: &str, line: usize) -> Option<LineBlame> {
-    use std::io::Write;
     let dir = path.parent()?;
     let name = path.file_name()?.to_str()?;
     let range = format!("{},{}", line + 1, line + 1);
-    let mut child = command(dir)
-        .args(["blame", "--porcelain", "-L", &range, "--contents", "-", "--", name])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    child.stdin.take()?.write_all(text.as_bytes()).ok()?;
-    let output = child.wait_with_output().ok()?;
+    let args = ["blame", "--porcelain", "-L", &range, "--contents", "-", "--", name];
+    let output = output_given(dir, &args, &[], Some(text.as_bytes())).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1248,7 +1292,7 @@ pub fn ago(time: i64, now: i64) -> String {
 
 /// Runs git, with its own words when it fails.
 fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = command(dir).args(args).output().map_err(|e| format!("Couldn't run git: {e}"))?;
+    let output = output(dir, args).map_err(|e| format!("Couldn't run git: {e}"))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
@@ -1403,6 +1447,31 @@ mod tests {
             let usual = similar::TextDiff::from_lines(before, after).ops().to_vec();
             assert_eq!(line_ops(before, after), usual, "{before:?} → {after:?}");
         }
+    }
+
+    /// A repository on a server: git there, through the connection (`sh` here for one).
+    #[test]
+    #[cfg(unix)]
+    fn git_on_a_server_runs_through_its_connection() {
+        let dir =
+            dunce::canonicalize(std::env::temp_dir()).unwrap().join(format!("null-git-remote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| git(&dir, args);
+        if run(&["init", "-q", "-b", "trunk"]).is_none() {
+            return; // No git here: nothing to test.
+        }
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        run(&["add", "."]).unwrap();
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "first"]).unwrap();
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        let root = crate::remote::path(crate::remote::TEST_HOST, &dir.to_string_lossy());
+        assert_eq!(current_branch(&root).as_deref(), Some("trunk"));
+        assert_eq!(status(&root), [(root.join("a.txt"), FileStatus::Modified)]);
+        assert_eq!(committed_text(&root.join("a.txt"), Default::default()).as_deref(), Some("one\n"));
+        // (Its text given to git: the line as written now is new, the one committed is git's.)
+        assert!(blame_line(&root.join("a.txt"), "one\n", 0).is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

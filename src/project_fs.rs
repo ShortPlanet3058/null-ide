@@ -149,6 +149,10 @@ pub fn exists(path: &Path) -> bool {
     metadata(path).is_ok()
 }
 
+pub fn is_file(path: &Path) -> bool {
+    metadata(path).is_ok_and(|m| m.is_file())
+}
+
 pub fn is_dir(path: &Path) -> bool {
     metadata(path).is_ok_and(|m| m.is_dir())
 }

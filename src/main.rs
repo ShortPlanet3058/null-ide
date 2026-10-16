@@ -9,6 +9,7 @@ mod ai_agent;
 mod ai_context;
 mod ai_task;
 mod ai_usage;
+mod askpass;
 mod assets;
 mod basic_syntax;
 mod buffer;
@@ -79,6 +80,7 @@ mod settings_panel;
 mod shell;
 mod snippets;
 mod spell;
+mod ssh_prompt;
 mod svg_image;
 mod system_clipboard;
 mod tasks;
@@ -381,6 +383,11 @@ fn answered_in_the_terminal() -> bool {
 }
 
 fn main() {
+    // Started by ssh to ask something (see `askpass`): asked in the window of the Null that
+    // started that ssh, answered, done.
+    if let Some(code) = askpass::answered_for_ssh() {
+        std::process::exit(code);
+    }
     if answered_in_the_terminal() {
         return;
     }
@@ -471,6 +478,24 @@ fn main() {
             }
         })
         .detach();
+        // What ssh asks (a password, whether to trust a server): asked in the window in
+        // front, or the first one.
+        let mut questions = askpass::questions();
+        cx.spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(ask) = questions.next().await {
+                cx.update(|cx| {
+                    let front = cx.active_window().and_then(|w| w.downcast::<Workspace>());
+                    let window = front.or_else(|| cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>()));
+                    // (No window: not answered, the connection gives up.)
+                    if let Some(window) = window {
+                        window.update(cx, |workspace, window, cx| workspace.ask_for_ssh(ask, window, cx)).ok();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
         // What later launches hand over (off the Mac): opened as they would have opened.
         if let Some(mut handed) = handed.take() {
             cx.spawn(async move |cx| {
@@ -544,7 +569,8 @@ fn main() {
                 cx.background_executor().timer(std::time::Duration::from_millis(350)).await;
                 cx.update(|cx| {
                     if !handed_paths.load(std::sync::atomic::Ordering::SeqCst) && cx.windows().is_empty() {
-                        open_project_window_now(root, file, place, cx);
+                        open_project_window_now(root.clone(), file, place, cx);
+                        reopen_server_project(&root, cx);
                     }
                 })
                 .ok();
@@ -556,6 +582,7 @@ fn main() {
             let first = root.clone();
             open_project_window_now(root, file, place, cx);
             add_folders(&first, others, cx);
+            reopen_server_project(&first, cx);
         }
         trace::mark("window opened");
         // The spell checker started once the window's up, then what's shown checked.
@@ -694,6 +721,16 @@ fn open_waiting_window(root: PathBuf, file: Option<PathBuf>, place: Option<(u32,
     if opened.is_err() {
         cx.quit();
     }
+}
+
+/// Started on Null's own empty folder when it last closed on a server's: that folder again,
+/// once the server's reached (the window doesn't wait on it).
+fn reopen_server_project(root: &std::path::Path, cx: &mut gpui::App) {
+    if !session::is_scratch(root) {
+        return;
+    }
+    let (Some(server), Some(handle)) = (session::last_server_project(), window_on(root, None, cx)) else { return };
+    handle.update(cx, |workspace, window, cx| workspace.reopen_server_project(server, window, cx)).ok();
 }
 
 fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(u32, u32)>, cx: &mut gpui::App) {

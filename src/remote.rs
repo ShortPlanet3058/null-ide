@@ -138,19 +138,34 @@ pub fn command(host: &str, folder: Option<&str>, program: &str, args: &[&str]) -
         line.push_str(&quote(arg));
     }
     let mut command = ssh(host);
-    command.args(["-T", "-o", "BatchMode=yes", "--", destination(host).0, &line]);
+    asking(&mut command);
+    command.args(["-T", "--", destination(host).0, &line]);
     command
 }
 
-/// The program and arguments for a terminal on `host`, in `folder`: the person's own shell
-/// there. Run in a terminal, so ssh can ask for a password or a passphrase.
-pub fn terminal(host: &str, folder: &str) -> (PathBuf, Vec<String>) {
+/// What ssh asks (a password, a passphrase, whether to trust a server), asked in Null's
+/// window (see `askpass`); where it can't be, nothing asked: it fails at once instead.
+fn asking(command: &mut std::process::Command) {
+    match crate::askpass::environment() {
+        Some(environment) => {
+            command.envs(environment);
+        }
+        None => {
+            command.args(["-o", "BatchMode=yes"]);
+        }
+    }
+}
+
+/// The program, arguments and environment for a terminal on `host`, in `folder`: the
+/// person's own shell there. What ssh asks is asked as for the rest (in the window, a
+/// password typed once this run answering again); where it can't be, in the terminal.
+pub fn terminal(host: &str, folder: &str) -> (PathBuf, Vec<String>, Vec<(&'static str, String)>) {
     let command = ssh(host);
     let program = PathBuf::from(command.get_program());
     let mut args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     args.extend(["-t".into(), "--".into(), destination(host).0.into()]);
     args.push(format!("cd {} 2>/dev/null; exec \"${{SHELL:-sh}}\" -l", quote(folder)));
-    (program, args)
+    (program, args, crate::askpass::environment().unwrap_or_default())
 }
 
 /// What a script on a server printed, and how it ended.
@@ -207,13 +222,15 @@ impl Session {
             std::process::Command::new("sh")
         } else {
             let mut command = ssh(host);
-            command.args(["-T", "-o", "BatchMode=yes", "--", destination(host).0, "sh"]);
+            asking(&mut command);
+            command.args(["-T", "--", destination(host).0, "sh"]);
             command
         };
         #[cfg(not(test))]
         let mut command = {
             let mut command = ssh(host);
-            command.args(["-T", "-o", "BatchMode=yes", "--", destination(host).0, "sh"]);
+            asking(&mut command);
+            command.args(["-T", "--", destination(host).0, "sh"]);
             command
         };
         let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
@@ -311,9 +328,11 @@ impl Drop for Session {
 fn connect_error(host: &str, said: &str) -> String {
     let last = said.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("").trim();
     if said.contains("Permission denied") || said.contains("Too many authentication failures") {
+        // (What was typed didn't sign in: asked again next time.)
+        crate::askpass::forget();
         format!(
-            "Couldn't sign in to {host}: Null signs in with your SSH keys or agent (add your key \
-             with ssh-copy-id {host}, or ssh-add it)."
+            "Couldn't sign in to {host}: check the password, or add your key to the server \
+             (ssh-copy-id {host}) or to your agent (ssh-add)."
         )
     } else if said.contains("Host key verification failed") {
         format!("{host} isn't a known server yet: connect once with ssh {host} in a terminal to check and accept it.")
@@ -574,7 +593,7 @@ pub fn trash(at: &RemotePath) -> io::Result<()> {
 }
 
 /// `bytes` in base64, in lines (for a here-document).
-fn encoded_lines(bytes: &[u8]) -> String {
+pub fn encoded_lines(bytes: &[u8]) -> String {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     let mut lines = String::with_capacity(encoded.len() + encoded.len() / 76 + 1);

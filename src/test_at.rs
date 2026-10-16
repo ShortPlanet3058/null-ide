@@ -51,13 +51,18 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
         "Python" => {
             let python = crate::python_env::python_for(root, path);
             let package = crate::python_env::owner_for(root, path).map(|(dir, _)| dir);
-            let text = std::fs::read_to_string(path).unwrap_or_default();
+            let text = crate::project_fs::read_to_string(path).unwrap_or_default();
             if !uses_pytest(root, path, &text) {
                 return Some(match package.filter(|p| p != root) {
                     Some(package) => {
                         format!("{python} -m unittest discover -v -s {}", quote(&relative(root, &package)))
                     }
-                    None => format!("{python} -m unittest discover -v"),
+                    // (Tests in a folder that isn't a package, `tests/` with no __init__.py:
+                    // unittest looks there only when told to; `-m` keeps the top importable.)
+                    None => match loose_tests_folder(root, path) {
+                        Some(folder) => format!("{python} -m unittest discover -v -s {}", quote(&folder)),
+                        None => format!("{python} -m unittest discover -v"),
+                    },
                 });
             }
             Some(match package.filter(|p| p != root) {
@@ -77,6 +82,19 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The top folder `path` is in under `root` when it isn't a package (no `__init__.py`):
+/// where unittest has to be told to look.
+fn loose_tests_folder(root: &Path, path: &Path) -> Option<String> {
+    let inside = path.strip_prefix(root).ok()?;
+    let first = inside.components().next()?;
+    // (A file at the top: found from there.)
+    if inside.components().count() < 2 {
+        return None;
+    }
+    let folder = root.join(first);
+    (!crate::project_fs::exists(&folder.join("__init__.py"))).then(|| relative(root, &folder))
 }
 
 /// `command` run in the package at `project`: in a subshell, so the terminal stays where it
@@ -140,6 +158,28 @@ pub fn may_hold_tests(path: &Path) -> bool {
 /// Every test under `root` (as .gitignore leaves it), file by file. Slow on a big project:
 /// off the main thread.
 pub fn discover(root: &Path) -> Vec<FileTests> {
+    // A server's: its files listed there (git's list), those that can hold tests read.
+    if let Some(remote) = crate::remote::of(root) {
+        let listed = crate::remote::list_files(&remote.host, &remote.path, 200_000).unwrap_or_default();
+        let mut files: Vec<FileTests> = crate::python_env::remembering(|| {
+            listed
+                .iter()
+                .map(|p| crate::remote::path(&remote.host, p))
+                .filter(|p| may_hold_tests(p))
+                .filter(|p| {
+                    !p.components()
+                        .any(|c| matches!(c.as_os_str().to_str(), Some("node_modules" | "target" | ".venv" | "venv")))
+                })
+                .take(MAX_FILES)
+                .filter_map(|path| {
+                    let text = crate::encoding::read(&path).ok()?.0;
+                    tests_in_file(root, &path, &text)
+                })
+                .collect()
+        });
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        return files;
+    }
     let files = ignore::WalkBuilder::new(root)
         // .gitignore read outside a git repository too; packages and builds never looked in.
         .require_git(false)
@@ -296,6 +336,13 @@ fn js_title(node: Node, text: &str) -> Option<String> {
 
 /// What a test run printed, read: each test's name as `Found` has it, and whether it passed.
 /// cargo test, go test -v, pytest -v, and jest, vitest or node's runner.
+/// Whether a run reporting `reported` means the test known as `known`: the same, or the
+/// same from a folder further in (unittest run in `tests/` says `test_cart.py::…` of
+/// what's `tests/test_cart.py::…` from the project).
+pub fn same_test(known: &str, reported: &str) -> bool {
+    known == reported || known.strip_suffix(reported).is_some_and(|before| before.ends_with(['/', '\\']))
+}
+
 pub fn results(output: &str) -> Vec<(String, bool)> {
     let mut found: Vec<(String, bool)> = Vec::new();
     // jest's and node's suites, by how far in they're written: what a test's title follows.
@@ -635,10 +682,10 @@ fn uses_pytest(root: &Path, path: &Path, text: &str) -> bool {
     if imports("pytest") || !imports("unittest") {
         return true;
     }
-    let says_pytest = |file: PathBuf| std::fs::read_to_string(file).is_ok_and(|t| t.contains("pytest"));
+    let says_pytest = |file: PathBuf| crate::project_fs::read_to_string(&file).is_ok_and(|t| t.contains("pytest"));
     let mut dir = path.parent();
     while let Some(d) = dir.filter(|d| d.starts_with(root)) {
-        if d.join("conftest.py").is_file() || d.join("pytest.ini").is_file() {
+        if crate::project_fs::is_file(&d.join("conftest.py")) || crate::project_fs::is_file(&d.join("pytest.ini")) {
             return true;
         }
         let settings = ["pyproject.toml", "setup.cfg", "tox.ini", "requirements.txt", "requirements-dev.txt"];
@@ -706,16 +753,18 @@ enum JsRunner {
 }
 
 fn js_runner(project: &Path) -> JsRunner {
-    let exec = if project.join("pnpm-lock.yaml").is_file() {
+    let exec = if crate::project_fs::is_file(&project.join("pnpm-lock.yaml")) {
         "pnpm exec"
-    } else if project.join("yarn.lock").is_file() {
+    } else if crate::project_fs::is_file(&project.join("yarn.lock")) {
         "yarn"
-    } else if project.join("bun.lockb").is_file() || project.join("bun.lock").is_file() {
+    } else if crate::project_fs::is_file(&project.join("bun.lockb"))
+        || crate::project_fs::is_file(&project.join("bun.lock"))
+    {
         "bunx"
     } else {
         "npx"
     };
-    let manifest = std::fs::read_to_string(project.join("package.json")).unwrap_or_default();
+    let manifest = crate::project_fs::read_to_string(&project.join("package.json")).unwrap_or_default();
     let json: serde_json::Value = serde_json::from_str(&manifest).unwrap_or_default();
     let has = |name: &str| {
         ["dependencies", "devDependencies"].iter().any(|key| json.get(key).and_then(|d| d.get(name)).is_some())
@@ -739,11 +788,14 @@ fn node_text<'a>(node: Node, text: &'a str) -> &'a str {
 
 /// The nearest folder from `dir` up that holds `file`.
 fn ancestor_with(dir: &Path, file: &str) -> Option<PathBuf> {
-    dir.ancestors().find(|d| d.join(file).is_file()).map(Path::to_path_buf)
+    dir.ancestors().find(|d| crate::project_fs::is_file(&d.join(file))).map(Path::to_path_buf)
 }
 
+/// `path` from `base`, as the terminal's shell takes it (inside WSL or on a server: with `/`,
+/// whatever this computer writes).
 fn relative(base: &Path, path: &Path) -> String {
-    path.strip_prefix(base).unwrap_or(path).to_string_lossy().into_owned()
+    let relative = path.strip_prefix(base).unwrap_or(path).to_string_lossy().into_owned();
+    if crate::wsl::is_wsl(base) || crate::remote::is_remote(base) { relative.replace('\\', "/") } else { relative }
 }
 
 /// `make(dir)` when `dir` isn't the project's root (where the terminal starts), else nothing.
@@ -793,6 +845,39 @@ mod tests {
     fn at(language: &str, root: &Path, file: &str, text: &str, marker: &str) -> Option<TestRun> {
         let byte = text.find(marker).unwrap();
         find(language, root, &root.join(file), text, &tree(file, text), Some(byte))
+    }
+
+    /// A project on a server: its tests found there, run as its shell takes paths.
+    #[test]
+    #[cfg(unix)]
+    fn a_server_s_tests_are_found_there() {
+        let dir = dunce::canonicalize(project(
+            "remote",
+            &[
+                ("pyproject.toml", "[tool.pytest.ini_options]\n"),
+                ("tests/test_cart.py", "import pytest\n\ndef test_total():\n    assert 1\n"),
+                ("cart.py", "def total(): pass\n"),
+            ],
+        ))
+        .unwrap();
+        let root = crate::remote::path(crate::remote::TEST_HOST, &dir.to_string_lossy());
+        let found = discover(&root);
+        assert_eq!(found.len(), 1, "{:?}", found.iter().map(|f| &f.path).collect::<Vec<_>>());
+        assert_eq!(found[0].path, root.join("tests/test_cart.py"));
+        assert_eq!(found[0].tests.len(), 1);
+        assert!(
+            found[0].command.as_deref().is_some_and(|c| c.contains("tests/test_cart.py")),
+            "{:?}",
+            found[0].command
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_test_reported_from_a_folder_further_in_is_the_same() {
+        assert!(same_test("tests/test_cart.py::CartTest::test_total", "test_cart.py::CartTest::test_total"));
+        assert!(same_test("a::b", "a::b"));
+        assert!(!same_test("tests/xtest_cart.py::T::t", "test_cart.py::T::t"));
     }
 
     #[test]
@@ -974,7 +1059,11 @@ mod tests {
         let root = project("py-unit", &[("tests/test_cart.py", unit)]);
         let run = at("Python", &root, "tests/test_cart.py", unit, "assertTrue").unwrap();
         assert_eq!(run.command, "python3 -m unittest -v tests.test_cart.TestCart.test_total");
+        // (`tests/` isn't a package: unittest told where to look.)
         let every = every_test("Python", &root, &root.join("tests/test_cart.py")).unwrap();
+        assert_eq!(every, "python3 -m unittest discover -v -s tests");
+        let packaged = project("py-unit-package", &[("tests/__init__.py", ""), ("tests/test_cart.py", unit)]);
+        let every = every_test("Python", &packaged, &packaged.join("tests/test_cart.py")).unwrap();
         assert_eq!(every, "python3 -m unittest discover -v");
         // The same file in a project that uses pytest: pytest.
         let root = project(
