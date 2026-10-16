@@ -5,7 +5,8 @@
 - Folders inside WSL (Windows): Open WSL Folder…, or `null .` in a WSL shell. Files are read
   through Windows' WSL share; the terminal, git and language servers run inside Linux, in the
   folder's Linux path, and servers install there (Node.js along when the distribution has
-  none). Changes made there are looked for every couple of seconds.
+  none). Changes made there are looked for every couple of seconds. On WSL 1, servers built
+  on Node.js say they need WSL 2 (Node.js doesn't start there).
 - Windows: while a question is open ("Save changes?"), the window behind it takes no keys or
   clicks; `null --version` and `null --help` print in the console they're typed in.
 - "Tell me when a new version is out" (off until turned on, on the welcome's last step or in

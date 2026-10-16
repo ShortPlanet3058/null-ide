@@ -278,6 +278,10 @@ credentials), and language servers run and install there (into `~/.local/share/n
 Node.js when the distribution has none). Tasks and tests are written for that shell. Changes
 made in WSL by other programs are noticed within a couple of seconds.
 
+On WSL 1, servers built on Node.js (Python's, TypeScript's, and others) can't run: Node.js
+doesn't start there. Move the distribution to WSL 2 (`wsl --set-version Ubuntu 2`, with its
+name); the other servers work on both.
+
 ## New versions
 
 Null never updates itself and doesn't look for updates unless asked: turn on "Tell me when a

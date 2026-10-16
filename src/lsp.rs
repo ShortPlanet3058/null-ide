@@ -24,6 +24,15 @@ pub fn is_python_server(name: &str) -> bool {
     matches!(name, "pyright" | "pyright-langserver" | "basedpyright" | "pylsp" | "ruff" | "jedi-language-server")
 }
 
+/// What a server needs set to start: marksman (.NET) stops at once without the ICU library,
+/// which minimal Linux installs (WSL's Ubuntu) lack, and doesn't use it.
+pub fn variables_for(name: &str) -> &'static [(&'static str, &'static str)] {
+    match name {
+        "marksman" => &[("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1")],
+        _ => &[],
+    }
+}
+
 /// With `NULL_LSP_LOG=/some/file` set, every message to and from language
 /// servers is appended there. For figuring out why a server misbehaves.
 fn trace(direction: &str, message: &str) {
@@ -134,7 +143,14 @@ impl LanguageServer {
         // set there, with Null's folders).
         let wsl = crate::wsl::of(root);
         let mut command = match &wsl {
-            Some(wsl) => crate::wsl::command(&wsl.distro, Some(&wsl.linux), &program.to_string_lossy(), args),
+            Some(wsl) => {
+                // (Through `env`: what's set for wsl.exe doesn't reach Linux.)
+                let set: Vec<String> = variables_for(name).iter().map(|(k, v)| format!("{k}={v}")).collect();
+                let program = program.to_string_lossy();
+                let with: Vec<&str> =
+                    set.iter().map(String::as_str).chain([program.as_ref()]).chain(args.iter().copied()).collect();
+                crate::wsl::command(&wsl.distro, Some(&wsl.linux), "env", &with)
+            }
             None => {
                 let mut command = crate::tools::command(program);
                 command
@@ -143,6 +159,7 @@ impl LanguageServer {
                     // Where Null looks for programs, so a server finds what it runs in turn (an
                     // npm package's `node`, Null's own when the computer has none).
                     .env("PATH", crate::tools::search_path())
+                    .envs(variables_for(name).iter().copied())
                     // A Python project's own environment first, for Python's server (pyright
                     // reads its packages from there); other servers keep the PATH they'd have.
                     .envs(if is_python_server(name) {
