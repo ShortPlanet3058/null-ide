@@ -675,6 +675,16 @@ impl SettingsPanel {
                 }),
                 &theme,
             ),
+            Self::row(
+                "Tell me when a new version is out",
+                Some(
+                    "Once a day Null asks GitHub for its latest version; nothing about you is sent, and nothing is installed",
+                ),
+                Self::toggle("updates", s.check_for_updates, &theme, cx, |s| {
+                    s.check_for_updates = !s.check_for_updates
+                }),
+                &theme,
+            ),
         ]
     }
 

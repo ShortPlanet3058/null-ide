@@ -208,6 +208,8 @@ actions!(
         ShowNotes,
         /// The failed test at the cursor (or the first one that failed) explained by AI.
         ExplainTestFailure,
+        /// Asks now whether a newer Null is out.
+        CheckForUpdates,
     ]
 );
 
@@ -1064,6 +1066,7 @@ impl Workspace {
             cx.observe_global_in::<Settings>(window, |this, window, cx| {
                 this.apply_settings(cx);
                 this.ask_where_suggestions_come_from(window, cx);
+                this.check_for_updates_soon(cx);
             }),
             cx.observe(&lsp, |_, _, cx| cx.notify()),
             cx.subscribe(&lsp, |this, _, event, cx| match event {
@@ -1349,6 +1352,7 @@ impl Workspace {
         }
         // Already answering from a command line tool with suggestions on: asked once, here.
         cx.defer_in(window, |this, window, cx| this.ask_where_suggestions_come_from(window, cx));
+        workspace.check_for_updates_soon(cx);
         workspace
     }
 
@@ -5164,6 +5168,7 @@ impl Workspace {
             (View, "Split Terminal".into(), Box::new(SplitTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
             (App, "About Null".into(), Box::new(AboutNull)),
+            (App, "Check for Updates".into(), Box::new(CheckForUpdates)),
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
@@ -7774,6 +7779,45 @@ impl Workspace {
         }
         rows.sort_by(|a, b| (&a.path, a.position.line).cmp(&(&b.path, b.position.line)));
         self.open_locations("Notes".into(), rows, window, cx);
+    }
+
+    /// When asked to be told of new versions: what the last check found, and a new check
+    /// a few seconds after launch if the last is a day old (once a run, whatever the windows).
+    fn check_for_updates_soon(&mut self, cx: &mut Context<Self>) {
+        if !cx.global::<Settings>().check_for_updates || !crate::updates::first_this_run() {
+            return;
+        }
+        crate::updates::remember();
+        cx.notify();
+        if !crate::updates::due() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(8)).await;
+            let found = cx.background_executor().spawn(async { crate::updates::check() }).await;
+            if let Ok(Some(_)) = found {
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Check for Updates: asked now, and said.
+    fn check_for_updates(&mut self, _: &CheckForUpdates, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_notice("Checking for a new version…".into(), cx);
+        cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async { crate::updates::check() }).await;
+            this.update(cx, |this, cx| {
+                let message = match found {
+                    Ok(Some(version)) => format!("Null {version} is out: get it at null-ide.com."),
+                    Ok(None) => format!("Null {} is the latest version.", crate::updates::current()),
+                    Err(error) => error,
+                };
+                this.show_notice(message, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn show_ai_usage(&mut self, _: &ShowAiUsage, _: &mut Window, cx: &mut Context<Self>) {
@@ -11317,6 +11361,7 @@ impl Render for Workspace {
         };
         let ai_provider = cx.global::<Settings>().ai.active();
         let ai_dot = ai_provider != ProviderId::Off && (crate::ai::working() || crate::ai::failed_lately());
+        let update = cx.global::<Settings>().check_for_updates.then(crate::updates::known).flatten();
         if ai_dot && self.ai_dot_watch.is_none() {
             self.ai_dot_watch = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
@@ -11676,6 +11721,21 @@ impl Render for Workspace {
             }))
             // AI's only mark: a dot, while it answers (or just after it failed). Its name shows
             // on hover; a click opens its settings.
+            // A newer Null out (when asked to be told): where to get it.
+            .when_some(update, |bar, version| {
+                bar.child(
+                    div()
+                        .id("update")
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .text_color(theme.muted)
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child(format!("Null {version} is out"))
+                        .tooltip(ui::tip("Get it at null-ide.com".to_string(), None))
+                        .on_click(|_, _, cx| cx.open_url(crate::updates::DOWNLOAD)),
+                )
+            })
             .when(ai_dot, |bar| {
                 let failed = !crate::ai::working();
                 let dot = if failed { theme.error.opacity(0.8) } else { theme.caret.opacity(0.6) };
@@ -12038,6 +12098,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_ai_usage))
             .on_action(cx.listener(Self::show_notes))
             .on_action(cx.listener(Self::explain_test_failure))
+            .on_action(cx.listener(Self::check_for_updates))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))

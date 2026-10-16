@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- "Tell me when a new version is out" (off until turned on, on the welcome's last step or in
+  Settings): once a day Null asks GitHub for its latest release, and says so in the status
+  bar when there's a newer one. "Check for Updates" in ⌘K asks now. Nothing is installed.
 - Notes on code: ⌥⌘N (Ctrl+Alt+N) writes a note under the cursor's line; it moves with its
   line and is kept privately in Null's folder, never in the project. Notes… lists them.
 - An answer from ⌘I can be asked about further (each follow-up goes with the questions
