@@ -369,6 +369,9 @@ pub fn run(host: &str, script: &str) -> io::Result<Output> {
         return Err(io::Error::new(io::ErrorKind::NotConnected, why));
     }
     let result = run_now(host, script);
+    if let Err(error) = &result {
+        crate::trace::mark(&format!("ssh {host}: {error}"));
+    }
     if let Err(error) = &result
         && matches!(error.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::BrokenPipe)
     {

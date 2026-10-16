@@ -11281,7 +11281,8 @@ impl Render for Workspace {
                 let home = crate::tools::home_dir();
                 let shown = match home.as_ref().and_then(|h| root.strip_prefix(h).ok()) {
                     Some(rest) => Path::new("~").join(rest).display().to_string(),
-                    None => root.display().to_string(),
+                    // (A server's folder as people write it: `me@box:/home/me/app`.)
+                    None => crate::remote::shown(&root),
                 };
                 (vec![shorten_path(&shown, STATUS_PATH_CHARS)], (0, 0))
             }
