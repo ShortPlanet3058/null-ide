@@ -740,7 +740,7 @@ fn search_files(
         Some(only) => {
             let wanted = file_filter(roots.primary(), files_wanted);
             only.iter()
-                .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() <= MAX_FILE_SIZE))
+                .filter(|p| crate::project_fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() <= MAX_FILE_SIZE))
                 .filter(|p| wanted.as_ref().is_none_or(|w| !w.matched(p, false).is_ignore()))
                 .cloned()
                 .collect()
@@ -756,8 +756,33 @@ fn search_files(
     if cancel.load(Ordering::Relaxed) {
         return;
     }
+    // A server's files: those that can match found there first (plain text: what a pattern
+    // could match isn't grep's to say), the rest not read over the network.
+    if !query.regex && files.iter().any(|f| crate::remote::is_remote(f)) {
+        files = on_servers_with(files, &query.text, !query.case_sensitive);
+    }
     files.sort();
     search_in(roots, &files, &regex, query, unsaved, cancel, report);
+}
+
+/// `files`, those on servers kept only if `text` is in them (this computer's all kept).
+fn on_servers_with(files: Vec<PathBuf>, text: &str, ignore_case: bool) -> Vec<PathBuf> {
+    let mut kept = Vec::new();
+    let mut by_host: Vec<(String, Vec<String>)> = Vec::new();
+    for file in files {
+        match crate::remote::of(&file) {
+            None => kept.push(file),
+            Some(remote) => match by_host.iter_mut().find(|(h, _)| *h == remote.host) {
+                Some((_, paths)) => paths.push(remote.path),
+                None => by_host.push((remote.host, vec![remote.path])),
+            },
+        }
+    }
+    for (host, paths) in by_host {
+        let found = crate::remote::files_containing(&host, &paths, text, ignore_case).unwrap_or_default();
+        kept.extend(found.iter().map(|p| crate::remote::path(&host, p)));
+    }
+    kept
 }
 
 /// The files field as it reads in `root`: with several folders, `/web/app/` (a folder's name
@@ -781,6 +806,24 @@ fn wanted_in(roots: &crate::roots::ProjectRoots, root: &Path, written: &str) -> 
 /// field respected, read side by side.
 fn files_in(root: &Path, files_wanted: &str, hide: &[String], cancel: &AtomicBool) -> Vec<PathBuf> {
     let wanted = file_filter(root, files_wanted);
+    // A server's: listed there (git's list), then the files field and `hide` applied.
+    if let Some(remote) = crate::remote::of(root) {
+        let hidden = crate::project_index::hidden_rules(root, hide);
+        let listed = crate::remote::list_files(&remote.host, &remote.path, 200_000).unwrap_or_default();
+        return listed
+            .iter()
+            .map(|p| crate::remote::path(&remote.host, p))
+            .filter(|p| !hidden.matched_path_or_any_parents(p, false).is_ignore())
+            .filter(|p| match &wanted {
+                Some(wanted) => {
+                    let matched = wanted.matched(p, false);
+                    // (Only what's named, when something is: an override's whitelist.)
+                    matched.is_whitelist() || (matched.is_none() && wanted.num_whitelists() == 0)
+                }
+                None => true,
+            })
+            .collect();
+    }
     {
         {
             use ignore::WalkState;

@@ -476,6 +476,39 @@ pub fn changed_since(host: &str, folders: &[String], stamp: &str) -> io::Result<
     Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| l.starts_with('/')).map(str::to_string).collect())
 }
 
+/// Every file in `folder` on `host` (paths there), at most `limit`: git's list (what it
+/// tracks and what's new, not what it ignores) in a repository, else all of them but
+/// dependencies and build output.
+pub fn list_files(host: &str, folder: &str, limit: usize) -> io::Result<Vec<String>> {
+    let script = format!(
+        "r={q}; cd -- \"$r\" || exit 1; \
+         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+           git ls-files -co --exclude-standard 2>/dev/null | sed \"s|^|$PWD/|\"; \
+         else find \"$PWD\" \\( -name .git -o -name node_modules -o -name target -o -name .venv -o -name __pycache__ \\) -prune -o -type f -print; \
+         fi | head -n {limit}",
+        q = quote(folder)
+    );
+    let output = run_ok(host, &script)?;
+    Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| l.starts_with('/')).map(str::to_string).collect())
+}
+
+/// Those of `files` on `host` that have `text` in them (with `ignore_case`, in any case),
+/// found there: what a search then reads of a server is only those.
+pub fn files_containing(host: &str, files: &[String], text: &str, ignore_case: bool) -> io::Result<Vec<String>> {
+    if files.is_empty() || text.is_empty() {
+        return Ok(files.to_vec());
+    }
+    let mut list = files.join("\n");
+    list.push('\n');
+    let script = format!(
+        "tr '\\n' '\\000' <<'NULL_END' | xargs -0 grep -lF {case}-e {q} -- 2>/dev/null; exit 0\n{list}NULL_END",
+        case = if ignore_case { "-i " } else { "" },
+        q = quote(text)
+    );
+    let output = run_ok(host, &script)?;
+    Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| l.starts_with('/')).map(str::to_string).collect())
+}
+
 /// What `stat` says of a file: its kind, size, last change and whether it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Meta {
@@ -735,6 +768,16 @@ mod tests {
         assert!(metadata(&at("shown")).is_ok());
         remove_dir_all(&at("a b")).unwrap();
         assert!(metadata(&at("a b")).is_err());
+        // Every file, as the finder lists them (no repository here: all of them).
+        let mut files = list_files(TEST_HOST, &dir.to_string_lossy(), 100).unwrap();
+        files.sort();
+        assert_eq!(files, [format!("{}/shown", dir.display())]);
+        // Those with a text in them, looked for there.
+        write(&at("other"), b"nothing here").unwrap();
+        let both = [format!("{}/shown", dir.display()), format!("{}/other", dir.display())];
+        assert_eq!(files_containing(TEST_HOST, &both, "THROUGH", true).unwrap(), [both[0].clone()]);
+        assert!(files_containing(TEST_HOST, &both, "THROUGH", false).unwrap().is_empty());
+        remove_file(&at("other")).unwrap();
         // What changed since the last look (the first only sets its stamp).
         let stamp = format!("{}/.stamp", dir.display());
         let folders = [dir.to_string_lossy().into_owned()];

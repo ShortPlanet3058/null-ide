@@ -1638,6 +1638,19 @@ pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
 fn list_files_under(root: &Path, roots: &crate::roots::ProjectRoots, hide: &[String]) -> Vec<FileEntry> {
     use ignore::WalkState;
     let hidden = crate::project_index::hidden_rules(root, hide);
+    // A server's: listed there, in one go.
+    if let Some(remote) = crate::remote::of(root) {
+        let listed = crate::remote::list_files(&remote.host, &remote.path, MAX_FILES * 4).unwrap_or_default();
+        let mut files: Vec<FileEntry> = listed
+            .iter()
+            .map(|p| crate::remote::path(&remote.host, p))
+            .filter(|p| !hidden.matched_path_or_any_parents(p, false).is_ignore())
+            .map(|p| FileEntry::new(p, roots))
+            .collect();
+        files.sort_by(|a, b| a.relative.cmp(&b.relative));
+        files.truncate(MAX_FILES);
+        return files;
+    }
     let found: std::sync::Mutex<Vec<FileEntry>> = std::sync::Mutex::new(Vec::new());
     ignore::WalkBuilder::new(root)
         .hidden(false)
