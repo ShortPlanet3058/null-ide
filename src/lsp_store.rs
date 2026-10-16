@@ -761,8 +761,11 @@ impl LspStore {
         let env = python.then(|| crate::python_env::find_for(&self.root_for(&scope), &scope)).flatten();
         match env {
             // (A path that isn't text, on Linux: not given.)
+            // (As the server has it: a WSL or server path in its own form.)
             Some(env) => match crate::python_env::interpreter(&env).to_str() {
-                Some(python) => serde_json::json!({ "pythonPath": python }),
+                Some(_) => {
+                    serde_json::json!({ "pythonPath": crate::shell::path_text(&crate::python_env::interpreter(&env)) })
+                }
                 None => Value::Null,
             },
             None => Value::Null,

@@ -3939,8 +3939,7 @@ impl Workspace {
         if self.sidebar_tests {
             self.find_tests(cx);
         }
-        // (A server's Python environment isn't one Null can run here.)
-        self.python_env = if crate::remote::is_remote(&path) { None } else { crate::python_env::find(&path) };
+        self.python_env = crate::python_env::find(&path);
         self.python_env_here = None;
         let mut session = crate::session::Session::load(&path);
         session.window = self.window_state;
@@ -9141,9 +9140,13 @@ impl Workspace {
     fn add_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // In a Python project with its own environment: made the shell's, as activating does.
         let root = self.roots.root_for(&dir).to_path_buf();
+        let linux = crate::wsl::is_wsl(&dir) || crate::remote::is_remote(&dir);
         let activate =
             self.roots.contains(&dir).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
-                let shell = if cfg!(windows) {
+                // (Inside WSL or on a server: a POSIX shell there, whichever it is.)
+                let shell = if linux {
+                    "sh".to_string()
+                } else if cfg!(windows) {
                     crate::shell::windows_program()
                 } else {
                     std::env::var("SHELL")
@@ -9154,7 +9157,7 @@ impl Workspace {
                 };
                 // From where the shell starts: short when it's the project's folder.
                 let env = env.strip_prefix(&dir).map(Path::to_path_buf).unwrap_or(env);
-                crate::python_env::activate_command(&env, &shell)
+                crate::python_env::activate_command(&env, &shell, linux)
             });
         let shell = match Shell::start(dir) {
             Ok(shell) => shell,
