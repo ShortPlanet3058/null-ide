@@ -210,6 +210,8 @@ actions!(
         ExplainTestFailure,
         /// Asks now whether a newer Null is out.
         CheckForUpdates,
+        /// A folder inside WSL as the project (Windows).
+        OpenWslFolder,
     ]
 );
 
@@ -861,7 +863,7 @@ pub struct Workspace {
     /// Actions run from the palette lately, most recent first.
     recent_commands: Vec<&'static str>,
     /// Watches the project folder so the tree and open files follow changes made elsewhere.
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Option<Box<dyn notify::Watcher>>,
     watch_task: Option<Task<()>>,
     index_task: Option<Task<()>>,
     session_task: Option<Task<()>>,
@@ -1317,6 +1319,8 @@ impl Workspace {
             if window.is_window_active() {
                 let root = this.tree.read(cx).root().to_path_buf();
                 crate::settings::use_project(&root, cx);
+                // What's typed in its terminal is for Linux's shell when its folder's in WSL.
+                crate::shell::set_wsl_project(crate::wsl::is_wsl(&root));
             }
             if window.is_window_active()
                 && let Some(message) = this.notice_on_return.take()
@@ -1607,15 +1611,22 @@ impl Workspace {
     /// Watches the project folder (and the window's others); changes made elsewhere
     /// (terminal, git, other apps) show up in the tree and in open files.
     fn watch(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        use notify::Watcher;
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
-        let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        let handler = move |result: notify::Result<notify::Event>| {
             if let Ok(event) = result
                 && !matches!(event.kind, notify::EventKind::Access(_))
             {
                 tx.unbounded_send(event.paths).ok();
             }
-        });
+        };
+        // A folder inside WSL: Windows isn't told of changes there, so they're looked for
+        // every couple of seconds instead.
+        let watcher: notify::Result<Box<dyn notify::Watcher>> = if crate::wsl::is_wsl(&root) {
+            let config = notify::Config::default().with_poll_interval(Duration::from_secs(2));
+            notify::PollWatcher::new(handler, config).map(|w| Box::new(w) as Box<dyn notify::Watcher>)
+        } else {
+            notify::recommended_watcher(handler).map(|w| Box::new(w) as Box<dyn notify::Watcher>)
+        };
         let Ok(mut watcher) = watcher else { return };
         if watcher.watch(&root, notify::RecursiveMode::Recursive).is_err() {
             return;
@@ -3808,6 +3819,7 @@ impl Workspace {
     }
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        crate::shell::set_wsl_project(crate::wsl::is_wsl(&path));
         self.roots = crate::roots::ProjectRoots::new(path.clone());
         self.git_root = path.clone();
         self.git_view.update(cx, |view, cx| view.set_repos(Vec::new(), cx));
@@ -4872,6 +4884,46 @@ impl Workspace {
         }
     }
 
+    /// Open WSL Folder…: a folder inside WSL, typed from the distribution's home (Windows'
+    /// file dialog shows WSL's files too, but not as a place of its own).
+    fn open_wsl_folder(&mut self, _: &OpenWslFolder, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async {
+                    crate::wsl::distros().into_iter().map(|d| (crate::wsl::home(&d), d)).collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let Some((home, distro)) = found.first() else {
+                    return this.show_notice(
+                        "WSL isn't installed: “wsl --install” in PowerShell installs it, with Ubuntu.".into(),
+                        cx,
+                    );
+                };
+                let start = crate::wsl::windows_path(distro, home.as_deref().unwrap_or("/"));
+                this.open_palette_with(
+                    PaletteKind::Path(PathFor::Folder),
+                    Some(format!("A folder in {distro}")),
+                    Vec::new(),
+                    window,
+                    cx,
+                );
+                if let Some((palette, _)) = &this.palette {
+                    let typed = format!("{}\\", start.display());
+                    palette.update(cx, |palette, cx| palette.set_query(&typed, cx));
+                }
+                if found.len() > 1 {
+                    let others: Vec<String> =
+                        found[1..].iter().map(|(_, d)| format!("\\\\wsl.localhost\\{d}")).collect();
+                    this.show_notice(format!("Other distributions: {}", others.join(", ")), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// No file dialog on this system (Linux without a desktop portal, as on a bare window
     /// manager): the path typed instead, with what's in the folders listed on the way.
     fn type_a_path(&mut self, purpose: PathFor, window: &mut Window, cx: &mut Context<Self>) {
@@ -4996,6 +5048,8 @@ impl Workspace {
             (File, "New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
             (File, OPEN_LABEL.into(), Box::new(Open)),
             (File, "Open Folder…".into(), Box::new(OpenFolder)),
+            #[cfg(windows)]
+            (File, "Open WSL Folder…".into(), Box::new(OpenWslFolder)),
             (File, "Add Folder to Window…".into(), Box::new(AddFolderToWindow)),
             (File, "Open Recent…".into(), Box::new(OpenRecent)),
             (File, "Open Folder in New Window…".into(), Box::new(NewWindow)),
@@ -9823,7 +9877,7 @@ impl Workspace {
     fn install_language_server(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf)) else { return };
         let Some(server) = crate::servers::for_path(&path) else { return };
-        if let Err(reason) = crate::servers::can_install(server) {
+        if let Err(reason) = crate::servers::can_install_for(server, self.root(cx)) {
             return self.show_notice(reason, cx);
         }
         self.lsp.update(cx, |lsp, cx| lsp.install(&path, cx));
@@ -10781,8 +10835,12 @@ fn cmd_script(exe: &Path) -> String {
 fn git_bash_script(exe: &Path) -> String {
     let exe = exe.display().to_string().replace('\\', "/");
     format!(
-        "#!/bin/sh\n# Opens files and folders in Null from Git Bash: `null .`, `null a.rs:42`, `null --wait <file>`.\n\
-         case \"$1\" in --version|-V|--help|-h) exec \"{exe}\" \"$1\" ;; esac\n\
+        "#!/bin/sh\n# Opens files and folders in Null from Git Bash (and a WSL shell): `null .`, `null a.rs:42`, `null --wait <file>`.\n\
+         exe=\"{exe}\"\n\
+         # In WSL: Null's own path as Linux has it, and paths given in Windows' form.\n\
+         [ -n \"$WSL_DISTRO_NAME\" ] && exe=$(wslpath -u \"$exe\")\n\
+         win() {{ cygpath -aw \"$1\" 2>/dev/null || wslpath -aw \"$1\" 2>/dev/null || printf '%s' \"$1\"; }}\n\
+         case \"$1\" in --version|-V|--help|-h) exec \"$exe\" \"$1\" ;; esac\n\
          wait=\n\
          [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
@@ -10791,14 +10849,14 @@ fn git_bash_script(exe: &Path) -> String {
          if [ -z \"$wait\" ] && [ $# -gt 1 ]; then folders=1; for p in \"$@\"; do [ -d \"$p\" ] || folders=; done; fi\n\
          if [ -n \"$folders\" ]; then\n\
          \tn=$#\n\
-         \tfor p in \"$@\"; do set -- \"$@\" \"$(cygpath -aw \"$p\" 2>/dev/null || printf '%s' \"$p\")\"; done\n\
+         \tfor p in \"$@\"; do set -- \"$@\" \"$(win \"$p\")\"; done\n\
          \tshift \"$n\"\n\
-         \t\"{exe}\" \"$@\" &\n\
+         \t\"$exe\" \"$@\" &\n\
          \texit 0\n\
          fi\n\
          for p in \"$@\"; do\n\
-         \tw=$(cygpath -aw \"$p\" 2>/dev/null || printf '%s' \"$p\")\n\
-         \tif [ -n \"$wait\" ]; then \"{exe}\" --wait \"$w\"; else \"{exe}\" \"$w\" & fi\n\
+         \tw=$(win \"$p\")\n\
+         \tif [ -n \"$wait\" ]; then \"$exe\" --wait \"$w\"; else \"$exe\" \"$w\" & fi\n\
          done\n"
     )
 }
@@ -12099,6 +12157,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_notes))
             .on_action(cx.listener(Self::explain_test_failure))
             .on_action(cx.listener(Self::check_for_updates))
+            .on_action(cx.listener(Self::open_wsl_folder))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -14141,7 +14200,9 @@ mod tests {
         assert!(lines.contains(&r#"if "%~1"=="" (start "" "C:\Program Files\Null\null.exe" "%CD%\." & exit /b)"#));
         // Git Bash's: valid sh, Null run by its forward-slashed path.
         let sh = git_bash_script(Path::new(r"C:\Program Files\Null\null.exe"));
-        assert!(sh.contains(r#""C:/Program Files/Null/null.exe" "$w" &"#), "{sh}");
+        assert!(sh.contains(r#"exe="C:/Program Files/Null/null.exe""#) && sh.contains(r#""$exe" "$w" &"#), "{sh}");
+        // From a WSL shell: Null's own path as Linux has it, the paths given in Windows' form.
+        assert!(sh.contains("wslpath -u") && sh.contains("wslpath -aw"), "{sh}");
         #[cfg(unix)]
         {
             let file = crate::tools::test_dir("git-bash-null").join("null");

@@ -95,6 +95,7 @@ mod window_frame;
 mod word_blocks;
 mod workspace;
 mod wrap;
+mod wsl;
 
 use gpui::{
     App, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size,

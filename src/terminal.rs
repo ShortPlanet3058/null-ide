@@ -418,12 +418,18 @@ impl Shell {
         // Without `$SHELL` (an app started oddly), the account's own shell rather than a
         // `login` wrapper, so the shell is the process watched for its prompt.
         // (On Windows: PowerShell, whatever a `$SHELL` from Git Bash says.)
-        let shell = if cfg!(windows) {
+        // A folder inside WSL: the person's own shell there, started in its Linux path.
+        let wsl = crate::wsl::of(&cwd);
+        let shell = if wsl.is_some() {
+            Some("wsl.exe".to_string())
+        } else if cfg!(windows) {
             Some(crate::shell::windows_program())
         } else {
             std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell)
         };
-        let args: Vec<String> = if cfg!(windows) {
+        let args: Vec<String> = if let Some(wsl) = &wsl {
+            vec!["-d".into(), wsl.distro.clone(), "--cd".into(), wsl.linux.clone()]
+        } else if cfg!(windows) {
             // The system can't say which folder PowerShell is in: its prompt says it, in the
             // title (the person's own prompt, from their profile, still draws after).
             vec!["-NoLogo".into(), "-NoExit".into(), "-Command".into(), crate::shell::POWERSHELL_FOLDER_IN_TITLE.into()]
@@ -443,7 +449,8 @@ impl Shell {
         let options = tty::Options {
             // A login shell, like a terminal app opens, so PATH and the prompt are set up.
             shell: shell.map(|program| tty::Shell::new(program, args)),
-            working_directory: Some(cwd.clone()),
+            // (wsl.exe is given its folder: Windows starts it in its own.)
+            working_directory: if wsl.is_some() { crate::tools::home_dir() } else { Some(cwd.clone()) },
             drain_on_exit: false,
             env,
             #[cfg(target_os = "windows")]
@@ -875,6 +882,12 @@ impl TerminalView {
             folder.or_else(|| self.shell_pid.and_then(crate::terminal_watch::folder_of)).filter(|f| f.is_dir())
         {
             return folder;
+        }
+        // A shell inside WSL: its title says its Linux folder (`me@host: ~/proj`).
+        if let Some(wsl) = crate::wsl::of(&self.root) {
+            return crate::wsl::folder_in_title(&wsl.distro, &self.title)
+                .filter(|f| f.is_dir())
+                .unwrap_or_else(|| self.root.clone());
         }
         // (PowerShell's title is its folder whole: see `shell::POWERSHELL_FOLDER_IN_TITLE`.)
         let whole = PathBuf::from(self.title.trim());
@@ -1925,7 +1938,7 @@ fn within(paths: &[PathBuf], folder: &std::path::Path) -> Vec<PathBuf> {
 fn shell_words(paths: &[std::path::PathBuf]) -> String {
     paths
         .iter()
-        .map(|path| format!("{} ", crate::shell::quote(&path.display().to_string(), crate::shell::kind())))
+        .map(|path| format!("{} ", crate::shell::quote(&crate::shell::path_text(path), crate::shell::kind())))
         .collect()
 }
 

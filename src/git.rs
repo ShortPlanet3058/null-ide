@@ -24,12 +24,39 @@ pub fn not_a_repository() -> &'static str {
 /// git, run in `dir`. Paths given to it are names, never patterns: discarding `app/[id].tsx`
 /// mustn't touch `app/d.tsx`.
 fn command(dir: &Path) -> Command {
+    // A folder inside WSL: Linux's git, run there (its config, its credentials), in the
+    // folder's Linux path; the same settings, given as `env` gives them.
+    if let Some(wsl) = crate::wsl::of(dir) {
+        return crate::wsl::command(
+            &wsl.distro,
+            Some(&wsl.linux),
+            "env",
+            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git"],
+        );
+    }
     let mut command = crate::tools::command("git");
     command.arg("-C").arg(dir).env("GIT_LITERAL_PATHSPECS", "1").env("GIT_TERMINAL_PROMPT", "0");
     // Asking (status) never writes git's index: that write was seen as a change, and set
     // every open file's committed version to be read again.
     command.env("GIT_OPTIONAL_LOCKS", "0");
     command
+}
+
+/// A path git printed (`--show-toplevel`, `--absolute-git-dir`) as Null reaches it: inside
+/// WSL, a Linux path to take back to Windows'.
+fn printed_path(dir: &Path, printed: &str) -> PathBuf {
+    match crate::wsl::of(dir) {
+        Some(wsl) => crate::wsl::from_linux(&wsl.distro, printed.trim()),
+        None => PathBuf::from(printed.trim()),
+    }
+}
+
+/// A path given to git run for `dir`, as that git knows it.
+fn given_path(dir: &Path, path: &Path) -> String {
+    match crate::wsl::of(dir) {
+        Some(wsl) => crate::wsl::linux_path(&wsl.distro, path),
+        None => path.to_string_lossy().into_owned(),
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
@@ -73,7 +100,7 @@ pub enum FileStatus {
 /// ones not), and only under it: a project inside a bigger repository sees its own.
 /// Empty outside a repository.
 pub fn status(root: &Path) -> Vec<(std::path::PathBuf, FileStatus)> {
-    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| std::path::PathBuf::from(t.trim())) else {
+    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| printed_path(root, &t)) else {
         return Vec::new();
     };
     let Some(out) = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]) else {
@@ -139,7 +166,7 @@ pub fn commit_parts(
     left_out: &[PathBuf],
     partly: &[(PathBuf, Vec<u8>)],
 ) -> Result<String, String> {
-    let names = |paths: &[PathBuf]| paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>();
+    let names = |paths: &[PathBuf]| paths.iter().map(|p| given_path(root, p)).collect::<Vec<_>>();
     if !kept.is_empty() {
         let paths = names(kept);
         let mut args = vec!["add", "-A", "--"];
@@ -152,7 +179,7 @@ pub fn commit_parts(
         args.extend(paths.iter().map(String::as_str));
         run(root, &args)?;
     }
-    let top = PathBuf::from(run(root, &["rev-parse", "--show-toplevel"])?.trim());
+    let top = printed_path(root, &run(root, &["rev-parse", "--show-toplevel"])?);
     for (path, bytes) in partly {
         let name = path.strip_prefix(&top).unwrap_or(path).to_string_lossy().into_owned();
         // The part committed, as a blob of its own (through the file's filters and line
@@ -244,7 +271,7 @@ pub fn undo_last_commit(root: &Path) -> Result<String, String> {
     if run(root, &["symbolic-ref", "-q", "HEAD"]).is_err() {
         return Err("Not on a branch.".into());
     }
-    let git_dir = run(root, &["rev-parse", "--absolute-git-dir"]).map(|d| PathBuf::from(d.trim()))?;
+    let git_dir = run(root, &["rev-parse", "--absolute-git-dir"]).map(|d| printed_path(root, &d))?;
     if ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
         .iter()
         .any(|f| git_dir.join(f).exists())
@@ -461,9 +488,8 @@ fn with_mainline<'a>(root: &Path, args: &[&'a str], id: &'a str) -> Vec<&'a str>
 
 /// The file as it was in `commit`, in its own encoding.
 pub fn file_at(path: &Path, commit: &FileCommit, encoding: crate::encoding::Encoding) -> Option<String> {
-    let top = git(path.parent()?, &["rev-parse", "--show-toplevel"])?;
-    let output =
-        command(Path::new(top.trim())).args(["show", &format!("{}:{}", commit.hash, commit.path)]).output().ok()?;
+    let top = printed_path(path.parent()?, &git(path.parent()?, &["rev-parse", "--show-toplevel"])?);
+    let output = command(&top).args(["show", &format!("{}:{}", commit.hash, commit.path)]).output().ok()?;
     output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
 }
 
@@ -582,7 +608,7 @@ pub fn push_as_itself(root: &Path) -> Result<String, String> {
 /// A file back as it was in the last commit; a file the last commit doesn't have goes to
 /// the Trash (and out of what's staged), whatever `status` says: never deleted.
 pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String> {
-    let name = path.to_string_lossy();
+    let name = given_path(root, path);
     // A folder that isn't new (a submodule): taken back by git, never trashed whole.
     if status != FileStatus::Added && path.is_dir() {
         return run(root, &["restore", "--source=HEAD", "--staged", "--worktree", "--", &name]).map(|_| ());
@@ -901,7 +927,7 @@ pub fn delete_branch(root: &Path, name: &str, anyway: bool) -> Result<(), String
 /// The files git has left conflicting (in a merge, a rebase, changes brought back),
 /// anywhere in the repository (not only in the folder opened).
 pub fn conflicted(root: &Path) -> Vec<PathBuf> {
-    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())) else {
+    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| printed_path(root, &t)) else {
         return Vec::new();
     };
     let names = git(root, &["diff", "--name-only", "-z", "--diff-filter=U"]).unwrap_or_default();
@@ -966,7 +992,7 @@ pub struct JoiningState {
 
 /// What git is in the middle of, if anything.
 pub fn joining(root: &Path) -> Option<JoiningState> {
-    let dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?.trim());
+    let dir = printed_path(root, &git(root, &["rev-parse", "--absolute-git-dir"])?);
     let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_string());
     let name_of = |id: &str| {
         git(root, &["name-rev", "--name-only", "--no-undefined", "--exclude=tags/*", id])
@@ -1016,7 +1042,7 @@ pub enum Undecided {
 /// The conflicted files that have no markers to settle: a side deleted them, or they're
 /// not text. Committing would keep whatever's there without anyone choosing.
 pub fn undecided(root: &Path) -> Vec<(PathBuf, Undecided)> {
-    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())) else {
+    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| printed_path(root, &t)) else {
         return Vec::new();
     };
     // "mode id stage\tname": which sides (2 ours, 3 theirs) each conflicted file has.
@@ -1258,7 +1284,7 @@ pub fn line_link(path: &Path, first: usize, last: usize) -> Result<String, Strin
     let commit = git(dir, &["rev-parse", "HEAD"]).ok_or("Nothing committed yet.")?;
     // Through any links: a project opened from /tmp is /private/tmp to git on macOS.
     let resolve = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let (file_path, top) = (resolve(path), resolve(Path::new(top.trim())));
+    let (file_path, top) = (resolve(path), resolve(&printed_path(dir, &top)));
     let relative = file_path.strip_prefix(&top).map_err(|_| "The file isn't in the repository.")?;
     let file = relative.to_string_lossy().replace('\\', "/");
     let commit = commit.trim();

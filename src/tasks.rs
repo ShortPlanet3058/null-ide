@@ -80,7 +80,7 @@ pub(crate) fn filled(text: &str, root: &Path, file: Option<&Path>, put: fn(&str)
         let name = &rest[at + 2..end];
         let file_part = |f: fn(&Path) -> Option<String>| file.and_then(f);
         let value = match name {
-            "workspaceFolder" | "workspaceRoot" | "cwd" => Some(root.display().to_string()),
+            "workspaceFolder" | "workspaceRoot" | "cwd" => Some(crate::shell::path_text(root)),
             "workspaceFolderBasename" => root.file_name().map(|n| n.to_string_lossy().into_owned()),
             "pathSeparator" => Some(std::path::MAIN_SEPARATOR_STR.into()),
             "userHome" => crate::tools::home_dir().map(|h| h.display().to_string()),
