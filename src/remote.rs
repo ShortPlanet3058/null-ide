@@ -138,8 +138,22 @@ pub fn command(host: &str, folder: Option<&str>, program: &str, args: &[&str]) -
         line.push_str(&quote(arg));
     }
     let mut command = ssh(host);
-    command.args(["-T", "-o", "BatchMode=yes", "--", destination(host).0, &line]);
+    asking(&mut command);
+    command.args(["-T", "--", destination(host).0, &line]);
     command
+}
+
+/// What ssh asks (a password, a passphrase, whether to trust a server), asked in Null's
+/// window (see `askpass`); where it can't be, nothing asked: it fails at once instead.
+fn asking(command: &mut std::process::Command) {
+    match crate::askpass::environment() {
+        Some(environment) => {
+            command.envs(environment);
+        }
+        None => {
+            command.args(["-o", "BatchMode=yes"]);
+        }
+    }
 }
 
 /// The program and arguments for a terminal on `host`, in `folder`: the person's own shell
@@ -207,13 +221,15 @@ impl Session {
             std::process::Command::new("sh")
         } else {
             let mut command = ssh(host);
-            command.args(["-T", "-o", "BatchMode=yes", "--", destination(host).0, "sh"]);
+            asking(&mut command);
+            command.args(["-T", "--", destination(host).0, "sh"]);
             command
         };
         #[cfg(not(test))]
         let mut command = {
             let mut command = ssh(host);
-            command.args(["-T", "-o", "BatchMode=yes", "--", destination(host).0, "sh"]);
+            asking(&mut command);
+            command.args(["-T", "--", destination(host).0, "sh"]);
             command
         };
         let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
@@ -311,9 +327,11 @@ impl Drop for Session {
 fn connect_error(host: &str, said: &str) -> String {
     let last = said.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("").trim();
     if said.contains("Permission denied") || said.contains("Too many authentication failures") {
+        // (What was typed didn't sign in: asked again next time.)
+        crate::askpass::forget();
         format!(
-            "Couldn't sign in to {host}: Null signs in with your SSH keys or agent (add your key \
-             with ssh-copy-id {host}, or ssh-add it)."
+            "Couldn't sign in to {host}: check the password, or add your key to the server \
+             (ssh-copy-id {host}) or to your agent (ssh-add)."
         )
     } else if said.contains("Host key verification failed") {
         format!("{host} isn't a known server yet: connect once with ssh {host} in a terminal to check and accept it.")

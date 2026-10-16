@@ -217,6 +217,9 @@ actions!(
     ]
 );
 
+/// Where ssh's answer goes (see `askpass`).
+type SshAnswer = futures::channel::oneshot::Sender<Option<String>>;
+
 /// ⌘1…⌘8: the tab at that place on the side in use; ⌘9: its last one.
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = workspace, no_json)]
@@ -968,6 +971,10 @@ pub struct Workspace {
     ignore_rules: Vec<(PathBuf, ignore::gitignore::Gitignore)>,
     /// The AI answer panel, while open.
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
+    /// What ssh asks, asked here (see `askpass`): the one shown, with whoever waits for its
+    /// answer (the same question asked again meanwhile, all of them), then those after it.
+    ssh_prompt: Option<(Entity<crate::ssh_prompt::SshPrompt>, Subscription, Vec<SshAnswer>)>,
+    ssh_questions: std::collections::VecDeque<crate::askpass::Ask>,
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
     /// The notices shown lately, newest last (Recent Notices lists them).
@@ -1259,6 +1266,8 @@ impl Workspace {
             pending_commands: Vec::new(),
             ignore_rules,
             key_prompt: None,
+            ssh_prompt: None,
+            ssh_questions: std::collections::VecDeque::new(),
             notice: None,
             past_notices: Vec::new(),
             notice_on_return: None,
@@ -8049,6 +8058,49 @@ impl Workspace {
         self.show_notice(format!("{tool} is too slow for suggestions as you type: choose where they come from."), cx);
     }
 
+    /// What ssh asks, asked in this window: now, or after the question already shown (the
+    /// same question again waits for the same answer).
+    pub fn ask_for_ssh(&mut self, ask: crate::askpass::Ask, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((prompt, _, waiting)) = &mut self.ssh_prompt {
+            if prompt.read(cx).asks(&ask.prompt) {
+                waiting.push(ask.answer);
+            } else {
+                self.ssh_questions.push_back(ask);
+            }
+            return;
+        }
+        if self.focus_before_palette.is_none() {
+            self.focus_before_palette = window.focused(cx);
+        }
+        let prompt = cx.new(|cx| crate::ssh_prompt::SshPrompt::new(ask.prompt, cx));
+        let subscription = cx.subscribe_in(&prompt, window, |this, _, event, window, cx| {
+            let crate::ssh_prompt::SshPromptEvent::Answered(answer) = event;
+            this.answer_ssh(answer.clone(), window, cx);
+        });
+        window.focus(&prompt.focus_handle(cx));
+        window.activate_window();
+        self.ssh_prompt = Some((prompt, subscription, vec![ask.answer]));
+        cx.notify();
+    }
+
+    /// ssh's question answered (or not): told to all who asked it, and the next one asked.
+    fn answer_ssh(&mut self, answer: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, _, waiting)) = self.ssh_prompt.take() {
+            for sender in waiting {
+                let _ = sender.send(answer.clone());
+            }
+        }
+        match self.ssh_questions.pop_front() {
+            Some(next) => self.ask_for_ssh(next, window, cx),
+            None => {
+                if let Some(focus) = self.focus_before_palette.take() {
+                    window.focus(&focus);
+                }
+                cx.notify();
+            }
+        }
+    }
+
     fn ask_for_key(&mut self, provider: ProviderId, window: &mut Window, cx: &mut Context<Self>) {
         if !provider.uses_api_key() {
             let message = match provider {
@@ -11546,7 +11598,10 @@ impl Render for Workspace {
         let tab_menu = self.render_tab_menu(cx);
         let text_menu = self.render_text_menu(cx);
         let tab_switcher = self.render_tab_switcher(cx);
-        let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
+        let overlay: Option<AnyElement> = if let Some((prompt, ..)) = &self.ssh_prompt {
+            // (What ssh asks waits on nothing else: a connection hangs on it.)
+            Some(prompt.clone().into_any_element())
+        } else if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
             Some(panel.clone().into_any_element())
@@ -12423,6 +12478,10 @@ impl Render for Workspace {
                                     return;
                                 }
                                 this.key_prompt = None;
+                                // (ssh's question, clicked away: not answered.)
+                                if this.ssh_prompt.is_some() {
+                                    return this.answer_ssh(None, window, cx);
+                                }
                                 this.close_palette(window, cx);
                             }),
                         )

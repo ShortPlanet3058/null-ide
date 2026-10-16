@@ -9,6 +9,7 @@ mod ai_agent;
 mod ai_context;
 mod ai_task;
 mod ai_usage;
+mod askpass;
 mod assets;
 mod basic_syntax;
 mod buffer;
@@ -79,6 +80,7 @@ mod settings_panel;
 mod shell;
 mod snippets;
 mod spell;
+mod ssh_prompt;
 mod svg_image;
 mod system_clipboard;
 mod tasks;
@@ -381,6 +383,11 @@ fn answered_in_the_terminal() -> bool {
 }
 
 fn main() {
+    // Started by ssh to ask something (see `askpass`): asked in the window of the Null that
+    // started that ssh, answered, done.
+    if let Some(code) = askpass::answered_for_ssh() {
+        std::process::exit(code);
+    }
     if answered_in_the_terminal() {
         return;
     }
@@ -465,6 +472,24 @@ fn main() {
                                 workspace.open_paths(paths, window, cx)
                             })
                             .ok();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+        // What ssh asks (a password, whether to trust a server): asked in the window in
+        // front, or the first one.
+        let mut questions = askpass::questions();
+        cx.spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(ask) = questions.next().await {
+                cx.update(|cx| {
+                    let front = cx.active_window().and_then(|w| w.downcast::<Workspace>());
+                    let window = front.or_else(|| cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>()));
+                    // (No window: not answered, the connection gives up.)
+                    if let Some(window) = window {
+                        window.update(cx, |workspace, window, cx| workspace.ask_for_ssh(ask, window, cx)).ok();
                     }
                 })
                 .ok();
