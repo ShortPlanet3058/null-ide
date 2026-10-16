@@ -1615,6 +1615,68 @@ impl Workspace {
     /// (terminal, git, other apps) show up in the tree and in open files.
     fn watch(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+        if let Some(server) = crate::remote::of(&root) {
+            self._watcher = None;
+            self.watch_server(server.host, tx);
+        } else {
+            self.watch_here(root, tx);
+        }
+        self.watch_task = Some(cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(first) = rx.next().await {
+                // Changes come in bursts (a build, a checkout): wait for it to settle.
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                let mut paths = first;
+                while let Ok(more) = rx.try_recv() {
+                    paths.extend(more);
+                }
+                paths.sort();
+                paths.dedup();
+                if this.update(cx, |this, cx| this.files_changed(paths, cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// The window's folders on a server: what changed there looked for every few seconds,
+    /// on a thread of its own (until the watch is replaced: nobody listening).
+    fn watch_server(&mut self, host: String, tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>) {
+        let folders: Vec<String> = self
+            .roots
+            .all()
+            .iter()
+            .filter_map(|r| crate::remote::of(r))
+            .filter(|r| r.host == host)
+            .map(|r| r.path)
+            .collect();
+        let stamp = format!(
+            "/tmp/null-watch-{:x}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        );
+        std::thread::Builder::new()
+            .name("ssh-watch".into())
+            .spawn(move || {
+                while !tx.is_closed() {
+                    if let Ok(changed) = crate::remote::changed_since(&host, &folders, &stamp)
+                        && !changed.is_empty()
+                    {
+                        let paths: Vec<PathBuf> = changed.iter().map(|p| crate::remote::path(&host, p)).collect();
+                        for path in &paths {
+                            crate::project_fs::forget(path);
+                        }
+                        if tx.unbounded_send(paths).is_err() {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(3));
+                }
+            })
+            .ok();
+    }
+
+    /// The window's folders on this computer: the system tells of changes.
+    fn watch_here(&mut self, root: PathBuf, tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>) {
         let handler = move |result: notify::Result<notify::Event>| {
             if let Ok(event) = result
                 && !matches!(event.kind, notify::EventKind::Access(_))
@@ -1634,27 +1696,11 @@ impl Workspace {
         if watcher.watch(&root, notify::RecursiveMode::Recursive).is_err() {
             return;
         }
-        // (The window's other folders, on the same watcher.)
-        for other in self.roots.all().iter().filter(|r| **r != root) {
+        // (The window's other folders, on the same watcher; a server's aren't its to watch.)
+        for other in self.roots.all().iter().filter(|r| **r != root && !crate::remote::is_remote(r)) {
             watcher.watch(other, notify::RecursiveMode::Recursive).ok();
         }
         self._watcher = Some(watcher);
-        self.watch_task = Some(cx.spawn(async move |this, cx| {
-            use futures::StreamExt;
-            while let Some(first) = rx.next().await {
-                // Changes come in bursts (a build, a checkout): wait for it to settle.
-                cx.background_executor().timer(Duration::from_millis(150)).await;
-                let mut paths = first;
-                while let Ok(more) = rx.try_recv() {
-                    paths.extend(more);
-                }
-                paths.sort();
-                paths.dedup();
-                if this.update(cx, |this, cx| this.files_changed(paths, cx)).is_err() {
-                    break;
-                }
-            }
-        }));
     }
 
     fn files_changed(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {

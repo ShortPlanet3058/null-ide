@@ -21,11 +21,15 @@ fn check_name(name: &str, nested: bool) -> Result<(), String> {
 pub fn create_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
     check_name(name, true)?;
     let path = dir.join(name.trim());
-    if path.exists() {
+    if crate::project_fs::exists(&path) {
         return Err(format!("{} already exists", name.trim()));
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Couldn't create the folder: {e}"))?;
+        crate::project_fs::create_dir_all(parent).map_err(|e| format!("Couldn't create the folder: {e}"))?;
+    }
+    if crate::remote::is_remote(&path) {
+        crate::project_fs::write(&path, b"").map_err(|e| format!("Couldn't create the file: {e}"))?;
+        return Ok(path);
     }
     std::fs::OpenOptions::new()
         .write(true)
@@ -38,10 +42,10 @@ pub fn create_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
 pub fn create_dir(dir: &Path, name: &str) -> Result<PathBuf, String> {
     check_name(name, true)?;
     let path = dir.join(name.trim());
-    if path.exists() {
+    if crate::project_fs::exists(&path) {
         return Err(format!("{} already exists", name.trim()));
     }
-    std::fs::create_dir_all(&path).map_err(|e| format!("Couldn't create the folder: {e}"))?;
+    crate::project_fs::create_dir_all(&path).map_err(|e| format!("Couldn't create the folder: {e}"))?;
     Ok(path)
 }
 
@@ -50,7 +54,7 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     if target == path {
         return Ok(target);
     }
-    std::fs::rename(path, &target).map_err(|e| format!("Couldn't rename: {e}"))?;
+    crate::project_fs::rename(path, &target).map_err(|e| format!("Couldn't rename: {e}"))?;
     Ok(target)
 }
 
@@ -62,7 +66,7 @@ pub fn move_target(path: &Path, dir: &Path) -> Result<PathBuf, String> {
     if dir.starts_with(path) {
         return Err("A folder can't go inside itself".into());
     }
-    if target != path && target.exists() {
+    if target != path && crate::project_fs::exists(&target) {
         return Err(format!("{} already has a {}", folder_name(dir), name.to_string_lossy()));
     }
     Ok(target)
@@ -83,7 +87,7 @@ pub fn move_path(path: &Path, target: &Path) -> Result<PathBuf, String> {
     }
     let dir = target.parent().ok_or("Nowhere to move it")?;
     let checked = move_target(path, dir)?;
-    std::fs::rename(path, &checked).map_err(|e| format!("Couldn't move: {e}"))?;
+    crate::project_fs::rename(path, &checked).map_err(|e| format!("Couldn't move: {e}"))?;
     Ok(checked)
 }
 
@@ -93,7 +97,7 @@ pub fn rename_target(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     let target = path.with_file_name(new_name.trim());
     // On case-insensitive disks "readme" and "README" are the same file: changing case is
     // fine. On case-sensitive ones they can be two files, and the other one must stay.
-    if target != path && target.exists() && !same_file(path, &target) {
+    if target != path && crate::project_fs::exists(&target) && !same_file(path, &target) {
         return Err(format!("{} already exists", new_name.trim()));
     }
     Ok(target)
@@ -115,7 +119,7 @@ pub fn copy_into(path: &Path, dir: &Path) -> Result<PathBuf, String> {
     }
     let name = path.file_name().ok_or("Nothing to copy")?;
     let target = dir.join(name);
-    let target = if target.exists() { copy_name(path, dir)? } else { target };
+    let target = if crate::project_fs::exists(&target) { copy_name(path, dir)? } else { target };
     copy_recursively(path, &target).map_err(|e| format!("Couldn't copy {}: {e}", name.to_string_lossy()))?;
     Ok(target)
 }
@@ -124,12 +128,9 @@ pub fn copy_into(path: &Path, dir: &Path) -> Result<PathBuf, String> {
 fn copy_name(path: &Path, dir: &Path) -> Result<PathBuf, String> {
     // A folder's whole name (`my.app`), a file's without its extension.
     let whole = |p: &Path| p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let stem = if path.is_dir() {
-        whole(path)
-    } else {
-        path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
-    };
-    let ext = if path.is_dir() { None } else { path.extension().map(|e| e.to_string_lossy().into_owned()) };
+    let is_dir = crate::project_fs::is_dir(path);
+    let stem = if is_dir { whole(path) } else { path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() };
+    let ext = if is_dir { None } else { path.extension().map(|e| e.to_string_lossy().into_owned()) };
     let name = |n: usize| {
         let copy = if n == 1 { format!("{stem} copy") } else { format!("{stem} copy {n}") };
         match &ext {
@@ -137,11 +138,18 @@ fn copy_name(path: &Path, dir: &Path) -> Result<PathBuf, String> {
             None => copy,
         }
     };
-    Ok((1..1000).map(|n| dir.join(name(n))).find(|p| !p.exists()).ok_or("Too many copies")?)
+    Ok((1..1000).map(|n| dir.join(name(n))).find(|p| !crate::project_fs::exists(p)).ok_or("Too many copies")?)
 }
 
 /// Whether two paths name the same file on disk (one file under two spellings).
 pub fn same_file(a: &Path, b: &Path) -> bool {
+    // (On a server: the same path, links followed.)
+    if crate::remote::is_remote(a) || crate::remote::is_remote(b) {
+        return match (crate::project_fs::canonicalize(a), crate::project_fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -160,6 +168,10 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 /// Copies files and folders; a link is copied as a link, never followed, so a link to a
 /// folder above it can't make the copy go on forever.
 fn copy_recursively(from: &Path, to: &Path) -> std::io::Result<()> {
+    // (On one server: there, `cp -pR` keeps links as links.)
+    if crate::remote::is_remote(from) || crate::remote::is_remote(to) {
+        return crate::project_fs::copy(from, to);
+    }
     let kind = std::fs::symlink_metadata(from)?.file_type();
     if kind.is_symlink() {
         #[cfg(unix)]
@@ -189,6 +201,12 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SAVES: AtomicU64 = AtomicU64::new(0);
+    // On a server: whole or not at all there too (its local history isn't kept: each save
+    // would read the file back over the network first).
+    if let Some(at) = crate::remote::of(path) {
+        crate::project_fs::forget(path);
+        return crate::remote::write_whole(&at, bytes);
+    }
     let target = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let existing = std::fs::metadata(&target).ok();
     if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
@@ -272,9 +290,14 @@ pub const TRASH: &str = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
 /// The command that sends things there.
 pub const MOVE_TO_TRASH: &str = if cfg!(windows) { "Move to Recycle Bin" } else { "Move to Trash" };
 
-/// Moves to the Trash (or the platform's recycle bin): never deletes outright.
+/// Moves to the Trash (or the platform's recycle bin): never deletes outright. A server's
+/// file goes to the server's own Trash.
 #[cfg(not(test))]
 pub fn move_to_trash(path: &Path) -> Result<(), String> {
+    if let Some(at) = crate::remote::of(path) {
+        crate::project_fs::forget(path);
+        return crate::remote::trash(&at).map_err(|e| format!("Couldn't move to the server's Trash: {e}"));
+    }
     #[allow(unused_mut)]
     let mut context = trash::TrashContext::default();
     // On macOS, ask the system directly instead of scripting Finder: faster, and no

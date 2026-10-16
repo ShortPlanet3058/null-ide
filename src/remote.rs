@@ -456,6 +456,26 @@ fn hosts_in_config(config: &str) -> Vec<String> {
     hosts
 }
 
+/// What changed in `folders` on `host` since the last look with this `stamp` (a file on
+/// the server it keeps): files and folders written since, and git's own (its HEAD, index
+/// and refs: a commit, a checkout). Nothing the first time: that look sets the stamp.
+/// Dependencies and build output aren't gone through (node_modules, target…): too many.
+pub fn changed_since(host: &str, folders: &[String], stamp: &str) -> io::Result<Vec<String>> {
+    let quoted: Vec<String> = folders.iter().map(|f| quote(f)).collect();
+    let script = format!(
+        "s={stamp}; n=\"$s.next\"; : > \"$n\" || exit 1; \
+         if [ -e \"$s\" ]; then for r in {folders}; do \
+           find \"$r\" \\( -name .git -o -name node_modules -o -name target -o -name .venv -o -name __pycache__ \\) -prune -o -newer \"$s\" -print; \
+           if [ -d \"$r/.git\" ]; then find \"$r/.git\" -maxdepth 1 -newer \"$s\" -print; \
+             [ \"$r/.git/logs/HEAD\" -nt \"$s\" ] && printf '%s\\n' \"$r/.git/logs/HEAD\"; fi; \
+         done 2>/dev/null; fi; mv -f \"$n\" \"$s\"; exit 0",
+        stamp = quote(stamp),
+        folders = quoted.join(" ")
+    );
+    let output = run_ok(host, &script)?;
+    Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| l.starts_with('/')).map(str::to_string).collect())
+}
+
 /// What `stat` says of a file: its kind, size, last change and whether it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Meta {
@@ -483,6 +503,47 @@ pub fn read(at: &RemotePath) -> io::Result<Vec<u8>> {
 }
 
 pub fn write(at: &RemotePath, bytes: &[u8]) -> io::Result<()> {
+    run_ok(&at.host, &format!("base64 -d > {} <<'NULL_END'\n{}NULL_END", quote(&at.path), encoded_lines(bytes)))?;
+    Ok(())
+}
+
+/// Writes a file whole or not at all: beside it first (with its permissions), then in its
+/// place; a link written through. In place when nothing can be made beside it.
+pub fn write_whole(at: &RemotePath, bytes: &[u8]) -> io::Result<()> {
+    let script = format!(
+        "f={q}; g=$(readlink -f -- \"$f\" 2>/dev/null) && [ -n \"$g\" ] && f=$g; \
+         t=\"${{f%/*}}/.${{f##*/}}.null-saving-$$\"; \
+         base64 -d > \"$t\" <<'NULL_END' || {{ rm -f -- \"$t\"; exit 75; }}\n{data}NULL_END\n\
+         if [ -e \"$f\" ]; then m=$(stat -c %a -- \"$f\" 2>/dev/null || stat -f %Lp -- \"$f\" 2>/dev/null) && chmod \"$m\" \"$t\"; fi; \
+         mv -f -- \"$t\" \"$f\"",
+        q = quote(&at.path),
+        data = encoded_lines(bytes)
+    );
+    let output = run(&at.host, &script)?;
+    match output.status {
+        0 => Ok(()),
+        // (Nothing could be made beside it: written in place.)
+        75 => write(at, bytes),
+        _ => Err(output.error()),
+    }
+}
+
+/// To the server's Trash (the freedesktop.org one file managers there show): a name of
+/// its own in it, and where it was, to put it back.
+pub fn trash(at: &RemotePath) -> io::Result<()> {
+    let script = format!(
+        "f={q}; T=\"${{XDG_DATA_HOME:-$HOME/.local/share}}/Trash\"; mkdir -p \"$T/files\" \"$T/info\" || exit 1; \
+         n=${{f##*/}}; d=$n; i=1; \
+         while [ -e \"$T/files/$d\" ] || [ -e \"$T/info/$d.trashinfo\" ]; do i=$((i+1)); d=\"$n.$i\"; done; \
+         printf '[Trash Info]\\nPath=%s\\nDeletionDate=%s\\n' \"$f\" \"$(date +%Y-%m-%dT%H:%M:%S)\" > \"$T/info/$d.trashinfo\" && \
+         mv -- \"$f\" \"$T/files/$d\" || {{ rm -f -- \"$T/info/$d.trashinfo\"; exit 1; }}",
+        q = quote(&at.path)
+    );
+    run_ok(&at.host, &script).map(drop)
+}
+
+/// `bytes` in base64, in lines (for a here-document).
+fn encoded_lines(bytes: &[u8]) -> String {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     let mut lines = String::with_capacity(encoded.len() + encoded.len() / 76 + 1);
@@ -490,8 +551,7 @@ pub fn write(at: &RemotePath, bytes: &[u8]) -> io::Result<()> {
         lines.push_str(std::str::from_utf8(chunk).unwrap_or_default());
         lines.push('\n');
     }
-    run_ok(&at.host, &format!("base64 -d > {} <<'NULL_END'\n{lines}NULL_END", quote(&at.path)))?;
-    Ok(())
+    lines
 }
 
 pub fn metadata(at: &RemotePath) -> io::Result<Meta> {
@@ -647,9 +707,25 @@ mod tests {
         assert_eq!(metadata(&at("a b/c/it's.bin")).unwrap().len, 5000);
         assert_eq!(read(&at("missing")).unwrap_err().kind(), io::ErrorKind::NotFound);
         rename(&at(".hidden"), &at("shown")).unwrap();
+        // A save: whole, its permissions kept, through a link.
+        write_whole(&at("shown"), b"saved").unwrap();
+        assert_eq!(read(&at("shown")).unwrap(), b"saved");
+        std::os::unix::fs::symlink(dir.join("shown"), dir.join("link")).unwrap();
+        write_whole(&at("link"), b"through").unwrap();
+        assert_eq!(std::fs::read(dir.join("shown")).unwrap(), b"through");
+        assert!(std::fs::symlink_metadata(dir.join("link")).unwrap().file_type().is_symlink());
         assert!(metadata(&at("shown")).is_ok());
         remove_dir_all(&at("a b")).unwrap();
         assert!(metadata(&at("a b")).is_err());
+        // What changed since the last look (the first only sets its stamp).
+        let stamp = format!("{}/.stamp", dir.display());
+        let folders = [dir.to_string_lossy().into_owned()];
+        assert!(changed_since(TEST_HOST, &folders, &stamp).unwrap().is_empty());
+        std::thread::sleep(Duration::from_millis(1100));
+        write(&at("new.txt"), b"x").unwrap();
+        let changed = changed_since(TEST_HOST, &folders, &stamp).unwrap();
+        assert!(changed.contains(&format!("{}/new.txt", dir.display())), "{changed:?}");
+        assert!(changed_since(TEST_HOST, &folders, &stamp).unwrap().iter().all(|p| !p.ends_with("new.txt")));
         std::fs::remove_dir_all(&dir).ok();
     }
 
