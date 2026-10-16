@@ -106,6 +106,10 @@ pub fn record(usage: Usage) {
     let saved = month.clone();
     drop(state);
     if let (Some(path), Ok(json)) = (file(), serde_json::to_string_pretty(&saved)) {
+        // (Null's folder may not be there yet, on a first launch.)
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         let _ = std::fs::write(path, json);
     }
 }

@@ -14,8 +14,8 @@
   </header>
   <main class="page">
     <h1>Privacy</h1>
-    <p>Null collects nothing. It has no telemetry, no analytics, no crash reporting, and it doesn't check for
-      updates. It will not transfer any information to other networked systems unless you ask it to.</p>
+    <p>Null collects nothing. It has no telemetry, no analytics and no crash reporting. It will not transfer any
+      information to other networked systems unless you ask it to.</p>
 
     <h2>What it contacts, and only when you ask</h2>
     <ul>
@@ -23,7 +23,12 @@
         the code and question you send go to that provider (Anthropic, OpenAI, Mistral, Groq, Google, OpenRouter,
         NVIDIA), or stay on your computer with Ollama. API keys are kept in your system's key store, never in a file.</li>
       <li><strong>Language servers</strong>, when you click Install: they're downloaded with the tool that ships
-        them (npm, pip, rustup, go).</li>
+        them (npm, rustup, go, dotnet), or from their makers' releases on GitHub; when a server needs Node.js and
+        the computer has none, Null downloads the official build from nodejs.org. Every download Null makes itself
+        is checked against the checksum it was built with.</li>
+      <li><strong>New versions</strong>, only if you turn on “Tell me when a new version is out”: once a day, Null
+        asks GitHub for the name of its latest release. Nothing about you or your files is sent, and nothing is
+        installed: Null only says a new version is out.</li>
       <li><strong>Git and GitHub</strong>, when you fetch, pull or push, or open a pull request: through your own
         <code>git</code> and <code>gh</code>, with your own credentials.</li>
       <li><strong>Links you open</strong>, in your browser.</li>

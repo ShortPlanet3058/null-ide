@@ -88,6 +88,7 @@ mod theme;
 mod tools;
 mod trace;
 mod ui;
+mod updates;
 mod user_keys;
 mod vscode_import;
 mod welcome;
