@@ -990,6 +990,22 @@ impl FileTree {
             self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        // Nothing shown by that name: a file in a closed folder (the project's files as ⌘P
+        // lists them), the one nearest the top, its folders opened.
+        let deeper = crate::palette::files_listed(&self.roots)
+            .into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().starts_with(prefix)))
+            .min_by_key(|p| (p.components().count(), p.clone()));
+        if let Some(path) = deeper {
+            self.expand_to(&path);
+            self.also.clear();
+            self.selected = Some(path);
+            self.rebuild();
+            self.reveal_selected();
+            cx.stop_propagation();
+            cx.notify();
         }
     }
 

@@ -1593,6 +1593,19 @@ fn rank_files(files: &[FileEntry], query: &str, recent: &HashSet<PathBuf>) -> Ve
 type Listed = ((Vec<PathBuf>, Vec<String>), Vec<FileEntry>);
 static LISTED: std::sync::Mutex<Option<Listed>> = std::sync::Mutex::new(None);
 
+/// The project's files as ⌘P last listed them, when it listed these folders (else none).
+pub(crate) fn files_listed(roots: &[PathBuf]) -> Vec<PathBuf> {
+    LISTED
+        .lock()
+        .ok()
+        .and_then(|last| {
+            last.as_ref()
+                .filter(|((r, _), _)| r == roots)
+                .map(|(_, files)| files.iter().map(|f| f.path.clone()).collect())
+        })
+        .unwrap_or_default()
+}
+
 /// The project's files listed a moment after it opens (in the background), so the first
 /// ⌘P shows them at once.
 pub(crate) fn list_files_soon(roots: crate::roots::ProjectRoots, cx: &mut App) {

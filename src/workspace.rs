@@ -10185,6 +10185,14 @@ impl Workspace {
                         }
                     }));
                 let (name, folder) = labels[ix].clone();
+                // Its language's logo, as the files have it: quieter than its name.
+                let logo = editor.path().and_then(crate::file_icons::for_path).map(|logo| {
+                    svg().path(logo).size(px(11.)).flex_none().text_color(if active || resting {
+                        theme.muted
+                    } else {
+                        theme.faint
+                    })
+                });
                 let dragged = DraggedTab { editor: tab.editor.clone(), label: name.clone().into() };
                 div()
                     .id(("tab", ix))
@@ -10226,7 +10234,9 @@ impl Workspace {
                         div()
                             .min_w_0()
                             .flex()
+                            .items_center()
                             .gap(px(6.))
+                            .children(logo)
                             // Deleted on disk: struck through, until saved back.
                             .child(
                                 div()
@@ -10239,14 +10249,7 @@ impl Workspace {
                             )
                             // Can't be written (its permissions): a lock, faintly.
                             .when(read_only, |d| {
-                                d.child(
-                                    svg()
-                                        .path("icons/lock.svg")
-                                        .size(px(11.))
-                                        .flex_none()
-                                        .mt(px(3.))
-                                        .text_color(theme.faint),
-                                )
+                                d.child(svg().path("icons/lock.svg").size(px(11.)).flex_none().text_color(theme.faint))
                             })
                             .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
                     )
