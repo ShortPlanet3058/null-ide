@@ -18,18 +18,19 @@ pub fn ask<T>(
 where
     T: Clone + Into<PromptButton>,
 {
-    #[cfg(windows)]
+    #[cfg(all(windows, not(test)))]
     let held = windows::Held::new(window);
     let answer = window.prompt(level, message, detail, answers, cx);
     async move {
         let answered = answer.await;
-        #[cfg(windows)]
+        #[cfg(all(windows, not(test)))]
         drop(held);
         answered
     }
 }
 
-#[cfg(windows)]
+// (Not in tests: GPUI's test windows have no handle to give.)
+#[cfg(all(windows, not(test)))]
 mod windows {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use std::collections::HashMap;
