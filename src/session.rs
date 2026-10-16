@@ -373,6 +373,13 @@ pub fn last_project() -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
+/// The project open when Null last closed, when it was a server's folder: reopened once
+/// Null has started and reached the server (see `Workspace::reopen_server_project`).
+pub fn last_server_project() -> Option<PathBuf> {
+    let path = PathBuf::from(std::fs::read_to_string(last_project_file()?).ok()?.trim());
+    crate::remote::is_remote(&path).then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

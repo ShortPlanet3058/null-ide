@@ -569,7 +569,8 @@ fn main() {
                 cx.background_executor().timer(std::time::Duration::from_millis(350)).await;
                 cx.update(|cx| {
                     if !handed_paths.load(std::sync::atomic::Ordering::SeqCst) && cx.windows().is_empty() {
-                        open_project_window_now(root, file, place, cx);
+                        open_project_window_now(root.clone(), file, place, cx);
+                        reopen_server_project(&root, cx);
                     }
                 })
                 .ok();
@@ -581,6 +582,7 @@ fn main() {
             let first = root.clone();
             open_project_window_now(root, file, place, cx);
             add_folders(&first, others, cx);
+            reopen_server_project(&first, cx);
         }
         trace::mark("window opened");
         // The spell checker started once the window's up, then what's shown checked.
@@ -719,6 +721,16 @@ fn open_waiting_window(root: PathBuf, file: Option<PathBuf>, place: Option<(u32,
     if opened.is_err() {
         cx.quit();
     }
+}
+
+/// Started on Null's own empty folder when it last closed on a server's: that folder again,
+/// once the server's reached (the window doesn't wait on it).
+fn reopen_server_project(root: &std::path::Path, cx: &mut gpui::App) {
+    if !session::is_scratch(root) {
+        return;
+    }
+    let (Some(server), Some(handle)) = (session::last_server_project(), window_on(root, None, cx)) else { return };
+    handle.update(cx, |workspace, window, cx| workspace.reopen_server_project(server, window, cx)).ok();
 }
 
 fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(u32, u32)>, cx: &mut gpui::App) {

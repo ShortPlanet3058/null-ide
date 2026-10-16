@@ -5010,6 +5010,27 @@ impl Workspace {
         .detach();
     }
 
+    /// The server's folder Null last closed on, reopened once the server answers (meanwhile
+    /// the window is Null's own empty folder); not when another folder was opened meanwhile.
+    pub fn reopen_server_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(server) = crate::remote::of(&path) else { return };
+        self.show_notice(format!("Connecting to {}…", server.host), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let host = server.host.clone();
+            let reached = cx.background_executor().spawn(async move { crate::remote::connect(&host) }).await;
+            this.update_in(cx, |this, window, cx| match reached {
+                Ok(_) if crate::session::is_scratch(this.roots.primary()) => {
+                    this.notice = None;
+                    this.open_path(path, window, cx);
+                }
+                Ok(_) => {}
+                Err(error) => this.show_notice(format!("{error} The folder is in Open Recent."), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Open SSH Folder…: a server first (as ssh takes it: `me@box`, a name from
     /// `~/.ssh/config`), then a folder on it, typed from its home folder.
     fn open_ssh_folder(&mut self, _: &OpenSshFolder, window: &mut Window, cx: &mut Context<Self>) {
