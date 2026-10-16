@@ -66,6 +66,7 @@ mod punctuation;
 mod python_env;
 #[cfg(debug_assertions)]
 mod qa;
+mod remote;
 mod roots;
 mod search;
 mod server_log;
