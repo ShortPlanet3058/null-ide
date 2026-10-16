@@ -6,6 +6,8 @@
   through Windows' WSL share; the terminal, git and language servers run inside Linux, in the
   folder's Linux path, and servers install there (Node.js along when the distribution has
   none). Changes made there are looked for every couple of seconds.
+- Windows: while a question is open ("Save changes?"), the window behind it takes no keys or
+  clicks; `null --version` and `null --help` print in the console they're typed in.
 - "Tell me when a new version is out" (off until turned on, on the welcome's last step or in
   Settings): once a day Null asks GitHub for its latest release, and says so in the status
   bar when there's a newer one. "Check for Updates" in ⌘K asks now. Nothing is installed.

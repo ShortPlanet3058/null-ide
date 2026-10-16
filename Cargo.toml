@@ -96,6 +96,10 @@ libc = "0.2"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 secret-service = { version = "5", features = ["crypto-rust"] }
 
+[target.'cfg(windows)'.dependencies]
+# The window's handle, to keep it from taking input while a dialog is over it (modal.rs).
+raw-window-handle = "0.6"
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
 

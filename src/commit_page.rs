@@ -164,7 +164,7 @@ impl CommitPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let answer = window.prompt(PromptLevel::Info, &title, Some(detail), &[button, "Cancel"], cx);
+        let answer = crate::modal::ask(window, PromptLevel::Info, &title, Some(detail), &[button, "Cancel"], cx);
         cx.spawn(async move |this, cx| {
             if answer.await == Ok(0) {
                 this.update(cx, |this, cx| this.act(done, action, cx)).ok();

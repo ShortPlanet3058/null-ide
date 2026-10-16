@@ -2181,7 +2181,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Info,
             &format!("Bring your changes along to {}?", branch.name),
             Some("Switching as they are would overwrite them. Null sets them aside, switches, and puts them back."),
@@ -2769,7 +2770,8 @@ impl Workspace {
         } else {
             "It goes back to how it was at the last commit.".to_string()
         };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("Discard the changes to {name}?"),
             Some(&detail),
@@ -2809,7 +2811,8 @@ impl Workspace {
             return;
         }
         let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("Discard every change in {files}?"),
             Some(&format!("They go back to the last commit. New files go to the {}.", crate::fs_ops::TRASH)),
@@ -3671,7 +3674,8 @@ impl Workspace {
             self.show_notice("Only the app (Null.app) uninstalls itself.".into(), cx);
             return;
         };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             "Uninstall Null?",
             Some(
@@ -4162,7 +4166,8 @@ impl Workspace {
             && let Some(message) = self.commands_running(cx)
         {
             let leave = if matches!(action, CloseAction::Quit) { "Quit" } else { "Close" };
-            let answer = window.prompt(
+            let answer = crate::modal::ask(
+                window,
                 PromptLevel::Warning,
                 &message,
                 Some(if matches!(action, CloseAction::Quit) { "Quitting stops it." } else { "Closing stops it." }),
@@ -4217,7 +4222,8 @@ impl Workspace {
             [one] => format!("Save changes to {}?", one.read(cx).file_name()),
             many => format!("Save changes to {} files?", many.len()),
         };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &message,
             Some("Your changes will be lost if you don't save them."),
@@ -4629,7 +4635,8 @@ impl Workspace {
     /// Saving a file that changed on disk under unsaved edits: which version stays.
     fn resolve_save_conflict(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         let name = editor.read(cx).file_name();
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("{name} changed on disk since you started editing it."),
             Some("Saving writes your version over it. Reloading takes the one on disk, losing your edits."),
@@ -4714,7 +4721,8 @@ impl Workspace {
     /// Null's name and version, where it comes from.
     fn about(&mut self, _: &AboutNull, window: &mut Window, cx: &mut Context<Self>) {
         let detail = format!("{}\n{}", env!("CARGO_PKG_DESCRIPTION"), env!("CARGO_PKG_REPOSITORY"));
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Info,
             &format!("Null {}", env!("CARGO_PKG_VERSION")),
             Some(&detail),
@@ -4841,7 +4849,8 @@ impl Workspace {
             }
             _ => format!("Add these {} folders to this window, or copy them in?", names.len()),
         };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Info,
             &title,
             Some("Added, it shows beside the others, where it is. Copied, it goes into the folder."),
@@ -6424,7 +6433,7 @@ impl Workspace {
             return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         };
         let asked = rebase.then(|| {
-            window.prompt(
+            crate::modal::ask(window,
                 PromptLevel::Info,
                 &format!("Rebase {here} onto {branch}?"),
                 Some(&format!("Its commits are redone one by one on top of {branch}. They become new commits, so any already pushed would need a force push.")),
@@ -6482,7 +6491,8 @@ impl Workspace {
     /// The banner's Stop: the merge (rebase, …) undone, after asking.
     fn stop_joining(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.joining.clone() else { return };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("Stop {}?", joining_name(state.kind)),
             Some("Everything goes back to how it was before, including conflicts already resolved."),
@@ -6541,9 +6551,9 @@ impl Workspace {
                         [git::Decision::Keep, git::Decision::Theirs],
                     ),
                 };
-                let Ok(answer) =
-                    this.update_in(cx, |_, window, cx| window.prompt(PromptLevel::Info, &title, None, &buttons, cx))
-                else {
+                let Ok(answer) = this.update_in(cx, |_, window, cx| {
+                    crate::modal::ask(window, PromptLevel::Info, &title, None, &buttons, cx)
+                }) else {
                     return;
                 };
                 let decision = match answer.await {
@@ -6718,7 +6728,8 @@ impl Workspace {
             return self.show_notice(format!("Null already has your {editor} settings."), cx);
         }
         let count = if changed.len() == 1 { "1 setting".to_string() } else { format!("{} settings", changed.len()) };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Info,
             &format!("Bring over {count} from {editor}?"),
             Some(&changed.join("\n")),

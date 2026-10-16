@@ -348,7 +348,8 @@ impl GitHubPage {
     fn merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pull) = self.pull() else { return };
         let (number, head, base) = (pull.pull.number, pull.pull.head.clone(), pull.pull.base.clone());
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Info,
             &format!("Merge #{number} ({head} into {base})?"),
             Some("On GitHub: as a merge commit, its commits squashed into one, or its commits rebased onto the base."),
