@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Files show their language's logo where they had a dot (the files, ⌘P) and in their tabs,
+  in the dot's one colour.
+- Open to the Side: ⌥-click a file, or its menu, opens it in the other half of the window.
+- Typing in the files also finds a file inside a closed folder, and opens the folders to it.
+- Smooth caret and scrolling can be turned off (View menu, ⌘K, Settings → Cursor).
+- Language servers install without npm's update check.
 - Folders on servers over SSH: Open SSH Folder… (a server, then a folder from its home), or
   `null ssh://me@box/path`. With your own ssh, keys and config, nothing installed there:
   files through one connection, the terminal, git and language servers run on the server,

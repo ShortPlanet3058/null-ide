@@ -39,6 +39,8 @@ Settings open with ⌘, / Ctrl+,. They're saved in `~/.config/null/settings.json
 | right-click a tab → Move Below | the two sides one above the other (dragged, a tab offers "Open below" too); the line between them resizes |
 | one click on a file | it opens in a preview tab (its name slanted), which the next file clicked replaces; edit it or double-click it (or its tab) to keep it (Settings → Preview tabs) |
 | right-click a tab → Pin Tab | it stays first, out of "Close Others" and "Close All"; its pin unpins it |
+| ⌥-click a file (or its menu → Open to the Side) | it opens in the other half of the window, split if it isn't |
+| typing in the files | goes to the first file or folder whose name starts so, also one inside a closed folder (opened to show it) |
 | ⌘⇧N / ⌥⌘O | a new window / a recent project |
 | drop from the Finder | files open; on a folder in the files, they're copied there; on the terminal, their paths are typed in |
 | ⌥⌘↵ | focus mode: only the code |
@@ -74,6 +76,11 @@ in every folder and run in their own.
 
 The window remembers its folders: open its first one again (or pick it in Recent) and the
 others come back with it.
+
+Files show their language's logo (Rust's, Python's…) in the files, ⌘P and their tabs, in
+one quiet colour; other files keep a dot. The caret glides to where it goes and the text
+eases when it scrolls: View → Stop Smooth Caret and Scrolling (or ⌘K, or Settings → Cursor)
+makes both jump instead.
 
 ## Writing
 
