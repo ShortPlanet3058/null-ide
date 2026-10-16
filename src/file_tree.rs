@@ -1285,7 +1285,8 @@ impl FileTree {
         }
         let Some(entry) = self.selected_entry().filter(|e| !self.is_root(&e.path)) else { return };
         let what = if entry.is_dir { "folder" } else { "file" };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             gpui::PromptLevel::Warning,
             &format!("Move the {what} “{}” to the {}?", entry.name, fs_ops::TRASH),
             Some(&format!("You can restore it from the {}.", fs_ops::TRASH)),
@@ -1303,7 +1304,8 @@ impl FileTree {
 
     /// Several picked: one question for them all, then each to the Trash.
     fn trash_picked(&mut self, picked: Vec<Entry>, window: &mut Window, cx: &mut Context<Self>) {
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             gpui::PromptLevel::Warning,
             &format!("Move these {} items to the {}?", picked.len(), fs_ops::TRASH),
             Some(&format!("You can restore them from the {}.", fs_ops::TRASH)),
