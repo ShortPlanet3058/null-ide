@@ -525,6 +525,23 @@ fn test_programs(messages: &str, of_src: bool) -> Vec<PathBuf> {
 
 /// Of the test `programs`, the one that has test `id` (each is asked for its list, and
 /// given 10 seconds to answer).
+/// cargo with `args`, in `dir`: on its server for a folder on one.
+fn cargo_in(dir: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    if let Some(remote) = crate::remote::of(dir) {
+        return crate::remote::command(&remote.host, Some(&remote.path), "cargo", args).output();
+    }
+    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
+    crate::tools::command(cargo).args(args).current_dir(dir).output()
+}
+
+/// A path cargo printed, run for `dir`, as Null reaches it (a server's in Null's form).
+fn printed_in(dir: &Path, path: PathBuf) -> PathBuf {
+    match crate::remote::of(dir) {
+        Some(remote) => crate::remote::path(&remote.host, &path.to_string_lossy()),
+        None => path,
+    }
+}
+
 fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathBuf> {
     if programs.len() == 1 {
         return programs.first().cloned();
@@ -535,6 +552,13 @@ fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathB
 fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
     use std::io::Read;
     use std::process::Stdio;
+    // On a server: asked there (10 seconds at most).
+    if let (Some(remote), Some(on)) = (crate::remote::of(cwd), crate::remote::of(program)) {
+        let q = crate::remote::quote;
+        let script = format!("cd {} && timeout 10 {} --list --exact {}", q(&remote.path), q(&on.path), q(id));
+        return crate::remote::run(&remote.host, &script)
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l == format!("{id}: test")));
+    }
     let Ok(mut child) = crate::tools::command(program)
         .args(["--list", "--exact", id])
         .current_dir(cwd)
@@ -578,7 +602,7 @@ fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
 }
 
 fn cargo_program(root: &Path) -> Option<PathBuf> {
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let manifest = crate::project_fs::read_to_string(&root.join("Cargo.toml")).ok()?;
     let mut section = String::new();
     let (mut package, mut bin) = (None, None);
     for line in manifest.lines() {
@@ -599,7 +623,8 @@ fn cargo_program(root: &Path) -> Option<PathBuf> {
         }
     }
     let name = bin.or(package)?;
-    let exe = if cfg!(windows) { format!("{name}.exe") } else { name };
+    // (A server's: Linux's, no .exe.)
+    let exe = if cfg!(windows) && !crate::remote::is_remote(root) { format!("{name}.exe") } else { name };
     Some(root.join("target").join("debug").join(exe))
 }
 
@@ -8425,16 +8450,13 @@ impl Workspace {
             let built = cx
                 .background_executor()
                 .spawn(async move {
-                    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
                     // (Its messages say where each program went: a target folder set
                     // elsewhere, a workspace's.)
-                    let built = crate::tools::command(cargo)
-                        .args(&cargo_args)
-                        .arg("--message-format=json-render-diagnostics")
-                        .current_dir(&cwd)
-                        .output();
+                    let mut args: Vec<&str> = cargo_args.iter().map(String::as_str).collect();
+                    args.push("--message-format=json-render-diagnostics");
+                    let built = cargo_in(&cwd, &args);
                     // Rust's own formatters, so its strings and collections show their contents.
-                    (built, crate::debugger::rust_formatters())
+                    (built, crate::debugger::rust_formatters_for(&cwd))
                 })
                 .await;
             let (built, formatters) = built;
@@ -8444,11 +8466,11 @@ impl Workspace {
                     // `cargo test --no-run`: its one test program (a plain program is built
                     // beside it for the tests to run, but isn't what's debugged).
                     match &test_programs(&messages, false)[..] {
-                        [only] => Some(only.clone()),
+                        [only] => Some(printed_in(&root, only.clone())),
                         _ => None,
                     }
                 } else {
-                    built_program(&messages, usual.as_deref()).or(usual)
+                    built_program(&messages, usual.as_deref()).map(|p| printed_in(&root, p)).or(usual)
                 }
             });
             this.update(cx, |this, cx| {
@@ -8462,7 +8484,9 @@ impl Workspace {
                     (Err(error), _) => Some(format!("Couldn't run cargo: {error}\n")),
                     (_, None) if tests => Some("Couldn't tell which test program to debug: name one target.\n".into()),
                     (_, None) => Some("Couldn't tell which program this project builds.\n".into()),
-                    (_, Some(p)) if !p.is_file() => Some(format!("{} wasn't built.\n", p.display())),
+                    (_, Some(p)) if !crate::project_fs::is_file(p) => {
+                        Some(format!("{} wasn't built.\n", crate::remote::shown(p)))
+                    }
                     _ => None,
                 };
                 match message {
@@ -8517,17 +8541,18 @@ impl Workspace {
             let found = cx
                 .background_executor()
                 .spawn(async move {
-                    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
-                    let built = crate::tools::command(cargo)
-                        .args(["test", "--no-run", "--message-format=json-render-diagnostics"])
-                        .args(&target)
-                        .current_dir(&krate)
-                        .output();
+                    let mut args = vec!["test", "--no-run", "--message-format=json-render-diagnostics"];
+                    args.extend(target.iter().map(String::as_str));
+                    let built = cargo_in(&krate, &args);
                     let program = built.as_ref().ok().filter(|o| o.status.success()).and_then(|output| {
                         let messages = String::from_utf8_lossy(&output.stdout);
-                        program_with_test(&test_programs(&messages, target.is_empty()), &id, &krate)
+                        let programs: Vec<PathBuf> = test_programs(&messages, target.is_empty())
+                            .into_iter()
+                            .map(|p| printed_in(&krate, p))
+                            .collect();
+                        program_with_test(&programs, &id, &krate)
                     });
-                    (built, program, crate::debugger::rust_formatters())
+                    (built, program, crate::debugger::rust_formatters_for(&krate))
                 })
                 .await;
             let (built, program, formatters) = found;
