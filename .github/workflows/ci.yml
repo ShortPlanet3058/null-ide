@@ -1,11 +1,19 @@
-# Builds, lints and tests Null on the three platforms it runs on, for every push to dev
-# and main and every pull request.
+# Builds, lints and tests Null on the three platforms it runs on, for a pull request once
+# it's ready (a draft is checked on the Mac: scripts/check.sh), and when started by hand.
+# Not again on the merge: the pull request's run was on the merged result already. Changes
+# to the site, the docs or the trailer alone build nothing.
 name: CI
 
 on:
-  push:
-    branches: [dev, main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - "site/**"
+      - "docs/**"
+      - "**/*.md"
+      - "scripts/trailer/**"
+      - "scripts/build-site.sh"
+      - ".github/workflows/site.yml"
   workflow_dispatch:
 
 concurrency:
@@ -19,6 +27,7 @@ env:
 
 jobs:
   format:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +37,7 @@ jobs:
       - run: cargo fmt --check
 
   build:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     strategy:
       fail-fast: false
       matrix:
