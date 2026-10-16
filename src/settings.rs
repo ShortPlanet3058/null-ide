@@ -441,6 +441,9 @@ pub struct Settings {
     pub sidebar_visible: bool,
     /// Dim the title bar, sidebar and status bar while typing.
     pub fade_bars_while_typing: bool,
+    /// Say when a newer Null is out (once a day, Null asks GitHub its latest version). Off
+    /// until the person turns it on.
+    pub check_for_updates: bool,
     /// Wrap long lines to the width of the editor instead of scrolling sideways.
     pub word_wrap: bool,
     /// Markdown and plain text wrap on their own: they're paragraphs, not code.
@@ -546,6 +549,7 @@ impl Default for Settings {
             whitespace: ShowWhitespace::Selection,
             sidebar_visible: true,
             fade_bars_while_typing: true,
+            check_for_updates: false,
             word_wrap: false,
             wrap_prose: true,
             wrap_at_guide: false,

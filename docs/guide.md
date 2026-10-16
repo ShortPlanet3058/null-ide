@@ -268,6 +268,13 @@ or the Dock, it comes back to the last project. Sessions are small files in Null
 (`~/Library/Application Support/Null/sessions` on macOS, `%LOCALAPPDATA%\Null\sessions` on
 Windows, `~/.local/share/null/sessions` on Linux; `NULL_DATA_DIR` overrides it).
 
+## New versions
+
+Null never updates itself and doesn't look for updates unless asked: turn on "Tell me when a
+new version is out" (on the welcome's last step, or Settings → Appearance) and once a day it
+asks GitHub for its latest release's name; a newer one shows as "Null 0.2.0 is out" in the
+status bar, which opens null-ide.com. "Check for Updates" in ⌘K asks right away.
+
 ## Code intelligence
 
 Completions, errors, info on hover and go to definition come from language servers. Null
