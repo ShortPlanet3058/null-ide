@@ -194,9 +194,26 @@ fn headings_in(path: &Path, text: &str) -> Vec<Definition> {
 /// What the project's `.gitignore` (and `.git/info/exclude`) leave out: build output,
 /// dependencies. Their files aren't the person's code, so they stay out of the index.
 pub fn ignore_rules(root: &Path) -> ignore::gitignore::Gitignore {
+    // (A server's: read through the connection, as text.)
+    if crate::remote::is_remote(root) {
+        let texts: Vec<String> = [root.join(".gitignore"), root.join(".git").join("info").join("exclude")]
+            .iter()
+            .filter_map(|f| crate::project_fs::read_to_string(f).ok())
+            .collect();
+        return rules_from(root, &texts);
+    }
     let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
     builder.add(root.join(".gitignore"));
     builder.add(root.join(".git").join("info").join("exclude"));
+    builder.build().unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
+}
+
+/// Rules from `.gitignore` texts, for paths under `dir` (where they were read).
+pub fn rules_from(dir: &Path, texts: &[String]) -> ignore::gitignore::Gitignore {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
+    for line in texts.iter().flat_map(|t| t.lines()) {
+        builder.add_line(None, line).ok();
+    }
     builder.build().unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
 }
 
@@ -221,6 +238,10 @@ pub fn is_source(path: &Path) -> bool {
 /// Every definition under `root`, respecting `.gitignore`. Slow on big projects: run it
 /// off the main thread.
 pub fn index(root: &Path) -> Vec<Definition> {
+    // (Not a server's: every file would be read over the network.)
+    if crate::remote::is_remote(root) {
+        return Vec::new();
+    }
     ignore::WalkBuilder::new(root)
         .build()
         .filter_map(Result::ok)

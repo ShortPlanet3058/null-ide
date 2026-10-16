@@ -277,11 +277,13 @@ fn runs_when_opened(path: &Path) -> bool {
         return true;
     }
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
-            return true;
-        }
+    if crate::project_fs::metadata(path).is_ok_and(|m| m.executable()) {
+        return true;
+    }
+    // (A server's file, from Windows: its mode says.)
+    #[cfg(not(unix))]
+    if crate::remote::is_remote(path) && crate::project_fs::metadata(path).is_ok_and(|m| m.executable()) {
+        return true;
     }
     false
 }
@@ -504,7 +506,9 @@ impl FileTree {
 
     /// Expands folders again, as they were last time.
     pub fn expand_folders(&mut self, folders: &[PathBuf], cx: &mut Context<Self>) {
-        let inside = |p: &PathBuf| self.roots.iter().any(|r| p.starts_with(r)) && p.is_dir();
+        // (A server's folders aren't asked about one by one: a gone one just lists nothing.)
+        let inside =
+            |p: &PathBuf| self.roots.iter().any(|r| p.starts_with(r)) && (crate::remote::is_remote(p) || p.is_dir());
         let folders: Vec<PathBuf> = folders.iter().filter(|p| inside(p)).cloned().collect();
         self.expanded.extend(folders);
         self.rebuild();
@@ -630,6 +634,9 @@ impl FileTree {
     /// The folder's entries, folders first. Everything inside an ignored folder is ignored
     /// (dimmed) too: `node_modules/x` as well as `node_modules`.
     fn read_dir(dir: &Path, inside_ignored: bool, hidden: &ignore::gitignore::Gitignore) -> Vec<Entry> {
+        if crate::remote::is_remote(dir) {
+            return Self::read_server_dir(dir, inside_ignored, hidden);
+        }
         let visible: HashSet<PathBuf> = ignore::WalkBuilder::new(dir)
             .max_depth(Some(1))
             .hidden(false)
@@ -653,6 +660,51 @@ impl FileTree {
                     name: e.file_name().to_string_lossy().into_owned().into(),
                     is_dir,
                     ignored: inside_ignored || !visible.contains(&path),
+                    path,
+                })
+            })
+            .collect();
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        entries
+    }
+
+    /// A server's folder (see `read_dir`): git's rules from the `.gitignore`s here and in the
+    /// folders above, up to the repository's (those their listings show, read).
+    fn read_server_dir(dir: &Path, inside_ignored: bool, hidden: &ignore::gitignore::Gitignore) -> Vec<Entry> {
+        let Ok(listed) = crate::project_fs::read_dir(dir) else { return Vec::new() };
+        let mut levels = Vec::new();
+        let mut at = Some(dir);
+        while let Some(folder) = at.filter(|f| crate::remote::is_remote(f)) {
+            let file = folder.join(".gitignore");
+            if crate::project_fs::exists_now(&file, false)
+                && let Ok(text) = crate::project_fs::read_to_string(&file)
+            {
+                levels.push(crate::project_index::rules_from(folder, &[text]));
+            }
+            if crate::project_fs::exists_now(&folder.join(".git"), false) {
+                break;
+            }
+            at = folder.parent();
+        }
+        // (The nearest `.gitignore` that says something decides.)
+        let ignored = |path: &Path, is_dir: bool| {
+            levels.iter().find_map(|rules| match rules.matched(path, is_dir) {
+                ignore::Match::Ignore(_) => Some(true),
+                ignore::Match::Whitelist(_) => Some(false),
+                ignore::Match::None => None,
+            }) == Some(true)
+        };
+        let mut entries: Vec<Entry> = listed
+            .into_iter()
+            .filter_map(|(path, meta)| {
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                if ALWAYS_HIDDEN.contains(&name.as_str()) || hidden.matched(&path, meta.is_dir()).is_ignore() {
+                    return None;
+                }
+                Some(Entry {
+                    name: name.into(),
+                    is_dir: meta.is_dir(),
+                    ignored: inside_ignored || ignored(&path, meta.is_dir()),
                     path,
                 })
             })
@@ -718,8 +770,15 @@ impl FileTree {
             // The folders gone through, as they really are: a link back up ends the chain.
             let mut seen: Vec<PathBuf> = Vec::new();
             while expanded && !self.new_item_in(&entry.path) {
-                match dunce::canonicalize(&entry.path) {
-                    Ok(real) if !seen.contains(&real) => seen.push(real),
+                // (A server's folders as they're named: no asking each where it leads. A
+                // chain that long is a link going round.)
+                let real = if crate::remote::is_remote(&entry.path) {
+                    Ok(entry.path.clone())
+                } else {
+                    dunce::canonicalize(&entry.path)
+                };
+                match real {
+                    Ok(real) if !seen.contains(&real) && seen.len() < 64 => seen.push(real),
                     _ => break,
                 }
                 let inner = match self.children.get(&entry.path) {

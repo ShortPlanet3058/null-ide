@@ -212,6 +212,8 @@ actions!(
         CheckForUpdates,
         /// A folder inside WSL as the project (Windows).
         OpenWslFolder,
+        /// A folder on a server, over SSH, as the project.
+        OpenSshFolder,
     ]
 );
 
@@ -1320,7 +1322,7 @@ impl Workspace {
                 let root = this.tree.read(cx).root().to_path_buf();
                 crate::settings::use_project(&root, cx);
                 // What's typed in its terminal is for Linux's shell when its folder's in WSL.
-                crate::shell::set_wsl_project(crate::wsl::is_wsl(&root));
+                crate::shell::set_linux_project(crate::wsl::is_wsl(&root) || crate::remote::is_remote(&root));
             }
             if window.is_window_active()
                 && let Some(message) = this.notice_on_return.take()
@@ -1420,7 +1422,8 @@ impl Workspace {
     /// Opens the project as it was: its tabs (caret and scroll included), folders and terminal.
     pub fn restore_session(&mut self, session: crate::session::Session, window: &mut Window, cx: &mut Context<Self>) {
         // The window's other folders first (those still there), so their folders open below.
-        let others: Vec<PathBuf> = session.roots.iter().filter(|r| r.is_dir()).cloned().collect();
+        let others: Vec<PathBuf> =
+            session.roots.iter().filter(|r| crate::remote::is_remote(r) || r.is_dir()).cloned().collect();
         // (Each added, whichever were already there.)
         if others.into_iter().filter(|r| self.roots.add(r.clone())).count() > 0 {
             self.roots_changed(window, cx);
@@ -1612,6 +1615,68 @@ impl Workspace {
     /// (terminal, git, other apps) show up in the tree and in open files.
     fn watch(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+        if let Some(server) = crate::remote::of(&root) {
+            self._watcher = None;
+            self.watch_server(server.host, tx);
+        } else {
+            self.watch_here(root, tx);
+        }
+        self.watch_task = Some(cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(first) = rx.next().await {
+                // Changes come in bursts (a build, a checkout): wait for it to settle.
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                let mut paths = first;
+                while let Ok(more) = rx.try_recv() {
+                    paths.extend(more);
+                }
+                paths.sort();
+                paths.dedup();
+                if this.update(cx, |this, cx| this.files_changed(paths, cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// The window's folders on a server: what changed there looked for every few seconds,
+    /// on a thread of its own (until the watch is replaced: nobody listening).
+    fn watch_server(&mut self, host: String, tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>) {
+        let folders: Vec<String> = self
+            .roots
+            .all()
+            .iter()
+            .filter_map(|r| crate::remote::of(r))
+            .filter(|r| r.host == host)
+            .map(|r| r.path)
+            .collect();
+        let stamp = format!(
+            "/tmp/null-watch-{:x}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        );
+        std::thread::Builder::new()
+            .name("ssh-watch".into())
+            .spawn(move || {
+                while !tx.is_closed() {
+                    if let Ok(changed) = crate::remote::changed_since(&host, &folders, &stamp)
+                        && !changed.is_empty()
+                    {
+                        let paths: Vec<PathBuf> = changed.iter().map(|p| crate::remote::path(&host, p)).collect();
+                        for path in &paths {
+                            crate::project_fs::forget(path);
+                        }
+                        if tx.unbounded_send(paths).is_err() {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(3));
+                }
+            })
+            .ok();
+    }
+
+    /// The window's folders on this computer: the system tells of changes.
+    fn watch_here(&mut self, root: PathBuf, tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>) {
         let handler = move |result: notify::Result<notify::Event>| {
             if let Ok(event) = result
                 && !matches!(event.kind, notify::EventKind::Access(_))
@@ -1631,27 +1696,11 @@ impl Workspace {
         if watcher.watch(&root, notify::RecursiveMode::Recursive).is_err() {
             return;
         }
-        // (The window's other folders, on the same watcher.)
-        for other in self.roots.all().iter().filter(|r| **r != root) {
+        // (The window's other folders, on the same watcher; a server's aren't its to watch.)
+        for other in self.roots.all().iter().filter(|r| **r != root && !crate::remote::is_remote(r)) {
             watcher.watch(other, notify::RecursiveMode::Recursive).ok();
         }
         self._watcher = Some(watcher);
-        self.watch_task = Some(cx.spawn(async move |this, cx| {
-            use futures::StreamExt;
-            while let Some(first) = rx.next().await {
-                // Changes come in bursts (a build, a checkout): wait for it to settle.
-                cx.background_executor().timer(Duration::from_millis(150)).await;
-                let mut paths = first;
-                while let Ok(more) = rx.try_recv() {
-                    paths.extend(more);
-                }
-                paths.sort();
-                paths.dedup();
-                if this.update(cx, |this, cx| this.files_changed(paths, cx)).is_err() {
-                    break;
-                }
-            }
-        }));
     }
 
     fn files_changed(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -3100,8 +3149,10 @@ impl Workspace {
         let lsp = self.lsp.clone();
         // A very big file: its tab at once, a stand-in until it's read in the background (a
         // gigabyte would hold the window still for seconds).
-        let size = std::fs::metadata(&path).map_or(0, |m| m.len());
-        let editor = if size > READ_IN_BACKGROUND_FROM {
+        // (One on a server too: reading it waits on the network.)
+        let remote = crate::remote::is_remote(&path);
+        let size = if remote { 0 } else { std::fs::metadata(&path).map_or(0, |m| m.len()) };
+        let editor = if size > READ_IN_BACKGROUND_FROM || remote {
             let editor = cx.new(|cx| Editor::stand_in(path.clone(), size, cx));
             self.read_in_background(editor.clone(), path, window, cx);
             editor
@@ -3804,16 +3855,15 @@ impl Workspace {
     }
 
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let is_dir = crate::project_fs::is_dir(&path);
         // A folder another window has open: that window comes forward.
-        if path.is_dir()
-            && let Some(other) = crate::window_on(&path, Some(window.window_handle()), cx)
-        {
+        if is_dir && let Some(other) = crate::window_on(&path, Some(window.window_handle()), cx) {
             cx.defer(move |cx| {
                 other.update(cx, |_, window, _| window.activate_window()).ok();
             });
             return;
         }
-        if path.is_dir() {
+        if is_dir {
             // The project being left keeps its session.
             self.save_session(cx);
             self.confirm_unsaved(CloseAction::SwitchProject(path), window, cx);
@@ -3824,7 +3874,7 @@ impl Workspace {
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let path = crate::wsl::plain(path);
-        crate::shell::set_wsl_project(crate::wsl::is_wsl(&path));
+        crate::shell::set_linux_project(crate::wsl::is_wsl(&path) || crate::remote::is_remote(&path));
         self.roots = crate::roots::ProjectRoots::new(path.clone());
         self.git_root = path.clone();
         self.git_view.update(cx, |view, cx| view.set_repos(Vec::new(), cx));
@@ -3844,7 +3894,7 @@ impl Workspace {
         // Another project's tests: looked for again, if they show.
         self.tests = None;
         self.tests_task = None;
-        self.testable = Self::looks_testable(&path);
+        self.testable = !crate::remote::is_remote(&path) && Self::looks_testable(&path);
         self.results_waiting.clear();
         // What was debugged there isn't Debug Again here, nor a build for it run here.
         self.debugged_test = None;
@@ -3864,7 +3914,8 @@ impl Workspace {
         if self.sidebar_tests {
             self.find_tests(cx);
         }
-        self.python_env = crate::python_env::find(&path);
+        // (A server's Python environment isn't one Null can run here.)
+        self.python_env = if crate::remote::is_remote(&path) { None } else { crate::python_env::find(&path) };
         self.python_env_here = None;
         let mut session = crate::session::Session::load(&path);
         session.window = self.window_state;
@@ -4788,8 +4839,8 @@ impl Workspace {
     pub fn add_roots(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let mut added = Vec::new();
         for path in paths {
-            let path = crate::wsl::plain(dunce::canonicalize(&path).unwrap_or(path));
-            if path.is_dir() && self.roots.add(path.clone()) {
+            let path = crate::wsl::plain(crate::project_fs::canonicalize(&path).unwrap_or(path));
+            if crate::project_fs::is_dir(&path) && self.roots.add(path.clone()) {
                 added.push(path);
             }
         }
@@ -4934,6 +4985,42 @@ impl Workspace {
         .detach();
     }
 
+    /// Open SSH Folder…: a server first (as ssh takes it: `me@box`, a name from
+    /// `~/.ssh/config`), then a folder on it, typed from its home folder.
+    fn open_ssh_folder(&mut self, _: &OpenSshFolder, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette_with(PaletteKind::Server, None, Vec::new(), window, cx);
+    }
+
+    /// Connects to `host` (off the main thread: it can take a moment), then asks for a
+    /// folder there, from its home folder; or says why it couldn't.
+    fn connect_to_server(&mut self, host: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_notice(format!("Connecting to {host}…"), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let asked = host.clone();
+            let home = cx.background_executor().spawn(async move { crate::remote::connect(&asked) }).await;
+            this.update_in(cx, |this, window, cx| match home {
+                Err(error) => this.show_notice(error.to_string(), cx),
+                Ok(home) => {
+                    this.notice = None;
+                    this.open_palette_with(
+                        PaletteKind::Path(PathFor::Folder),
+                        Some(format!("A folder on {host}")),
+                        Vec::new(),
+                        window,
+                        cx,
+                    );
+                    let start = crate::remote::path(&host, &home).display().to_string();
+                    let typed = if start.ends_with('/') { start } else { format!("{start}/") };
+                    if let Some((palette, _)) = &this.palette {
+                        palette.update(cx, |palette, cx| palette.set_query(&typed, cx));
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// No file dialog on this system (Linux without a desktop portal, as on a bare window
     /// manager): the path typed instead, with what's in the folders listed on the way.
     fn type_a_path(&mut self, purpose: PathFor, window: &mut Window, cx: &mut Context<Self>) {
@@ -5060,6 +5147,7 @@ impl Workspace {
             (File, "Open Folder…".into(), Box::new(OpenFolder)),
             #[cfg(windows)]
             (File, "Open WSL Folder…".into(), Box::new(OpenWslFolder)),
+            (File, "Open SSH Folder…".into(), Box::new(OpenSshFolder)),
             (File, "Add Folder to Window…".into(), Box::new(AddFolderToWindow)),
             (File, "Open Recent…".into(), Box::new(OpenRecent)),
             (File, "Open Folder in New Window…".into(), Box::new(NewWindow)),
@@ -5581,6 +5669,11 @@ impl Workspace {
                 if let Some((panel, _)) = &this.settings_panel {
                     panel.update(cx, |panel, cx| panel.search_for(&query, cx));
                 }
+            }
+            PaletteEvent::ServerChosen(host) => {
+                let host = host.clone();
+                this.close_palette(window, cx);
+                this.connect_to_server(host, window, cx);
             }
             PaletteEvent::PathChosen(purpose, path) => {
                 let path = path.clone();
@@ -7958,9 +8051,11 @@ impl Workspace {
             self.past_notices.remove(0);
         }
         self.past_notices.push((message.clone(), std::time::SystemTime::now()));
+        // (A longer one, as why a server can't be reached and what to do, stays to be read.)
+        let shown_for = Duration::from_secs((4 + message.chars().count() as u64 / 25).min(10));
         self.notice = Some((message, Instant::now()));
         self.notice_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(4)).await;
+            cx.background_executor().timer(shown_for).await;
             this.update(cx, |this, cx| {
                 this.notice = None;
                 cx.notify();
@@ -11188,7 +11283,8 @@ impl Render for Workspace {
                 let home = crate::tools::home_dir();
                 let shown = match home.as_ref().and_then(|h| root.strip_prefix(h).ok()) {
                     Some(rest) => Path::new("~").join(rest).display().to_string(),
-                    None => root.display().to_string(),
+                    // (A server's folder as people write it: `me@box:/home/me/app`.)
+                    None => crate::remote::shown(&root),
                 };
                 (vec![shorten_path(&shown, STATUS_PATH_CHARS)], (0, 0))
             }
@@ -12170,6 +12266,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::explain_test_failure))
             .on_action(cx.listener(Self::check_for_updates))
             .on_action(cx.listener(Self::open_wsl_folder))
+            .on_action(cx.listener(Self::open_ssh_folder))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))

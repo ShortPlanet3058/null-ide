@@ -5,6 +5,8 @@
 #   scripts/qa/shot.sh STEPS OUT.png [PROJECT] [WAIT_SECONDS]
 #
 # `shot NAME` steps take more pictures on the way, as NAME.png beside OUT.png.
+# PROJECT can be a folder on a server (`ssh://me@box:2222/home/me/app`): opened there as
+# it is (no copy), with your ssh (a connection already open, or your keys or agent).
 # NULL_QA_SETTINGS='"keymap": "vim", "word_wrap": true' adds settings to its own.
 # NULL_QA_FAKE_AI=1 gives it an AI: a stand-in on this Mac (fake_ai.py) with set answers.
 # NULL_QA_FILE=app.rs:4:2 opens that file (at that place) instead of the project, as
@@ -39,7 +41,9 @@ if [ ! -x "$winid" ] || [ "$here/winid.swift" -nt "$winid" ]; then
     swiftc -O -o "$winid" "$here/winid.swift"
 fi
 
-if [ -n "${3:-}" ] && [ ! -d "$3" ]; then
+remote=""
+case "${3:-}" in ssh://* | /ssh:*) remote="$3" ;; esac
+if [ -n "${3:-}" ] && [ -z "$remote" ] && [ ! -d "$3" ]; then
     echo "no folder $3" >&2
     exit 1
 fi
@@ -62,7 +66,9 @@ fake_pid=""
 trap finish EXIT
 mkdir -p "$home/.config/null" "$home/tmp" "$home/ack" "$home/project"
 # A copy, named as the original (its name shows), so the steps change nothing of yours.
-if [ -n "${3:-}" ]; then
+if [ -n "$remote" ]; then
+    project="$remote"
+elif [ -n "${3:-}" ]; then
     project="$home/project/$(basename "$(cd "$3" && pwd)")"
     rsync -a --exclude target/ --exclude node_modules/ "$(cd "$3" && pwd)/" "$project/"
 else
@@ -105,7 +111,8 @@ real_home="$HOME"
 tools="$real_home/.cargo/bin:$real_home/.local/bin:$real_home/go/bin:/opt/homebrew/bin:/usr/local/bin"
 servers="$real_home/Library/Application Support/Null/servers"
 tools="$tools:$servers/node_modules/.bin:$servers/bin"
-cd "$project"
+# (A server's folder: started from its home.)
+if [ -n "$remote" ]; then cd "$home"; else cd "$project"; fi
 # (Its own process group, so all it starts goes with it.)
 set -m
 env -i \

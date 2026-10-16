@@ -1,14 +1,19 @@
 # A version tag (v0.1.0) builds Null for the three platforms and makes a draft GitHub
-# release of them, its notes from CHANGELOG.md, to look over before publishing. A pull
-# request labelled `package` builds them too, without a release: they're on its run's
-# page, to try before merging.
+# release of them, its notes from CHANGELOG.md, to look over before publishing. Started by
+# hand on a branch, it builds the platform asked for (no release), to try before merging:
+#   gh workflow run release.yml --ref feature/x -f platform=windows
 name: Release
 
 on:
   push:
     tags: ["v*"]
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which package to build
+        type: choice
+        options: [windows, linux, macos, all]
+        default: windows
 
 permissions:
   contents: write
@@ -19,7 +24,7 @@ env:
 
 jobs:
   macos:
-    if: startsWith(github.ref, 'refs/tags/') || contains(github.event.pull_request.labels.*.name, 'package')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.platform == 'macos' || inputs.platform == 'all'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +40,7 @@ jobs:
           path: target/release/Null-*.dmg
 
   windows:
-    if: startsWith(github.ref, 'refs/tags/') || contains(github.event.pull_request.labels.*.name, 'package')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.platform == 'windows' || inputs.platform == 'all'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +57,7 @@ jobs:
             target/release/null-*-setup.exe
 
   linux:
-    if: startsWith(github.ref, 'refs/tags/') || contains(github.event.pull_request.labels.*.name, 'package')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.platform == 'linux' || inputs.platform == 'all'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

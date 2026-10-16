@@ -142,7 +142,18 @@ impl LanguageServer {
         // A folder inside WSL: the server runs there, in the folder's Linux path (its PATH
         // set there, with Null's folders).
         let wsl = crate::wsl::of(root);
+        let server = crate::remote::of(root);
         let mut command = match &wsl {
+            // A folder on a server: the server runs there, in the folder (through `env`, as
+            // in WSL; `program` is its path there).
+            _ if server.is_some() => {
+                let server = server.as_ref().expect("checked");
+                let set: Vec<String> = variables_for(name).iter().map(|(k, v)| format!("{k}={v}")).collect();
+                let program = program.to_string_lossy();
+                let with: Vec<&str> =
+                    set.iter().map(String::as_str).chain([program.as_ref()]).chain(args.iter().copied()).collect();
+                crate::remote::command(&server.host, Some(&server.path), "env", &with)
+            }
             Some(wsl) => {
                 // (Through `env`: what's set for wsl.exe doesn't reach Linux.)
                 let set: Vec<String> = variables_for(name).iter().map(|(k, v)| format!("{k}={v}")).collect();
@@ -171,7 +182,11 @@ impl LanguageServer {
             }
         };
         let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-        let addresses = wsl.as_ref().map(|w| Addresses::for_distro(&w.distro));
+        let addresses = match (&server, &wsl) {
+            (Some(server), _) => Addresses::for_server(&server.host),
+            (None, Some(wsl)) => Some(Addresses::for_distro(&wsl.distro)),
+            (None, None) => None,
+        };
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
         // What it says about itself (why it fails, often): into the server log.
@@ -296,6 +311,13 @@ struct Addresses {
 }
 
 impl Addresses {
+    /// A server over SSH: Null's addresses for its files are `file:///ssh:host:/…` (see
+    /// `uri_for`), the server's its own.
+    fn for_server(host: &str) -> Option<Self> {
+        let root = uri_for(&crate::remote::path(host, "/"))?;
+        Some(Self { windows: vec![root.as_str().to_string()], linux: "file:///".to_string() })
+    }
+
     fn for_distro(distro: &str) -> Self {
         let windows = ["wsl.localhost", "wsl$", "wsl%24"].iter().map(|h| format!("file://{h}/{distro}/")).collect();
         Self { windows, linux: "file:///".to_string() }
@@ -444,11 +466,43 @@ pub async fn types_around(
 }
 
 pub fn uri_for(path: &Path) -> Option<lsp_types::Uri> {
+    // A server's file: `file:///ssh:host:/path`, the same on every system (it isn't one of
+    // this computer's paths, for the system to write its way).
+    if let Some(remote) = crate::remote::of(path) {
+        let mut url = url::Url::parse("file:///").ok()?;
+        url.set_path(&format!("/ssh:{}:{}", remote.host, remote.path));
+        return url.as_str().parse().ok();
+    }
     url::Url::from_file_path(path).ok()?.as_str().parse().ok()
 }
 
 pub fn path_for(uri: &lsp_types::Uri) -> Option<PathBuf> {
-    url::Url::parse(uri.as_str()).ok()?.to_file_path().ok()
+    let url = url::Url::parse(uri.as_str()).ok()?;
+    if url.scheme() == "file" && url.path().starts_with("/ssh:") {
+        return Some(PathBuf::from(percent_decoded(url.path())));
+    }
+    url.to_file_path().ok()
+}
+
+/// `%20` and the like as the characters they stand for.
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (bytes[i], bytes.get(i + 1).copied().and_then(hex), bytes.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(high), Some(low)) => {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+            }
+            (byte, ..) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A server's edit, file by file: its `changes` and its `documentChanges` (the text edits
@@ -493,6 +547,21 @@ pub fn edits_by_file(edit: lsp_types::WorkspaceEdit) -> Vec<(PathBuf, Vec<lsp_ty
 #[cfg(test)]
 mod wsl_tests {
     use super::*;
+
+    #[test]
+    fn a_server_over_ssh_reads_its_own_addresses_and_null_gets_its() {
+        let file = crate::remote::path("me@box#2222", "/home/me/my app/a.rs");
+        let uri = uri_for(&file).unwrap();
+        assert_eq!(uri.as_str(), "file:///ssh:me@box%232222:/home/me/my%20app/a.rs");
+        assert_eq!(path_for(&uri).as_deref(), Some(file.as_path()));
+        let addresses = Addresses::for_server("me@box#2222").unwrap();
+        assert_eq!(
+            addresses.to_server(&format!(r#"{{"uri":"{}"}}"#, uri.as_str())),
+            r#"{"uri":"file:///home/me/my%20app/a.rs"}"#
+        );
+        let back = addresses.for_null(serde_json::json!({ "uri": "file:///home/me/b.rs" }));
+        assert_eq!(back["uri"], "file:///ssh:me@box%232222:/home/me/b.rs");
+    }
 
     #[test]
     fn a_server_in_wsl_reads_linux_addresses_and_null_gets_windows_ones() {

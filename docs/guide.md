@@ -282,6 +282,33 @@ On WSL 1, servers built on Node.js (Python's, TypeScript's, and others) can't ru
 doesn't start there. Move the distribution to WSL 2 (`wsl --set-version Ubuntu 2`, with its
 name); the other servers work on both.
 
+## Folders on servers (SSH)
+
+**Open SSH Folder…** (in ⌘K or the File menu) asks for a server, as you'd give it to `ssh`
+(`me@example.com`, a name from `~/.ssh/config`, `box#2222` for another port; those you've
+used and those in your config are listed), connects, then lists your home folder there to
+pick a folder from. `null ssh://me@example.com/home/me/app` opens one from a terminal (with
+`/~/app` for one in your home folder). Open Recent lists them too.
+
+Null uses your own `ssh`: your keys, your agent and your `~/.ssh/config`. Nothing is
+installed on the server; it needs a shell and the usual tools (Linux, or a Mac). Files are
+read and written through one connection that stays open; the terminal, git and language
+servers run on the server, in the folder (language servers install there, into
+`~/.local/share/null`, with Node.js when the server has none). Saving writes the whole file
+beside the old one, then swaps it in; Move to Trash uses the server's Trash
+(`~/.local/share/Trash`). Changes made on the server by other programs are noticed within a
+few seconds. Search looks through the files on the server first, and reads only those that
+can match.
+
+Null signs in with keys, not passwords: if `ssh` asks for a password, add your key to the
+server (`ssh-copy-id me@example.com`), or to your agent (`ssh-add`) if it has a passphrase.
+A server you've never connected to must be accepted once with `ssh` in a terminal. On a Mac
+and Linux, Null shares one connection to each server between everything it runs there, so
+programs start at once.
+
+Not on a server: the project's Python environment, tests in the Tests panel, the debugger,
+and local history of saves.
+
 ## New versions
 
 Null never updates itself and doesn't look for updates unless asked: turn on "Tell me when a

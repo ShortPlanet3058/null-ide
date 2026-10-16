@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Folders on servers over SSH: Open SSH Folder… (a server, then a folder from its home), or
+  `null ssh://me@box/path`. With your own ssh, keys and config, nothing installed there:
+  files through one connection, the terminal, git and language servers run on the server,
+  saves are whole, Move to Trash uses the server's Trash, changes there show within seconds,
+  search narrows files on the server first.
+- CI runs once a pull request is ready, not on drafts or after merges; packages are built on
+  demand, per platform.
 - Folders inside WSL (Windows): Open WSL Folder…, or `null .` in a WSL shell. Files are read
   through Windows' WSL share; the terminal, git and language servers run inside Linux, in the
   folder's Linux path, and servers install there (Node.js along when the distribution has

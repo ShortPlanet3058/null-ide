@@ -9,27 +9,32 @@ pub enum Kind {
     PowerShell,
 }
 
-/// Whether the window being worked in has a folder inside WSL: its terminal's shell is
-/// Linux's then (see `wsl`), and what's typed into it is written for it.
-static WSL_PROJECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether the window being worked in has a folder inside WSL or on a server: its
+/// terminal's shell is Linux's then (see `wsl`, `remote`), and what's typed into it is
+/// written for it.
+static LINUX_PROJECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Said by the window that comes to the front (and when its folder changes).
-pub fn set_wsl_project(wsl: bool) {
-    WSL_PROJECT.store(wsl, std::sync::atomic::Ordering::Relaxed);
+pub fn set_linux_project(linux: bool) {
+    LINUX_PROJECT.store(linux, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The terminal's shell: PowerShell on Windows (Null starts it there), a POSIX one elsewhere
-/// and for a folder inside WSL.
+/// and for a folder inside WSL or on a server.
 pub fn kind() -> Kind {
-    if cfg!(windows) && !WSL_PROJECT.load(std::sync::atomic::Ordering::Relaxed) {
+    if cfg!(windows) && !LINUX_PROJECT.load(std::sync::atomic::Ordering::Relaxed) {
         Kind::PowerShell
     } else {
         Kind::Posix
     }
 }
 
-/// A path as the terminal's shell has it: a folder inside WSL in its Linux form.
+/// A path as the terminal's shell has it: a folder inside WSL in its Linux form, one on a
+/// server as the server has it.
 pub fn path_text(path: &std::path::Path) -> String {
+    if let Some(remote) = crate::remote::of(path) {
+        return remote.path;
+    }
     match crate::wsl::of(path) {
         Some(wsl) => wsl.linux,
         None => path.display().to_string(),

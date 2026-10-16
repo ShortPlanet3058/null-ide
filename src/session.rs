@@ -104,13 +104,15 @@ impl Session {
         let before = session.tabs.len();
         let active_path = session.active.and_then(|i| session.tabs.get(i)).map(|t| t.path.clone());
         let right_path = session.shown_right.and_then(|i| session.tabs.get(i)).map(|t| t.path.clone());
-        session.tabs.retain(|t| t.path.is_file());
+        // (A server's files are kept: asking would wait on it; one gone opens as gone.)
+        let there = |p: &Path, is: fn(&Path) -> bool| crate::remote::is_remote(p) || is(p);
+        session.tabs.retain(|t| there(&t.path, Path::is_file));
         session.shown_right = right_path.and_then(|p| session.tabs.iter().position(|t| t.path == p));
         session.active = active_path
             .and_then(|p| session.tabs.iter().position(|t| t.path == p))
             .or_else(|| (before > 0 && !session.tabs.is_empty()).then_some(0));
-        session.expanded.retain(|p| p.is_dir());
-        session.recent_files.retain(|p| p.is_file());
+        session.expanded.retain(|p| there(p, Path::is_dir));
+        session.recent_files.retain(|p| there(p, Path::is_file));
         session
     }
 
@@ -357,13 +359,15 @@ fn forget_in(file: &Path, root: &Path) {
     }
 }
 
-/// Projects opened lately, most recent first, that are still there.
+/// Projects opened lately, most recent first, that are still there (a server's are kept:
+/// it's asked when one is opened).
 pub fn recent_projects() -> Vec<PathBuf> {
     let Some(file) = recent_projects_file() else { return Vec::new() };
-    read_recent(&file).into_iter().filter(|p| p.is_dir()).collect()
+    read_recent(&file).into_iter().filter(|p| crate::remote::is_remote(p) || p.is_dir()).collect()
 }
 
-/// The project open when Null last closed, if it's still there.
+/// The project open when Null last closed, if it's still there. Not one on a server: Null
+/// would wait on the network to start (it's in Open Recent).
 pub fn last_project() -> Option<PathBuf> {
     let path = PathBuf::from(std::fs::read_to_string(last_project_file()?).ok()?.trim());
     path.is_dir().then_some(path)

@@ -60,12 +60,14 @@ mod outline;
 mod palette;
 mod preview;
 mod problem_matcher;
+mod project_fs;
 mod project_index;
 mod project_search;
 mod punctuation;
 mod python_env;
 #[cfg(debug_assertions)]
 mod qa;
+mod remote;
 mod roots;
 mod search;
 mod server_log;
@@ -215,6 +217,11 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
         }
         return (cwd, None);
     };
+    // A folder on a server: `ssh://me@box:2222/home/me/app`, or as Null writes it
+    // (`/ssh:me@box:/home/me/app`).
+    if let Some(server) = server_folder(&arg) {
+        return (server, None);
+    }
     // `null .` and `null` are the same project, with the same session: no `/.` at the end.
     let path = absolute(&cwd.join(arg));
     if path.is_dir() {
@@ -222,6 +229,31 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
     }
     let root = if path.starts_with(&cwd) { cwd } else { path.parent().map(PathBuf::from).unwrap_or(cwd) };
     (root, Some(path))
+}
+
+/// A folder on a server, as `null` is given it: `ssh://[user@]host[:port]/path` (a path
+/// from the home folder with `/~/`), or `/ssh:host:/path`.
+fn server_folder(arg: &str) -> Option<PathBuf> {
+    if remote::is_remote(Path::new(arg)) {
+        return Some(PathBuf::from(arg));
+    }
+    let rest = arg.strip_prefix("ssh://")?;
+    let (address, path) = rest.split_once('/').unwrap_or((rest, ""));
+    // (A port after the last colon, unless it's inside an address in brackets.)
+    let host = match address.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) && !port.contains(']') => {
+            format!("{host}#{port}")
+        }
+        _ => address.to_string(),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let path = match path.strip_prefix('~') {
+        Some(rest) => format!("{}{rest}", remote::home(&host).ok()?),
+        None => format!("/{path}"),
+    };
+    Some(remote::path(&host, &path))
 }
 
 /// A `file://` URL as a path ("%20" back to a space, and so on).
@@ -755,6 +787,15 @@ pub(crate) fn quit_next(cx: &mut gpui::App) {
 #[cfg(test)]
 mod url_tests {
     use super::*;
+
+    #[test]
+    fn a_server_s_folder_is_given_as_an_ssh_address() {
+        assert_eq!(server_folder("ssh://me@box:2222/srv/app"), Some(remote::path("me@box#2222", "/srv/app")));
+        assert_eq!(server_folder("ssh://box"), Some(remote::path("box", "/")));
+        assert_eq!(server_folder("/ssh:box:/x"), Some(PathBuf::from("/ssh:box:/x")));
+        assert_eq!(server_folder("ssh://"), None);
+        assert_eq!(server_folder("src/main.rs"), None);
+    }
 
     #[test]
     fn a_waited_file_s_project_is_its_repository() {

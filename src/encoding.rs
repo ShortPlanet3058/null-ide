@@ -41,7 +41,7 @@ const W1252_HIGH: [char; 32] = [
 
 /// Reads a file as text. `InvalidData` when its bytes aren't text in any of the above.
 pub fn read(path: &Path) -> std::io::Result<(String, Encoding)> {
-    let bytes = std::fs::read(path)?;
+    let bytes = crate::project_fs::read(path)?;
     decode(bytes).ok_or_else(|| std::io::ErrorKind::InvalidData.into())
 }
 
@@ -49,7 +49,7 @@ pub fn read(path: &Path) -> std::io::Result<(String, Encoding)> {
 /// to a file that isn't open (a replace across the project, a rename's edits), which mustn't
 /// touch what they don't change. (A few stray bytes among UTF-8 would come back as UTF-8.)
 pub fn read_whole(path: &Path) -> std::io::Result<(String, Encoding)> {
-    let bytes = std::fs::read(path)?;
+    let bytes = crate::project_fs::read(path)?;
     let (text, encoding) = decode(bytes.clone()).ok_or(std::io::ErrorKind::InvalidData)?;
     if encode(&text, encoding).ok().as_deref() != Some(bytes.as_slice()) {
         return Err(std::io::ErrorKind::InvalidData.into());
