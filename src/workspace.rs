@@ -7,7 +7,7 @@ use crate::fonts::Fonts;
 use crate::git;
 use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
 use crate::lsp_store::{LspStore, Readiness};
-use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
+use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleSmoothMotion, ToggleWordWrap};
 use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, PathFor, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::AutoSave;
@@ -5245,6 +5245,11 @@ impl Workspace {
                 toggle(settings.fade_bars_while_typing, "Stop Fading Bars While Typing", "Fade Bars While Typing"),
                 Box::new(ToggleFadeWhileTyping),
             ),
+            (
+                View,
+                toggle(settings.smooth_motion, "Stop Smooth Caret and Scrolling", "Smooth Caret and Scrolling"),
+                Box::new(ToggleSmoothMotion),
+            ),
             (Appearance, theme_label(ThemeName::Null), theme_action(ThemeName::Null)),
             (Appearance, theme_label(ThemeName::Ash), theme_action(ThemeName::Ash)),
             (Appearance, theme_label(ThemeName::Midnight), theme_action(ThemeName::Midnight)),
@@ -7657,6 +7662,10 @@ impl Workspace {
 
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
+    }
+
+    fn toggle_smooth_motion(&mut self, _: &ToggleSmoothMotion, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.smooth_motion = !s.smooth_motion);
     }
 
     /// ⌃⌥Z (⌥Z off a Mac): wrapping on or off for the kind of file at hand, prose or code.
@@ -12249,6 +12258,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
+            .on_action(cx.listener(Self::toggle_smooth_motion))
             .on_action(cx.listener(Self::toggle_word_wrap))
             .on_action(cx.listener(Self::toggle_autocomplete))
             .on_action(cx.listener(Self::toggle_terminal))

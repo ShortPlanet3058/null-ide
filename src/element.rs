@@ -721,7 +721,9 @@ impl Element for EditorElement {
             editor.scroll.target_y = editor.scroll.target_y.clamp(0., max_y);
             editor.scroll.y = editor.scroll.y.clamp(0., max_y);
             let distance = editor.scroll.target_y - editor.scroll.y;
-            if distance.abs() > 0.5 {
+            // (Smooth motion off: where it's going at once.)
+            let smooth = cx.global::<Settings>().smooth_motion;
+            if smooth && distance.abs() > 0.5 {
                 let dt = editor.scroll.last_tick.map_or(1. / 60., |t| (now - t).as_secs_f32().min(0.05));
                 editor.scroll.y += distance * (1. - (-dt * 18.).exp());
                 editor.scroll.last_tick = Some(now);
@@ -1717,7 +1719,7 @@ impl Element for EditorElement {
             let target = point(caret_x, line_height * caret_row as f32);
             editor.set_lens_hits(lens_hits);
             let motion = &mut editor.caret;
-            if !motion.placed {
+            if !motion.placed || !smooth {
                 (motion.from, motion.to, motion.visual, motion.placed) = (target, target, target, true);
             } else if target != motion.to {
                 motion.from =
