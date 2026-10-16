@@ -394,8 +394,10 @@ impl LspStore {
         let key = self.project_key(config);
         self.servers.insert(key.clone(), ServerState::Installing);
         cx.notify();
+        let root = key.1.clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { crate::servers::install(config) }).await;
+            let result =
+                cx.background_executor().spawn(async move { crate::servers::install_for(config, &root) }).await;
             this.update(cx, |this, cx| {
                 cx.emit(LspEvent::Installed(result.clone().map(|()| config.name)));
                 match result {
@@ -476,7 +478,7 @@ impl LspStore {
 
     /// Starts `config`'s server for the folder `root` (see `key_for`).
     fn start(&mut self, config: &'static ServerConfig, root: PathBuf, cx: &mut Context<Self>) -> ServerState {
-        let Some(program) = crate::servers::find(config) else { return ServerState::Missing };
+        let Some(program) = crate::servers::find_for(config, &root) else { return ServerState::Missing };
         crate::server_log::append(config.name, &format!("starting {}", program.display()));
         let (server, mut messages) = match LanguageServer::spawn_named(&program, config.args, &root, config.name) {
             Ok(started) => started,
@@ -503,7 +505,8 @@ impl LspStore {
         let python = crate::lsp::is_python_server(config.name);
         #[allow(deprecated)] // root_uri is deprecated in favour of workspace folders, but some servers still read it
         let params = InitializeParams {
-            process_id: Some(std::process::id()),
+            // (A server in WSL can't see Windows' processes: it'd take this one as gone.)
+            process_id: (!crate::wsl::is_wsl(&root)).then(std::process::id),
             root_uri: root_uri.clone(),
             workspace_folders: root_uri.map(|uri| {
                 vec![WorkspaceFolder {

@@ -73,6 +73,12 @@ pub fn bin_dir() -> Option<PathBuf> {
     Some(if cfg!(windows) { root } else { root.join("bin") })
 }
 
+/// The Linux build for a WSL distribution (Arm or x64, as Windows is), to unpack there.
+pub fn linux_build() -> &'static Asset {
+    let target = if cfg!(target_arch = "aarch64") { Target::LinuxArm } else { Target::LinuxX64 };
+    ASSETS.iter().find(|a| a.target == target).expect("a Linux build")
+}
+
 /// Whether Null can bring its own Node.js to this computer.
 pub fn available() -> bool {
     crate::download::for_here(ASSETS).is_some()

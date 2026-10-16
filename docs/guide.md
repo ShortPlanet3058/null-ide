@@ -268,6 +268,20 @@ or the Dock, it comes back to the last project. Sessions are small files in Null
 (`~/Library/Application Support/Null/sessions` on macOS, `%LOCALAPPDATA%\Null\sessions` on
 Windows, `~/.local/share/null/sessions` on Linux; `NULL_DATA_DIR` overrides it).
 
+## Folders inside WSL (Windows)
+
+**Open WSL Folder…** (in ⌘K or the File menu) opens a folder inside WSL, starting from your
+Linux home; `null .` typed in a WSL shell does the same (after Install Shell Command). Null
+reads and writes the files through Windows' WSL share, and runs everything else inside Linux,
+in the folder's Linux path: the terminal is your Linux shell, git is Linux's (its settings and
+credentials), and language servers run and install there (into `~/.local/share/null`, with
+Node.js when the distribution has none). Tasks and tests are written for that shell. Changes
+made in WSL by other programs are noticed within a couple of seconds.
+
+On WSL 1, servers built on Node.js (Python's, TypeScript's, and others) can't run: Node.js
+doesn't start there. Move the distribution to WSL 2 (`wsl --set-version Ubuntu 2`, with its
+name); the other servers work on both.
+
 ## New versions
 
 Null never updates itself and doesn't look for updates unless asked: turn on "Tell me when a

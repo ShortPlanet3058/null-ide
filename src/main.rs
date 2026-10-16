@@ -96,6 +96,7 @@ mod window_frame;
 mod word_blocks;
 mod workspace;
 mod wrap;
+mod wsl;
 
 use gpui::{
     App, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size,
@@ -247,10 +248,10 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
 /// keeps its name, under its resolved folder.
 fn absolute(path: &Path) -> PathBuf {
     if let Ok(path) = dunce::canonicalize(path) {
-        return path;
+        return wsl::plain(path);
     }
     match (path.parent().and_then(|p| dunce::canonicalize(p).ok()), path.file_name()) {
-        (Some(parent), Some(name)) => parent.join(name),
+        (Some(parent), Some(name)) => wsl::plain(parent.join(name)),
         _ => path.to_path_buf(),
     }
 }
