@@ -7086,7 +7086,10 @@ impl Workspace {
         // The terminal reports the command from its first program on (`(cd web && npx jest x)`
         // comes back as `npx jest x`): ours if it ends ours.
         let ours = self.tests_running.as_ref().is_some_and(|(command, _)| {
-            *command == ran.command || (ran.command.len() >= 8 && command.ends_with(ran.command.as_str()))
+            *command == ran.command
+                || (ran.command.len() >= 8 && command.ends_with(ran.command.as_str()))
+                // (A prompt Null doesn't know the end of, `➜  app git:(main) ✗`, still before it.)
+                || (command.len() >= 8 && ran.command.ends_with(command.as_str()))
         });
         let running = if ours { self.tests_running.take().map(|(_, which)| which) } else { None };
         if results.is_empty() && running.is_none() {
@@ -7113,8 +7116,8 @@ impl Workspace {
             let status = if passed { TestStatus::Passed } else { TestStatus::Failed };
             // The ones run, when it was from the list; any of that name, when typed.
             let targets: Vec<&(PathBuf, String)> = match &running {
-                Some(which) => which.iter().filter(|(_, n)| *n == id).collect(),
-                None => known.iter().filter(|(_, n)| *n == id).collect(),
+                Some(which) => which.iter().filter(|(_, n)| crate::test_at::same_test(n, &id)).collect(),
+                None => known.iter().filter(|(_, n)| crate::test_at::same_test(n, &id)).collect(),
             };
             for target in targets {
                 self.test_status.insert(target.clone(), status);
@@ -9176,6 +9179,11 @@ impl Workspace {
                         .or_else(crate::terminal_watch::account_shell)
                         .unwrap_or_default()
                 };
+                // (An environment without its activate script: nothing typed, rather than an error.)
+                let folder = if cfg!(windows) && !linux { "Scripts" } else { "bin" };
+                if !crate::project_fs::exists(&env.join(folder).join("activate")) {
+                    return None;
+                }
                 // From where the shell starts: short when it's the project's folder.
                 let env = env.strip_prefix(&dir).map(Path::to_path_buf).unwrap_or(env);
                 crate::python_env::activate_command(&env, &shell, linux)
@@ -9227,6 +9235,8 @@ impl Workspace {
                     this.results_waiting.push(ran.clone());
                 } else {
                     this.read_test_results(ran);
+                    // (How they did, shown now: nothing else may draw the window again soon.)
+                    cx.notify();
                 }
                 this.read_reported(ran, cx);
                 // `poetry install`, `poetry env use`: Poetry's environments are kept outside

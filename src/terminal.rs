@@ -196,6 +196,8 @@ struct RunStart {
     seen: bool,
     /// ⌘K cleared what was above: the command's line among it (`line` says what it was).
     cleared: bool,
+    /// The command, when Null typed it (else it's read from the line, after the prompt).
+    typed: Option<String>,
 }
 
 /// Clears a terminal as ⌘K does: the line being typed on to the top (all of it, when it
@@ -470,14 +472,20 @@ impl Shell {
         let size = GridSize { columns: 80, lines: 24 };
         let window_size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
         let pty = tty::new(&options, window_size, 0)?;
+        // (A shell on a server or inside WSL: what runs there isn't this computer's to see,
+        // ssh or wsl.exe is all it would see. Its prompt coming back says a command ended.)
+        let elsewhere = server.is_some() || wsl.is_some();
         #[cfg(unix)]
-        let watch = crate::terminal_watch::Foreground::new(pty.file(), pty.child().id());
+        let watch = if elsewhere { None } else { crate::terminal_watch::Foreground::new(pty.file(), pty.child().id()) };
         #[cfg(not(unix))]
         let watch = None;
         #[cfg(unix)]
-        let pid = Some(pty.child().id() as i32);
+        let pid = (!elsewhere).then(|| pty.child().id() as i32);
         #[cfg(not(unix))]
-        let pid = None;
+        let pid = {
+            let _ = elsewhere;
+            None
+        };
         let (tx, events) = mpsc::unbounded();
         let listener = Listener(tx);
         let config = Config { scrolling_history: SCROLLBACK, ..Default::default() };
@@ -492,13 +500,14 @@ impl Shell {
 impl TerminalView {
     pub fn new(shell: Shell, cx: &mut Context<Self>) -> Self {
         let Shell { term, sender, mut events, size, cwd, watch, pid } = shell;
-        // Once a second, what the shell is running.
-        let watching = watch.map(|watch| {
+        // A few times a second, what the shell is running (where that can be seen; elsewhere,
+        // only whether its prompt is back).
+        let watching = Some({
             cx.spawn(async move |this, cx| {
                 let mut running = None;
                 loop {
                     cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
-                    let now = watch.program();
+                    let now = watch.as_ref().and_then(|watch| watch.program());
                     let group = now.as_ref().map(|(group, _)| *group);
                     let folder = pid.and_then(crate::terminal_watch::folder_of).filter(|f| f.is_dir());
                     let name = now.as_ref().map(|(_, name)| name.clone());
@@ -604,6 +613,9 @@ impl TerminalView {
         if self.settled {
             if self.running.is_none() {
                 self.start_run(Some(command));
+                if let Some(run) = &mut self.run {
+                    run.typed = Some(command.to_string());
+                }
             }
             return self.write(format!("{command}\r").into_bytes());
         }
@@ -636,7 +648,7 @@ impl TerminalView {
                 }
                 this.settled = true;
                 for command in std::mem::take(&mut this.queued) {
-                    this.run = Some(this.run_start(Some(&command)));
+                    this.run = Some(RunStart { typed: Some(command.clone()), ..this.run_start(Some(&command)) });
                     this.write(format!("{command}\r").into_bytes());
                 }
             })
@@ -977,7 +989,15 @@ impl TerminalView {
             let text: String = text.chars().take(grid.columns()).collect();
             ((grid.history_size() as i32 + first).max(0) as usize, text.trim_end().to_string())
         };
-        RunStart { mark, line, folder: self.shell_folder(), at: std::time::Instant::now(), seen: false, cleared: false }
+        RunStart {
+            mark,
+            line,
+            folder: self.shell_folder(),
+            at: std::time::Instant::now(),
+            seen: false,
+            cleared: false,
+            typed: None,
+        }
     }
 
     /// Whether the shell shows its prompt again after `run`: what's before the cursor
@@ -987,6 +1007,12 @@ impl TerminalView {
         let term = self.term.lock();
         let grid = term.grid();
         let cursor = grid.cursor.point;
+        // (Still on the command's own line: it's only been typed. A prompt comes on a line
+        // of its own after.)
+        let line = (grid.history_size() as i32 + cursor.line.0).max(0) as usize;
+        if line <= run.mark {
+            return false;
+        }
         let before = row_text_to(grid, cursor.line, cursor.column.0);
         // What came before the command on its line (`typed_command` gives part of it).
         let typed = typed_command(&run.line);
@@ -1001,7 +1027,8 @@ impl TerminalView {
         let output = self.output_since(&run);
         // (Cleared since: the first line is some output, the command was on `line`.)
         let line = if run.cleared { run.line.as_str() } else { output.lines().next().unwrap_or("") };
-        let command = typed_command(line).to_string();
+        // (Typed by Null: as typed, whatever prompt was before it.)
+        let command = run.typed.clone().unwrap_or_else(|| typed_command(line).to_string());
         let name = program.unwrap_or_else(|| program_of(&command).to_string());
         if name.is_empty() {
             return;

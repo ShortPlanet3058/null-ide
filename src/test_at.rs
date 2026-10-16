@@ -57,7 +57,12 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
                     Some(package) => {
                         format!("{python} -m unittest discover -v -s {}", quote(&relative(root, &package)))
                     }
-                    None => format!("{python} -m unittest discover -v"),
+                    // (Tests in a folder that isn't a package, `tests/` with no __init__.py:
+                    // unittest looks there only when told to; `-m` keeps the top importable.)
+                    None => match loose_tests_folder(root, path) {
+                        Some(folder) => format!("{python} -m unittest discover -v -s {}", quote(&folder)),
+                        None => format!("{python} -m unittest discover -v"),
+                    },
                 });
             }
             Some(match package.filter(|p| p != root) {
@@ -77,6 +82,19 @@ pub fn every_test(language: &str, root: &Path, path: &Path) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The top folder `path` is in under `root` when it isn't a package (no `__init__.py`):
+/// where unittest has to be told to look.
+fn loose_tests_folder(root: &Path, path: &Path) -> Option<String> {
+    let inside = path.strip_prefix(root).ok()?;
+    let first = inside.components().next()?;
+    // (A file at the top: found from there.)
+    if inside.components().count() < 2 {
+        return None;
+    }
+    let folder = root.join(first);
+    (!crate::project_fs::exists(&folder.join("__init__.py"))).then(|| relative(root, &folder))
 }
 
 /// `command` run in the package at `project`: in a subshell, so the terminal stays where it
@@ -318,6 +336,13 @@ fn js_title(node: Node, text: &str) -> Option<String> {
 
 /// What a test run printed, read: each test's name as `Found` has it, and whether it passed.
 /// cargo test, go test -v, pytest -v, and jest, vitest or node's runner.
+/// Whether a run reporting `reported` means the test known as `known`: the same, or the
+/// same from a folder further in (unittest run in `tests/` says `test_cart.py::…` of
+/// what's `tests/test_cart.py::…` from the project).
+pub fn same_test(known: &str, reported: &str) -> bool {
+    known == reported || known.strip_suffix(reported).is_some_and(|before| before.ends_with(['/', '\\']))
+}
+
 pub fn results(output: &str) -> Vec<(String, bool)> {
     let mut found: Vec<(String, bool)> = Vec::new();
     // jest's and node's suites, by how far in they're written: what a test's title follows.
@@ -849,6 +874,13 @@ mod tests {
     }
 
     #[test]
+    fn a_test_reported_from_a_folder_further_in_is_the_same() {
+        assert!(same_test("tests/test_cart.py::CartTest::test_total", "test_cart.py::CartTest::test_total"));
+        assert!(same_test("a::b", "a::b"));
+        assert!(!same_test("tests/xtest_cart.py::T::t", "test_cart.py::T::t"));
+    }
+
+    #[test]
     fn rust_tests_by_their_module_path() {
         let text = "fn helper() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds_up() {\n        assert!(true);\n    }\n\n    #[tokio::test]\n    async fn waits() {}\n}\n";
         let root = project("rust", &[("Cargo.toml", "[package]\n"), ("src/editor/conflicts.rs", text)]);
@@ -1027,7 +1059,11 @@ mod tests {
         let root = project("py-unit", &[("tests/test_cart.py", unit)]);
         let run = at("Python", &root, "tests/test_cart.py", unit, "assertTrue").unwrap();
         assert_eq!(run.command, "python3 -m unittest -v tests.test_cart.TestCart.test_total");
+        // (`tests/` isn't a package: unittest told where to look.)
         let every = every_test("Python", &root, &root.join("tests/test_cart.py")).unwrap();
+        assert_eq!(every, "python3 -m unittest discover -v -s tests");
+        let packaged = project("py-unit-package", &[("tests/__init__.py", ""), ("tests/test_cart.py", unit)]);
+        let every = every_test("Python", &packaged, &packaged.join("tests/test_cart.py")).unwrap();
         assert_eq!(every, "python3 -m unittest discover -v");
         // The same file in a project that uses pytest: pytest.
         let root = project(

@@ -814,6 +814,21 @@ fn find_in_linux(linux: &Linux, server: &Server) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Installs Python's server on a real server (Node.js along, if it has none), as
+    /// Install does for a folder there: `NULL_TEST_SERVER=me@box cargo test
+    /// installs_on_a_server -- --ignored` (keys, an agent or a shared connection: no
+    /// questions asked in tests).
+    #[test]
+    #[ignore]
+    fn installs_on_a_server() {
+        let Ok(host) = std::env::var("NULL_TEST_SERVER") else { return };
+        let root = crate::remote::path(&host, "/tmp");
+        let server = for_path(Path::new("a.py")).unwrap();
+        install_for(server, &root).unwrap();
+        let found = find_for(server, &root).unwrap();
+        println!("{} is at {}", server.name, found.display());
+    }
+
     #[test]
     fn every_language_finds_its_server() {
         assert_eq!(for_path(Path::new("a.py")).map(|s| s.name), Some("pyright"));
