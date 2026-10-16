@@ -25,6 +25,7 @@ mod editor;
 mod element;
 mod emmet;
 mod encoding;
+mod file_icons;
 mod file_style;
 mod file_tree;
 mod find_bar;

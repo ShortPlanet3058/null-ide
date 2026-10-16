@@ -762,6 +762,12 @@ impl SettingsPanel {
             ),
             Self::heading("Cursor", &theme),
             Self::row(
+                "Smooth caret and scrolling",
+                Some("The cursor glides to where it goes and the text eases when it scrolls; off, both jump"),
+                Self::toggle("smooth-motion", s.smooth_motion, &theme, cx, |s| s.smooth_motion = !s.smooth_motion),
+                &theme,
+            ),
+            Self::row(
                 "Blinking cursor",
                 Some("Blinks for a while after you stop typing, then stays lit"),
                 Self::toggle("caret-blink", s.caret_blink, &theme, cx, |s| s.caret_blink = !s.caret_blink),

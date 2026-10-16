@@ -7,7 +7,7 @@ use crate::fonts::Fonts;
 use crate::git;
 use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
 use crate::lsp_store::{LspStore, Readiness};
-use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
+use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleSmoothMotion, ToggleWordWrap};
 use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, PathFor, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::AutoSave;
@@ -1022,6 +1022,7 @@ impl Workspace {
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) | FileTreeEvent::Created(path) => this.open_file(path.clone(), window, cx),
+                FileTreeEvent::OpenToTheSide(path) => this.open_to_the_side(path.clone(), window, cx),
                 FileTreeEvent::Preview(path) => {
                     this.open_file_passing(path.clone(), window, cx);
                     window.focus(&this.tree.focus_handle(cx));
@@ -3310,6 +3311,21 @@ impl Workspace {
         self.add_twin(&source, other, window, cx);
     }
 
+    /// Open to the Side (⌥-click in the files): the file in the other half of the window,
+    /// split if it isn't; already open on this side, a second copy there.
+    fn open_to_the_side(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let other = if self.is_split() { 1 - self.focused_side().min(1) } else { 1 };
+        if !self.is_split() {
+            self.stacked = false;
+        }
+        let open_here = self.tabs.iter().find(|t| t.side != other && t.editor.read(cx).path() == Some(path.as_path()));
+        let open_there = self.tabs.iter().any(|t| t.side == other && t.editor.read(cx).path() == Some(path.as_path()));
+        match open_here.map(|t| t.editor.clone()) {
+            Some(source) if !open_there => self.add_twin(&source, other, window, cx),
+            _ => self.open_file_on(path, Some(other), window, cx),
+        }
+    }
+
     fn add_twin(&mut self, source: &Entity<Editor>, side: usize, window: &mut Window, cx: &mut Context<Self>) {
         // (Its file still being read: nothing to share yet.)
         if source.read(cx).is_opening() {
@@ -5228,6 +5244,11 @@ impl Workspace {
                 View,
                 toggle(settings.fade_bars_while_typing, "Stop Fading Bars While Typing", "Fade Bars While Typing"),
                 Box::new(ToggleFadeWhileTyping),
+            ),
+            (
+                View,
+                toggle(settings.smooth_motion, "Stop Smooth Caret and Scrolling", "Smooth Caret and Scrolling"),
+                Box::new(ToggleSmoothMotion),
             ),
             (Appearance, theme_label(ThemeName::Null), theme_action(ThemeName::Null)),
             (Appearance, theme_label(ThemeName::Ash), theme_action(ThemeName::Ash)),
@@ -7641,6 +7662,10 @@ impl Workspace {
 
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
+    }
+
+    fn toggle_smooth_motion(&mut self, _: &ToggleSmoothMotion, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.smooth_motion = !s.smooth_motion);
     }
 
     /// ⌃⌥Z (⌥Z off a Mac): wrapping on or off for the kind of file at hand, prose or code.
@@ -10185,6 +10210,14 @@ impl Workspace {
                         }
                     }));
                 let (name, folder) = labels[ix].clone();
+                // Its language's logo, as the files have it: quieter than its name.
+                let logo = editor.path().and_then(crate::file_icons::for_path).map(|logo| {
+                    svg().path(logo).size(px(11.)).flex_none().text_color(if active || resting {
+                        theme.muted
+                    } else {
+                        theme.faint
+                    })
+                });
                 let dragged = DraggedTab { editor: tab.editor.clone(), label: name.clone().into() };
                 div()
                     .id(("tab", ix))
@@ -10226,7 +10259,9 @@ impl Workspace {
                         div()
                             .min_w_0()
                             .flex()
+                            .items_center()
                             .gap(px(6.))
+                            .children(logo)
                             // Deleted on disk: struck through, until saved back.
                             .child(
                                 div()
@@ -10239,14 +10274,7 @@ impl Workspace {
                             )
                             // Can't be written (its permissions): a lock, faintly.
                             .when(read_only, |d| {
-                                d.child(
-                                    svg()
-                                        .path("icons/lock.svg")
-                                        .size(px(11.))
-                                        .flex_none()
-                                        .mt(px(3.))
-                                        .text_color(theme.faint),
-                                )
+                                d.child(svg().path("icons/lock.svg").size(px(11.)).flex_none().text_color(theme.faint))
                             })
                             .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
                     )
@@ -12230,6 +12258,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
+            .on_action(cx.listener(Self::toggle_smooth_motion))
             .on_action(cx.listener(Self::toggle_word_wrap))
             .on_action(cx.listener(Self::toggle_autocomplete))
             .on_action(cx.listener(Self::toggle_terminal))

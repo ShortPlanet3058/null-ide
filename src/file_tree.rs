@@ -156,6 +156,8 @@ impl Render for EntryGhost {
 pub enum FileTreeEvent {
     /// Open and move to the file (double-click, Enter).
     Open(PathBuf),
+    /// Open the file in the other half of the window (⌥-click, Open to the Side).
+    OpenToTheSide(PathBuf),
     /// Two files picked, compared: the first against the second.
     Compare(PathBuf, PathBuf),
     /// Show the file but keep the keyboard in the tree (single click, arrows),
@@ -320,6 +322,7 @@ fn default_browser() -> Option<std::path::PathBuf> {
 #[derive(Clone, Copy, PartialEq)]
 enum MenuItem {
     Open,
+    OpenToTheSide,
     OpenInBrowser,
     /// In the app the system opens its kind with (Preview, Numbers...).
     OpenWithApp,
@@ -349,6 +352,7 @@ impl MenuItem {
     fn label(self) -> &'static str {
         match self {
             MenuItem::Open => "Open",
+            MenuItem::OpenToTheSide => "Open to the Side",
             MenuItem::OpenInBrowser => "Open in Browser",
             MenuItem::OpenWithApp => "Open with Default App",
             MenuItem::NewFile => "New File…",
@@ -916,6 +920,14 @@ impl FileTree {
         cx: &mut Context<Self>,
     ) {
         let Some(entry) = self.entry_at(ix).cloned() else { return };
+        // ⌥-click on a file: in the other half of the window.
+        if modifiers.alt && !entry.is_dir && !modifiers.secondary() && !modifiers.shift {
+            self.also.clear();
+            self.selected = Some(entry.path.clone());
+            self.menu = None;
+            cx.emit(FileTreeEvent::OpenToTheSide(entry.path));
+            return cx.notify();
+        }
         // ⌘-click picks one more (or lets one go); ⇧-click, all from the one picked to here.
         if modifiers.secondary() || modifiers.shift {
             self.menu = None;
@@ -988,6 +1000,22 @@ impl FileTree {
             self.also.clear();
             self.selected = self.entry_at(ix).map(|e| e.path.clone());
             self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        // Nothing shown by that name: a file in a closed folder (the project's files as ⌘P
+        // lists them), the one nearest the top, its folders opened.
+        let deeper = crate::palette::files_listed(&self.roots)
+            .into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().starts_with(prefix)))
+            .min_by_key(|p| (p.components().count(), p.clone()));
+        if let Some(path) = deeper {
+            self.expand_to(&path);
+            self.also.clear();
+            self.selected = Some(path);
+            self.rebuild();
+            self.reveal_selected();
             cx.stop_propagation();
             cx.notify();
         }
@@ -1552,7 +1580,7 @@ impl FileTree {
                 items
             }
             Some(e) => {
-                let mut items = vec![Open];
+                let mut items = vec![Open, OpenToTheSide];
                 if opens_in_browser(&e.path) {
                     items.push(OpenInBrowser);
                 }
@@ -1604,6 +1632,11 @@ impl FileTree {
             MenuItem::Open => {
                 if let Some(entry) = target {
                     cx.emit(FileTreeEvent::Open(entry.path));
+                }
+            }
+            MenuItem::OpenToTheSide => {
+                if let Some(entry) = target {
+                    cx.emit(FileTreeEvent::OpenToTheSide(entry.path));
                 }
             }
             MenuItem::OpenInBrowser => {
@@ -1713,7 +1746,7 @@ impl FileTree {
         let row = &self.rows[ix];
         // Rows sit inset from the sidebar's edges, so their highlight has rounded ends.
         let indent = px(10. + row.depth as f32 * INDENT);
-        let marker = |is_dir: bool, turn: f32, color: gpui::Hsla, dot: gpui::Hsla| {
+        let marker = |path: &Path, is_dir: bool, turn: f32, color: gpui::Hsla, dot: gpui::Hsla| {
             if is_dir {
                 div().size(px(14.)).flex().items_center().justify_center().child(
                     svg()
@@ -1723,12 +1756,8 @@ impl FileTree {
                         .with_transformation(Transformation::rotate(radians(turn * std::f32::consts::FRAC_PI_2))),
                 )
             } else {
-                div()
-                    .size(px(14.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(div().size(px(5.)).rounded(px(2.)).bg(dot))
+                // (Its language's logo, in the dot's colour, when it has one.)
+                div().size(px(14.)).flex().items_center().justify_center().child(crate::file_icons::marker(path, dot))
             }
         };
         // The error (like "already exists") sits at the end of the field, in red.
@@ -1771,7 +1800,7 @@ impl FileTree {
             RowKind::NewItem { is_dir } => {
                 let edit = self.edit.as_ref().expect("a new-item row exists only while editing");
                 base.key_context("TreeEdit")
-                    .child(marker(*is_dir, 0., theme.muted, theme.faint))
+                    .child(marker(Path::new(""), *is_dir, 0., theme.muted, theme.faint))
                     .child(name_field(edit))
                     .into_any_element()
             }
@@ -1831,7 +1860,13 @@ impl FileTree {
                     .when(active, |r| r.bg(theme.accent_soft))
                     .when(selected && !active, |r| r.bg(theme.hairline))
                     .when(!active && !selected, |r| r.hover(|s| s.bg(ui::hover(theme))))
-                    .child(marker(entry.is_dir, turn, if active { theme.foreground } else { theme.muted }, dot));
+                    .child(marker(
+                        &entry.path,
+                        entry.is_dir,
+                        turn,
+                        if active { theme.foreground } else { theme.muted },
+                        dot,
+                    ));
                 if editing_this(&path) {
                     let edit = self.edit.as_ref().unwrap();
                     row_el.key_context("TreeEdit").child(name_field(edit)).into_any_element()

@@ -1215,7 +1215,7 @@ impl Palette {
         };
         let dim = theme.muted;
         let accent = if selected { theme.caret } else { theme.faint };
-        let file_marker = || div().size(px(5.)).rounded(px(2.)).bg(accent).into_any_element();
+        let file_marker = |path: &Path| crate::file_icons::marker(path, accent);
         let (marker, label, right): (AnyElement, AnyElement, Option<AnyElement>) = match row.item {
             Item::Command(i) => {
                 let command = &self.commands[i];
@@ -1253,7 +1253,7 @@ impl Palette {
                 let marked = highlights_in(&name, file.name_start);
                 let folder = file.relative[..file.name_start].trim_end_matches(['/', '\\']).to_string();
                 (
-                    file_marker(),
+                    file_marker(&file.path),
                     StyledText::new(name).with_highlights(marked).into_any_element(),
                     (!folder.is_empty()).then(|| div().text_color(dim).child(folder).into_any_element()),
                 )
@@ -1305,7 +1305,8 @@ impl Palette {
                     None => path.parent().map(crate::remote::shown).unwrap_or_default(),
                 };
                 (
-                    file_marker(),
+                    // (A folder: no language.)
+                    file_marker(Path::new("")),
                     StyledText::new(name).with_highlights(marked).into_any_element(),
                     Some(div().text_color(dim).child(place).into_any_element()),
                 )
@@ -1591,6 +1592,19 @@ fn rank_files(files: &[FileEntry], query: &str, recent: &HashSet<PathBuf>) -> Ve
 /// The project's files as ⌘P last listed them (its folders, the `hide` setting then).
 type Listed = ((Vec<PathBuf>, Vec<String>), Vec<FileEntry>);
 static LISTED: std::sync::Mutex<Option<Listed>> = std::sync::Mutex::new(None);
+
+/// The project's files as ⌘P last listed them, when it listed these folders (else none).
+pub(crate) fn files_listed(roots: &[PathBuf]) -> Vec<PathBuf> {
+    LISTED
+        .lock()
+        .ok()
+        .and_then(|last| {
+            last.as_ref()
+                .filter(|((r, _), _)| r == roots)
+                .map(|(_, files)| files.iter().map(|f| f.path.clone()).collect())
+        })
+        .unwrap_or_default()
+}
 
 /// The project's files listed a moment after it opens (in the background), so the first
 /// ⌘P shows them at once.

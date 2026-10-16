@@ -441,6 +441,8 @@ pub struct Settings {
     pub sidebar_visible: bool,
     /// Dim the title bar, sidebar and status bar while typing.
     pub fade_bars_while_typing: bool,
+    /// The caret glides to where it goes and the text eases when it scrolls; off, both jump.
+    pub smooth_motion: bool,
     /// Say when a newer Null is out (once a day, Null asks GitHub its latest version). Off
     /// until the person turns it on.
     pub check_for_updates: bool,
@@ -549,6 +551,7 @@ impl Default for Settings {
             whitespace: ShowWhitespace::Selection,
             sidebar_visible: true,
             fade_bars_while_typing: true,
+            smooth_motion: true,
             check_for_updates: false,
             word_wrap: false,
             wrap_prose: true,
@@ -1653,6 +1656,12 @@ mod tests {
             let off = Settings { match_appearance: false, ..s };
             assert_eq!(off.shown_theme(cx), ThemeName::Null);
         });
+    }
+
+    #[test]
+    fn the_caret_glides_and_the_text_eases_unless_told_not_to() {
+        assert!(Settings::default().smooth_motion);
+        assert!(!Settings::parse(r#"{ "smooth_motion": false }"#).unwrap().smooth_motion);
     }
 
     #[test]
