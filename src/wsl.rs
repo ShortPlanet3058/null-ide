@@ -119,6 +119,31 @@ pub fn home(distro: &str) -> Option<String> {
     home
 }
 
+/// Whether `distro` runs on WSL 1 (asked once): its kernel is Windows' own translation,
+/// which some Linux programs don't start on (Node.js's builds since Node 20).
+pub fn is_wsl1(distro: &str) -> bool {
+    use std::sync::Mutex;
+    static ASKED: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+    if let Some((_, one)) = ASKED.lock().ok().and_then(|a| a.iter().find(|(d, _)| d == distro).cloned()) {
+        return one;
+    }
+    let one = command(distro, None, "uname", &["-r"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| kernel_is_wsl1(&String::from_utf8_lossy(&o.stdout)));
+    if let Ok(mut asked) = ASKED.lock() {
+        asked.push((distro.to_string(), one));
+    }
+    one
+}
+
+/// WSL 1's kernel names itself "4.4.0-26100-Microsoft"; WSL 2's is a real Linux,
+/// "6.6.87.2-microsoft-standard-WSL2".
+fn kernel_is_wsl1(release: &str) -> bool {
+    release.trim().ends_with("-Microsoft")
+}
+
 /// The folder a shell in `distro` says it's in, in its title (bash's `me@host: ~/proj`), as
 /// Windows reaches it.
 pub fn folder_in_title(distro: &str, title: &str) -> Option<PathBuf> {
@@ -206,5 +231,12 @@ mod tests {
         let listed: Vec<u8> = "Ubuntu\r\nDebian\r\n\r\n".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         assert_eq!(names_listed(&listed), ["Ubuntu", "Debian"]);
         assert!(names_listed(&[]).is_empty());
+    }
+
+    #[test]
+    fn tells_wsl_1_by_its_kernel() {
+        assert!(kernel_is_wsl1("4.4.0-26100-Microsoft\n"));
+        assert!(!kernel_is_wsl1("6.6.87.2-microsoft-standard-WSL2\n"));
+        assert!(!kernel_is_wsl1(""));
     }
 }

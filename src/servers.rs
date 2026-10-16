@@ -633,6 +633,12 @@ pub fn install_for(server: &Server, root: &Path) -> Result<(), String> {
         return Err("Nothing is installed in a QA run.".into());
     }
     can_install_for(server, root)?;
+    if matches!(server.install, Install::Npm(_)) && crate::wsl::is_wsl1(&wsl.distro) {
+        return Err(format!(
+            "{} runs on Node.js, which doesn't run on WSL 1. Move {} to WSL 2: wsl --set-version {} 2",
+            server.name, wsl.distro, wsl.distro
+        ));
+    }
     let script = install_script(server)?;
     let output = crate::wsl::command(&wsl.distro, None, "sh", &["-c", &script])
         .output()
@@ -666,15 +672,29 @@ fn fetch_checked(url: &str, sha256: &str) -> String {
     )
 }
 
+/// `untar FILE FOLDER STRIP` in sh: tar, else Python's (Ubuntu 26.04's tar can't write
+/// files on WSL 1: "Function not implemented").
+const UNTAR: &str = r#"untar() { tar xzf "$1" -C "$2" --strip-components="$3" 2>/dev/null || python3 -c 'import sys, tarfile
+f, d, s = sys.argv[1], sys.argv[2], int(sys.argv[3])
+cut = lambda p: "/".join(p.split("/")[s:])
+with tarfile.open(f) as t:
+    ms = []
+    for m in t.getmembers():
+        if cut(m.name):
+            m.name = cut(m.name)
+            if m.islnk(): m.linkname = cut(m.linkname)
+            ms.append(m)
+    t.extractall(d, members=ms, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))' "$1" "$2" "$3"; }; "#;
+
 /// The shell script that installs `server` inside WSL.
 fn install_script(server: &Server) -> Result<String, String> {
-    let home = "N=\"$HOME/.local/share/null\"; mkdir -p \"$N/servers\"; ";
+    let home = format!("N=\"$HOME/.local/share/null\"; mkdir -p \"$N/servers\"; {UNTAR}");
     Ok(match server.install {
         Install::Npm(packages) => {
             let node = crate::node_runtime::linux_build();
             format!(
                 "set -e; {home}if ! command -v npm >/dev/null 2>&1; then mkdir -p \"$N/node\"; {}\
-                 tar xzf \"$t\" -C \"$N/node\" --strip-components=1; rm -f \"$t\"; fi; \
+                 untar \"$t\" \"$N/node\" 1; rm -f \"$t\"; fi; \
                  cd \"$N/servers\"; npm install --prefix . --no-audit --no-fund --loglevel=error {}",
                 fetch_checked(node.url, node.sha256),
                 packages.join(" ")
@@ -687,7 +707,7 @@ fn install_script(server: &Server) -> Result<String, String> {
             let unpack = match asset.packed {
                 Packed::Plain => format!("cp \"$t\" {folder}/{program}; chmod +x {folder}/{program}"),
                 Packed::Gz => format!("gunzip -c \"$t\" > {folder}/{program}; chmod +x {folder}/{program}"),
-                Packed::TarGz => format!("tar xzf \"$t\" -C {folder}"),
+                Packed::TarGz => format!("untar \"$t\" {folder} 0"),
                 Packed::Zip => return Err(format!("There's no Linux build of {}.", server.name)),
             };
             let rustup = match server.install {
