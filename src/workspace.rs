@@ -3919,7 +3919,7 @@ impl Workspace {
         // Another project's tests: looked for again, if they show.
         self.tests = None;
         self.tests_task = None;
-        self.testable = !crate::remote::is_remote(&path) && Self::looks_testable(&path);
+        self.testable = Self::looks_testable(&path);
         self.results_waiting.clear();
         // What was debugged there isn't Debug Again here, nor a build for it run here.
         self.debugged_test = None;
@@ -7592,7 +7592,7 @@ impl Workspace {
             "spec",
             "__tests__",
         ];
-        let signs = |dir: &Path| SIGNS.iter().any(|name| dir.join(name).exists());
+        let signs = |dir: &Path| SIGNS.iter().any(|name| crate::project_fs::exists(&dir.join(name)));
         let test_file = |name: &str| {
             name.starts_with("test_") && name.ends_with(".py")
                 || name.ends_with("_test.py")
@@ -7603,17 +7603,13 @@ impl Workspace {
         if signs(root) {
             return true;
         }
-        let Ok(entries) = std::fs::read_dir(root) else { return false };
-        entries.flatten().take(500).any(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(entries) = crate::project_fs::read_dir(root) else { return false };
+        entries.into_iter().take(500).any(|(path, meta)| {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             if name.starts_with('.') || name == "node_modules" || name == "target" {
                 return false;
             }
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => signs(&entry.path()),
-                Ok(_) => test_file(&name),
-                Err(_) => false,
-            }
+            if meta.is_dir() { signs(&path) } else { test_file(&name) }
         })
     }
 

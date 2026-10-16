@@ -252,6 +252,8 @@ pub fn python_for(root: &Path, path: &Path) -> String {
         Some(env) => {
             let python = python_in(&env);
             let relative = python.strip_prefix(root).unwrap_or(&python).to_string_lossy().into_owned();
+            // (Inside WSL or on a server, its shell takes `/`.)
+            let relative = if on_linux(root) { relative.replace('\\', "/") } else { relative };
             crate::shell::program(&relative, crate::shell::kind())
         }
         // (On Windows `python3` is often only the Store's stand-in: `python` there.)
