@@ -60,6 +60,7 @@ mod outline;
 mod palette;
 mod preview;
 mod problem_matcher;
+mod project_fs;
 mod project_index;
 mod project_search;
 mod punctuation;

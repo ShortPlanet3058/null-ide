@@ -357,13 +357,15 @@ fn forget_in(file: &Path, root: &Path) {
     }
 }
 
-/// Projects opened lately, most recent first, that are still there.
+/// Projects opened lately, most recent first, that are still there (a server's are kept:
+/// it's asked when one is opened).
 pub fn recent_projects() -> Vec<PathBuf> {
     let Some(file) = recent_projects_file() else { return Vec::new() };
-    read_recent(&file).into_iter().filter(|p| p.is_dir()).collect()
+    read_recent(&file).into_iter().filter(|p| crate::remote::is_remote(p) || p.is_dir()).collect()
 }
 
-/// The project open when Null last closed, if it's still there.
+/// The project open when Null last closed, if it's still there. Not one on a server: Null
+/// would wait on the network to start (it's in Open Recent).
 pub fn last_project() -> Option<PathBuf> {
     let path = PathBuf::from(std::fs::read_to_string(last_project_file()?).ok()?.trim());
     path.is_dir().then_some(path)

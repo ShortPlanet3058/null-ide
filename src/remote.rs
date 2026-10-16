@@ -343,9 +343,45 @@ fn server(host: &str) -> Arc<Server> {
     server
 }
 
+/// Servers that couldn't be reached lately, and why: asked again only after a while, so
+/// a server that's down doesn't hold up everything that asks it.
+static UNREACHABLE: Mutex<Vec<(String, std::time::Instant, String)>> = Mutex::new(Vec::new());
+
+const RETRY_AFTER: Duration = Duration::from_secs(20);
+
+fn unreachable(host: &str) -> Option<String> {
+    let mut failed = UNREACHABLE.lock().unwrap_or_else(|e| e.into_inner());
+    failed.retain(|(_, when, _)| when.elapsed() < RETRY_AFTER);
+    failed.iter().find(|(h, ..)| h == host).map(|(.., why)| why.clone())
+}
+
+/// Connects to `host` now (asked for by the person: tried again even if it just failed),
+/// and says its home folder.
+pub fn connect(host: &str) -> io::Result<String> {
+    UNREACHABLE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(h, ..)| h != host);
+    home(host)
+}
+
 /// Runs `script` (sh) on `host`, in the home folder, its input empty. Slow (the network):
 /// off the main thread when it can be. A connection that ended is made again, once.
 pub fn run(host: &str, script: &str) -> io::Result<Output> {
+    if let Some(why) = unreachable(host) {
+        return Err(io::Error::new(io::ErrorKind::NotConnected, why));
+    }
+    let result = run_now(host, script);
+    if let Err(error) = &result
+        && matches!(error.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::BrokenPipe)
+    {
+        UNREACHABLE.lock().unwrap_or_else(|e| e.into_inner()).push((
+            host.to_string(),
+            std::time::Instant::now(),
+            error.to_string(),
+        ));
+    }
+    result
+}
+
+fn run_now(host: &str, script: &str) -> io::Result<Output> {
     let server = server(host);
     // A free session, else the first when it's free.
     let mut session = match server.sessions.iter().find_map(|s| s.try_lock().ok()) {
@@ -380,6 +416,44 @@ fn run_ok(host: &str, script: &str) -> io::Result<Output> {
 pub fn disconnect(host: &str) {
     let mut servers = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
     servers.retain(|(h, _)| h != host);
+}
+
+/// The servers to offer for a folder: those used before (most recent first), then those
+/// named in `~/.ssh/config` (not its patterns).
+pub fn hosts_to_offer() -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    for project in crate::session::recent_projects() {
+        if let Some(remote) = of(&project)
+            && !hosts.contains(&remote.host)
+        {
+            hosts.push(remote.host);
+        }
+    }
+    let config = crate::tools::home_dir().and_then(|h| std::fs::read_to_string(h.join(".ssh").join("config")).ok());
+    for host in config.as_deref().map(hosts_in_config).unwrap_or_default() {
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
+/// The names `Host` lines give in an ssh config, but patterns (`*`, `?`, `!`).
+fn hosts_in_config(config: &str) -> Vec<String> {
+    let mut hosts = Vec::new();
+    for line in config.lines() {
+        let line = line.trim();
+        let Some((word, rest)) = line.split_once(|c: char| c.is_whitespace() || c == '=') else { continue };
+        if !word.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        for name in rest.split_whitespace() {
+            if !name.contains(['*', '?', '!']) && !hosts.iter().any(|h| h == name) {
+                hosts.push(name.to_string());
+            }
+        }
+    }
+    hosts
 }
 
 /// What `stat` says of a file: its kind, size, last change and whether it runs.
@@ -536,6 +610,12 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout), "$HOME `x` it's \"q\"");
+    }
+
+    #[test]
+    fn offers_the_hosts_an_ssh_config_names() {
+        let config = "Host box dev-*\n  HostName 10.0.0.2\nhost=build\nMatch all\nHost *\n  User me\nHost box\n";
+        assert_eq!(hosts_in_config(config), ["box", "build"]);
     }
 
     #[test]
