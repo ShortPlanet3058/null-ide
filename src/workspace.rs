@@ -20,9 +20,9 @@ use crate::ui::px;
 use crate::welcome::{Welcome, WelcomeEvent};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, ScrollStrategy,
-    SharedString, Subscription, Task, UniformListScrollHandle, Window, WindowControlArea, actions, div, prelude::*,
-    relative, svg, uniform_list,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, SharedString,
+    Subscription, Task, UniformListScrollHandle, Window, WindowControlArea, actions, div, prelude::*, relative, svg,
+    uniform_list,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -160,8 +160,8 @@ actions!(
         ShowOutline,
         ShowChanges,
         ImportVsCodeSettings,
-        GoToOutlineMatch,
-        ClearOutlineFilter,
+        /// Esc in project search: what's typed cleared, or (nothing typed) back to the files.
+        LeaveSearch,
         ShowTests,
         ToggleAutocomplete,
         ToggleTerminal,
@@ -257,8 +257,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-f11", StepOut, ctx),
         KeyBinding::new("enter", AddWatch, Some("DebugWatch")),
         KeyBinding::new("enter", EvaluateInDebugger, Some("DebugConsole")),
-        KeyBinding::new("enter", GoToOutlineMatch, Some("OutlineFilter")),
-        KeyBinding::new("escape", ClearOutlineFilter, Some("OutlineFilter")),
+        KeyBinding::new("escape", LeaveSearch, Some("ProjectSearch")),
         KeyBinding::new("enter", ConfirmTerminalName, Some("TerminalName")),
         KeyBinding::new("escape", CancelTerminalName, Some("TerminalName")),
         KeyBinding::new("f8", NextProblem, ctx),
@@ -812,8 +811,9 @@ pub struct Workspace {
     project_search: Entity<ProjectSearch>,
     /// On while the sidebar shows project search instead of files.
     sidebar_search: Transition,
-    /// The sidebar shows the open file's outline instead of the files (when not searching).
-    sidebar_outline: bool,
+    /// The open file's outline as last given to the files (its editor, text and caret's
+    /// symbol), so it's given again only when that changes.
+    tree_outline: Option<(gpui::EntityId, u64, Option<usize>)>,
     /// The sidebar shows the project's tests (see `crate::test_at::discover`).
     sidebar_tests: bool,
     /// The sidebar shows the Changes tab (git).
@@ -851,11 +851,6 @@ pub struct Workspace {
     /// (a big file's isn't worked out again on every keystroke).
     outline_at: Instant,
     outline_later: Option<Task<()>>,
-    outline_scroll: UniformListScrollHandle,
-    /// The item the caret was in when last drawn: the list follows it to another.
-    outline_followed: Option<(gpui::EntityId, usize)>,
-    /// The Outline view's filter line.
-    outline_filter: Entity<crate::text_input::TextInput>,
     tabs: Vec<Tab>,
     /// The tab with the keyboard: the one shown on the side being worked in.
     active: Option<usize>,
@@ -1055,6 +1050,11 @@ impl Workspace {
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) | FileTreeEvent::Created(path) => this.open_file(path.clone(), window, cx),
                 FileTreeEvent::OpenToTheSide(path) => this.open_to_the_side(path.clone(), window, cx),
+                FileTreeEvent::GoToLine(path, row) => {
+                    let (path, row) = (path.clone(), *row);
+                    this.open_file(path, window, cx);
+                    this.go_to_outline_row(row, window, cx);
+                }
                 FileTreeEvent::Preview(path) => {
                     this.open_file_passing(path.clone(), window, cx);
                     window.focus(&this.tree.focus_handle(cx));
@@ -1183,7 +1183,7 @@ impl Workspace {
             lsp,
             project_search,
             sidebar_search: Transition::new(false),
-            sidebar_outline: false,
+            tree_outline: None,
             sidebar_tests: false,
             sidebar_git: false,
             git_view,
@@ -1204,9 +1204,6 @@ impl Workspace {
             outline: None,
             outline_at: Instant::now(),
             outline_later: None,
-            outline_scroll: UniformListScrollHandle::new(),
-            outline_followed: None,
-            outline_filter: cx.new(|cx| crate::text_input::TextInput::new("Filter", cx)),
             tabs: Vec::new(),
             shown: [None, None],
             split_ratio: 0.5,
@@ -1314,16 +1311,6 @@ impl Workspace {
         .detach();
         let git_events = cx.subscribe_in(&workspace.git_view, window, Self::git_view_event);
         workspace._subscriptions.push(git_events);
-        // Typed in the Outline's filter: the list shows what fits.
-        let filter_changes =
-            cx.subscribe(&workspace.outline_filter, |this, filter, _: &crate::text_input::TextInputEvent, cx| {
-                // Emptied (by ⌫ too): the list follows the caret again.
-                if filter.read(cx).text().is_empty() {
-                    this.outline_followed = None;
-                }
-                cx.notify()
-            });
-        workspace._subscriptions.push(filter_changes);
         workspace._subscriptions.push(debugger_events);
         workspace._subscriptions.push(debugger_changes);
         // A key while a tab's or the text's menu is open: it closes, as menus do, and does
@@ -1958,7 +1945,6 @@ impl Workspace {
     /// The Git sidebar tab clicked: the Git view as it was left (its tab kept).
     fn show_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_git = true;
-        self.sidebar_outline = false;
         self.sidebar_tests = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
@@ -6833,7 +6819,6 @@ impl Workspace {
     }
 
     fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_outline = false;
         self.sidebar_tests = false;
         self.sidebar_git = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
@@ -6842,28 +6827,54 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Show Outline: the open file's functions and types, under it in the files (shown
+    /// there already: hidden again).
     fn show_outline(&mut self, _: &ShowOutline, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_outline(window, cx);
-        // Typing then narrows it (Esc goes back to the text), when there's an outline.
-        let has_outline = self
-            .active_editor()
-            .cloned()
-            .is_some_and(|editor| self.outline_items(&editor, 1_000_000, cx).is_some_and(|items| !items.is_empty()));
-        if has_outline {
-            window.focus(&self.outline_filter.focus_handle(cx));
+        let files_shown = !self.sidebar_search.on && !self.sidebar_tests && !self.sidebar_git;
+        if files_shown && cx.global::<Settings>().sidebar_visible && self.tree.read(cx).outline_open() {
+            return self.tree.update(cx, |tree, cx| tree.show_outline(false, cx));
         }
+        self.open_outline(window, cx);
     }
 
-    /// The Outline in the sidebar (its tab clicked: the text keeps the keys).
+    /// The files shown, with the open file's outline opened under it.
     fn open_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_outline = true;
-        self.sidebar_tests = false;
-        self.sidebar_git = false;
-        self.outline_followed = None;
-        self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
-        settings::update(cx, |s| s.sidebar_visible = true);
-        self.leave_hidden_focus(window, cx);
-        cx.notify();
+        self.show_files(&ShowFiles, window, cx);
+        self.sync_tree_outline(cx);
+        self.tree.update(cx, |tree, cx| tree.show_outline(true, cx));
+    }
+
+    /// The open file's outline, given to the files when it changed (its text, or the symbol
+    /// the caret's in).
+    fn sync_tree_outline(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned().filter(|e| e.read(cx).path().is_some()) else {
+            if self.tree_outline.take().is_some() {
+                self.tree.update(cx, |tree, cx| tree.set_outline(None, Vec::new(), None, cx));
+            }
+            return;
+        };
+        let (id, revision, row, path) = {
+            let e = editor.read(cx);
+            (editor.entity_id(), e.buffer.revision(), e.caret_point().0, e.path().map(Path::to_path_buf))
+        };
+        let items = self.outline_items(&editor, 1_000_000, cx);
+        let current = items.as_ref().and_then(|items| crate::outline::current(items, row));
+        let key = Some((id, revision, current));
+        if self.tree_outline == key {
+            return;
+        }
+        self.tree_outline = key;
+        let symbols: Vec<crate::file_tree::Symbol> = items
+            .iter()
+            .flat_map(|items| items.iter())
+            .map(|item| crate::file_tree::Symbol {
+                name: item.name.clone().into(),
+                kind: item.kind,
+                row: item.row,
+                depth: item.depth,
+            })
+            .collect();
+        self.tree.update(cx, |tree, cx| tree.set_outline(path, symbols, current, cx));
     }
 
     /// Your settings from VS Code (the one used last, of VS Code, Insiders, VSCodium and
@@ -6923,33 +6934,18 @@ impl Workspace {
         .detach();
     }
 
-    /// ⏎ in the Outline's filter: to the first item that fits.
-    fn go_to_outline_match(&mut self, _: &GoToOutlineMatch, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor().cloned() else { return };
-        let Some(items) = self.outline_items(&editor, 1_000_000, cx) else { return };
-        let query = self.outline_filter.read(cx).text().to_string();
-        if let Some(&(ix, _)) = crate::outline::filtered(&items, &query).iter().find(|(_, fits)| *fits) {
-            self.go_to_outline_row(items[ix].row, window, cx);
+    /// Esc in project search: what's typed cleared; nothing typed, back to the files.
+    fn leave_search(&mut self, _: &LeaveSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_search.read(cx).has_query(cx) {
+            return self.project_search.update(cx, |search, cx| search.focus(Some(String::new()), window, cx));
         }
-    }
-
-    /// Esc in the Outline's filter: emptied, or (already empty) back to the text.
-    fn clear_outline_filter(&mut self, _: &ClearOutlineFilter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.outline_filter.read(cx).text().is_empty() {
-            if let Some(editor) = self.active_editor() {
-                window.focus(&editor.focus_handle(cx));
-            }
-        } else {
-            self.outline_filter.update(cx, |input, cx| input.set_text("", cx));
-            self.outline_followed = None;
-        }
-        cx.notify();
+        self.show_files(&ShowFiles, window, cx);
+        self.focus_main(window, cx);
     }
 
     /// The project's tests in the sidebar, looked for again (they may have changed).
     fn show_tests(&mut self, _: &ShowTests, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_tests = true;
-        self.sidebar_outline = false;
         self.sidebar_git = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
@@ -7372,116 +7368,6 @@ impl Workspace {
 
     /// The Outline view: the open file's functions and types (its headings, in Markdown),
     /// the one the caret is in marked; a click goes there.
-    fn render_outline(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.global::<Theme>().clone();
-        let quiet = |text: String| ui::empty_state(text, &theme).into_any_element();
-        let Some(editor) = self.active_editor().cloned() else {
-            return quiet("Open a file to see its outline".into());
-        };
-        let (id, row, name) = {
-            let e = editor.read(cx);
-            (editor.entity_id(), e.caret_point().0, e.file_name())
-        };
-        let Some(items) = self.outline_items(&editor, 1_000_000, cx) else {
-            return quiet(format!("{name} is too long for an outline"));
-        };
-        if items.is_empty() {
-            return quiet(format!("No functions or types in {name}"));
-        }
-        let query = self.outline_filter.read(cx).text().to_string();
-        let shown = crate::outline::filtered(&items, &query);
-        let current = crate::outline::current(&items, row);
-        // The caret went into another: the list brings it into view (unless filtered).
-        if let Some(ix) = current
-            && query.trim().is_empty()
-            && self.outline_followed != Some((id, ix))
-        {
-            self.outline_followed = Some((id, ix));
-            self.outline_scroll.scroll_to_item(ix, ScrollStrategy::Center);
-        }
-        let filter = ui::field(&theme)
-            .key_context("OutlineFilter")
-            .flex_none()
-            .mx(px(12.))
-            .mt(px(10.))
-            .mb(px(2.))
-            .text_color(theme.foreground)
-            .child(self.outline_filter.clone());
-        let list = if shown.is_empty() {
-            quiet(format!("Nothing in {name} called that"))
-        } else {
-            self.outline_list(items, shown, current, cx)
-        };
-        div().size_full().flex().flex_col().child(filter).child(div().flex_1().min_h_0().child(list)).into_any_element()
-    }
-
-    /// The outline's rows: `shown` (indexes into `items`, and whether each fits the filter;
-    /// those only around one that does are faint).
-    fn outline_list(
-        &mut self,
-        items: std::rc::Rc<Vec<crate::outline::Item>>,
-        shown: Vec<(usize, bool)>,
-        current: Option<usize>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        uniform_list(
-            "outline",
-            shown.len(),
-            cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
-                let theme = cx.global::<Theme>().clone();
-                range
-                    .map(|at| {
-                        let (ix, fits) = shown[at];
-                        let item = &items[ix];
-                        let here = current == Some(ix);
-                        let heading = item.kind.starts_with('#');
-                        let row = item.row;
-                        // The sidebar's width, inset a little so the highlight has rounded ends.
-                        let line = div()
-                            .id(("outline-row", ix))
-                            .w_full()
-                            .h(px(ui::ROW))
-                            .pl(px(12. + 14. * item.depth.min(8) as f32))
-                            .pr(px(10.))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .rounded(px(ui::R_ROW))
-                            .cursor_pointer()
-                            .text_size(px(ui::T_MD))
-                            .text_color(if here {
-                                theme.foreground
-                            } else if fits {
-                                theme.muted
-                            } else {
-                                theme.faint
-                            })
-                            .when(here, |r| r.bg(theme.hairline))
-                            .when(!here, |r| r.hover(|s| s.bg(ui::hover(&theme))))
-                            // Code by its name in the code's font, the word defining it beside it;
-                            // a heading as written, its depth saying its level.
-                            .child(
-                                div().min_w_0().truncate().when(!heading, |d| d.code_font(cx)).child(item.name.clone()),
-                            )
-                            .when(!heading, |r| {
-                                r.child(
-                                    div().flex_none().text_size(px(ui::T_SM)).text_color(theme.faint).child(item.kind),
-                                )
-                            })
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.go_to_outline_row(row, window, cx)
-                            }));
-                        div().w_full().px(px(6.)).child(line).into_any_element()
-                    })
-                    .collect()
-            }),
-        )
-        .track_scroll(self.outline_scroll.clone())
-        .size_full()
-        .pt(px(6.))
-        .into_any_element()
-    }
-
     /// Shows the theme of your own called `name`, saying what in it couldn't be read.
     fn use_own_theme(&mut self, name: &str, cx: &mut Context<Self>) {
         match crate::theme::own::load(name) {
@@ -7554,11 +7440,6 @@ impl Workspace {
     fn leave_hidden_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         let search_hidden = !self.sidebar_search.on || !cx.global::<Settings>().sidebar_visible;
         if search_hidden && self.project_search.focus_handle(cx).contains_focused(window, cx) {
-            self.focus_main(window, cx);
-        }
-        // The Outline's filter, out of sight: the keys back to the text.
-        let outline_hidden = !self.sidebar_outline || !cx.global::<Settings>().sidebar_visible;
-        if outline_hidden && self.outline_filter.focus_handle(cx).is_focused(window) {
             self.focus_main(window, cx);
         }
         // The commit message (or another git field), out of sight: the same.
@@ -7646,13 +7527,11 @@ impl Workspace {
         let badge = if conflicts > 0 { conflicts } else { self.git_status.len() };
         let theme = cx.global::<Theme>();
         let searching = self.sidebar_search.on;
-        let outlining = !searching && self.sidebar_outline;
         let testing = !searching && self.sidebar_tests;
         let changes = !searching && self.sidebar_git;
         let tab = |id: &'static str, label: &'static str, on: bool| {
             ui::segment(on, theme)
                 .id(id)
-                // (Five side by side: room for their names.)
                 .px(px(4.))
                 .min_w_0()
                 .flex_1()
@@ -7667,27 +7546,16 @@ impl Workspace {
             .pt(px(10.))
             .child(
                 ui::segmented(theme)
-                    .child(
-                        tab("files", "Files", !searching && !outlining && !testing && !changes)
-                            .active(|s| s.opacity(0.7))
-                            .on_click(
-                                cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
-                            ),
-                    )
-                    .child(
-                        tab("outline", "Outline", outlining)
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_outline(window, cx))),
-                    )
+                    // (Search is the files' too: their field, above them.)
+                    .child(tab("files", "Files", !testing && !changes).active(|s| s.opacity(0.7)).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
+                    ))
                     // (Only for a project that has tests, or may: none found, it goes.)
                     .when(testing || self.may_have_tests(cx), |strip| {
                         strip.child(tab("tests", "Tests", testing).active(|s| s.opacity(0.7)).on_click(
                             cx.listener(|this, _: &ClickEvent, window, cx| this.show_tests(&ShowTests, window, cx)),
                         ))
                     })
-                    .child(tab("search", "Search", searching).active(|s| s.opacity(0.7)).on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
-                    ))
                     .child(
                         tab("changes", "Git", changes)
                             .gap(px(3.))
@@ -11329,15 +11197,38 @@ impl Render for Workspace {
         let switch = self.render_sidebar_switch(cx);
         let sidebar_content = if self.sidebar_search.on {
             div().flex_1().min_h_0().pt(px(6.)).child(self.project_search.clone())
-        } else if self.sidebar_outline && sidebar_width > 0.5 {
-            // (Read only while it shows.)
-            div().flex_1().min_h_0().child(self.render_outline(cx))
         } else if self.sidebar_git && sidebar_width > 0.5 {
             div().flex_1().min_h_0().child(self.git_view.clone())
         } else if self.sidebar_tests && sidebar_width > 0.5 {
             div().flex_1().min_h_0().child(self.render_tests(cx))
         } else {
-            div().flex_1().min_h_0().child(self.tree.clone())
+            // The files, a field above them to search in them (it becomes the search).
+            if sidebar_width > 0.5 {
+                self.sync_tree_outline(cx);
+            }
+            let theme = cx.global::<Theme>();
+            let keys = crate::palette::shortcut(&SearchProject, cx);
+            let field = ui::field(theme)
+                .id("search-in-files")
+                .flex_none()
+                .mx(px(12.))
+                .mt(px(10.))
+                .mb(px(2.))
+                .gap(px(8.))
+                .cursor_text()
+                .text_color(theme.faint)
+                .child(div().flex_1().child("Search in files"))
+                .children(keys.map(|k| div().flex_none().text_size(px(ui::T_SM)).child(k)))
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
+                );
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(field)
+                .child(div().flex_1().min_h_0().child(self.tree.clone()))
         };
 
         let root = self.roots.primary().to_path_buf();
@@ -12281,10 +12172,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))
             .on_action(cx.listener(Self::debug_test))
-            .on_action(cx.listener(Self::go_to_outline_match))
             .on_action(cx.listener(Self::import_vs_code_settings))
             .on_action(cx.listener(Self::show_changes))
-            .on_action(cx.listener(Self::clear_outline_filter))
+            .on_action(cx.listener(Self::leave_search))
             .on_action(cx.listener(|this, _: &DebugAgain, window, cx| match this.debugged_test.clone() {
                 Some(test) => this.debug_rust_test(test, cx),
                 None => this.start_debugging(&StartDebugging, window, cx),
@@ -14156,8 +14046,9 @@ mod tests {
         cx.run_until_parked();
         workspace.update_in(cx, |w, window, cx| {
             assert_eq!(w.outline.as_ref().unwrap().2.len(), 4);
+            // (Shown in the files, under the open file: still there with them.)
             w.show_files(&ShowFiles, window, cx);
-            assert!(!w.sidebar_outline);
+            assert!(w.tree.read(cx).outline_open());
         });
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -16251,11 +16142,12 @@ esac
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The Outline's filter: shown with Show Outline, ⏎ goes to the first that fits, Esc
-    /// empties it, then goes back to the text.
+    /// The outline under the open file, in the files: Show Outline opens it there (and closes
+    /// it), its symbols under the file's row, one clicked goes to its line; Esc in the
+    /// search in files: what's typed cleared, then back to the files.
     #[gpui::test]
-    fn the_outline_filters(cx: &mut gpui::TestAppContext) {
-        let dir = crate::tools::test_dir("outline-filter");
+    fn the_outline_unfolds_under_the_open_file(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("outline-in-files");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -16277,22 +16169,29 @@ esac
         });
         cx.run_until_parked();
         workspace.update_in(cx, |w, window, cx| {
-            assert!(w.outline_filter.focus_handle(cx).is_focused(window), "typing goes to the filter");
-            w.outline_filter.update(cx, |input, cx| input.set_text("cls", cx));
+            let tree = w.tree.read(cx);
+            assert!(tree.outline_open());
+            assert_eq!(tree.shown_symbols(), ["Shop", "open", "close"]);
+            // A symbol clicked: to its line.
+            let path = dir.join("shop.py");
+            w.tree.update(cx, |_, cx| cx.emit(crate::file_tree::FileTreeEvent::GoToLine(path, 4)));
+            let _ = window;
         });
         cx.run_until_parked();
-        cx.dispatch_action(GoToOutlineMatch);
-        cx.run_until_parked();
         workspace.update_in(cx, |w, window, cx| {
-            let editor = w.active_editor().unwrap().clone();
-            assert_eq!(editor.read(cx).caret_point().0, 4, "at close");
-            // Esc: emptied first, then back to the text.
-            window.focus(&w.outline_filter.focus_handle(cx));
-            w.clear_outline_filter(&ClearOutlineFilter, window, cx);
-            assert!(w.outline_filter.read(cx).text().is_empty());
-            assert!(w.outline_filter.focus_handle(cx).is_focused(window));
-            w.clear_outline_filter(&ClearOutlineFilter, window, cx);
-            assert!(editor.focus_handle(cx).is_focused(window));
+            assert_eq!(w.active_editor().unwrap().read(cx).caret_point().0, 4, "at close");
+            // Show Outline again: closed.
+            w.show_outline(&ShowOutline, window, cx);
+            assert!(!w.tree.read(cx).outline_open());
+            assert!(w.tree.read(cx).shown_symbols().is_empty());
+            // Esc in the search: what's typed goes, then the search does.
+            w.search_project(&SearchProject, window, cx);
+            assert!(w.sidebar_search.on);
+            w.project_search.update(cx, |search, cx| search.focus(Some("shop".into()), window, cx));
+            w.leave_search(&LeaveSearch, window, cx);
+            assert!(w.sidebar_search.on && !w.project_search.read(cx).has_query(cx));
+            w.leave_search(&LeaveSearch, window, cx);
+            assert!(!w.sidebar_search.on);
         });
         std::fs::remove_dir_all(&dir).ok();
     }

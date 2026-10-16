@@ -28,7 +28,8 @@ Settings open with ⌘, / Ctrl+,. They're saved in `~/.config/null/settings.json
 | ⌃G | go to a line |
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
 | the status bar | after the file's name, where the caret is in the code: `shop.py › Shop › checkout` |
-| **Outline** (over the files) | the file's functions and types, a method inside its class (in Markdown, its headings); the one you're in is marked, a click goes there |
+| the arrow at the end of the open file's row (or Show Outline) | its functions and types under it in the files, a method inside its class (in Markdown, its headings); the one you're in is marked, a click goes there |
+| **Search in files** (above the files) | the project searched, the results in the files' place; Esc empties it, then goes back to the files |
 | ⌘P `file:42:7` | open a file at a place, as compilers print it |
 | ⌘F | find in the file (with lines selected, only in them); ↑ ↓ bring back earlier searches, ⌥↵ puts a cursor on every match; ⌘E searches for the selection, ⌘G the next |
 | ⌘⇧F / ⌘⇧H | search / replace across the project (the chevron also picks which files: `*.rs, src/, !tests`; **Tabs**, only the files open) |
