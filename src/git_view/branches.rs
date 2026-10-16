@@ -117,7 +117,8 @@ impl GitView {
 
     /// Deletes a branch, asked first; one with commits merged nowhere else asked again.
     fn delete_branch(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("Delete the branch {name}?"),
             Some("Only on this computer: a remote's copy stays."),
@@ -133,7 +134,8 @@ impl GitView {
             let mut result = cx.background_executor().spawn(async move { git::delete_branch(&r, &n, false) }).await;
             if result.as_ref().is_err_and(|e| e == git::NOT_MERGED) {
                 let Ok(again) = this.update_in(cx, |_, window, cx| {
-                    window.prompt(
+                    crate::modal::ask(
+                        window,
                         PromptLevel::Warning,
                         &format!("{name} has commits merged nowhere else."),
                         Some("If you delete it, those commits are hard to get back."),
@@ -165,7 +167,8 @@ impl GitView {
 
     /// Discards changes set aside, asked first.
     fn drop_set_aside(&mut self, set: git::SetAside, window: &mut Window, cx: &mut Context<Self>) {
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("Discard “{}”?", set.message),
             Some("These changes can't be brought back afterwards."),

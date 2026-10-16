@@ -3838,6 +3838,7 @@ dependencies = [
  "ratex-parser",
  "ratex-svg",
  "ratex-types",
+ "raw-window-handle",
  "regex",
  "resvg",
  "ropey",

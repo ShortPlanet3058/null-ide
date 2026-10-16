@@ -52,6 +52,7 @@ mod markdown_links;
 mod markdown_view;
 mod math;
 mod menus;
+mod modal;
 mod node_runtime;
 mod notebook;
 mod ollama;
@@ -303,14 +304,42 @@ fn answered_in_the_terminal() -> bool {
             return false;
         }
     };
-    // (On Windows Null has no console of its own: the one it was started from, if any.)
+    // (On Windows Null has no console of its own: the one it was started from, if any. Joined,
+    // a windowed program can still have no handle to write to it with: the console's own
+    // output is opened then. Output sent to a file or a pipe is left as it is.)
     #[cfg(windows)]
     {
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_SHARE_WRITE: u32 = 2;
+        const OPEN_EXISTING: u32 = 3;
         unsafe extern "system" {
             fn AttachConsole(process: u32) -> i32;
+            fn GetStdHandle(which: u32) -> isize;
+            fn SetStdHandle(which: u32, handle: isize) -> i32;
+            fn CreateFileW(
+                name: *const u16,
+                access: u32,
+                share: u32,
+                security: *const std::ffi::c_void,
+                disposition: u32,
+                flags: u32,
+                template: isize,
+            ) -> isize;
         }
-        // SAFETY: a plain Win32 call with no pointers; it fails harmlessly with no console.
-        unsafe { AttachConsole(u32::MAX) };
+        // SAFETY: plain Win32 calls; the only pointer is a NUL-terminated name that lives
+        // through the call. Each fails harmlessly when there's no console.
+        unsafe {
+            let had = GetStdHandle(STD_OUTPUT_HANDLE);
+            if AttachConsole(u32::MAX) != 0 && (had == 0 || had == -1) {
+                let name: Vec<u16> = "CONOUT$".encode_utf16().chain([0]).collect();
+                let out =
+                    CreateFileW(name.as_ptr(), GENERIC_WRITE, FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, 0, 0);
+                if out != -1 {
+                    SetStdHandle(STD_OUTPUT_HANDLE, out);
+                }
+            }
+        }
     }
     println!("{answer}");
     true

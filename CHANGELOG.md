@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Windows: while a question is open ("Save changes?"), the window behind it takes no keys or
+  clicks; `null --version` and `null --help` print in the console they're typed in.
 - Notes on code: ⌥⌘N (Ctrl+Alt+N) writes a note under the cursor's line; it moves with its
   line and is kept privately in Null's folder, never in the project. Notes… lists them.
 - An answer from ⌘I can be asked about further (each follow-up goes with the questions
