@@ -1713,7 +1713,7 @@ impl FileTree {
         let row = &self.rows[ix];
         // Rows sit inset from the sidebar's edges, so their highlight has rounded ends.
         let indent = px(10. + row.depth as f32 * INDENT);
-        let marker = |is_dir: bool, turn: f32, color: gpui::Hsla, dot: gpui::Hsla| {
+        let marker = |path: &Path, is_dir: bool, turn: f32, color: gpui::Hsla, dot: gpui::Hsla| {
             if is_dir {
                 div().size(px(14.)).flex().items_center().justify_center().child(
                     svg()
@@ -1723,12 +1723,8 @@ impl FileTree {
                         .with_transformation(Transformation::rotate(radians(turn * std::f32::consts::FRAC_PI_2))),
                 )
             } else {
-                div()
-                    .size(px(14.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(div().size(px(5.)).rounded(px(2.)).bg(dot))
+                // (Its language's logo, in the dot's colour, when it has one.)
+                div().size(px(14.)).flex().items_center().justify_center().child(crate::file_icons::marker(path, dot))
             }
         };
         // The error (like "already exists") sits at the end of the field, in red.
@@ -1771,7 +1767,7 @@ impl FileTree {
             RowKind::NewItem { is_dir } => {
                 let edit = self.edit.as_ref().expect("a new-item row exists only while editing");
                 base.key_context("TreeEdit")
-                    .child(marker(*is_dir, 0., theme.muted, theme.faint))
+                    .child(marker(Path::new(""), *is_dir, 0., theme.muted, theme.faint))
                     .child(name_field(edit))
                     .into_any_element()
             }
@@ -1831,7 +1827,7 @@ impl FileTree {
                     .when(active, |r| r.bg(theme.accent_soft))
                     .when(selected && !active, |r| r.bg(theme.hairline))
                     .when(!active && !selected, |r| r.hover(|s| s.bg(ui::hover(theme))))
-                    .child(marker(entry.is_dir, turn, if active { theme.foreground } else { theme.muted }, dot));
+                    .child(marker(&entry.path, entry.is_dir, turn, if active { theme.foreground } else { theme.muted }, dot));
                 if editing_this(&path) {
                     let edit = self.edit.as_ref().unwrap();
                     row_el.key_context("TreeEdit").child(name_field(edit)).into_any_element()

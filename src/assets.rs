@@ -20,14 +20,75 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/window-restore.svg", include_bytes!("../assets/icons/window-restore.svg")),
 ];
 
+/// The languages' logos (see `file_icons`).
+macro_rules! lang {
+    ($name:literal) => {
+        (concat!("icons/lang/", $name, ".svg"), include_bytes!(concat!("../assets/icons/lang/", $name, ".svg")) as &[u8])
+    };
+}
+
+const LANGUAGES: &[(&str, &[u8])] = &[
+    lang!("astro"),
+    lang!("c"),
+    lang!("clojure"),
+    lang!("cmake"),
+    lang!("cplusplus"),
+    lang!("css"),
+    lang!("dart"),
+    lang!("docker"),
+    lang!("elixir"),
+    lang!("erlang"),
+    lang!("fsharp"),
+    lang!("git"),
+    lang!("gnubash"),
+    lang!("go"),
+    lang!("graphql"),
+    lang!("haskell"),
+    lang!("html5"),
+    lang!("javascript"),
+    lang!("json"),
+    lang!("julia"),
+    lang!("kotlin"),
+    lang!("less"),
+    lang!("lua"),
+    lang!("markdown"),
+    lang!("nim"),
+    lang!("ocaml"),
+    lang!("openjdk"),
+    lang!("perl"),
+    lang!("php"),
+    lang!("prisma"),
+    lang!("python"),
+    lang!("r"),
+    lang!("react"),
+    lang!("ruby"),
+    lang!("rust"),
+    lang!("sass"),
+    lang!("scala"),
+    lang!("solidity"),
+    lang!("svelte"),
+    lang!("swift"),
+    lang!("terraform"),
+    lang!("toml"),
+    lang!("typescript"),
+    lang!("vuedotjs"),
+    lang!("yaml"),
+    lang!("zig"),
+];
+
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(ICONS.iter().find(|(name, _)| *name == path).map(|(_, bytes)| Cow::Borrowed(*bytes)))
+        Ok(ICONS.iter().chain(LANGUAGES).find(|(name, _)| *name == path).map(|(_, bytes)| Cow::Borrowed(*bytes)))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        Ok(ICONS.iter().filter(|(name, _)| name.starts_with(path)).map(|(name, _)| (*name).into()).collect())
+        Ok(ICONS
+            .iter()
+            .chain(LANGUAGES)
+            .filter(|(name, _)| name.starts_with(path))
+            .map(|(name, _)| (*name).into())
+            .collect())
     }
 }
