@@ -156,15 +156,16 @@ fn asking(command: &mut std::process::Command) {
     }
 }
 
-/// The program and arguments for a terminal on `host`, in `folder`: the person's own shell
-/// there. Run in a terminal, so ssh can ask for a password or a passphrase.
-pub fn terminal(host: &str, folder: &str) -> (PathBuf, Vec<String>) {
+/// The program, arguments and environment for a terminal on `host`, in `folder`: the
+/// person's own shell there. What ssh asks is asked as for the rest (in the window, a
+/// password typed once this run answering again); where it can't be, in the terminal.
+pub fn terminal(host: &str, folder: &str) -> (PathBuf, Vec<String>, Vec<(&'static str, String)>) {
     let command = ssh(host);
     let program = PathBuf::from(command.get_program());
     let mut args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     args.extend(["-t".into(), "--".into(), destination(host).0.into()]);
     args.push(format!("cd {} 2>/dev/null; exec \"${{SHELL:-sh}}\" -l", quote(folder)));
-    (program, args)
+    (program, args, crate::askpass::environment().unwrap_or_default())
 }
 
 /// What a script on a server printed, and how it ended.

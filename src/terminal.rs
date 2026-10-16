@@ -425,7 +425,7 @@ impl Shell {
         // A folder on a server: ssh there, its shell in the folder (in a terminal, ssh can
         // ask for a passphrase or a password itself).
         let server = crate::remote::of(&cwd).map(|r| crate::remote::terminal(&r.host, &r.path));
-        let shell = if let Some((program, _)) = &server {
+        let shell = if let Some((program, ..)) = &server {
             Some(program.to_string_lossy().into_owned())
         } else if wsl.is_some() {
             Some("wsl.exe".to_string())
@@ -434,7 +434,7 @@ impl Shell {
         } else {
             std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell)
         };
-        let args: Vec<String> = if let Some((_, args)) = server.clone() {
+        let args: Vec<String> = if let Some((_, args, _)) = server.clone() {
             args
         } else if let Some(wsl) = &wsl {
             vec!["-d".into(), wsl.distro.clone(), "--cd".into(), wsl.linux.clone()]
@@ -454,6 +454,10 @@ impl Shell {
         // accented characters. Use UTF-8 unless one is already set, as Terminal.app does.
         if ["LANG", "LC_ALL", "LC_CTYPE"].iter().all(|v| std::env::var_os(v).is_none_or(|x| x.is_empty())) {
             env.insert("LANG".into(), "en_US.UTF-8".into());
+        }
+        // (ssh asking through Null: see `askpass`.)
+        for (key, value) in server.iter().flat_map(|(.., env)| env) {
+            env.insert(key.to_string(), value.clone());
         }
         let options = tty::Options {
             // A login shell, like a terminal app opens, so PATH and the prompt are set up.
