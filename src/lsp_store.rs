@@ -506,7 +506,7 @@ impl LspStore {
         #[allow(deprecated)] // root_uri is deprecated in favour of workspace folders, but some servers still read it
         let params = InitializeParams {
             // (A server in WSL can't see Windows' processes: it'd take this one as gone.)
-            process_id: (!crate::wsl::is_wsl(&root)).then(std::process::id),
+            process_id: (!crate::wsl::is_wsl(&root) && !crate::remote::is_remote(&root)).then(std::process::id),
             root_uri: root_uri.clone(),
             workspace_folders: root_uri.map(|uri| {
                 vec![WorkspaceFolder {

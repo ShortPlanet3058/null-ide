@@ -599,51 +599,89 @@ pub fn install(server: &Server) -> Result<(), String> {
     find(server).map(|_| ()).ok_or_else(|| format!("{} was installed but can't be found.", server.name))
 }
 
-/// Where a server for `root` is: inside its WSL distribution for a folder there (a Linux
-/// path), else here.
+/// A Linux system a folder is on, reached through a program: a WSL distribution, or a
+/// server over SSH.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Linux {
+    Wsl(String),
+    Server(String),
+}
+
+impl Linux {
+    fn of(root: &Path) -> Option<Linux> {
+        if let Some(remote) = crate::remote::of(root) {
+            return Some(Linux::Server(remote.host));
+        }
+        crate::wsl::of(root).map(|wsl| Linux::Wsl(wsl.distro))
+    }
+
+    /// `program args…` run there, from its home folder.
+    fn command(&self, program: &str, args: &[&str]) -> std::process::Command {
+        match self {
+            Linux::Wsl(distro) => crate::wsl::command(distro, None, program, args),
+            Linux::Server(host) => crate::remote::command(host, None, program, args),
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Linux::Wsl(name) | Linux::Server(name) => name,
+        }
+    }
+}
+
+/// Where a server for `root` is: inside its WSL distribution or on its server for a folder
+/// there (a path there), else here.
 pub fn find_for(server: &Server, root: &Path) -> Option<PathBuf> {
-    match crate::wsl::of(root) {
-        Some(wsl) => find_in_wsl(&wsl.distro, server).map(PathBuf::from),
+    match Linux::of(root) {
+        Some(linux) => find_in_linux(&linux, server).map(PathBuf::from),
         None => find(server),
     }
 }
 
 /// Whether Null can install `server` for `root`, or what to do instead.
 pub fn can_install_for(server: &Server, root: &Path) -> Result<(), String> {
-    if crate::wsl::of(root).is_none() {
-        return can_install(server);
-    }
+    let Some(linux) = Linux::of(root) else { return can_install(server) };
+    let place = match linux {
+        Linux::Wsl(_) => "inside WSL",
+        Linux::Server(_) => "on the server",
+    };
     match server.install {
         Install::Xcode | Install::XcodeElse(_) => {
-            Err(format!("Install {} inside WSL with its packages: sudo apt install {}", server.name, server.program))
+            Err(format!("Install {} {place} with its packages: sudo apt install {}", server.name, server.program))
         }
         Install::Sdk { name, from } => {
-            Err(format!("{} comes with {name}: install it inside WSL, from {from}.", server.label))
+            Err(format!("{} comes with {name}: install it {place}, from {from}.", server.label))
         }
         Install::Download(d) if linux_asset(d).is_none() => Err(format!("There's no Linux build of {}.", server.name)),
         _ => Ok(()),
     }
 }
 
-/// Installs `server` for `root`: inside its WSL distribution for a folder there (into
-/// `~/.local/share/null`, Node.js along when it has none), else here. Slow: off the main thread.
+/// Installs `server` for `root`: inside its WSL distribution or on its server for a folder
+/// there (into `~/.local/share/null`, Node.js along when it has none), else here. Slow: off
+/// the main thread.
 pub fn install_for(server: &Server, root: &Path) -> Result<(), String> {
-    let Some(wsl) = crate::wsl::of(root) else { return install(server) };
+    let Some(linux) = Linux::of(root) else { return install(server) };
     if crate::system_clipboard::kept_apart() {
         return Err("Nothing is installed in a QA run.".into());
     }
     can_install_for(server, root)?;
-    if matches!(server.install, Install::Npm(_)) && crate::wsl::is_wsl1(&wsl.distro) {
+    if let Linux::Wsl(distro) = &linux
+        && matches!(server.install, Install::Npm(_))
+        && crate::wsl::is_wsl1(distro)
+    {
         return Err(format!(
-            "{} runs on Node.js, which doesn't run on WSL 1. Move {} to WSL 2: wsl --set-version {} 2",
-            server.name, wsl.distro, wsl.distro
+            "{} runs on Node.js, which doesn't run on WSL 1. Move {distro} to WSL 2: wsl --set-version {distro} 2",
+            server.name
         ));
     }
     let script = install_script(server)?;
-    let output = crate::wsl::command(&wsl.distro, None, "sh", &["-c", &script])
+    let output = linux
+        .command("sh", &["-c", &script])
         .output()
-        .map_err(|e| format!("Couldn't run WSL: {e}"))?;
-    forget_found(&wsl.distro, server.program);
+        .map_err(|e| format!("Couldn't reach {}: {e}", linux.name()))?;
+    forget_found(&linux, server.program);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).rev().take(3).collect();
@@ -653,12 +691,13 @@ pub fn install_for(server: &Server, root: &Path) -> Result<(), String> {
             detail.into_iter().rev().collect::<Vec<_>>().join(" ")
         ));
     }
-    find_in_wsl(&wsl.distro, server)
+    find_in_linux(&linux, server)
         .map(|_| ())
         .ok_or_else(|| format!("{} was installed but can't be found.", server.name))
 }
 
-/// The Linux build of a download, for WSL (as Windows is: Arm or x64), unless it's a zip.
+/// The Linux build of a download, for WSL (as Windows is: Arm or x64) or a server (taken as
+/// x64, as most are), unless it's a zip.
 fn linux_asset(download: &Download) -> Option<&'static Asset> {
     let target = if cfg!(target_arch = "aarch64") { Target::LinuxArm } else { Target::LinuxX64 };
     download.assets.iter().find(|a| a.target == target && a.packed != Packed::Zip)
@@ -731,22 +770,22 @@ fn install_script(server: &Server) -> Result<String, String> {
     })
 }
 
-/// A server's program asked for in a distribution, and where it was found (or not).
-type FoundInWsl = ((String, &'static str), Option<String>);
+/// A server's program asked for on a Linux system, and where it was found (or not).
+type FoundInLinux = ((Linux, &'static str), Option<String>);
 
-/// Servers found inside WSL distributions this session (asking takes a moment).
-static FOUND_IN_WSL: Mutex<Vec<FoundInWsl>> = Mutex::new(Vec::new());
+/// Servers found inside WSL distributions and on servers this session (asking takes a moment).
+static FOUND_IN_LINUX: Mutex<Vec<FoundInLinux>> = Mutex::new(Vec::new());
 
-fn forget_found(distro: &str, program: &'static str) {
-    if let Ok(mut found) = FOUND_IN_WSL.lock() {
-        found.retain(|((d, p), _)| !(d == distro && *p == program));
+fn forget_found(linux: &Linux, program: &'static str) {
+    if let Ok(mut found) = FOUND_IN_LINUX.lock() {
+        found.retain(|((l, p), _)| !(l == linux && *p == program));
     }
 }
 
-/// Where `server` is inside `distro` (a Linux path): on its PATH, or where Null put it.
-fn find_in_wsl(distro: &str, server: &Server) -> Option<String> {
-    let key = (distro.to_string(), server.program);
-    if let Some((_, found)) = FOUND_IN_WSL.lock().ok()?.iter().find(|(k, _)| *k == key) {
+/// Where `server` is on `linux` (a path there): on its PATH, or where Null put it.
+fn find_in_linux(linux: &Linux, server: &Server) -> Option<String> {
+    let key = (linux.clone(), server.program);
+    if let Some((_, found)) = FOUND_IN_LINUX.lock().ok()?.iter().find(|(k, _)| *k == key) {
         return found.clone();
     }
     let own = match server.install {
@@ -759,13 +798,14 @@ fn find_in_wsl(distro: &str, server: &Server) -> Option<String> {
         _ => String::new(),
     };
     let script = format!("command -v {}{own}", server.program);
-    let found = crate::wsl::command(distro, None, "sh", &["-c", &script])
+    let found = linux
+        .command("sh", &["-c", &script])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|p| p.starts_with('/'));
-    if let Ok(mut kept) = FOUND_IN_WSL.lock() {
+    if let Ok(mut kept) = FOUND_IN_LINUX.lock() {
         kept.push((key, found.clone()));
     }
     found
