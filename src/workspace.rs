@@ -1022,6 +1022,7 @@ impl Workspace {
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) | FileTreeEvent::Created(path) => this.open_file(path.clone(), window, cx),
+                FileTreeEvent::OpenToTheSide(path) => this.open_to_the_side(path.clone(), window, cx),
                 FileTreeEvent::Preview(path) => {
                     this.open_file_passing(path.clone(), window, cx);
                     window.focus(&this.tree.focus_handle(cx));
@@ -3308,6 +3309,21 @@ impl Workspace {
             return self.activate(at, window, cx);
         }
         self.add_twin(&source, other, window, cx);
+    }
+
+    /// Open to the Side (⌥-click in the files): the file in the other half of the window,
+    /// split if it isn't; already open on this side, a second copy there.
+    fn open_to_the_side(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let other = if self.is_split() { 1 - self.focused_side().min(1) } else { 1 };
+        if !self.is_split() {
+            self.stacked = false;
+        }
+        let open_here = self.tabs.iter().find(|t| t.side != other && t.editor.read(cx).path() == Some(path.as_path()));
+        let open_there = self.tabs.iter().any(|t| t.side == other && t.editor.read(cx).path() == Some(path.as_path()));
+        match open_here.map(|t| t.editor.clone()) {
+            Some(source) if !open_there => self.add_twin(&source, other, window, cx),
+            _ => self.open_file_on(path, Some(other), window, cx),
+        }
     }
 
     fn add_twin(&mut self, source: &Entity<Editor>, side: usize, window: &mut Window, cx: &mut Context<Self>) {
