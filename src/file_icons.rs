@@ -2,7 +2,7 @@
 //! the dot's, so the list stays as quiet as it was. Files of other kinds keep the dot.
 //! The logos are Simple Icons' (CC0), in assets/icons/lang.
 
-use gpui::{AnyElement, Hsla, IntoElement, ParentElement, Styled, div, px, svg};
+use gpui::{AnyElement, Hsla, IntoElement, Styled, div, px, svg};
 use std::path::Path;
 
 /// The logos there are, by name (assets/icons/lang/<name>.svg).
