@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The sidebar is quieter: Files, Tests and Git. Search is a field above the files (⌘⇧F),
+  its results in their place; the outline opens under the open file, from the arrow at the
+  end of its row or Show Outline.
+- SSH: passwords, passphrases and trusting a new server asked in the window (Windows too);
+  git through the open connection; a server's folder reopened at launch once reachable;
+  Python environments, the Tests panel and the debugger on servers.
+- Tests: results read where the terminal can't see its programs (servers, WSL, Windows);
+  unittest run on a `tests/` folder that isn't a package finds its tests.
 - Files show their language's logo where they had a dot (the files, ⌘P) and in their tabs,
   in the dot's one colour.
 - Open to the Side: ⌥-click a file, or its menu, opens it in the other half of the window.

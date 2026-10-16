@@ -1,3 +1,4 @@
+use crate::fonts::CodeFont;
 use crate::fs_ops;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
@@ -156,6 +157,8 @@ impl Render for EntryGhost {
 pub enum FileTreeEvent {
     /// Open and move to the file (double-click, Enter).
     Open(PathBuf),
+    /// To a line of the open file (one of its symbols, under its row, clicked).
+    GoToLine(PathBuf, usize),
     /// Open the file in the other half of the window (⌥-click, Open to the Side).
     OpenToTheSide(PathBuf),
     /// Two files picked, compared: the first against the second.
@@ -211,6 +214,28 @@ enum RowKind {
     NewItem {
         is_dir: bool,
     },
+    /// One of the open file's functions or types, under its row (`outline.symbols[i]`).
+    Symbol(usize),
+}
+
+/// A function, type or heading of the open file, as its outline lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Symbol {
+    pub name: SharedString,
+    /// The word that defines it (`fn`, `class`), or the heading's `##`.
+    pub kind: &'static str,
+    /// Its line (from 0).
+    pub row: usize,
+    pub depth: usize,
+}
+
+/// The open file's outline, shown under its row when opened there.
+#[derive(Clone, Debug, PartialEq)]
+struct Outline {
+    path: PathBuf,
+    symbols: Vec<Symbol>,
+    /// The one the caret is in.
+    current: Option<usize>,
 }
 
 struct Row {
@@ -434,6 +459,9 @@ pub struct FileTree {
     pub ask_before_renaming: bool,
     /// What's been typed to go to a file by its name (as in the Finder), and when.
     typed: (String, Instant),
+    /// The open file's outline, and whether it's shown under the file.
+    outline: Option<Outline>,
+    outline_open: bool,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -464,6 +492,8 @@ impl FileTree {
             errors: HashSet::new(),
             error_folders: HashSet::new(),
             typed: (String::new(), Instant::now()),
+            outline: None,
+            outline_open: false,
         };
         tree.rebuild();
         tree
@@ -804,7 +834,26 @@ impl FileTree {
             }
             let chain = chain.map(|(head, names)| (head, names.into()));
             let (path, ignored) = (entry.path.clone(), entry.ignored);
+            let is_dir = entry.is_dir;
             self.rows.push(Row { kind: RowKind::Entry(entry), depth, expanded, chain });
+            // The open file's outline, under it, when opened there.
+            if !is_dir
+                && self.outline_open
+                && let Some(outline) = self.outline.as_ref().filter(|o| o.path == path)
+            {
+                let symbols: Vec<Row> = outline
+                    .symbols
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| Row {
+                        kind: RowKind::Symbol(i),
+                        depth: depth + 1 + s.depth.min(6),
+                        expanded: false,
+                        chain: None,
+                    })
+                    .collect();
+                self.rows.extend(symbols);
+            }
             if expanded {
                 self.push_new_item_row(&path, depth + 1);
                 self.push_children_of(&path, depth + 1, ignored);
@@ -876,10 +925,74 @@ impl FileTree {
         (0..self.rows.len()).filter_map(|i| self.entry_at(i)).map(|e| e.name.to_string()).collect()
     }
 
+    /// The symbols shown under the open file, in order.
+    #[cfg(test)]
+    pub fn shown_symbols(&self) -> Vec<String> {
+        let Some(outline) = &self.outline else { return Vec::new() };
+        self.rows
+            .iter()
+            .filter_map(|r| match r.kind {
+                RowKind::Symbol(i) => outline.symbols.get(i).map(|s| s.name.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn entry_at(&self, ix: usize) -> Option<&Entry> {
         match &self.rows.get(ix)?.kind {
             RowKind::Entry(entry) => Some(entry),
-            RowKind::NewItem { .. } => None,
+            RowKind::NewItem { .. } | RowKind::Symbol(_) => None,
+        }
+    }
+
+    /// The open file's outline (`path`'s symbols, the caret in `current`): shown under its
+    /// row when that's opened. Laid out again only when something changed.
+    pub fn set_outline(
+        &mut self,
+        path: Option<PathBuf>,
+        symbols: Vec<Symbol>,
+        current: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let outline = path.map(|path| Outline { path, symbols, current });
+        if outline == self.outline {
+            return;
+        }
+        // (Only the caret's place changed: the row it's on brought into view.)
+        let moved =
+            matches!((&outline, &self.outline), (Some(a), Some(b)) if a.path == b.path && a.symbols == b.symbols);
+        self.outline = outline;
+        if self.outline_open {
+            self.rebuild();
+            if moved {
+                self.reveal_current_symbol();
+            }
+            cx.notify();
+        }
+    }
+
+    /// The outline under the open file, shown or not (and the file brought into view).
+    pub fn show_outline(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.outline_open = open;
+        if let Some(path) = self.outline.as_ref().map(|o| o.path.clone()).filter(|_| open) {
+            self.expand_to(&path);
+        }
+        self.rebuild();
+        if open {
+            self.reveal_current_symbol();
+        }
+        cx.notify();
+    }
+
+    pub fn outline_open(&self) -> bool {
+        self.outline_open
+    }
+
+    /// The symbol the caret is in, in view.
+    fn reveal_current_symbol(&mut self) {
+        let Some(current) = self.outline.as_ref().and_then(|o| o.current) else { return };
+        if let Some(ix) = self.rows.iter().position(|r| matches!(r.kind, RowKind::Symbol(i) if i == current)) {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
     }
 
@@ -1797,6 +1910,30 @@ impl FileTree {
             .pr(px(6.))
             .text_size(px(ui::T_MD));
         match &row.kind {
+            RowKind::Symbol(i) => {
+                let Some((outline, symbol)) = self.outline.as_ref().and_then(|o| Some((o, o.symbols.get(*i)?))) else {
+                    return base.into_any_element();
+                };
+                let here = outline.current == Some(*i);
+                let heading = symbol.kind.starts_with('#');
+                let (path, line) = (outline.path.clone(), symbol.row);
+                // Code by its name in the code's font, the word defining it beside it; a
+                // heading as written (as the Outline listed them).
+                base.text_color(if here { theme.foreground } else { theme.muted })
+                    .when(here, |r| r.bg(theme.hairline))
+                    .when(!here, |r| r.hover(|s| s.bg(ui::hover(theme))))
+                    .cursor_pointer()
+                    .child(div().w(px(14.)).flex_none())
+                    .child(div().min_w_0().truncate().when(!heading, |d| d.code_font(cx)).child(symbol.name.clone()))
+                    .when(!heading, |r| {
+                        r.child(div().flex_none().text_size(px(ui::T_SM)).text_color(theme.faint).child(symbol.kind))
+                    })
+                    .active(|s| s.opacity(0.7))
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.emit(FileTreeEvent::GoToLine(path.clone(), line));
+                    }))
+                    .into_any_element()
+            }
             RowKind::NewItem { is_dir } => {
                 let edit = self.edit.as_ref().expect("a new-item row exists only while editing");
                 base.key_context("TreeEdit")
@@ -1887,6 +2024,43 @@ impl FileTree {
                                 .truncate()
                                 .when(heading, |d| d.text_size(px(ui::T_XS)).font_weight(gpui::FontWeight::SEMIBOLD))
                                 .child(shown),
+                        )
+                        // The open file: its outline opened (and closed) under it, from the
+                        // end of its row.
+                        .when(
+                            active
+                                && !entry.is_dir
+                                && self.outline.as_ref().is_some_and(|o| o.path == entry.path && !o.symbols.is_empty()),
+                            |r| {
+                                let open = self.outline_open;
+                                r.child(
+                                    div()
+                                        .id("outline-toggle")
+                                        .flex_none()
+                                        .size(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(ui::R_KEY))
+                                        .hover(|s| s.bg(ui::hover(theme)))
+                                        .tooltip(ui::tip(if open { "Hide outline" } else { "Show outline" }, None))
+                                        .child(
+                                            svg()
+                                                .path(CHEVRON)
+                                                .size(px(11.))
+                                                .text_color(theme.faint)
+                                                .with_transformation(Transformation::rotate(radians(if open {
+                                                    std::f32::consts::FRAC_PI_2
+                                                } else {
+                                                    0.
+                                                }))),
+                                        )
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.show_outline(!open, cx);
+                                        })),
+                                )
+                            },
                         )
                         // A folder with changes inside: a small dot at the end.
                         .when(holds_changes || holds_errors, |r| {
@@ -2181,7 +2355,7 @@ mod tests {
                 .iter()
                 .filter_map(|r| match &r.kind {
                     RowKind::Entry(e) => Some(format!("{}{}", "  ".repeat(r.depth), e.name)),
-                    RowKind::NewItem { .. } => None,
+                    RowKind::NewItem { .. } | RowKind::Symbol(_) => None,
                 })
                 .collect::<Vec<_>>()
         };
