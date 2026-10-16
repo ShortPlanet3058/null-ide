@@ -15,14 +15,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::remote::{self, RemotePath};
 
-/// What's known of a file: its kind, size, last change, and whether it runs or is read-only.
+/// What's known of a file: its kind, size, last change, and whether it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Meta {
     dir: bool,
     len: u64,
     modified: Option<SystemTime>,
     executable: bool,
-    readonly: bool,
 }
 
 impl Meta {
@@ -46,10 +45,6 @@ impl Meta {
         self.executable
     }
 
-    pub fn readonly(&self) -> bool {
-        self.readonly
-    }
-
     fn of_local(meta: &std::fs::Metadata) -> Meta {
         #[cfg(unix)]
         let executable = {
@@ -63,12 +58,11 @@ impl Meta {
             len: meta.len(),
             modified: meta.modified().ok(),
             executable,
-            readonly: meta.permissions().readonly(),
         }
     }
 
     fn of_remote(meta: remote::Meta) -> Meta {
-        Meta { dir: meta.dir, len: meta.len, modified: meta.modified, executable: meta.executable, readonly: false }
+        Meta { dir: meta.dir, len: meta.len, modified: meta.modified, executable: meta.executable }
     }
 }
 
@@ -158,10 +152,6 @@ pub fn metadata(path: &Path) -> io::Result<Meta> {
 
 pub fn exists(path: &Path) -> bool {
     metadata(path).is_ok()
-}
-
-pub fn is_file(path: &Path) -> bool {
-    metadata(path).is_ok_and(|m| m.is_file())
 }
 
 pub fn is_dir(path: &Path) -> bool {
@@ -254,36 +244,6 @@ pub fn create_dir_all(path: &Path) -> io::Result<()> {
     }
 }
 
-pub fn create_dir(path: &Path) -> io::Result<()> {
-    match remote::of(path) {
-        None => std::fs::create_dir(path),
-        Some(at) => {
-            forget(path);
-            remote::create_dir(&at)
-        }
-    }
-}
-
-pub fn remove_file(path: &Path) -> io::Result<()> {
-    match remote::of(path) {
-        None => std::fs::remove_file(path),
-        Some(at) => {
-            forget(path);
-            remote::remove_file(&at)
-        }
-    }
-}
-
-pub fn remove_dir_all(path: &Path) -> io::Result<()> {
-    match remote::of(path) {
-        None => std::fs::remove_dir_all(path),
-        Some(at) => {
-            forget(path);
-            remote::remove_dir_all(&at)
-        }
-    }
-}
-
 /// Moves `from` to `to`; both on this computer, or on the same server.
 pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
     match (remote::of(from), remote::of(to)) {
@@ -331,7 +291,7 @@ mod tests {
         assert_eq!(read_to_string(&dir.join("a/x.txt")).unwrap(), "hello");
         assert_eq!(read_head(&dir.join("a/x.txt"), 2).unwrap(), b"he");
         assert_eq!(metadata(&dir.join("a/x.txt")).unwrap().len(), 5);
-        assert!(is_dir(&dir.join("a")) && is_file(&dir.join("a/x.txt")) && !exists(&dir.join("b")));
+        assert!(is_dir(&dir.join("a")) && !is_dir(&dir.join("a/x.txt")) && !exists(&dir.join("b")));
         let listed = read_dir(&dir.join("a")).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].0, dir.join("a/x.txt"));
@@ -358,7 +318,7 @@ mod tests {
         assert!(!exists_now(&root.join("src/other.rs"), true), "not in the listing");
         assert_eq!(read_to_string(&root.join("src/main.rs")).unwrap(), "fn main() {}");
         write(&root.join("src/new.rs"), "x").unwrap();
-        assert!(is_file(&root.join("src/new.rs")), "a change forgets the listing");
+        assert!(exists(&root.join("src/new.rs")), "a change forgets the listing");
         assert_eq!(canonicalize(&root.join("src/../src")).unwrap(), root.join("src"));
         std::fs::remove_dir_all(&dir).ok();
     }

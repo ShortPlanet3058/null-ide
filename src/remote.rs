@@ -412,12 +412,6 @@ fn run_ok(host: &str, script: &str) -> io::Result<Output> {
     if output.success() { Ok(output) } else { Err(output.error()) }
 }
 
-/// The ends of the connections to `host` (when its folder is closed, or to connect again).
-pub fn disconnect(host: &str) {
-    let mut servers = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
-    servers.retain(|(h, _)| h != host);
-}
-
 /// The servers to offer for a folder: those used before (most recent first), then those
 /// named in `~/.ssh/config` (not its patterns).
 pub fn hosts_to_offer() -> Vec<String> {
@@ -561,6 +555,7 @@ pub fn write_whole(at: &RemotePath, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 /// To the server's Trash (the freedesktop.org one file managers there show): a name of
 /// its own in it, and where it was, to put it back.
 pub fn trash(at: &RemotePath) -> io::Result<()> {
@@ -616,18 +611,6 @@ pub fn read_dir(at: &RemotePath) -> io::Result<Vec<(String, Meta)>> {
 
 pub fn create_dir_all(at: &RemotePath) -> io::Result<()> {
     run_ok(&at.host, &format!("mkdir -p -- {}", quote(&at.path))).map(drop)
-}
-
-pub fn create_dir(at: &RemotePath) -> io::Result<()> {
-    run_ok(&at.host, &format!("mkdir -- {}", quote(&at.path))).map(drop)
-}
-
-pub fn remove_file(at: &RemotePath) -> io::Result<()> {
-    run_ok(&at.host, &format!("rm -- {}", quote(&at.path))).map(drop)
-}
-
-pub fn remove_dir_all(at: &RemotePath) -> io::Result<()> {
-    run_ok(&at.host, &format!("rm -rf -- {}", quote(&at.path))).map(drop)
 }
 
 /// Moves `from` to `to`, on the same server.
@@ -766,7 +749,7 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("shown")).unwrap(), b"through");
         assert!(std::fs::symlink_metadata(dir.join("link")).unwrap().file_type().is_symlink());
         assert!(metadata(&at("shown")).is_ok());
-        remove_dir_all(&at("a b")).unwrap();
+        std::fs::remove_dir_all(dir.join("a b")).unwrap();
         assert!(metadata(&at("a b")).is_err());
         // Every file, as the finder lists them (no repository here: all of them).
         let mut files = list_files(TEST_HOST, &dir.to_string_lossy(), 100).unwrap();
@@ -777,7 +760,7 @@ mod tests {
         let both = [format!("{}/shown", dir.display()), format!("{}/other", dir.display())];
         assert_eq!(files_containing(TEST_HOST, &both, "THROUGH", true).unwrap(), [both[0].clone()]);
         assert!(files_containing(TEST_HOST, &both, "THROUGH", false).unwrap().is_empty());
-        remove_file(&at("other")).unwrap();
+        std::fs::remove_file(dir.join("other")).unwrap();
         // What changed since the last look (the first only sets its stamp).
         let stamp = format!("{}/.stamp", dir.display());
         let folders = [dir.to_string_lossy().into_owned()];
