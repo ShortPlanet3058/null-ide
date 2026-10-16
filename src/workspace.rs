@@ -3823,6 +3823,7 @@ impl Workspace {
     }
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let path = crate::wsl::plain(path);
         crate::shell::set_wsl_project(crate::wsl::is_wsl(&path));
         self.roots = crate::roots::ProjectRoots::new(path.clone());
         self.git_root = path.clone();
@@ -4787,7 +4788,7 @@ impl Workspace {
     pub fn add_roots(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let mut added = Vec::new();
         for path in paths {
-            let path = dunce::canonicalize(&path).unwrap_or(path);
+            let path = crate::wsl::plain(dunce::canonicalize(&path).unwrap_or(path));
             if path.is_dir() && self.roots.add(path.clone()) {
                 added.push(path);
             }

@@ -147,10 +147,21 @@ pub fn command(distro: &str, folder: Option<&str>, program: &str, args: &[&str])
     if let Some(folder) = folder {
         command.args(["--cd", folder]);
     }
-    // ("$0" "$@": the program and its arguments as they are, nothing read twice.)
+    // (--exec: the arguments as they are; after `--`, wsl.exe hands the line to a shell to
+    // read again, and the script's quotes were lost. "$0" "$@": the program and its
+    // arguments, nothing read twice.)
     let script = format!("PATH=\"{}\"; exec \"$0\" \"$@\"", path_inside());
-    command.args(["--", "sh", "-lc", &script, program]).args(args);
+    command.args(["--exec", "sh", "-lc", &script, program]).args(args);
     command
+}
+
+/// A WSL path in the form people read (`\\wsl.localhost\Ubuntu\…`), not the `\\?\UNC\…`
+/// one Windows gives back when a path is resolved; other paths as they are.
+pub fn plain(path: PathBuf) -> PathBuf {
+    match path.to_str().filter(|p| p.starts_with(r"\\?\UNC\")).and_then(|_| of(&path)) {
+        Some(wsl) => windows_path(&wsl.distro, &wsl.linux),
+        None => path,
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +194,11 @@ mod tests {
         );
         assert_eq!(from_linux("Ubuntu", "/mnt/c/Users/me"), PathBuf::from(r"C:\Users\me"));
         assert_eq!(windows_path("Ubuntu", "/"), PathBuf::from(r"\\wsl.localhost\Ubuntu"));
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\UNC\wsl.localhost\Ubuntu\home\dev")),
+            PathBuf::from(r"\\wsl.localhost\Ubuntu\home\dev")
+        );
+        assert_eq!(plain(PathBuf::from(r"C:\x")), PathBuf::from(r"C:\x"));
     }
 
     #[test]
