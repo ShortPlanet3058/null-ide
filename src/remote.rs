@@ -592,7 +592,7 @@ pub fn trash(at: &RemotePath) -> io::Result<()> {
 }
 
 /// `bytes` in base64, in lines (for a here-document).
-fn encoded_lines(bytes: &[u8]) -> String {
+pub fn encoded_lines(bytes: &[u8]) -> String {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     let mut lines = String::with_capacity(encoded.len() + encoded.len() / 76 + 1);
