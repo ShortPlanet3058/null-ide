@@ -40,9 +40,6 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// Items a ⌘I without a selection works on, smallest first.
-const RUST_SCOPES: &[&str] =
-    &["function_item", "struct_item", "enum_item", "impl_item", "trait_item", "macro_definition", "mod_item"];
 const NOTE_MAX_ROWS: usize = 14;
 
 /// Rows between the lines of code, drawn by the editor or with something on top.
@@ -102,7 +99,9 @@ pub(super) struct Prompting {
     preview: String,
     failed: Option<String>,
     task: Option<Task<()>>,
-    _subscription: Subscription,
+    /// Rows the field takes beyond its first, with several lines typed.
+    added_rows: usize,
+    _subscriptions: [Subscription; 2],
 }
 
 /// A change written into the file, until it's kept or undone.
@@ -129,6 +128,9 @@ pub(super) struct Note {
     answer: String,
     /// A follow-up question, once the answer's there.
     follow_up: Entity<TextInput>,
+    /// Rows it takes beyond its first, with several lines typed.
+    follow_up_rows: usize,
+    _follow_up_resized: Subscription,
     done: bool,
     failed: Option<String>,
     scroll: ScrollHandle,
@@ -147,16 +149,21 @@ fn is_question(text: &str) -> bool {
 }
 
 impl Editor {
-    /// The lines ⌘I changes: the selected lines, else the Rust item around the
-    /// caret (with its doc comments and attributes), else the paragraph around it.
-    fn assist_lines(&self) -> Range<usize> {
+    /// The lines ⌘I changes: the selected lines, else the function (class, CSS rule,
+    /// HTML element…) around the caret (see `ai_scope`), else the paragraph around it; no
+    /// more than `ai_scope::MAX_LINES` of either (else the caret's line).
+    fn assist_lines(&mut self) -> Range<usize> {
         if let Some(lines) = self.selected_line_span() {
             return lines;
         }
         let (caret_line, _) = self.caret_point();
-        if self.language_name() == "Rust"
-            && let Some(lines) = self.rust_item_lines(caret_line)
-        {
+        let language = self.language_name();
+        let tree = match &mut self.highlighter {
+            Some(h) => h.ready(&self.buffer).then(|| h.tree().cloned()).flatten(),
+            None => None,
+        };
+        let line = |l: usize| self.buffer.line_text(l).to_string();
+        if let Some(lines) = tree.and_then(|tree| super::ai_scope::unit_lines(&tree, language, caret_line, &line)) {
             return lines;
         }
         let blank = |l: usize| self.buffer.line_text(l).trim().is_empty();
@@ -168,7 +175,7 @@ impl Editor {
         while end < self.buffer.len_lines() && !blank(end) {
             end += 1;
         }
-        start..end
+        if end - start > super::ai_scope::MAX_LINES { caret_line..caret_line + 1 } else { start..end }
     }
 
     fn selected_line_span(&self) -> Option<Range<usize>> {
@@ -180,35 +187,6 @@ impl Editor {
         let (end_line, end_col) = self.buffer.point(selection.end);
         let end = if end_col == 0 && end_line > start { end_line } else { end_line + 1 };
         Some(start..end)
-    }
-
-    fn rust_item_lines(&self, line: usize) -> Option<Range<usize>> {
-        let text = self.buffer.to_string();
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).ok()?;
-        let tree = parser.parse(&text, None)?;
-        let byte = self.buffer.line_to_byte(line) + self.buffer.line_text(line).len()
-            - self.buffer.line_text(line).trim_start().len();
-        let mut node = tree.root_node().descendant_for_byte_range(byte, byte)?;
-        loop {
-            if RUST_SCOPES.contains(&node.kind()) {
-                break;
-            }
-            node = node.parent()?;
-        }
-        let mut start = node.start_position().row;
-        let end = node.end_position().row + 1;
-        // Bring the doc comments and attributes just above along.
-        while start > 0 {
-            let above = self.buffer.line_text(start - 1);
-            let above = above.trim_start();
-            if above.starts_with("///") || above.starts_with("#[") || above.starts_with("//!") {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
-        Some(start..end.min(self.buffer.len_lines()))
     }
 
     fn line_range_chars(&self, lines: &Range<usize>) -> Range<usize> {
@@ -269,7 +247,7 @@ impl Editor {
             let tokens = crate::ai_usage::estimate(&context.text) + crate::ai_usage::estimate(&code) + 150;
             format!("with {} · about {} tokens", context.summary, crate::ai_usage::short(tokens))
         };
-        let input = cx.new(|cx| TextInput::new(placeholder, cx));
+        let input = cx.new(|cx| TextInput::new(placeholder, cx).multiline());
         if !previous.is_empty() {
             input.update(cx, |input, cx| input.set_text(&previous, cx));
         }
@@ -278,6 +256,15 @@ impl Editor {
                 prompt.failed = None;
             }
             cx.notify();
+        });
+        // More lines typed: room made for them.
+        let resized = cx.observe(&input, |this, input, cx| {
+            let rows = input.read(cx).rows_added(this.line_height());
+            if let Some(prompt) = this.prompt.as_mut().filter(|p| p.added_rows != rows) {
+                prompt.added_rows = rows;
+                this.rebuild_blocks();
+                cx.notify();
+            }
         });
         window.focus(&input.focus_handle(cx));
         self.prompt = Some(Prompting {
@@ -291,7 +278,8 @@ impl Editor {
             preview: String::new(),
             failed: None,
             task: None,
-            _subscription: subscription,
+            added_rows: 0,
+            _subscriptions: [subscription, resized],
         });
         self.rebuild_blocks();
         self.autoscroll = true;
@@ -519,7 +507,7 @@ impl Editor {
 
     fn ask_question(&mut self, question: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = self.prompt.take() else { return };
-        let follow_up = cx.new(|cx| TextInput::new("Ask a follow-up", cx));
+        let (follow_up, resized) = Self::follow_up_field(cx);
         self.note = Some(Note {
             line: prompt.lines.end,
             code_lines: prompt.lines.clone(),
@@ -529,6 +517,8 @@ impl Editor {
             question: question.clone(),
             answer: String::new(),
             follow_up,
+            follow_up_rows: 0,
+            _follow_up_resized: resized,
             done: false,
             failed: None,
             scroll: ScrollHandle::new(),
@@ -538,6 +528,20 @@ impl Editor {
         self.send_note_question(cx);
         window.focus(&self.focus_handle);
         self.autoscroll = true;
+    }
+
+    /// A note's field for a follow-up question, making room for the lines typed in it.
+    fn follow_up_field(cx: &mut Context<Self>) -> (Entity<TextInput>, Subscription) {
+        let input = cx.new(|cx| TextInput::new("Ask a follow-up", cx).multiline());
+        let resized = cx.observe(&input, |this, input, cx| {
+            let rows = input.read(cx).rows_added(this.line_height());
+            if let Some(note) = this.note.as_mut().filter(|n| n.follow_up_rows != rows) {
+                note.follow_up_rows = rows;
+                this.rebuild_blocks();
+                cx.notify();
+            }
+        });
+        (input, resized)
     }
 
     /// Asks the note's question, with what was asked before it, and writes the answer in.
@@ -610,7 +614,7 @@ impl Editor {
         self.set_caret_point((line.min(self.buffer.len_lines().saturating_sub(1)), 0), cx);
         let lines = self.assist_lines();
         let code = self.buffer.slice(self.line_range_chars(&lines));
-        let follow_up = cx.new(|cx| TextInput::new("Ask a follow-up", cx));
+        let (follow_up, resized) = Self::follow_up_field(cx);
         self.note = Some(Note {
             line: lines.end,
             code_lines: lines,
@@ -620,6 +624,8 @@ impl Editor {
             question: "Why does this test fail, and what would fix it?".into(),
             answer: String::new(),
             follow_up,
+            follow_up_rows: 0,
+            _follow_up_resized: resized,
             done: false,
             failed: None,
             scroll: ScrollHandle::new(),
@@ -725,7 +731,8 @@ impl Editor {
         let follow = if note.done { 34. } else { 0. };
         let needed = 18. + 20. + 20. * body as f32 + 4. * paragraphs as f32 + 10. * gaps as f32 + follow;
         let row = f32::from(self.line_height()).max(1.);
-        ((needed / row).ceil() as usize).clamp(2, NOTE_MAX_ROWS)
+        // (Several lines asked: the field's rows on top, the note's text scrolls.)
+        ((needed / row).ceil() as usize).clamp(2, NOTE_MAX_ROWS) + note.follow_up_rows
     }
 
     /// Whether some of the blocks are drawn as elements over the text, placed from its layout.
@@ -784,7 +791,11 @@ impl Editor {
             blocks.push(Block { before_line: (thread.line + 1).min(lines), rows, kind: BlockKind::Thread(i) });
         }
         if let Some(prompt) = &self.prompt {
-            blocks.push(Block { before_line: prompt.lines.start, rows: 1, kind: BlockKind::Prompt });
+            blocks.push(Block {
+                before_line: prompt.lines.start,
+                rows: 1 + prompt.added_rows,
+                kind: BlockKind::Prompt,
+            });
             // The new code appears line by line as it's written, above the code it replaces.
             let written: Vec<String> =
                 prompt.preview.lines().filter(|l| !l.trim_start().starts_with("```")).map(str::to_string).collect();
@@ -928,7 +939,7 @@ impl Editor {
                     } else {
                         let typed = prompt.input.read(cx).text().trim().to_string();
                         let hint = if typed.is_empty() {
-                            if prompt.error.is_some() { "↵ fix error" } else { "" }
+                            if prompt.error.is_some() { "↵ fix error" } else { "⇧↵ new line" }
                         } else if prompt.ask_only || is_question(&typed) {
                             "↵ ask"
                         } else {
@@ -937,6 +948,8 @@ impl Editor {
                         (None, hint)
                     };
                     let failed_long = prompt.failed.as_ref().filter(|f| f.len() > 60).cloned();
+                    // Several lines typed: what's beside the field stays by its first.
+                    let tall = block.rows > 1;
                     // What goes with it, while nothing's wrong and nothing's being written.
                     let sends = (!prompt.writing && prompt.failed.is_none()).then(|| prompt.sends.clone());
                     out.push(
@@ -949,7 +962,8 @@ impl Editor {
                             .on_action(cx.listener(Self::submit_prompt))
                             .on_action(cx.listener(Self::cancel_prompt))
                             .flex()
-                            .items_center()
+                            .when(tall, |d| d.items_start().pt(px(4.)))
+                            .when(!tall, |d| d.items_center())
                             .gap(px(10.))
                             .px(px(10.))
                             .rounded(px(ui::R_CONTROL))
