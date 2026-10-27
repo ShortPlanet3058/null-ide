@@ -383,6 +383,9 @@ pub fn keep_windows(windows: Vec<Vec<PathBuf>>) {
         return;
     }
     if let (Some(file), Ok(json)) = (reopen_file(), serde_json::to_string(&windows)) {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         let _ = std::fs::write(file, json);
     }
 }
