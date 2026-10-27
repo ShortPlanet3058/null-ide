@@ -659,6 +659,7 @@ impl Element for EditorElement {
             let total_lines = editor.buffer.len_lines();
             // Without line numbers the gutter keeps only its marks: changes, folds, breakpoints.
             let numbered = editor.shows_line_numbers(cx);
+            let relative = cx.global::<Settings>().relative_line_numbers;
             let digits = if numbered { total_lines.to_string().len().max(3) } else { 0 };
             let gutter_width = char_width * digits as f32 + px(GUTTER_PADDING * 2. + FOLD_SPACE);
             let text_bounds =
@@ -1419,7 +1420,11 @@ impl Element for EditorElement {
                 .filter(|(r, row)| editor.wrap.first_row(r.row.line) == *row && r.row.block.is_none())
                 .map(|(r, row)| {
                     let line = r.row.line;
-                    let label = (line + 1).to_string();
+                    let label = if relative && line != caret_line {
+                        editor.wrap.shown_lines_between(caret_line, line).to_string()
+                    } else {
+                        (line + 1).to_string()
+                    };
                     // A bookmark shows over a problem's colour: the problem has its wavy line.
                     let bookmarked = editor.is_bookmarked(line).then_some(theme.caret);
                     let color = bookmarked.or(flagged[line - lines_shown.start]).unwrap_or(if line == caret_line {

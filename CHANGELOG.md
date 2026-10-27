@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Relative line numbers (Settings → Editor): lines counted from the cursor's, as a count
+  before a move goes (Vim's 5j); a fold counts as one line.
 - Update: a newer version out shows as "Null 0.2.0 is out · Update" in the status bar; a
   click downloads it, checks it's the release (signed details, and the package's SHA-256),
   then Restart to Update puts it in place and starts Null again (or it's installed when Null
