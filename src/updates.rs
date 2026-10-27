@@ -402,19 +402,41 @@ pub fn windows_to_reopen() -> Vec<Vec<PathBuf>> {
     windows.into_iter().filter(|w| !w.is_empty()).collect()
 }
 
+/// Left beside the package when it couldn't be put in place (the password asked for
+/// wasn't given, the installer failed): its version, told at the next start.
+const NOT_INSTALLED: &str = "not-installed";
+
 /// Null is quitting: a downloaded update is put in place once it has, by a process of its
 /// own (Null's files can't be replaced while it runs, on Windows).
 pub fn install_on_quit() {
     let Some((how, package)) = READY.lock().ok().and_then(|mut r| r.take()) else { return };
+    let State::Ready(version) = state() else { return };
     let restart = if RESTART.load(Ordering::Relaxed) { "1" } else { "0" };
     let pid = std::process::id().to_string();
-    if let Err(error) = start_installing(&how, &package, &pid, restart) {
+    if let Err(error) = start_installing(&how, &package, &pid, restart, &version) {
         eprintln!("null: couldn't install the update: {error}");
     }
 }
 
+/// The version an update to couldn't be put in place at the last quit (told once): it's
+/// out again, for Update to try again.
+pub fn not_installed() -> Option<String> {
+    let marker = crate::tools::data_dir()?.join("updates").join(NOT_INSTALLED);
+    let version = std::fs::read_to_string(&marker).ok()?.trim().to_string();
+    let _ = std::fs::remove_file(&marker);
+    if !newer(current(), &version) {
+        return None;
+    }
+    if let Ok(mut state) = STATE.lock()
+        && *state == State::Nothing
+    {
+        *state = State::Out(version.clone());
+    }
+    Some(version)
+}
+
 #[cfg(windows)]
-fn start_installing(how: &Install, package: &Path, pid: &str, restart: &str) -> std::io::Result<()> {
+fn start_installing(how: &Install, package: &Path, pid: &str, restart: &str, version: &str) -> std::io::Result<()> {
     let Install::Setup(exe) = how else { return Err(std::io::Error::other("not an installed Null")) };
     // (A copy runs the installer: Null's own file is replaced.)
     let helper = package.with_file_name("null-update.exe");
@@ -424,6 +446,7 @@ fn start_installing(how: &Install, package: &Path, pid: &str, restart: &str) -> 
         .args([pid, restart])
         .arg(package)
         .arg(exe)
+        .arg(version)
         .spawn()
         .map(drop)
 }
@@ -438,7 +461,7 @@ pub fn finish(args: &[String]) -> i32 {
         fn WaitForSingleObject(handle: isize, millis: u32) -> u32;
         fn CloseHandle(handle: isize) -> i32;
     }
-    let [pid, restart, setup, null] = args else { return 2 };
+    let [pid, restart, setup, null, version] = args else { return 2 };
     const SYNCHRONIZE: u32 = 0x0010_0000;
     // SAFETY: a handle opened here, waited on and closed; no pointers.
     unsafe {
@@ -452,6 +475,9 @@ pub fn finish(args: &[String]) -> i32 {
         .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/NOCANCEL", "/SP-"])
         .status()
         .is_ok_and(|s| s.success());
+    if !installed {
+        let _ = std::fs::write(Path::new(setup).with_file_name(NOT_INSTALLED), version);
+    }
     if restart == "1" {
         let _ = std::process::Command::new(null).spawn();
     }
@@ -459,23 +485,26 @@ pub fn finish(args: &[String]) -> i32 {
 }
 
 #[cfg(unix)]
-fn start_installing(how: &Install, package: &Path, pid: &str, restart: &str) -> std::io::Result<()> {
+fn start_installing(how: &Install, package: &Path, pid: &str, restart: &str, version: &str) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
-    // Each waits for Null to quit ($1), puts the package ($3) in place of the app ($4), and
-    // starts it again if asked ($2). What's there stays when anything fails.
-    const WAIT: &str = "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done\n";
+    // Each waits for Null to quit ($1), puts the package ($3) in place of the app ($4) and
+    // says so (ok), and starts it again if asked ($2). What's there stays when anything
+    // fails, and the version ($5) is left for the next start to tell.
+    const WAIT: &str = "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done\nok=\n";
+    const TOLD: &str = "[ -n \"$ok\" ] || echo \"$5\" > \"$(dirname \"$3\")/not-installed\"\n";
     let (script, target) = match how {
         Install::App(app) => (
             r#"m=$(mktemp -d) || exit 1
 if hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$m" "$3" >/dev/null; then
     new=$(ls -d "$m"/*.app | head -n 1)
     if [ -n "$new" ] && rm -rf "$4.old" && mv "$4" "$4.old"; then
-        if ditto "$new" "$4"; then rm -rf "$4.old"; else rm -rf "$4"; mv "$4.old" "$4"; fi
+        if ditto "$new" "$4"; then rm -rf "$4.old"; ok=1; else rm -rf "$4"; mv "$4.old" "$4"; fi
     fi
     hdiutil detach "$m" -quiet
 fi
 rmdir "$m"
 [ "$2" = 1 ] && open "$4"
+true
 "#,
             app,
         ),
@@ -483,28 +512,29 @@ rmdir "$m"
             r#"d=$(mktemp -d) || exit 1
 if tar -xzf "$3" -C "$d"; then
     new=$(find "$d" -type f -name null | head -n 1)
-    [ -n "$new" ] && cp "$new" "$4.new" && chmod 755 "$4.new" && mv -f "$4.new" "$4"
+    [ -n "$new" ] && cp "$new" "$4.new" && chmod 755 "$4.new" && mv -f "$4.new" "$4" && ok=1
 fi
 rm -rf "$d"
-[ "$2" = 1 ] && nohup "$4" >/dev/null 2>&1 &
 "#,
             bin,
         ),
         Install::Deb(bin) => (
-            r#"pkexec dpkg -i "$3"
-[ "$2" = 1 ] && nohup "$4" >/dev/null 2>&1 &
+            r#"pkexec dpkg -i "$3" && ok=1
 "#,
             bin,
         ),
         Install::Setup(_) => return Err(std::io::Error::other("not Windows")),
     };
+    // (Linux's started again here, the Mac's by `open` above.)
+    let again = if matches!(how, Install::App(_)) { "" } else { "[ \"$2\" = 1 ] && nohup \"$4\" >/dev/null 2>&1 &\n" };
     std::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("{WAIT}{script}"))
+        .arg(format!("{WAIT}{script}{TOLD}{again}"))
         .arg("sh")
         .args([pid, restart])
         .arg(package)
         .arg(target)
+        .arg(version)
         // (Its own group: a terminal Null was started from doesn't stop it.)
         .process_group(0)
         .spawn()
@@ -595,6 +625,59 @@ mod tests {
         READY.lock().unwrap().take();
         assert_eq!(windows_to_reopen(), windows);
         assert!(windows_to_reopen().is_empty(), "read once");
+    }
+
+    /// Linux's way, run for real: a binary replaced; a broken package leaves it as it was
+    /// and its version to be told.
+    #[test]
+    #[cfg(unix)]
+    fn a_binary_is_replaced_or_said_not_to_be() {
+        let dir = crate::tools::test_dir("updates-binary");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pkg/null-9.9.9")).unwrap();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("pkg/null-9.9.9/null"), "new").unwrap();
+        let made = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(dir.join("u.tar.gz"))
+            .arg("-C")
+            .arg(dir.join("pkg"))
+            .arg("null-9.9.9")
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let bin = dir.join("bin/null");
+        std::fs::write(&bin, "old").unwrap();
+        // (A process already gone: nothing to wait for.)
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let pid = gone.id().to_string();
+        gone.wait().unwrap();
+        let waited = |done: &dyn Fn() -> bool| {
+            (0..100).any(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                done()
+            })
+        };
+        start_installing(&Install::Binary(bin.clone()), &dir.join("u.tar.gz"), &pid, "0", "9.9.9").unwrap();
+        assert!(waited(&|| std::fs::read_to_string(&bin).is_ok_and(|b| b == "new")), "replaced");
+        std::fs::write(&bin, "old").unwrap();
+        std::fs::write(dir.join("bad.tar.gz"), "not a package").unwrap();
+        start_installing(&Install::Binary(bin.clone()), &dir.join("bad.tar.gz"), &pid, "0", "9.9.9").unwrap();
+        let told = dir.join(NOT_INSTALLED);
+        assert!(waited(&|| std::fs::read_to_string(&told).is_ok_and(|v| v.trim() == "9.9.9")), "told");
+        assert_eq!(std::fs::read_to_string(&bin).unwrap(), "old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_update_not_installed_is_told_once() {
+        let dir = crate::tools::data_dir().unwrap().join("updates");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(NOT_INSTALLED), "99.0.0\n").unwrap();
+        assert_eq!(not_installed().as_deref(), Some("99.0.0"));
+        assert_eq!(state(), State::Out("99.0.0".into()));
+        assert_eq!(not_installed(), None);
+        set_state(State::Nothing);
     }
 
     /// Asks GitHub for real: `cargo test asks_github -- --ignored`.

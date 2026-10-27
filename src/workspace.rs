@@ -7931,6 +7931,13 @@ impl Workspace {
     /// When asked to be told of new versions: what the last check found, and a new check
     /// a few seconds after launch if the last is a day old (once a run, whatever the windows).
     fn check_for_updates_soon(&mut self, cx: &mut Context<Self>) {
+        // (An update that couldn't be put in place at the last quit: said, and Update again.)
+        if let Some(version) = crate::updates::not_installed() {
+            self.show_notice(
+                format!("Null {version} couldn't be installed: Update in the status bar tries again."),
+                cx,
+            );
+        }
         if !cx.global::<Settings>().check_for_updates || !crate::updates::first_this_run() {
             return;
         }
