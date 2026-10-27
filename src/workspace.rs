@@ -16118,9 +16118,10 @@ esac
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
         cx.dispatch_action(TrashFile);
         cx.run_until_parked();
-        assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Cancel");
+        workspace.update(cx, |w, _| assert!(w.trash_prompt.is_some(), "asked in the window"));
+        cx.simulate_keystrokes("escape");
         cx.run_until_parked();
+        workspace.update(cx, |w, _| assert!(w.trash_prompt.is_none()));
         assert!(renamed.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
