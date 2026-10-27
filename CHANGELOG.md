@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- AI fields take several lines: ⇧↵ starts one in ⌘I, a follow-up question and an AI task
+  (⌥⌘I), and pasted text keeps its lines; the field grows up to 8 rows, then scrolls.
+- ⌘I without a selection changes the function, class, CSS rule or HTML element the cursor is
+  in, in every language with one (it was only Rust's; elsewhere the lines up to a blank one,
+  so a whole HTML page), and never more than 40 lines: in a bigger one, the part the cursor
+  is in.
 - Moving files to the Trash asks in the window, with "Don't ask again" (space ticks it);
   Settings → Window → Ask before moving to the Trash brings the question back.
 

@@ -398,9 +398,15 @@ beside the file.
 AI is a tool: it shows up only when you call it, right in the code, and a switch (⌘K or
 Settings) turns it off entirely.
 
-- **⌘I** opens a one-line field between your lines. Describe a small change (or press Enter
+- **⌘I** opens a field between your lines. Describe a small change (or press Enter
   on an error to fix it): it's written into the file as a diff, with removed lines struck
-  through and new ones tinted. ⇥ keeps it, Esc undoes it, ⌘I adjusts it.
+  through and new ones tinted. ⇥ keeps it, Esc undoes it, ⌘I adjusts it. ⇧↵ starts another
+  line in the field (pasted text keeps its lines); so do a follow-up question's field and an
+  AI task's (⌥⌘I).
+- **What ⌘I changes** is tinted while the field is open: the lines selected, else the
+  function, class, CSS rule or HTML element the cursor is in (with its doc comments and
+  attributes), else the paragraph around it. Without a selection it's never more than 40
+  lines: in a bigger one, it's the part the cursor is in (an `if`, a `<section>`), or its line.
 - **Questions** (typed in ⌘I, or “Ask About This File” in ⌘K) get a short note under the code
   they're about. Esc closes it.
 - **⌘I writes in place**: the new code appears line by line as it's written, over the

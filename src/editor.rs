@@ -1,3 +1,4 @@
+mod ai_scope;
 mod assist;
 pub use assist::Thread;
 mod bookmarks;
