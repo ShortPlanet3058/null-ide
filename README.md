@@ -54,6 +54,10 @@ switch branches, resolve conflicts in place, review pull requests.</td>
   terminal whose errors join the problems list, breakpoints with values shown in the code.
 - **Never lose work**: unsaved changes survive a crash, every save is kept for a month, and
   files changed on disk are never silently written over.
+- **Folders anywhere**: inside WSL on Windows, or on a server over SSH with your own keys;
+  the terminal, git, language servers and the debugger run where the files are.
+- **Up to date in one click**: Null says when a new version is out (if you ask it to) and
+  installs it when you click Update, checked against its signed release.
 
 ![⌘K: the theme, text size, wrapping and more, changed right in the list](docs/images/palette.png)
 
