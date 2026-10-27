@@ -245,7 +245,9 @@ numbers can show everywhere, only in code, or nowhere.
   commit's version compared with the file now; in every comparison, the words that changed
   in a line stand out. **Open Line on the Web** shows it on GitHub, GitLab or Bitbucket. Compare with Saved, the Clipboard, or another
   File, each difference kept or taken back.
-- Merge conflicts: each side tinted, **⌘.** keeps one or both, **⌥F8** to the next.
+- Merge conflicts: each side tinted, **⌘.** keeps one or both, **⌥F8** to the next. With AI
+  on, **✦ Resolve with AI** in the same list writes one version keeping what each side
+  changed, shown as a change: ⇥ keeps it, Esc undoes it.
 
 ## Running, testing, debugging
 

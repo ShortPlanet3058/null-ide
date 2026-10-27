@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Merge conflicts: ✦ Resolve with AI (⌘. in a conflict, with AI on) writes one version
+  keeping what each side changed, shown as a change to keep (⇥) or undo (Esc).
 - What's new: after an update, a notice says which version is installed, and a click on it
   shows the changes since the version before (What's New in ⌘K, any time).
 - AI fields take several lines: ⇧↵ starts one in ⌘I, a follow-up question and an AI task

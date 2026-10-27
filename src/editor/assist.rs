@@ -286,6 +286,14 @@ impl Editor {
         cx.notify();
     }
 
+    /// ⌘I on what's selected, sent at once with `instruction` (shown in the field).
+    pub(super) fn change_with_ai(&mut self, instruction: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_inline_assist(false, window, cx);
+        let Some(prompt) = &self.prompt else { return };
+        prompt.input.update(cx, |input, cx| input.set_text(&instruction, cx));
+        self.submit_prompt(&SubmitPrompt, window, cx);
+    }
+
     /// ⌘.'s Fix with AI: ⌘I's field on the error's code, sent at once with "Fix this error".
     pub(super) fn fix_with_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_inline_assist(false, window, cx);
