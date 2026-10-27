@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Update: a newer version out shows as "Null 0.2.0 is out · Update" in the status bar; a
+  click downloads it, checks it's the release (signed details, and the package's SHA-256),
+  then Restart to Update puts it in place and starts Null again (or it's installed when Null
+  quits). Windows' installer, the Mac app, Linux's binary or .deb; elsewhere null-ide.com.
 - Windows: AltGr and dead keys type in the terminal (an AZERTY's ~ # \\ { [ ê), and no
   shortcut takes a key AltGr types with (Ctrl+Alt+0 and Ctrl+Alt+= kept @ and } from
   being typed on an AZERTY; Reset Zoom and Zoom In stay in the View menu there).

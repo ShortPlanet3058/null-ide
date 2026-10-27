@@ -443,8 +443,8 @@ pub struct Settings {
     pub fade_bars_while_typing: bool,
     /// The caret glides to where it goes and the text eases when it scrolls; off, both jump.
     pub smooth_motion: bool,
-    /// Say when a newer Null is out (once a day, Null asks GitHub its latest version). Off
-    /// until the person turns it on.
+    /// Say when a newer Null is out (once a day, Null reads the latest release's details from
+    /// GitHub). Off until the person turns it on. Installing is always their click.
     pub check_for_updates: bool,
     /// Wrap long lines to the width of the editor instead of scrolling sideways.
     pub word_wrap: bool,

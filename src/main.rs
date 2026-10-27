@@ -388,6 +388,11 @@ fn main() {
     if let Some(code) = askpass::answered_for_ssh() {
         std::process::exit(code);
     }
+    // Started by Null as it quit, to install an update (see `updates`).
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--finish-update") {
+        std::process::exit(updates::finish(&std::env::args().skip(2).collect::<Vec<_>>()));
+    }
     // (ssh started from here asks nothing in the window: see `remote::asking`.)
     remote::note_main_thread();
     if answered_in_the_terminal() {
@@ -567,6 +572,7 @@ fn main() {
         cx.on_app_quit(|_| {
             ollama::stop();
             instance::forget();
+            updates::install_on_quit();
             async {}
         })
         .detach();
@@ -821,6 +827,7 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
 /// asks about them; once none is left, Null quits.
 /// Quitting was called off in one window: none of them counts as done asking any more.
 pub(crate) fn quit_cancelled(cx: &mut gpui::App) {
+    updates::restart_called_off();
     for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
         handle.update(cx, |workspace, _, _| workspace.quitting = false).ok();
     }

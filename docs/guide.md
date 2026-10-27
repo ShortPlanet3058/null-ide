@@ -319,10 +319,24 @@ and local history of saves.
 
 ## New versions
 
-Null never updates itself and doesn't look for updates unless asked: turn on "Tell me when a
-new version is out" (on the welcome's last step, or Settings → Appearance) and once a day it
-asks GitHub for its latest release's name; a newer one shows as "Null 0.2.0 is out" in the
-status bar, which opens null-ide.com. "Check for Updates" in ⌘K asks right away.
+Null doesn't look for updates unless asked: turn on "Tell me when a new version is out" (on
+the welcome's last step, or Settings → Appearance) and once a day it reads the latest
+release's details from GitHub; "Check for Updates" in ⌘K asks right away. A newer one shows
+as "Null 0.2.0 is out · Update" in the status bar.
+
+Nothing is installed until you click Update. Null then downloads the package for how you
+installed it, checks it's the release (its details are signed with Null's own key, and the
+package must have the digest they give), and says "Restart to Update": Null quits as usual
+(asking about unsaved changes), the new version is put in place, and it starts again. Not
+restarted, it's installed the next time Null quits.
+
+- Windows (installed with setup.exe): the installer runs again, quietly, with your choices.
+- Mac: the app is replaced where it is.
+- Linux: the binary (`~/.local/bin/null`, or where you put the .tar.gz's) is replaced; a
+  .deb is installed again, the system asking for your password.
+
+The Windows zip, a build from source, or a folder Null can't write to: "Null 0.2.0 is out"
+opens null-ide.com instead.
 
 ## Code intelligence
 

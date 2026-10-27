@@ -3841,6 +3841,7 @@ dependencies = [
  "raw-window-handle",
  "regex",
  "resvg",
+ "ring",
  "ropey",
  "secret-service",
  "serde",

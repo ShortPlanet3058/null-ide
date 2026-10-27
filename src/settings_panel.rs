@@ -678,7 +678,7 @@ impl SettingsPanel {
             Self::row(
                 "Tell me when a new version is out",
                 Some(
-                    "Once a day Null asks GitHub for its latest version; nothing about you is sent, and nothing is installed",
+                    "Once a day Null asks GitHub for its latest version; nothing about you is sent, and nothing is installed until you click Update",
                 ),
                 Self::toggle("updates", s.check_for_updates, &theme, cx, |s| {
                     s.check_for_updates = !s.check_for_updates
