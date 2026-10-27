@@ -349,6 +349,19 @@ pub fn get(progress: impl Fn(u8)) -> Result<String, String> {
     Ok(version)
 }
 
+/// An update installed (or given up on) at the last quit: its files go, once whatever ran
+/// it has ended. Off the main thread.
+pub fn tidy() {
+    let Some(dir) = crate::tools::data_dir().map(|d| d.join("updates")) else { return };
+    if dir.exists() {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        // (Downloaded meanwhile, this run: kept.)
+        if READY.lock().is_ok_and(|r| r.is_none()) && !matches!(state(), State::Getting(..)) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
 /// Null starts again once the update is in place (Restart to Update).
 pub fn restart_after() {
     RESTART.store(true, Ordering::Relaxed);
@@ -357,6 +370,33 @@ pub fn restart_after() {
 /// Quitting was called off: a later quit only installs.
 pub fn restart_called_off() {
     RESTART.store(false, Ordering::Relaxed);
+}
+
+fn reopen_file() -> Option<PathBuf> {
+    Some(crate::tools::data_dir()?.join("reopen.json"))
+}
+
+/// Restarting to update: each window's folders, opened again when Null starts (it's
+/// started with nothing to open).
+pub fn keep_windows(windows: Vec<Vec<PathBuf>>) {
+    if !RESTART.load(Ordering::Relaxed) || READY.lock().is_ok_and(|r| r.is_none()) || windows.is_empty() {
+        return;
+    }
+    if let (Some(file), Ok(json)) = (reopen_file(), serde_json::to_string(&windows)) {
+        let _ = std::fs::write(file, json);
+    }
+}
+
+/// The windows open when Null restarted to update (gone once read; a few minutes old at
+/// most, else it's another start).
+pub fn windows_to_reopen() -> Vec<Vec<PathBuf>> {
+    let Some(file) = reopen_file() else { return Vec::new() };
+    let fresh =
+        std::fs::metadata(&file).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e.as_secs() < 300));
+    let windows = std::fs::read_to_string(&file).ok().and_then(|s| serde_json::from_str(&s).ok());
+    let _ = std::fs::remove_file(&file);
+    let windows: Vec<Vec<PathBuf>> = if fresh { windows.unwrap_or_default() } else { Vec::new() };
+    windows.into_iter().filter(|w| !w.is_empty()).collect()
 }
 
 /// Null is quitting: a downloaded update is put in place once it has, by a process of its
@@ -537,6 +577,21 @@ mod tests {
         // Built from source: never.
         assert_eq!(how_for(&dir.join("target/release/null"), "linux"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restarting_to_update_opens_the_same_windows() {
+        let windows = vec![vec![PathBuf::from("/a"), PathBuf::from("/b")], vec![PathBuf::from("/ssh:box:/app")]];
+        // Not restarting (or nothing to install): nothing kept.
+        keep_windows(windows.clone());
+        assert!(windows_to_reopen().is_empty());
+        *READY.lock().unwrap() = Some((Install::Binary(PathBuf::from("/x/null")), PathBuf::from("/x/u.tar.gz")));
+        restart_after();
+        keep_windows(windows.clone());
+        restart_called_off();
+        READY.lock().unwrap().take();
+        assert_eq!(windows_to_reopen(), windows);
+        assert!(windows_to_reopen().is_empty(), "read once");
     }
 
     /// Asks GitHub for real: `cargo test asks_github -- --ignored`.
