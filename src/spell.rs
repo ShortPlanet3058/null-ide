@@ -587,6 +587,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     fn hunspell_dictionaries_answer() {
         let dir = crate::tools::test_dir("hunspell");
+        std::fs::create_dir_all(&dir).unwrap();
         let aff = "SET UTF-8\nTRY esianrtolcdugmphbyfvkwz'\nSFX S Y 1\nSFX S 0 s .\n";
         std::fs::write(dir.join("en_US.aff"), aff).unwrap();
         std::fs::write(dir.join("en_US.dic"), "4\ncat/S\nreceive\nthe\ndon't\n").unwrap();
