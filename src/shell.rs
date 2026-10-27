@@ -9,9 +9,36 @@ pub enum Kind {
     PowerShell,
 }
 
-/// The terminal's shell: PowerShell on Windows (Null starts it there), else a POSIX one.
+/// Whether the window being worked in has a folder inside WSL or on a server: its
+/// terminal's shell is Linux's then (see `wsl`, `remote`), and what's typed into it is
+/// written for it.
+static LINUX_PROJECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Said by the window that comes to the front (and when its folder changes).
+pub fn set_linux_project(linux: bool) {
+    LINUX_PROJECT.store(linux, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The terminal's shell: PowerShell on Windows (Null starts it there), a POSIX one elsewhere
+/// and for a folder inside WSL or on a server.
 pub fn kind() -> Kind {
-    if cfg!(windows) { Kind::PowerShell } else { Kind::Posix }
+    if cfg!(windows) && !LINUX_PROJECT.load(std::sync::atomic::Ordering::Relaxed) {
+        Kind::PowerShell
+    } else {
+        Kind::Posix
+    }
+}
+
+/// A path as the terminal's shell has it: a folder inside WSL in its Linux form, one on a
+/// server as the server has it.
+pub fn path_text(path: &std::path::Path) -> String {
+    if let Some(remote) = crate::remote::of(path) {
+        return remote.path;
+    }
+    match crate::wsl::of(path) {
+        Some(wsl) => wsl.linux,
+        None => path.display().to_string(),
+    }
 }
 
 /// The program the terminal starts on Windows: PowerShell 7 when it's installed, else the
@@ -50,7 +77,7 @@ pub fn line(words: &[String], kind: Kind) -> String {
 
 /// `command` run in `folder` (quoted here), the terminal staying where it was.
 pub fn in_folder(folder: &str, command: &str, kind: Kind) -> String {
-    let folder = quote(folder, kind);
+    let folder = quote(&path_text(std::path::Path::new(folder)), kind);
     match kind {
         Kind::Posix => format!("(cd {folder} && {command})"),
         // (-LiteralPath: `[ ]` in a name aren't wildcards.)

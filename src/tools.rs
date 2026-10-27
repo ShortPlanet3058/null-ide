@@ -143,11 +143,14 @@ pub fn search_dirs() -> Vec<PathBuf> {
             dirs.extend(versions.flatten().map(|v| v.path()));
         }
     }
-    // What Null installed itself.
+    // What Null installed itself, and its own Node.js (for those servers, when the
+    // computer has none).
     if let Some(data) = data_dir() {
         dirs.push(data.join("servers/node_modules/.bin"));
         dirs.push(data.join("servers/bin"));
+        dirs.push(data.join("servers/dotnet"));
     }
+    dirs.extend(crate::node_runtime::bin_dir());
     dirs
 }
 

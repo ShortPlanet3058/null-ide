@@ -24,6 +24,25 @@ pub fn not_a_repository() -> &'static str {
 /// git, run in `dir`. Paths given to it are names, never patterns: discarding `app/[id].tsx`
 /// mustn't touch `app/d.tsx`.
 fn command(dir: &Path) -> Command {
+    // A folder inside WSL: Linux's git, run there (its config, its credentials), in the
+    // folder's Linux path; the same settings, given as `env` gives them.
+    if let Some(wsl) = crate::wsl::of(dir) {
+        return crate::wsl::command(
+            &wsl.distro,
+            Some(&wsl.linux),
+            "env",
+            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git"],
+        );
+    }
+    // A folder on a server: its git, run there, the same way.
+    if let Some(remote) = crate::remote::of(dir) {
+        return crate::remote::command(
+            &remote.host,
+            Some(&remote.path),
+            "env",
+            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git"],
+        );
+    }
     let mut command = crate::tools::command("git");
     command.arg("-C").arg(dir).env("GIT_LITERAL_PATHSPECS", "1").env("GIT_TERMINAL_PROMPT", "0");
     // Asking (status) never writes git's index: that write was seen as a change, and set
@@ -32,8 +51,99 @@ fn command(dir: &Path) -> Command {
     command
 }
 
+/// A path git printed (`--show-toplevel`, `--absolute-git-dir`) as Null reaches it: inside
+/// WSL, a Linux path to take back to Windows'.
+fn printed_path(dir: &Path, printed: &str) -> PathBuf {
+    if let Some(remote) = crate::remote::of(dir) {
+        return crate::remote::path(&remote.host, printed.trim());
+    }
+    match crate::wsl::of(dir) {
+        Some(wsl) => crate::wsl::from_linux(&wsl.distro, printed.trim()),
+        None => PathBuf::from(printed.trim()),
+    }
+}
+
+/// A path given to git run for `dir`, as that git knows it.
+fn given_path(dir: &Path, path: &Path) -> String {
+    if let Some(remote) = crate::remote::of(path) {
+        return remote.path;
+    }
+    match crate::wsl::of(dir) {
+        Some(wsl) => crate::wsl::linux_path(&wsl.distro, path),
+        None => path.to_string_lossy().into_owned(),
+    }
+}
+
+/// git run in `dir` with `args`, waited for. A folder on a server: through the connection
+/// already open to it (a new ssh each time took a second on Windows, which can't share one).
+fn output(dir: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    output_with(dir, args, &[])
+}
+
+fn output_with(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> std::io::Result<std::process::Output> {
+    output_given(dir, args, env, None)
+}
+
+/// As `output_with`, git reading `input`.
+fn output_given(
+    dir: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    input: Option<&[u8]>,
+) -> std::io::Result<std::process::Output> {
+    let Some(remote) = crate::remote::of(dir) else {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut command = command(dir);
+        command.envs(env.iter().copied()).args(args);
+        let Some(input) = input else { return command.output() };
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input)?;
+        }
+        return child.wait_with_output();
+    };
+    // (What git reads, given in the script: decoded on the way in.)
+    let mut script = if input.is_some() { "base64 -d <<'NULL_END' | (".to_string() } else { "(".to_string() };
+    script.push_str(&format!(
+        "cd {} || exit 128; PATH=\"{}\"; export PATH; GIT_LITERAL_PATHSPECS=1 GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0",
+        crate::remote::quote(&remote.path),
+        crate::remote::path_inside()
+    ));
+    for (key, value) in env {
+        script.push_str(&format!(" {key}={}", crate::remote::quote(value)));
+    }
+    script.push_str(" git");
+    for arg in args {
+        script.push(' ');
+        script.push_str(&crate::remote::quote(arg));
+    }
+    script.push(')');
+    if let Some(input) = input {
+        script.push('\n');
+        script.push_str(&crate::remote::encoded_lines(input));
+        script.push_str("NULL_END");
+    }
+    let ran = crate::remote::run(&remote.host, &script)?;
+    Ok(std::process::Output { status: exit_status(ran.status), stdout: ran.stdout, stderr: ran.stderr })
+}
+
+/// An exit code as the system's status of a process that ended so.
+fn exit_status(code: i32) -> std::process::ExitStatus {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw((code & 0xff) << 8)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code as u32)
+    }
+}
+
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = command(dir).args(args).output().ok()?;
+    let output = output(dir, args).ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -42,7 +152,7 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 /// /tmp, which is /private/tmp on macOS) still finds it.
 pub fn committed_text(path: &Path, encoding: crate::encoding::Encoding) -> Option<String> {
     let name = path.file_name()?.to_str()?;
-    let output = command(path.parent()?).args(["show", &format!("HEAD:./{name}")]).output().ok()?;
+    let output = output(path.parent()?, &["show", &format!("HEAD:./{name}")]).ok()?;
     // In the file's own encoding, so a Windows-1252 file compares with its accents.
     output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
 }
@@ -73,7 +183,7 @@ pub enum FileStatus {
 /// ones not), and only under it: a project inside a bigger repository sees its own.
 /// Empty outside a repository.
 pub fn status(root: &Path) -> Vec<(std::path::PathBuf, FileStatus)> {
-    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| std::path::PathBuf::from(t.trim())) else {
+    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| printed_path(root, &t)) else {
         return Vec::new();
     };
     let Some(out) = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]) else {
@@ -139,7 +249,7 @@ pub fn commit_parts(
     left_out: &[PathBuf],
     partly: &[(PathBuf, Vec<u8>)],
 ) -> Result<String, String> {
-    let names = |paths: &[PathBuf]| paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>();
+    let names = |paths: &[PathBuf]| paths.iter().map(|p| given_path(root, p)).collect::<Vec<_>>();
     if !kept.is_empty() {
         let paths = names(kept);
         let mut args = vec!["add", "-A", "--"];
@@ -152,7 +262,7 @@ pub fn commit_parts(
         args.extend(paths.iter().map(String::as_str));
         run(root, &args)?;
     }
-    let top = PathBuf::from(run(root, &["rev-parse", "--show-toplevel"])?.trim());
+    let top = printed_path(root, &run(root, &["rev-parse", "--show-toplevel"])?);
     for (path, bytes) in partly {
         let name = path.strip_prefix(&top).unwrap_or(path).to_string_lossy().into_owned();
         // The part committed, as a blob of its own (through the file's filters and line
@@ -170,19 +280,7 @@ pub fn commit_parts(
 
 /// git, given `input` to read.
 fn run_with_input(dir: &Path, args: &[&str], input: &[u8]) -> Result<String, String> {
-    use std::io::Write;
-    use std::process::Stdio;
-    let mut child = command(dir)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Couldn't run git: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input).map_err(|e| format!("Couldn't run git: {e}"))?;
-    }
-    let output = child.wait_with_output().map_err(|e| format!("Couldn't run git: {e}"))?;
+    let output = output_given(dir, args, &[], Some(input)).map_err(|e| format!("Couldn't run git: {e}"))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
@@ -244,10 +342,10 @@ pub fn undo_last_commit(root: &Path) -> Result<String, String> {
     if run(root, &["symbolic-ref", "-q", "HEAD"]).is_err() {
         return Err("Not on a branch.".into());
     }
-    let git_dir = run(root, &["rev-parse", "--absolute-git-dir"]).map(|d| PathBuf::from(d.trim()))?;
+    let git_dir = run(root, &["rev-parse", "--absolute-git-dir"]).map(|d| printed_path(root, &d))?;
     if ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
         .iter()
-        .any(|f| git_dir.join(f).exists())
+        .any(|f| crate::project_fs::exists(&git_dir.join(f)))
     {
         return Err("A merge or rebase is under way: finish it first.".into());
     }
@@ -427,7 +525,7 @@ pub fn commit_files(root: &Path, id: &str, first_parent: Option<&str>) -> Vec<Co
 
 /// A file (by its path from the repository's top) as commit `rev` has it.
 pub fn text_at(root: &Path, rev: &str, path: &str) -> Option<String> {
-    let output = command(root).args(["show", &format!("{rev}:{path}")]).output().ok()?;
+    let output = output(root, &["show", &format!("{rev}:{path}")]).ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -461,9 +559,8 @@ fn with_mainline<'a>(root: &Path, args: &[&'a str], id: &'a str) -> Vec<&'a str>
 
 /// The file as it was in `commit`, in its own encoding.
 pub fn file_at(path: &Path, commit: &FileCommit, encoding: crate::encoding::Encoding) -> Option<String> {
-    let top = git(path.parent()?, &["rev-parse", "--show-toplevel"])?;
-    let output =
-        command(Path::new(top.trim())).args(["show", &format!("{}:{}", commit.hash, commit.path)]).output().ok()?;
+    let top = printed_path(path.parent()?, &git(path.parent()?, &["rev-parse", "--show-toplevel"])?);
+    let output = output(&top, &["show", &format!("{}:{}", commit.hash, commit.path)]).ok()?;
     output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
 }
 
@@ -582,18 +679,19 @@ pub fn push_as_itself(root: &Path) -> Result<String, String> {
 /// A file back as it was in the last commit; a file the last commit doesn't have goes to
 /// the Trash (and out of what's staged), whatever `status` says: never deleted.
 pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String> {
-    let name = path.to_string_lossy();
+    let name = given_path(root, path);
     // A folder that isn't new (a submodule): taken back by git, never trashed whole.
-    if status != FileStatus::Added && path.is_dir() {
+    if status != FileStatus::Added && crate::project_fs::is_dir(path) {
         return run(root, &["restore", "--source=HEAD", "--staged", "--worktree", "--", &name]).map(|_| ());
     }
-    if status == FileStatus::Added || (path.exists() && !in_last_commit(path)) {
+    if status == FileStatus::Added || (crate::project_fs::exists(path) && !in_last_commit(path)) {
         crate::fs_ops::move_to_trash(path)?;
         run(root, &["rm", "-q", "--cached", "--ignore-unmatch", "--", &name]).ok();
         return Ok(());
     }
     // What's thrown away is kept in the file's history first (git writes it, not Null).
-    if path.is_file() {
+    // (Not a server's: its history isn't kept here.)
+    if !crate::remote::is_remote(path) && path.is_file() {
         let real = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         crate::local_history::keep_before_writing(&real, &[]);
     }
@@ -604,10 +702,7 @@ pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String
 /// isn't in this repository, so asking for the object itself would say no).
 fn in_last_commit(path: &Path) -> bool {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return false };
-    command(dir)
-        .args(["ls-tree", "HEAD", "--", name])
-        .output()
-        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+    output(dir, &["ls-tree", "HEAD", "--", name]).is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// A branch to switch to.
@@ -901,7 +996,7 @@ pub fn delete_branch(root: &Path, name: &str, anyway: bool) -> Result<(), String
 /// The files git has left conflicting (in a merge, a rebase, changes brought back),
 /// anywhere in the repository (not only in the folder opened).
 pub fn conflicted(root: &Path) -> Vec<PathBuf> {
-    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())) else {
+    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| printed_path(root, &t)) else {
         return Vec::new();
     };
     let names = git(root, &["diff", "--name-only", "-z", "--diff-filter=U"]).unwrap_or_default();
@@ -934,8 +1029,7 @@ fn joined(root: &Path, result: Result<String, String>) -> Result<Vec<PathBuf>, S
 
 /// git, with nothing to open an editor for a message: the one it has is taken.
 fn run_without_editor(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output =
-        command(dir).env("GIT_EDITOR", "true").args(args).output().map_err(|e| format!("Couldn't run git: {e}"))?;
+    let output = output_with(dir, args, &[("GIT_EDITOR", "true")]).map_err(|e| format!("Couldn't run git: {e}"))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
@@ -966,8 +1060,8 @@ pub struct JoiningState {
 
 /// What git is in the middle of, if anything.
 pub fn joining(root: &Path) -> Option<JoiningState> {
-    let dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?.trim());
-    let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_string());
+    let dir = printed_path(root, &git(root, &["rev-parse", "--absolute-git-dir"])?);
+    let read = |name: &str| crate::project_fs::read_to_string(&dir.join(name)).ok().map(|s| s.trim().to_string());
     let name_of = |id: &str| {
         git(root, &["name-rev", "--name-only", "--no-undefined", "--exclude=tags/*", id])
             .map(|n| n.trim().to_string())
@@ -994,7 +1088,7 @@ pub fn joining(root: &Path) -> Option<JoiningState> {
 
 /// Whether a file still has conflict markers in it (whatever its encoding).
 pub fn still_marked(path: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(path) else { return false };
+    let Ok(bytes) = crate::project_fs::read(path) else { return false };
     let at_line_start =
         |m: &[u8]| bytes.starts_with(m) || bytes.windows(m.len() + 1).any(|w| w[0] == b'\n' && &w[1..] == m);
     let anywhere = |m: &[u8]| bytes.windows(m.len()).any(|w| w == m);
@@ -1016,7 +1110,7 @@ pub enum Undecided {
 /// The conflicted files that have no markers to settle: a side deleted them, or they're
 /// not text. Committing would keep whatever's there without anyone choosing.
 pub fn undecided(root: &Path) -> Vec<(PathBuf, Undecided)> {
-    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())) else {
+    let Some(top) = git(root, &["rev-parse", "--show-toplevel"]).map(|t| printed_path(root, &t)) else {
         return Vec::new();
     };
     // "mode id stage\tname": which sides (2 ours, 3 theirs) each conflicted file has.
@@ -1046,7 +1140,7 @@ pub fn undecided(root: &Path) -> Vec<(PathBuf, Undecided)> {
 }
 
 fn is_bytes(path: &Path) -> bool {
-    std::fs::read(path).is_ok_and(|bytes| bytes.iter().take(8000).any(|&b| b == 0))
+    crate::project_fs::read_head(path, 8000).is_ok_and(|bytes| bytes.contains(&0))
 }
 
 /// How an undecided conflict is settled.
@@ -1152,19 +1246,11 @@ pub struct LineBlame {
 /// unsaved edits don't shift the lines). None for a line not committed yet, or a file
 /// git doesn't follow.
 pub fn blame_line(path: &Path, text: &str, line: usize) -> Option<LineBlame> {
-    use std::io::Write;
     let dir = path.parent()?;
     let name = path.file_name()?.to_str()?;
     let range = format!("{},{}", line + 1, line + 1);
-    let mut child = command(dir)
-        .args(["blame", "--porcelain", "-L", &range, "--contents", "-", "--", name])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    child.stdin.take()?.write_all(text.as_bytes()).ok()?;
-    let output = child.wait_with_output().ok()?;
+    let args = ["blame", "--porcelain", "-L", &range, "--contents", "-", "--", name];
+    let output = output_given(dir, &args, &[], Some(text.as_bytes())).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1206,7 +1292,7 @@ pub fn ago(time: i64, now: i64) -> String {
 
 /// Runs git, with its own words when it fails.
 fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = command(dir).args(args).output().map_err(|e| format!("Couldn't run git: {e}"))?;
+    let output = output(dir, args).map_err(|e| format!("Couldn't run git: {e}"))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
@@ -1257,8 +1343,8 @@ pub fn line_link(path: &Path, first: usize, last: usize) -> Result<String, Strin
     let top = git(dir, &["rev-parse", "--show-toplevel"]).ok_or("Not in a git repository.")?;
     let commit = git(dir, &["rev-parse", "HEAD"]).ok_or("Nothing committed yet.")?;
     // Through any links: a project opened from /tmp is /private/tmp to git on macOS.
-    let resolve = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let (file_path, top) = (resolve(path), resolve(Path::new(top.trim())));
+    let resolve = |p: &Path| crate::project_fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (file_path, top) = (resolve(path), resolve(&printed_path(dir, &top)));
     let relative = file_path.strip_prefix(&top).map_err(|_| "The file isn't in the repository.")?;
     let file = relative.to_string_lossy().replace('\\', "/");
     let commit = commit.trim();
@@ -1361,6 +1447,31 @@ mod tests {
             let usual = similar::TextDiff::from_lines(before, after).ops().to_vec();
             assert_eq!(line_ops(before, after), usual, "{before:?} → {after:?}");
         }
+    }
+
+    /// A repository on a server: git there, through the connection (`sh` here for one).
+    #[test]
+    #[cfg(unix)]
+    fn git_on_a_server_runs_through_its_connection() {
+        let dir =
+            dunce::canonicalize(std::env::temp_dir()).unwrap().join(format!("null-git-remote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| git(&dir, args);
+        if run(&["init", "-q", "-b", "trunk"]).is_none() {
+            return; // No git here: nothing to test.
+        }
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        run(&["add", "."]).unwrap();
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "first"]).unwrap();
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        let root = crate::remote::path(crate::remote::TEST_HOST, &dir.to_string_lossy());
+        assert_eq!(current_branch(&root).as_deref(), Some("trunk"));
+        assert_eq!(status(&root), [(root.join("a.txt"), FileStatus::Modified)]);
+        assert_eq!(committed_text(&root.join("a.txt"), Default::default()).as_deref(), Some("one\n"));
+        // (Its text given to git: the line as written now is new, the one committed is git's.)
+        assert!(blame_line(&root.join("a.txt"), "one\n", 0).is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

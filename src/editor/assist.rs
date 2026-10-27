@@ -19,7 +19,7 @@ use gpui::{
 use lsp_types::DiagnosticSeverity;
 use std::ops::Range;
 
-actions!(inline_ai, [SubmitPrompt, CancelPrompt, KeepChange, UndoChange, CloseNote]);
+actions!(inline_ai, [SubmitPrompt, CancelPrompt, KeepChange, UndoChange, CloseNote, AskFollowUp, CloseFollowUp]);
 
 /// Esc while the AI writes, with the keys in the code (a click there): it stops it. After
 /// the review's and the suggestions' keys, so it's this Esc that counts then.
@@ -35,14 +35,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", KeepChange, Some("Editor && ai_change")),
         KeyBinding::new("escape", UndoChange, Some("Editor && ai_change")),
         KeyBinding::new("escape", CloseNote, Some("Editor && ai_note")),
+        KeyBinding::new("enter", AskFollowUp, Some("NoteFollowUp")),
+        KeyBinding::new("escape", CloseFollowUp, Some("NoteFollowUp")),
     ]);
 }
 
 /// Items a ⌘I without a selection works on, smallest first.
 const RUST_SCOPES: &[&str] =
     &["function_item", "struct_item", "enum_item", "impl_item", "trait_item", "macro_definition", "mod_item"];
-/// Whole files above this many lines are trimmed to the lines around the target.
-const CONTEXT_LINES: usize = 600;
 const NOTE_MAX_ROWS: usize = 14;
 
 /// Rows between the lines of code, drawn by the editor or with something on top.
@@ -64,6 +64,10 @@ pub enum BlockKind {
     ReviewHint(usize, bool),
     /// A conversation on the line above (`threads`' index).
     Thread(usize),
+    /// A note on the line above (`line_notes`' index).
+    LineNote(usize),
+    /// A note being written on the line above.
+    NoteDraft,
 }
 
 /// A conversation between the lines: a pull request's review comments on a line.
@@ -88,6 +92,9 @@ pub(super) struct Prompting {
     original: String,
     /// An error on those lines: Enter with nothing typed fixes it.
     error: Option<String>,
+    /// What's sent with the request besides the code itself (see `ai_context`), in a few
+    /// words, with its size: shown in the field.
+    sends: String,
     /// Opened to ask about the code, not to change it.
     ask_only: bool,
     writing: bool,
@@ -111,8 +118,17 @@ pub(super) struct Change {
 pub(super) struct Note {
     /// The note sits just above this line, under the code it's about.
     line: usize,
+    /// The code it's about, as asked.
+    code_lines: Range<usize>,
+    code: String,
+    /// The questions asked before this one, with their answers: a follow-up goes with them.
+    earlier: Vec<(String, String)>,
+    /// What else the question goes with (a failed test run's output).
+    extra: String,
     question: String,
     answer: String,
+    /// A follow-up question, once the answer's there.
+    follow_up: Entity<TextInput>,
     done: bool,
     failed: Option<String>,
     scroll: ScrollHandle,
@@ -128,17 +144,6 @@ fn is_question(text: &str) -> bool {
         || ["why ", "what ", "how ", "where ", "when ", "which ", "who ", "explain", "is ", "does ", "can ", "should "]
             .iter()
             .any(|w| lower.starts_with(w))
-}
-
-pub fn trim_context(text: &str, lines: &Range<usize>) -> String {
-    let all: Vec<&str> = text.lines().collect();
-    if all.len() <= CONTEXT_LINES {
-        return text.to_string();
-    }
-    let margin = CONTEXT_LINES / 2;
-    let start = lines.start.saturating_sub(margin);
-    let end = (lines.end + margin).min(all.len());
-    format!("[… lines 1-{start} omitted …]\n{}\n[… rest of the file omitted …]", all[start..end].join("\n"))
 }
 
 impl Editor {
@@ -258,6 +263,12 @@ impl Editor {
             (Some(_), false) => "Fix the error, or describe a change",
             (None, false) => "Describe a change, or ask a question",
         };
+        let sends = {
+            let context = self.request_context(&lines, cx);
+            let code = self.buffer.slice(self.line_range_chars(&lines));
+            let tokens = crate::ai_usage::estimate(&context.text) + crate::ai_usage::estimate(&code) + 150;
+            format!("with {} · about {} tokens", context.summary, crate::ai_usage::short(tokens))
+        };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         if !previous.is_empty() {
             input.update(cx, |input, cx| input.set_text(&previous, cx));
@@ -274,6 +285,7 @@ impl Editor {
             original: self.buffer.slice(span),
             lines,
             error: if ask_only { None } else { error },
+            sends,
             ask_only,
             writing: false,
             preview: String::new(),
@@ -330,12 +342,19 @@ impl Editor {
         }
     }
 
-    fn file_context(&self, lines: &Range<usize>) -> String {
-        let path = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "untitled".into());
-        format!(
-            "File: {path} ({})\n\n<file>\n{}\n</file>",
+    /// What the AI reads with a request about `lines`, besides them: the project's
+    /// conventions, the file (or the part of it around them), what they use from elsewhere.
+    fn request_context(&self, lines: &Range<usize>, cx: &App) -> crate::ai_context::Context {
+        let project = cx.try_global::<crate::project_index::ProjectContext>();
+        let root = project.map(|p| p.root.as_path()).filter(|r| !r.as_os_str().is_empty());
+        crate::ai_context::for_request(
+            self.path.as_deref(),
             self.language_name(),
-            trim_context(&self.buffer.to_string(), lines)
+            &self.buffer.to_string(),
+            lines,
+            root,
+            project.map_or(&[][..], |p| p.definitions.as_slice()),
+            cx.global::<Settings>().ai.active(),
         )
     }
 
@@ -343,19 +362,20 @@ impl Editor {
         let Some(prompt) = &self.prompt else { return };
         let lines = prompt.lines.clone();
         let user = format!(
-            "{}\n\n<selection lines=\"{}-{}\">\n{}</selection>\n\nInstruction: {instruction}",
-            self.file_context(&lines),
+            "<selection lines=\"{}-{}\">\n{}</selection>\n\nInstruction: {instruction}",
             lines.start + 1,
             lines.end,
             prompt.original
         );
         let request = Prompt {
             system: "You are a careful senior engineer making a small change to part of a file in a code editor. \
-                     You get the whole file for context and the part to change between <selection> tags. Apply the \
-                     instruction to that part only. Reply with the complete new text for that part and nothing \
-                     else: no explanation, no markdown fences, nothing before or after the code. Keep the file's \
-                     indentation and style, and change no more than needed."
+                     You get the file for context (or, in a long one, the lines around the change and an outline of \
+                     the rest), what the code uses from elsewhere in the project, and the part to change between \
+                     <selection> tags. Apply the instruction to that part only. Reply with the complete new text \
+                     for that part and nothing else: no explanation, no markdown fences, nothing before or after the \
+                     code. Keep the file's indentation and style, and change no more than needed."
                 .into(),
+            context: self.request_context(&lines, cx).text,
             user,
             ..Default::default()
         };
@@ -499,19 +519,49 @@ impl Editor {
 
     fn ask_question(&mut self, question: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = self.prompt.take() else { return };
-        let lines = prompt.lines.clone();
+        let follow_up = cx.new(|cx| TextInput::new("Ask a follow-up", cx));
+        self.note = Some(Note {
+            line: prompt.lines.end,
+            code_lines: prompt.lines.clone(),
+            code: prompt.original.clone(),
+            earlier: Vec::new(),
+            extra: String::new(),
+            question: question.clone(),
+            answer: String::new(),
+            follow_up,
+            done: false,
+            failed: None,
+            scroll: ScrollHandle::new(),
+            lines_total: self.buffer.len_lines(),
+            _task: None,
+        });
+        self.send_note_question(cx);
+        window.focus(&self.focus_handle);
+        self.autoscroll = true;
+    }
+
+    /// Asks the note's question, with what was asked before it, and writes the answer in.
+    fn send_note_question(&mut self, cx: &mut Context<Self>) {
+        let Some(note) = &self.note else { return };
+        let context = self.request_context(&note.code_lines, cx).text;
+        let earlier: String =
+            note.earlier.iter().map(|(q, a)| format!("Question: {q}\nYour answer: {a}\n\n")).collect();
+        let earlier =
+            if earlier.is_empty() { String::new() } else { format!("Earlier in this conversation:\n\n{earlier}") };
+        let extra = if note.extra.is_empty() { String::new() } else { format!("{}\n\n", note.extra) };
         let user = format!(
-            "{}\n\nThe code in question (lines {}-{}):\n<code>\n{}</code>\n\nQuestion: {question}",
-            self.file_context(&lines),
-            lines.start + 1,
-            lines.end,
-            prompt.original
+            "The code in question (lines {}-{}):\n<code>\n{}</code>\n\n{extra}{earlier}Question: {}",
+            note.code_lines.start + 1,
+            note.code_lines.end,
+            note.code,
+            note.question
         );
         let request = Prompt {
             system: "You are a concise, knowledgeable programming assistant inside a code editor. Your answer is \
                      shown as a small note right under the code it's about, so keep it short: a few sentences, \
                      specific to this code. Use a markdown code fence only when code really helps."
                 .into(),
+            context,
             user,
             ..Default::default()
         };
@@ -544,19 +594,85 @@ impl Editor {
                 }
             }
         });
+        if let Some(note) = &mut self.note {
+            note._task = Some(task);
+        }
+        self.rebuild_blocks();
+        cx.notify();
+    }
+
+    /// A failed test explained: the test (the item at `line`) asked about with what its run
+    /// said, in a note under it.
+    pub fn explain_failure(&mut self, line: usize, output: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !cx.global::<Settings>().ai.ready() {
+            return;
+        }
+        self.set_caret_point((line.min(self.buffer.len_lines().saturating_sub(1)), 0), cx);
+        let lines = self.assist_lines();
+        let code = self.buffer.slice(self.line_range_chars(&lines));
+        let follow_up = cx.new(|cx| TextInput::new("Ask a follow-up", cx));
         self.note = Some(Note {
             line: lines.end,
-            question,
+            code_lines: lines,
+            code,
+            earlier: Vec::new(),
+            extra: format!("The test failed. Its run said:\n<output>\n{}\n</output>", output.trim()),
+            question: "Why does this test fail, and what would fix it?".into(),
             answer: String::new(),
+            follow_up,
             done: false,
             failed: None,
             scroll: ScrollHandle::new(),
             lines_total: self.buffer.len_lines(),
-            _task: Some(task),
+            _task: None,
         });
-        self.rebuild_blocks();
+        self.send_note_question(cx);
         window.focus(&self.focus_handle);
         self.autoscroll = true;
+    }
+
+    /// Enter in the note's field: the next question, after the ones before.
+    pub(super) fn ask_follow_up(&mut self, _: &AskFollowUp, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(note) = &mut self.note else { return };
+        let question = note.follow_up.read(cx).text().trim().to_string();
+        if question.is_empty() || !note.done {
+            return;
+        }
+        note.follow_up.update(cx, |input, cx| input.set_text("", cx));
+        let answered = std::mem::take(&mut note.answer);
+        let asked = std::mem::replace(&mut note.question, question);
+        if note.failed.take().is_none() {
+            note.earlier.push((asked, answered));
+        }
+        note.done = false;
+        self.send_note_question(cx);
+        window.focus(&self.focus_handle);
+    }
+
+    /// Esc in the note's field: back to the code (the note stays).
+    pub(super) fn close_follow_up(&mut self, _: &CloseFollowUp, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    /// The answer kept as a note on the code's last line (the AI's), and the answer closed.
+    pub(super) fn keep_answer_as_note(&mut self, cx: &mut Context<Self>) {
+        let Some(note) = self.note.take() else { return };
+        let answer = note.answer.trim();
+        if answer.is_empty() {
+            return;
+        }
+        let line = note.code_lines.end.saturating_sub(1).max(note.code_lines.start);
+        self.line_notes.push(super::LineNote {
+            id: crate::code_notes::new_id(),
+            line,
+            text: format!("{}\n{answer}", note.question.trim()),
+            by_ai: true,
+        });
+        self.line_notes.sort_by_key(|n| n.line);
+        self.line_notes_revision = self.buffer.revision();
+        self.rebuild_blocks();
+        cx.emit(EditorEvent::NotesChanged);
         cx.notify();
     }
 
@@ -591,7 +707,12 @@ impl Editor {
             .as_ref()
             .map(|l| ((l.text_bounds.size.width - px(60.)) / (l.char_width * 0.95)).floor().max(20.) as usize)
             .unwrap_or(80);
-        let text = if let Some(failed) = &note.failed { failed.as_str() } else { note.answer.as_str() };
+        let mut text = String::new();
+        for (q, a) in &note.earlier {
+            text.push_str(&format!("{q}\n{a}\n\n"));
+        }
+        text.push_str(if let Some(failed) = &note.failed { failed.as_str() } else { note.answer.as_str() });
+        let text = text.as_str();
         // Text lines wrapped to the width; blank lines between paragraphs are only small gaps.
         let body: usize =
             text.lines().filter(|l| !l.trim().is_empty()).map(|l| l.chars().count().div_ceil(per_row)).sum();
@@ -600,14 +721,20 @@ impl Editor {
         // As it's drawn (see the Note block): its paddings (3 + 6, above and below), the
         // question's line, 20 a line of text, 4 around each paragraph, half a line a gap;
         // in the editor's rows, rounded up so nothing is cut off.
-        let needed = 18. + 20. + 20. * body as f32 + 4. * paragraphs as f32 + 10. * gaps as f32;
+        // (The follow-up field, once it's answered: a line and its gap.)
+        let follow = if note.done { 34. } else { 0. };
+        let needed = 18. + 20. + 20. * body as f32 + 4. * paragraphs as f32 + 10. * gaps as f32 + follow;
         let row = f32::from(self.line_height()).max(1.);
         ((needed / row).ceil() as usize).clamp(2, NOTE_MAX_ROWS)
     }
 
     /// Whether some of the blocks are drawn as elements over the text, placed from its layout.
     pub fn has_overlay_blocks(&self) -> bool {
-        !self.threads.is_empty() || self.prompt.is_some() || self.note.is_some()
+        !self.threads.is_empty()
+            || self.prompt.is_some()
+            || self.note.is_some()
+            || !self.line_notes.is_empty()
+            || self.note_draft.is_some()
     }
 
     #[cfg(all(test, unix))]
@@ -678,6 +805,17 @@ impl Editor {
         if let Some(note) = &self.note {
             let rows = self.note_rows(note);
             blocks.push(Block { before_line: note.line, rows, kind: BlockKind::Note });
+        }
+        // Notes on lines, under them (the one being changed, as its field).
+        let editing = self.note_draft.as_ref().and_then(|d| d.id);
+        for (i, note) in self.line_notes.iter().enumerate() {
+            if Some(note.id) != editing {
+                let rows = Self::line_note_rows(note);
+                blocks.push(Block { before_line: (note.line + 1).min(lines), rows, kind: BlockKind::LineNote(i) });
+            }
+        }
+        if let Some(draft) = &self.note_draft {
+            blocks.push(Block { before_line: (draft.line + 1).min(lines), rows: 1, kind: BlockKind::NoteDraft });
         }
         // An AI task's changes being reviewed: old lines struck through above the new ones,
         // and the keys under the change at the caret.
@@ -799,6 +937,8 @@ impl Editor {
                         (None, hint)
                     };
                     let failed_long = prompt.failed.as_ref().filter(|f| f.len() > 60).cloned();
+                    // What goes with it, while nothing's wrong and nothing's being written.
+                    let sends = (!prompt.writing && prompt.failed.is_none()).then(|| prompt.sends.clone());
                     out.push(
                         place(div())
                             // While it writes, the keys are here (see `writing_focus`).
@@ -827,6 +967,16 @@ impl Editor {
                                     .children(status.map(|s| div().text_color(theme.muted).child(s)))
                                     .when(!prompt.writing, |d| d.child(prompt.input.clone())),
                             )
+                            .children(sends.map(|sends| {
+                                div()
+                                    .flex_none()
+                                    .max_w(px(420.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(px(ui::T_XS))
+                                    .text_color(theme.faint)
+                                    .child(sends)
+                            }))
                             .children(failed_long.map(|f| {
                                 div()
                                     .max_w(px(360.))
@@ -901,12 +1051,8 @@ impl Editor {
                 }
                 BlockKind::Note => {
                     let Some(note) = &self.note else { continue };
-                    let body: Vec<AnyElement> = if let Some(failed) = &note.failed {
-                        vec![div().text_color(theme.error).child(failed.clone()).into_any_element()]
-                    } else if note.answer.trim().is_empty() {
-                        vec![div().text_color(theme.muted).child("Thinking…").into_any_element()]
-                    } else {
-                        crate::markdown::blocks(&note.answer, None)
+                    let answer = |text: &str| -> Vec<AnyElement> {
+                        crate::markdown::blocks(text, None)
                             .into_iter()
                             .map(|b| {
                                 if b.code {
@@ -931,9 +1077,74 @@ impl Editor {
                             })
                             .collect()
                     };
+                    let asked = |q: &str| {
+                        div()
+                            .pt(px(6.))
+                            .text_size(px(ui::T_XS))
+                            .text_color(theme.muted)
+                            .child(q.to_string())
+                            .into_any_element()
+                    };
+                    // The questions before, each with its answer; then this one's.
+                    let mut body: Vec<AnyElement> = Vec::new();
+                    for (i, (q, a)) in note.earlier.iter().enumerate() {
+                        if i > 0 {
+                            body.push(asked(q));
+                        }
+                        body.extend(answer(a));
+                    }
+                    if !note.earlier.is_empty() {
+                        body.push(asked(&note.question));
+                    }
+                    if let Some(failed) = &note.failed {
+                        body.push(div().text_color(theme.error).child(failed.clone()).into_any_element());
+                    } else if note.answer.trim().is_empty() {
+                        body.push(div().text_color(theme.muted).child("Thinking…").into_any_element());
+                    } else {
+                        body.extend(answer(&note.answer));
+                    }
+                    let first = note.earlier.first().map_or(note.question.clone(), |(q, _)| q.clone());
+                    // Once answered: a follow-up, or the answer kept as a note on the code.
+                    let follow = note.done.then(|| {
+                        div()
+                            .mt(px(8.))
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .key_context("NoteFollowUp")
+                            .on_action(cx.listener(Self::ask_follow_up))
+                            .on_action(cx.listener(Self::close_follow_up))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .px(px(8.))
+                                    .py(px(3.))
+                                    .rounded(px(ui::R_CONTROL))
+                                    .border_1()
+                                    .border_color(theme.hairline)
+                                    .child(note.follow_up.clone()),
+                            )
+                            .when(note.failed.is_none(), |d| {
+                                d.child(
+                                    div()
+                                        .id("keep-answer")
+                                        .flex_none()
+                                        .text_size(px(ui::T_XS))
+                                        .text_color(theme.muted)
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme.foreground))
+                                        .child("Keep as note")
+                                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                            this.keep_answer_as_note(cx)
+                                        })),
+                                )
+                            })
+                    });
                     out.push(
                         place(div())
                             .py(px(3.))
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 div()
                                     .id("ai-note")
@@ -954,12 +1165,7 @@ impl Editor {
                                             .justify_between()
                                             .text_size(px(ui::T_XS))
                                             .text_color(theme.muted)
-                                            .child(
-                                                div()
-                                                    .overflow_hidden()
-                                                    .whitespace_nowrap()
-                                                    .child(note.question.clone()),
-                                            )
+                                            .child(div().overflow_hidden().whitespace_nowrap().child(first))
                                             .child(
                                                 div()
                                                     .flex_none()
@@ -968,7 +1174,8 @@ impl Editor {
                                                     .child(if note.done { "Esc close" } else { "" }),
                                             ),
                                     )
-                                    .children(body),
+                                    .children(body)
+                                    .children(follow),
                             )
                             .into_any_element(),
                     );
@@ -1023,6 +1230,108 @@ impl Editor {
                                                 cx.emit(EditorEvent::ReplyAsked(id))
                                             })),
                                     ),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                BlockKind::LineNote(i) => {
+                    let Some(note) = self.line_notes.get(*i) else { continue };
+                    let (id, by_ai) = (note.id, note.by_ai);
+                    out.push(
+                        place(div())
+                            .py(px(2.))
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                div()
+                                    .id(("line-note", id as usize))
+                                    .group("line-note")
+                                    .size_full()
+                                    .overflow_hidden()
+                                    .flex()
+                                    .gap(px(10.))
+                                    .border_l_2()
+                                    .border_color(if by_ai { theme.caret.opacity(0.7) } else { theme.faint })
+                                    .pl(px(10.))
+                                    .pr(px(6.))
+                                    .font_family(cx.global::<crate::fonts::Fonts>().ui.clone())
+                                    .text_size(px(ui::T_MD))
+                                    .line_height(px(20.))
+                                    .text_color(theme.muted)
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+                                        this.edit_note(id, window, cx)
+                                    }))
+                                    .when(by_ai, |d| {
+                                        d.child(
+                                            div()
+                                                .flex_none()
+                                                .text_size(px(ui::T_XS))
+                                                .text_color(theme.caret)
+                                                .child("AI"),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .children(note.text.lines().map(|l| div().child(l.to_string()))),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("line-note-remove", id as usize))
+                                            .flex_none()
+                                            .text_size(px(ui::T_XS))
+                                            .text_color(theme.faint)
+                                            .invisible()
+                                            .group_hover("line-note", |s| s.visible())
+                                            .hover(|s| s.text_color(theme.foreground))
+                                            .child("✕")
+                                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                this.remove_note(id, cx)
+                                            })),
+                                    ),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                BlockKind::NoteDraft => {
+                    let Some(draft) = &self.note_draft else { continue };
+                    let hint = if draft.input.read(cx).text().trim().is_empty() && draft.id.is_some() {
+                        "↵ remove · Esc"
+                    } else {
+                        "↵ keep · Esc"
+                    };
+                    out.push(
+                        place(div())
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .key_context("NoteDraft")
+                            .on_action(cx.listener(Self::keep_note))
+                            .on_action(cx.listener(Self::leave_note))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .border_l_2()
+                            .border_color(theme.muted)
+                            .pl(px(10.))
+                            .pr(px(10.))
+                            .bg(theme.surface)
+                            .text_size(px(ui::T_MD))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_color(theme.foreground)
+                                    .child(draft.input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(ui::T_XS))
+                                    .text_color(theme.muted)
+                                    .child(ui::key_words(hint)),
                             )
                             .into_any_element(),
                     );

@@ -1339,7 +1339,7 @@ mod editor_tests {
             "on:\n  push:\njobs:\n  build:\n    steps:\n      - name: a\n        run: b"
         );
         // In a comment: left alone.
-        assert_eq!(typed(cx, "a.lua", "function f()\n  --[[ notes\n  ", "end"), "function f()\n  --[[ notes\n  end");
+        assert_eq!(typed(cx, "a.lua", "function f()\n  -- notes: ", "end"), "function f()\n  -- notes: end");
     }
 
     /// Enter in a doc comment carries it on, splitting a plain comment too; code that looks

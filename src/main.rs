@@ -6,21 +6,27 @@
 
 mod ai;
 mod ai_agent;
+mod ai_context;
 mod ai_task;
+mod ai_usage;
+mod askpass;
 mod assets;
 mod basic_syntax;
 mod buffer;
 mod clipboard_history;
+mod code_notes;
 mod color_panel;
 mod colors;
 mod commit_page;
 mod crash;
 mod dap;
 mod debugger;
+mod download;
 mod editor;
 mod element;
 mod emmet;
 mod encoding;
+mod file_icons;
 mod file_style;
 mod file_tree;
 mod find_bar;
@@ -48,18 +54,22 @@ mod markdown_links;
 mod markdown_view;
 mod math;
 mod menus;
+mod modal;
+mod node_runtime;
 mod notebook;
 mod ollama;
 mod outline;
 mod palette;
 mod preview;
 mod problem_matcher;
+mod project_fs;
 mod project_index;
 mod project_search;
 mod punctuation;
 mod python_env;
 #[cfg(debug_assertions)]
 mod qa;
+mod remote;
 mod roots;
 mod search;
 mod server_log;
@@ -70,6 +80,7 @@ mod settings_panel;
 mod shell;
 mod snippets;
 mod spell;
+mod ssh_prompt;
 mod svg_image;
 mod system_clipboard;
 mod tasks;
@@ -82,6 +93,7 @@ mod theme;
 mod tools;
 mod trace;
 mod ui;
+mod updates;
 mod user_keys;
 mod vscode_import;
 mod welcome;
@@ -89,6 +101,7 @@ mod window_frame;
 mod word_blocks;
 mod workspace;
 mod wrap;
+mod wsl;
 
 use gpui::{
     App, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size,
@@ -207,6 +220,11 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
         }
         return (cwd, None);
     };
+    // A folder on a server: `ssh://me@box:2222/home/me/app`, or as Null writes it
+    // (`/ssh:me@box:/home/me/app`).
+    if let Some(server) = server_folder(&arg) {
+        return (server, None);
+    }
     // `null .` and `null` are the same project, with the same session: no `/.` at the end.
     let path = absolute(&cwd.join(arg));
     if path.is_dir() {
@@ -214,6 +232,31 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
     }
     let root = if path.starts_with(&cwd) { cwd } else { path.parent().map(PathBuf::from).unwrap_or(cwd) };
     (root, Some(path))
+}
+
+/// A folder on a server, as `null` is given it: `ssh://[user@]host[:port]/path` (a path
+/// from the home folder with `/~/`), or `/ssh:host:/path`.
+fn server_folder(arg: &str) -> Option<PathBuf> {
+    if remote::is_remote(Path::new(arg)) {
+        return Some(PathBuf::from(arg));
+    }
+    let rest = arg.strip_prefix("ssh://")?;
+    let (address, path) = rest.split_once('/').unwrap_or((rest, ""));
+    // (A port after the last colon, unless it's inside an address in brackets.)
+    let host = match address.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) && !port.contains(']') => {
+            format!("{host}#{port}")
+        }
+        _ => address.to_string(),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let path = match path.strip_prefix('~') {
+        Some(rest) => format!("{}{rest}", remote::home(&host).ok()?),
+        None => format!("/{path}"),
+    };
+    Some(remote::path(&host, &path))
 }
 
 /// A `file://` URL as a path ("%20" back to a space, and so on).
@@ -240,10 +283,10 @@ fn path_from_url(url: &str) -> Option<PathBuf> {
 /// keeps its name, under its resolved folder.
 fn absolute(path: &Path) -> PathBuf {
     if let Ok(path) = dunce::canonicalize(path) {
-        return path;
+        return wsl::plain(path);
     }
     match (path.parent().and_then(|p| dunce::canonicalize(p).ok()), path.file_name()) {
-        (Some(parent), Some(name)) => parent.join(name),
+        (Some(parent), Some(name)) => wsl::plain(parent.join(name)),
         _ => path.to_path_buf(),
     }
 }
@@ -298,20 +341,60 @@ fn answered_in_the_terminal() -> bool {
             return false;
         }
     };
-    // (On Windows Null has no console of its own: the one it was started from, if any.)
+    // (On Windows Null has no console of its own: the one it was started from, if any. Joined,
+    // a windowed program can still have no handle to write to it with: the console's own
+    // output is opened then. Output sent to a file or a pipe is left as it is.)
     #[cfg(windows)]
     {
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_SHARE_WRITE: u32 = 2;
+        const OPEN_EXISTING: u32 = 3;
         unsafe extern "system" {
             fn AttachConsole(process: u32) -> i32;
+            fn GetStdHandle(which: u32) -> isize;
+            fn SetStdHandle(which: u32, handle: isize) -> i32;
+            fn CreateFileW(
+                name: *const u16,
+                access: u32,
+                share: u32,
+                security: *const std::ffi::c_void,
+                disposition: u32,
+                flags: u32,
+                template: isize,
+            ) -> isize;
         }
-        // SAFETY: a plain Win32 call with no pointers; it fails harmlessly with no console.
-        unsafe { AttachConsole(u32::MAX) };
+        // SAFETY: plain Win32 calls; the only pointer is a NUL-terminated name that lives
+        // through the call. Each fails harmlessly when there's no console.
+        unsafe {
+            let had = GetStdHandle(STD_OUTPUT_HANDLE);
+            if AttachConsole(u32::MAX) != 0 && (had == 0 || had == -1) {
+                let name: Vec<u16> = "CONOUT$".encode_utf16().chain([0]).collect();
+                let out =
+                    CreateFileW(name.as_ptr(), GENERIC_WRITE, FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, 0, 0);
+                if out != -1 {
+                    SetStdHandle(STD_OUTPUT_HANDLE, out);
+                }
+            }
+        }
     }
     println!("{answer}");
     true
 }
 
 fn main() {
+    // Started by ssh to ask something (see `askpass`): asked in the window of the Null that
+    // started that ssh, answered, done.
+    if let Some(code) = askpass::answered_for_ssh() {
+        std::process::exit(code);
+    }
+    // Started by Null as it quit, to install an update (see `updates`).
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--finish-update") {
+        std::process::exit(updates::finish(&std::env::args().skip(2).collect::<Vec<_>>()));
+    }
+    // (ssh started from here asks nothing in the window: see `remote::asking`.)
+    remote::note_main_thread();
     if answered_in_the_terminal() {
         return;
     }
@@ -330,10 +413,23 @@ fn main() {
     // Started by the Mac with nothing to open (the Dock, the Finder, or `null a b` through
     // `open -a`, whose paths come a moment later as "open these").
     let by_the_system = cfg!(target_os = "macos") && std::env::args().len() <= 1;
-    let Opening { root, others, file, place, wait } = resolve_args();
+    let Opening { mut root, mut others, file, place, wait } = resolve_args();
+    // Restarted after an update: its windows again (the first one here, the rest once it's open).
+    let mut reopen = if std::env::args().len() <= 1 { updates::windows_to_reopen() } else { Vec::new() };
+    if !reopen.is_empty() {
+        let mut first = reopen.remove(0).into_iter();
+        root = first.next().unwrap_or(root);
+        others = first.collect();
+    }
     trace::mark("what to open worked out");
     // Off the Mac: a Null already running opens it instead (a waiting one is its own).
     let request = instance::Request { root: root.clone(), others: others.clone(), file: file.clone(), place };
+    // A server's folder (`null ssh://box/app`): Null's own empty folder first, the server's
+    // once it's reached (the window doesn't wait on it, and ssh may ask for a password).
+    let (root, server) = match remote::is_remote(&root).then(session::scratch_folder).flatten() {
+        Some(scratch) => (scratch, Some(root)),
+        None => (root, None),
+    };
     let mut handed = match instance::launch(&request, wait) {
         instance::Launch::HandedOver => return,
         instance::Launch::First(handed) => handed,
@@ -402,6 +498,24 @@ fn main() {
             }
         })
         .detach();
+        // What ssh asks (a password, whether to trust a server): asked in the window in
+        // front, or the first one.
+        let mut questions = askpass::questions();
+        cx.spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(ask) = questions.next().await {
+                cx.update(|cx| {
+                    let front = cx.active_window().and_then(|w| w.downcast::<Workspace>());
+                    let window = front.or_else(|| cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>()));
+                    // (No window: not answered, the connection gives up.)
+                    if let Some(window) = window {
+                        window.update(cx, |workspace, window, cx| workspace.ask_for_ssh(ask, window, cx)).ok();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
         // What later launches hand over (off the Mac): opened as they would have opened.
         if let Some(mut handed) = handed.take() {
             cx.spawn(async move |cx| {
@@ -422,6 +536,19 @@ fn main() {
                                 .ok();
                             return;
                         }
+                        // A server's folder: in the window in front, once the server's reached.
+                        if remote::is_remote(&request.root)
+                            && let Some(handle) = cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>())
+                        {
+                            let root = request.root.clone();
+                            handle
+                                .update(cx, |workspace, window, cx| {
+                                    window.activate_window();
+                                    workspace.open_paths(vec![root], window, cx);
+                                })
+                                .ok();
+                            return;
+                        }
                         let root = request.root.clone();
                         open_project_window_now(request.root, request.file, request.place, cx);
                         add_folders(&root, request.others, cx);
@@ -433,6 +560,8 @@ fn main() {
         }
         // Local history past its month goes, now and then.
         std::thread::spawn(local_history::sweep);
+        // An update put in place at the last quit leaves its files.
+        std::thread::spawn(updates::tidy);
         settings::init(cx);
         find_bar::init(cx);
         keymap::register(cx.global::<settings::Settings>().keymap, cx);
@@ -449,9 +578,17 @@ fn main() {
         menus::init(cx);
         menus::set(cx);
         // The Ollama Null started (see `ollama`) goes with it.
-        cx.on_app_quit(|_| {
+        cx.on_app_quit(|cx| {
             ollama::stop();
             instance::forget();
+            updates::keep_windows(
+                cx.windows()
+                    .into_iter()
+                    .filter_map(|w| w.downcast::<Workspace>())
+                    .filter_map(|h| h.read(cx).ok().map(|w| w.roots().all().to_vec()))
+                    .collect(),
+            );
+            updates::install_on_quit();
             async {}
         })
         .detach();
@@ -475,7 +612,8 @@ fn main() {
                 cx.background_executor().timer(std::time::Duration::from_millis(350)).await;
                 cx.update(|cx| {
                     if !handed_paths.load(std::sync::atomic::Ordering::SeqCst) && cx.windows().is_empty() {
-                        open_project_window_now(root, file, place, cx);
+                        open_project_window_now(root.clone(), file, place, cx);
+                        reopen_server_project(&root, server.clone(), cx);
                     }
                 })
                 .ok();
@@ -487,6 +625,19 @@ fn main() {
             let first = root.clone();
             open_project_window_now(root, file, place, cx);
             add_folders(&first, others, cx);
+            reopen_server_project(&first, server, cx);
+        }
+        // (Each on its own: a server's waits for it.)
+        for folders in reopen {
+            let mut folders = folders.into_iter();
+            let Some(first) = folders.next() else { continue };
+            let (opened, server) = match remote::is_remote(&first).then(session::scratch_folder).flatten() {
+                Some(scratch) => (scratch, Some(first)),
+                None => (first, None),
+            };
+            open_project_window_now(opened.clone(), None, None, cx);
+            add_folders(&opened, folders.collect(), cx);
+            reopen_server_project(&opened, server, cx);
         }
         trace::mark("window opened");
         // The spell checker started once the window's up, then what's shown checked.
@@ -627,6 +778,18 @@ fn open_waiting_window(root: PathBuf, file: Option<PathBuf>, place: Option<(u32,
     }
 }
 
+/// Started on Null's own empty folder for a server's (`server`, or the one it last closed
+/// on): that folder, once the server's reached (the window doesn't wait on it).
+fn reopen_server_project(root: &std::path::Path, server: Option<PathBuf>, cx: &mut gpui::App) {
+    if !session::is_scratch(root) {
+        return;
+    }
+    let (Some(server), Some(handle)) = (server.or_else(session::last_server_project), window_on(root, None, cx)) else {
+        return;
+    };
+    handle.update(cx, |workspace, window, cx| workspace.reopen_server_project(server, window, cx)).ok();
+}
+
 fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(u32, u32)>, cx: &mut gpui::App) {
     if let Some(handle) = window_on(&root, None, cx) {
         handle
@@ -692,6 +855,7 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
 /// asks about them; once none is left, Null quits.
 /// Quitting was called off in one window: none of them counts as done asking any more.
 pub(crate) fn quit_cancelled(cx: &mut gpui::App) {
+    updates::restart_called_off();
     for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
         handle.update(cx, |workspace, _, _| workspace.quitting = false).ok();
     }
@@ -719,6 +883,15 @@ pub(crate) fn quit_next(cx: &mut gpui::App) {
 #[cfg(test)]
 mod url_tests {
     use super::*;
+
+    #[test]
+    fn a_server_s_folder_is_given_as_an_ssh_address() {
+        assert_eq!(server_folder("ssh://me@box:2222/srv/app"), Some(remote::path("me@box#2222", "/srv/app")));
+        assert_eq!(server_folder("ssh://box"), Some(remote::path("box", "/")));
+        assert_eq!(server_folder("/ssh:box:/x"), Some(PathBuf::from("/ssh:box:/x")));
+        assert_eq!(server_folder("ssh://"), None);
+        assert_eq!(server_folder("src/main.rs"), None);
+    }
 
     #[test]
     fn a_waited_file_s_project_is_its_repository() {

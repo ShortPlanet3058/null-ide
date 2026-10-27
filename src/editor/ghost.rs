@@ -11,7 +11,7 @@
 //! Off unless switched on in Settings → AI.
 
 use super::{EditKind, Editor};
-use crate::ai::{self, AiEvent, Prompt, ProviderId};
+use crate::ai::{self, AiEvent, Prompt};
 use crate::settings::Settings;
 use futures::StreamExt;
 use gpui::{App, Context, KeyBinding, Window, actions};
@@ -373,11 +373,9 @@ impl Editor {
             self.rebuild_blocks();
         }
 
-        // 2. The AI, after a pause. The command line tools take seconds to start: too slow for this.
-        let provider = ai_settings.active();
-        if matches!(provider, ProviderId::Off | ProviderId::ClaudeCode | ProviderId::Codex) {
-            return;
-        }
+        // 2. The AI, after a pause: the one chosen for suggestions (never a command line
+        // tool: they take seconds to start, too slow for this).
+        let Some(ai_settings) = ai_settings.for_suggestions() else { return };
         let use_fill = ai::fim_available(&ai_settings) && !fill_failed(&ai_settings);
         if mid_line && !use_fill {
             return;
@@ -480,8 +478,11 @@ impl Editor {
                  project, and well-known idioms. No explanation, no markdown, no fences. If nothing obvious \
                  comes next, reply with nothing."
             ),
+            // What the project defines and the other files stay the same while typing goes
+            // on: first, where a provider's cache can keep them.
+            context: format!("{chat_outline}{chat_context}").trim_end().to_string(),
             user: format!(
-                "{chat_outline}{chat_context}File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {:?}",
+                "File: {path} ({})\n\n{}<CURSOR>{}\n\nThe current line, up to the cursor: {:?}",
                 self.language_name(),
                 prefix,
                 suffix,

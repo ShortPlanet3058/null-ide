@@ -119,6 +119,10 @@ pub struct SettingsPanel {
     fields_for: ProviderId,
     /// Whether that provider's key is set. Checked once, since it reads the keychain.
     has_key: Option<bool>,
+    /// Where suggestions come from: what the suggestions' model field was filled for.
+    suggestions_for: ProviderId,
+    /// Whether that one's key is set, when it isn't the provider above.
+    suggestions_key: Option<bool>,
     /// Waiting for new keys for shortcut `ix` (Keyboard): the next keystroke, caught before
     /// anything else sees it, becomes its shortcut.
     recording: Option<(usize, [Subscription; 2])>,
@@ -163,7 +167,7 @@ impl SettingsPanel {
             }),
             cx.subscribe(&completion_model, |this, input, TextInputEvent::Changed, cx| {
                 let text = input.read(cx).text().trim().to_string();
-                let provider = this.fields_for;
+                let provider = this.suggestions_for;
                 let value = (!text.is_empty()).then_some(text);
                 settings::update(cx, |s| {
                     if value.is_some() || s.ai.providers.contains_key(provider.key()) {
@@ -205,6 +209,8 @@ impl SettingsPanel {
             fields_for: ProviderId::Off,
             search,
             has_key: None,
+            suggestions_for: ProviderId::Off,
+            suggestions_key: None,
             _subscriptions: subscriptions,
         };
         panel.fill_provider_fields(cx);
@@ -230,7 +236,13 @@ impl SettingsPanel {
             input.set_placeholder(address_hint);
             input.set_text(&address, cx);
         });
-        let completion_hint = match ai.completion_model(provider) {
+        // Never read the keychain just to show this: it can make macOS ask for permission.
+        self.has_key = provider.uses_api_key().then(|| ai::known_key(provider)).flatten();
+        // Suggestions can come from elsewhere: their model is that one's.
+        let source = ai.suggestion_provider();
+        self.suggestions_for = source;
+        let saved = ai.providers.get(source.key()).cloned().unwrap_or_default();
+        let completion_hint = match ai.completion_model(source) {
             Some(default) if saved.completion_model.is_none() => format!("Default: {default}"),
             _ => "Same as the model above".to_string(),
         };
@@ -239,8 +251,7 @@ impl SettingsPanel {
             input.set_placeholder(completion_hint);
             input.set_text(&completion_model, cx);
         });
-        // Never read the keychain just to show this: it can make macOS ask for permission.
-        self.has_key = provider.uses_api_key().then(|| ai::known_key(provider)).flatten();
+        self.suggestions_key = source.uses_api_key().then(|| ai::known_key(source)).flatten();
     }
 
     /// Escape: a search is cleared first; then Settings closes.
@@ -598,6 +609,14 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Relative line numbers",
+                Some("Counted from the cursor's line, as a count before a move goes (Vim's 5j)"),
+                Self::toggle("relative-numbers", s.relative_line_numbers, &theme, cx, |s| {
+                    s.relative_line_numbers = !s.relative_line_numbers
+                }),
+                &theme,
+            ),
+            Self::row(
                 "Spaces and tabs",
                 Some("Shown as faint dots and dashes; at line ends, where they're left by mistake"),
                 {
@@ -661,6 +680,16 @@ impl SettingsPanel {
                 Some("Dims the title bar, sidebar and status bar so only the code stands out"),
                 Self::toggle("fade", s.fade_bars_while_typing, &theme, cx, |s| {
                     s.fade_bars_while_typing = !s.fade_bars_while_typing
+                }),
+                &theme,
+            ),
+            Self::row(
+                "Tell me when a new version is out",
+                Some(
+                    "Once a day Null asks GitHub for its latest version; nothing about you is sent, and nothing is installed until you click Update",
+                ),
+                Self::toggle("updates", s.check_for_updates, &theme, cx, |s| {
+                    s.check_for_updates = !s.check_for_updates
                 }),
                 &theme,
             ),
@@ -740,6 +769,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::heading("Cursor", &theme),
+            Self::row(
+                "Smooth caret and scrolling",
+                Some("The cursor glides to where it goes and the text eases when it scrolls; off, both jump"),
+                Self::toggle("smooth-motion", s.smooth_motion, &theme, cx, |s| s.smooth_motion = !s.smooth_motion),
+                &theme,
+            ),
             Self::row(
                 "Blinking cursor",
                 Some("Blinks for a while after you stop typing, then stays lit"),
@@ -1024,7 +1059,10 @@ impl SettingsPanel {
                     let detail = match (failed, &can) {
                         (Some(Err(reason)), _) => reason.to_string(),
                         (_, Err(reason)) => reason.clone(),
-                        _ => format!("{} · not installed", server.name),
+                        _ => match crate::servers::install_note(server) {
+                            Some(note) => format!("{} · not installed · {note}", server.name),
+                            None => format!("{} · not installed", server.name),
+                        },
                     };
                     let control = if can.is_ok() {
                         Self::button(("install", i), "Install", &theme)
@@ -1228,22 +1266,74 @@ impl SettingsPanel {
             &theme,
         ));
         if s.ai.completions {
-            if matches!(current, ProviderId::ClaudeCode | ProviderId::Codex) {
-                rows.push(Self::row(
-                    "From the AI",
-                    Some("Command line tools take seconds to start, too slow for this: names from the file only; a free Mistral key gives the best suggestions"),
-                    div(),
-                    &theme,
-                ));
+            // Where they come from: the command line tools are too slow for this.
+            let mut options: Vec<(Option<ProviderId>, String)> = Vec::new();
+            if !current.is_cli() {
+                options.push((None, "Same as answers".into()));
+            }
+            options.extend(
+                ProviderId::FOR_SUGGESTIONS
+                    .iter()
+                    .filter(|p| current.is_cli() || **p != current)
+                    .map(|p| (Some(*p), p.label().to_string())),
+            );
+            options.push((Some(ProviderId::Off), "Names only".into()));
+            let chosen = s.ai.suggestions.filter(|p| !p.is_cli() && (current.is_cli() || *p != current));
+            let detail = if current.is_cli() {
+                format!(
+                    "{} takes seconds to answer, too slow between two keystrokes: a fast model suggests instead. \
+                     Mistral's Codestral fills in code best, and its key is free",
+                    current.label()
+                )
             } else {
+                "The provider of answers, or a faster one just for this".to_string()
+            };
+            rows.push(Self::stacked_row(
+                "Suggestions come from",
+                Some(&detail),
+                Self::choices("suggestions-from", options, chosen, &theme, cx, |this, value, cx| {
+                    settings::update(cx, |s| s.ai.suggestions = value);
+                    this.fill_provider_fields(cx);
+                    cx.notify();
+                }),
+                &theme,
+            ));
+            let source = s.ai.suggestion_provider();
+            if source != ProviderId::Off && source != current {
+                if source.uses_api_key() {
+                    let get = source.key_url().map(|u| format!(" · get one at {u}")).unwrap_or_default();
+                    let (status, label) = match self.suggestions_key {
+                        Some(true) => (format!("Kept in {}{get}", crate::ai::KEY_STORE), "Change…"),
+                        _ => (format!("Not set yet{get}"), "Set API Key…"),
+                    };
+                    rows.push(Self::row(
+                        &format!("{} key for suggestions", source.label()),
+                        Some(&status),
+                        Self::button("suggestions-key", label, &theme).active(|s| s.opacity(0.7)).on_click(
+                            cx.listener(|_, _: &ClickEvent, _, cx| {
+                                cx.emit(SettingsPanelEvent::Run(Box::new(crate::workspace::SetSuggestionsKey)))
+                            }),
+                        ),
+                        &theme,
+                    ));
+                } else if source == ProviderId::Ollama {
+                    rows.push(Self::row(
+                        "Suggestions on this computer",
+                        Some("Ollama runs the model here, nothing leaves the computer: install it from ollama.com, then run “ollama pull qwen2.5-coder:1.5b”"),
+                        div(),
+                        &theme,
+                    ));
+                }
+            }
+            if source != ProviderId::Off {
                 rows.push(Self::stacked_row(
                     "Model for suggestions",
                     Some("A code model that fills in the middle is best: fast, and it continues your code"),
                     div().flex().flex_col().gap(px(8.)).child(Self::wide_field(&self.completion_model, &theme)).child(
                         Self::model_chips(
                             "suggestion-model",
-                            current.recommended_for_suggestions(),
-                            s.ai.completion_model(current),
+                            source.recommended_for_suggestions(),
+                            s.ai.completion_model(source),
                             &self.completion_model,
                             &theme,
                         ),
@@ -1260,6 +1350,33 @@ impl SettingsPanel {
                 key(&crate::workspace::ShowCommands, cx),
             )),
             div(),
+            &theme,
+        ));
+        // Tokens: what was used, and a limit if wanted.
+        rows.push(Self::heading("AI usage", &theme));
+        let month = crate::ai_usage::this_months();
+        let used = if month.requests == 0 {
+            "Nothing yet this month".to_string()
+        } else {
+            format!(
+                "{} tokens in {} requests, {} of them read from the provider's cache (cheaper, sooner)",
+                crate::ai_usage::short(month.usage.total()),
+                month.requests,
+                crate::ai_usage::short(month.usage.cached)
+            )
+        };
+        rows.push(Self::row("This month", Some(&used), div(), &theme));
+        let limits: Vec<(Option<u64>, String)> = [None, Some(1_000_000), Some(5_000_000), Some(20_000_000)]
+            .into_iter()
+            .map(|l| (l, l.map_or("None".to_string(), crate::ai_usage::short)))
+            .collect();
+        let limit = s.ai.monthly_token_limit.filter(|l| *l > 0);
+        rows.push(Self::row(
+            "Monthly limit",
+            Some("Tokens read and written; reached, AI waits for next month (suggestions too)"),
+            Self::choices("token-limit", limits, limit, &theme, cx, |_, value, cx| {
+                settings::update(cx, |s| s.ai.monthly_token_limit = value)
+            }),
             &theme,
         ));
         rows
@@ -1510,7 +1627,8 @@ impl Focusable for SettingsPanel {
 impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The provider can change elsewhere (the palette); keep the fields in step.
-        if cx.global::<Settings>().ai.provider != self.fields_for {
+        let ai = &cx.global::<Settings>().ai;
+        if ai.provider != self.fields_for || ai.suggestion_provider() != self.suggestions_for {
             self.fill_provider_fields(cx);
         }
         let theme = cx.global::<Theme>().clone();

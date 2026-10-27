@@ -196,6 +196,8 @@ struct RunStart {
     seen: bool,
     /// ⌘K cleared what was above: the command's line among it (`line` says what it was).
     cleared: bool,
+    /// The command, when Null typed it (else it's read from the line, after the prompt).
+    typed: Option<String>,
 }
 
 /// Clears a terminal as ⌘K does: the line being typed on to the top (all of it, when it
@@ -349,6 +351,10 @@ enum LinkTarget {
 
 pub struct TerminalView {
     focus_handle: FocusHandle,
+    /// A character being composed (a dead key's `~`, an input method's), not typed yet.
+    marked: Option<String>,
+    /// Where the cursor was drawn last: where an input method shows what it offers.
+    cursor_bounds: Option<gpui::Bounds<Pixels>>,
     term: Arc<FairMutex<Term<Listener>>>,
     sender: EventLoopSender,
     size: GridSize,
@@ -418,12 +424,25 @@ impl Shell {
         // Without `$SHELL` (an app started oddly), the account's own shell rather than a
         // `login` wrapper, so the shell is the process watched for its prompt.
         // (On Windows: PowerShell, whatever a `$SHELL` from Git Bash says.)
-        let shell = if cfg!(windows) {
+        // A folder inside WSL: the person's own shell there, started in its Linux path.
+        let wsl = crate::wsl::of(&cwd);
+        // A folder on a server: ssh there, its shell in the folder (in a terminal, ssh can
+        // ask for a passphrase or a password itself).
+        let server = crate::remote::of(&cwd).map(|r| crate::remote::terminal(&r.host, &r.path));
+        let shell = if let Some((program, ..)) = &server {
+            Some(program.to_string_lossy().into_owned())
+        } else if wsl.is_some() {
+            Some("wsl.exe".to_string())
+        } else if cfg!(windows) {
             Some(crate::shell::windows_program())
         } else {
             std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell)
         };
-        let args: Vec<String> = if cfg!(windows) {
+        let args: Vec<String> = if let Some((_, args, _)) = server.clone() {
+            args
+        } else if let Some(wsl) = &wsl {
+            vec!["-d".into(), wsl.distro.clone(), "--cd".into(), wsl.linux.clone()]
+        } else if cfg!(windows) {
             // The system can't say which folder PowerShell is in: its prompt says it, in the
             // title (the person's own prompt, from their profile, still draws after).
             vec!["-NoLogo".into(), "-NoExit".into(), "-Command".into(), crate::shell::POWERSHELL_FOLDER_IN_TITLE.into()]
@@ -440,10 +459,19 @@ impl Shell {
         if ["LANG", "LC_ALL", "LC_CTYPE"].iter().all(|v| std::env::var_os(v).is_none_or(|x| x.is_empty())) {
             env.insert("LANG".into(), "en_US.UTF-8".into());
         }
+        // (ssh asking through Null: see `askpass`.)
+        for (key, value) in server.iter().flat_map(|(.., env)| env) {
+            env.insert(key.to_string(), value.clone());
+        }
         let options = tty::Options {
             // A login shell, like a terminal app opens, so PATH and the prompt are set up.
             shell: shell.map(|program| tty::Shell::new(program, args)),
-            working_directory: Some(cwd.clone()),
+            // (wsl.exe is given its folder: Windows starts it in its own.)
+            working_directory: if wsl.is_some() || server.is_some() {
+                crate::tools::home_dir()
+            } else {
+                Some(cwd.clone())
+            },
             drain_on_exit: false,
             env,
             #[cfg(target_os = "windows")]
@@ -452,14 +480,20 @@ impl Shell {
         let size = GridSize { columns: 80, lines: 24 };
         let window_size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
         let pty = tty::new(&options, window_size, 0)?;
+        // (A shell on a server or inside WSL: what runs there isn't this computer's to see,
+        // ssh or wsl.exe is all it would see. Its prompt coming back says a command ended.)
+        let elsewhere = server.is_some() || wsl.is_some();
         #[cfg(unix)]
-        let watch = crate::terminal_watch::Foreground::new(pty.file(), pty.child().id());
+        let watch = if elsewhere { None } else { crate::terminal_watch::Foreground::new(pty.file(), pty.child().id()) };
         #[cfg(not(unix))]
         let watch = None;
         #[cfg(unix)]
-        let pid = Some(pty.child().id() as i32);
+        let pid = (!elsewhere).then(|| pty.child().id() as i32);
         #[cfg(not(unix))]
-        let pid = None;
+        let pid = {
+            let _ = elsewhere;
+            None
+        };
         let (tx, events) = mpsc::unbounded();
         let listener = Listener(tx);
         let config = Config { scrolling_history: SCROLLBACK, ..Default::default() };
@@ -474,13 +508,14 @@ impl Shell {
 impl TerminalView {
     pub fn new(shell: Shell, cx: &mut Context<Self>) -> Self {
         let Shell { term, sender, mut events, size, cwd, watch, pid } = shell;
-        // Once a second, what the shell is running.
-        let watching = watch.map(|watch| {
+        // A few times a second, what the shell is running (where that can be seen; elsewhere,
+        // only whether its prompt is back).
+        let watching = Some({
             cx.spawn(async move |this, cx| {
                 let mut running = None;
                 loop {
                     cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
-                    let now = watch.program();
+                    let now = watch.as_ref().and_then(|watch| watch.program());
                     let group = now.as_ref().map(|(group, _)| *group);
                     let folder = pid.and_then(crate::terminal_watch::folder_of).filter(|f| f.is_dir());
                     let name = now.as_ref().map(|(_, name)| name.clone());
@@ -577,6 +612,8 @@ impl TerminalView {
             folder: Some(cwd),
             _events: events,
             _watching: watching,
+            marked: None,
+            cursor_bounds: None,
         }
     }
 
@@ -586,6 +623,9 @@ impl TerminalView {
         if self.settled {
             if self.running.is_none() {
                 self.start_run(Some(command));
+                if let Some(run) = &mut self.run {
+                    run.typed = Some(command.to_string());
+                }
             }
             return self.write(format!("{command}\r").into_bytes());
         }
@@ -618,7 +658,7 @@ impl TerminalView {
                 }
                 this.settled = true;
                 for command in std::mem::take(&mut this.queued) {
-                    this.run = Some(this.run_start(Some(&command)));
+                    this.run = Some(RunStart { typed: Some(command.clone()), ..this.run_start(Some(&command)) });
                     this.write(format!("{command}\r").into_bytes());
                 }
             })
@@ -753,6 +793,12 @@ impl TerminalView {
         if !self.focus_handle.is_focused(window) {
             return;
         }
+        // Text (a letter, what AltGr or ⌥ types, a dead key's accent): the system composes
+        // it and hands it over as text (see the input handler below), so `~` then `a` is
+        // `ã`, and AZERTY's AltGr+8 is `\`.
+        if is_text(&event.keystroke) {
+            return;
+        }
         let app_cursor = self.term.lock().mode().contains(TermMode::APP_CURSOR);
         if let Some(bytes) = key_to_bytes(&event.keystroke, app_cursor) {
             // Return at the shell's prompt: a command begins here.
@@ -766,6 +812,15 @@ impl TerminalView {
             cx.stop_propagation();
             cx.notify();
         }
+    }
+
+    /// Text typed (as the system composed it), to the shell.
+    fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // Typing jumps back to the prompt if the view was scrolled up.
+        self.term.lock().scroll_display(Scroll::Bottom);
+        self.term.lock().selection = None;
+        self.write(text.as_bytes().to_vec());
+        cx.notify();
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -876,6 +931,16 @@ impl TerminalView {
         {
             return folder;
         }
+        // A shell on a server: its title says its folder there (`me@host: ~/proj`).
+        if let Some(remote) = crate::remote::of(&self.root) {
+            return crate::remote::folder_in_title(&remote.host, &self.title).unwrap_or_else(|| self.root.clone());
+        }
+        // A shell inside WSL: its title says its Linux folder (`me@host: ~/proj`).
+        if let Some(wsl) = crate::wsl::of(&self.root) {
+            return crate::wsl::folder_in_title(&wsl.distro, &self.title)
+                .filter(|f| f.is_dir())
+                .unwrap_or_else(|| self.root.clone());
+        }
         // (PowerShell's title is its folder whole: see `shell::POWERSHELL_FOLDER_IN_TITLE`.)
         let whole = PathBuf::from(self.title.trim());
         if whole.is_absolute() && whole.is_dir() {
@@ -949,7 +1014,15 @@ impl TerminalView {
             let text: String = text.chars().take(grid.columns()).collect();
             ((grid.history_size() as i32 + first).max(0) as usize, text.trim_end().to_string())
         };
-        RunStart { mark, line, folder: self.shell_folder(), at: std::time::Instant::now(), seen: false, cleared: false }
+        RunStart {
+            mark,
+            line,
+            folder: self.shell_folder(),
+            at: std::time::Instant::now(),
+            seen: false,
+            cleared: false,
+            typed: None,
+        }
     }
 
     /// Whether the shell shows its prompt again after `run`: what's before the cursor
@@ -959,6 +1032,12 @@ impl TerminalView {
         let term = self.term.lock();
         let grid = term.grid();
         let cursor = grid.cursor.point;
+        // (Still on the command's own line: it's only been typed. A prompt comes on a line
+        // of its own after.)
+        let line = (grid.history_size() as i32 + cursor.line.0).max(0) as usize;
+        if line <= run.mark {
+            return false;
+        }
         let before = row_text_to(grid, cursor.line, cursor.column.0);
         // What came before the command on its line (`typed_command` gives part of it).
         let typed = typed_command(&run.line);
@@ -973,7 +1052,8 @@ impl TerminalView {
         let output = self.output_since(&run);
         // (Cleared since: the first line is some output, the command was on `line`.)
         let line = if run.cleared { run.line.as_str() } else { output.lines().next().unwrap_or("") };
-        let command = typed_command(line).to_string();
+        // (Typed by Null: as typed, whatever prompt was before it.)
+        let command = run.typed.clone().unwrap_or_else(|| typed_command(line).to_string());
         let name = program.unwrap_or_else(|| program_of(&command).to_string());
         if name.is_empty() {
             return;
@@ -1454,6 +1534,23 @@ impl TerminalView {
 }
 
 /// What a key press sends to the shell, as the escape sequences terminals use.
+/// Whether a key types text, to come as text through the input handler rather than be
+/// sent as a key: a character, with no Ctrl and (but for a Mac's ⌥, which types
+/// characters) no Alt.
+fn is_text(keystroke: &Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    let typed = keystroke.key_char.as_deref().filter(|c| !c.is_empty() && !c.chars().any(char::is_control));
+    let Some(typed) = typed else { return false };
+    let single = keystroke.key.chars().count() == 1 || keystroke.key == "space";
+    // (Ctrl+Alt is AltGr to Windows, which types with it what AltGr types: AZERTY's
+    // Ctrl+Alt+8 is `\`.)
+    let altgr = cfg!(windows) && m.control && m.alt && typed != keystroke.key;
+    single
+        && !m.platform
+        && !m.function
+        && (altgr || (!m.control && (!m.alt || (cfg!(target_os = "macos") && typed != keystroke.key))))
+}
+
 pub fn key_to_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = &keystroke.modifiers;
     if m.platform {
@@ -1660,6 +1757,72 @@ impl IntoElement for TerminalElement {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+/// Text typed into the terminal, as the system composed it: written to the shell as it is.
+/// A character still being composed (a dead key) is held until it's done.
+impl gpui::EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        _: &mut Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<gpui::UTF16Selection> {
+        let end = self.marked.as_ref().map_or(0, |m| m.encode_utf16().count());
+        Some(gpui::UTF16Selection { range: end..end, reversed: false })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
+        self.marked.as_ref().map(|m| 0..m.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+        self.marked = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = None;
+        if !text.is_empty() {
+            self.type_text(text, cx);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = (!text.is_empty()).then(|| text.to_string());
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        _: gpui::Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        self.cursor_bounds
+    }
+
+    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
     }
 }
 
@@ -1872,6 +2035,12 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         let theme = cx.global::<Theme>().clone();
+        // Typed text comes through here (see the input handler), and an input method's
+        // offers show by the cursor.
+        let focus = self.view.read(cx).focus_handle.clone();
+        let cursor = prepaint.cursor;
+        self.view.update(cx, |view, _| view.cursor_bounds = cursor);
+        window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, self.view.clone()), cx);
         window.paint_quad(fill(bounds, theme.background));
         for (rect, color) in &prepaint.backgrounds {
             window.paint_quad(fill(*rect, *color));
@@ -1925,13 +2094,39 @@ fn within(paths: &[PathBuf], folder: &std::path::Path) -> Vec<PathBuf> {
 fn shell_words(paths: &[std::path::PathBuf]) -> String {
     paths
         .iter()
-        .map(|path| format!("{} ", crate::shell::quote(&path.display().to_string(), crate::shell::kind())))
+        .map(|path| format!("{} ", crate::shell::quote(&crate::shell::path_text(path), crate::shell::kind())))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What types text comes as text (composed by the system: AltGr, dead keys); what
+    /// doesn't is sent as keys.
+    #[test]
+    fn text_keys_come_as_text() {
+        let key = |modifiers: Modifiers, key: &str, typed: Option<&str>| Keystroke {
+            modifiers,
+            key: key.into(),
+            key_char: typed.map(str::to_string),
+        };
+        let none = Modifiers::default();
+        // AZERTY's AltGr+8 on Windows: no Ctrl or Alt said, `\\` typed.
+        assert!(is_text(&key(none, "8", Some("\\"))));
+        assert!(is_text(&key(none, "a", Some("a"))));
+        assert!(is_text(&key(none, "space", Some(" "))));
+        assert!(!is_text(&key(Modifiers { control: true, ..none }, "c", Some("c"))));
+        assert!(!is_text(&key(none, "enter", Some("\n"))));
+        assert!(!is_text(&key(none, "escape", None)));
+        // Alt + a key: Meta (Alt+B back a word), but a Mac's ⌥ types characters.
+        let alt = key(Modifiers { alt: true, ..none }, "b", Some("∫"));
+        assert_eq!(is_text(&alt), cfg!(target_os = "macos"));
+        assert!(!is_text(&key(Modifiers { alt: true, ..none }, "b", Some("b"))));
+        // Ctrl+Alt+8 on AZERTY: AltGr's `\\` on Windows.
+        let ctrl_alt = key(Modifiers { control: true, alt: true, ..none }, "8", Some("\\"));
+        assert_eq!(is_text(&ctrl_alt), cfg!(windows));
+    }
 
     /// Files dragged in from the files are typed as the shell's folder reaches them.
     #[test]

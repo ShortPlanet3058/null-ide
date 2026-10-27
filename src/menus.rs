@@ -11,7 +11,10 @@ use crate::workspace::{
 };
 use gpui::{App, KeyBinding, Menu, MenuItem, SystemMenuType, actions};
 
-actions!(null, [Quit, ToggleFadeWhileTyping, ToggleWordWrap, Hide, HideOthers, ShowAll, Minimize, Zoom]);
+actions!(
+    null,
+    [Quit, ToggleFadeWhileTyping, ToggleSmoothMotion, ToggleWordWrap, Hide, HideOthers, ShowAll, Minimize, Zoom]
+);
 
 /// The menu items every Mac app has: hiding the app, and the Window menu's two.
 pub fn init(cx: &mut App) {
@@ -67,6 +70,8 @@ pub fn set(cx: &mut App) {
     let shown = cx.try_global::<InFront>().copied().unwrap_or_default();
     let fade_label =
         if settings.fade_bars_while_typing { "Stop Fading Bars While Typing" } else { "Fade Bars While Typing" };
+    let smooth_label =
+        if settings.smooth_motion { "Stop Smooth Caret and Scrolling" } else { "Smooth Caret and Scrolling" };
     let wrap_label = if shown.wrapping.unwrap_or_else(|| settings.word_wrap_for("Plain Text")) {
         "Stop Wrapping Lines"
     } else {
@@ -280,6 +285,7 @@ pub fn set(cx: &mut App) {
                 }),
                 MenuItem::action(wrap_label, ToggleWordWrap),
                 MenuItem::action(fade_label, ToggleFadeWhileTyping),
+                MenuItem::action(smooth_label, ToggleSmoothMotion),
             ],
         },
         Menu {

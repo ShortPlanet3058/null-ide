@@ -28,7 +28,8 @@ Settings open with ⌘, / Ctrl+,. They're saved in `~/.config/null/settings.json
 | ⌃G | go to a line |
 | ⌘⇧O / ⌘T | go to a function or type, in the file / in the project |
 | the status bar | after the file's name, where the caret is in the code: `shop.py › Shop › checkout` |
-| **Outline** (over the files) | the file's functions and types, a method inside its class (in Markdown, its headings); the one you're in is marked, a click goes there |
+| the arrow at the end of the open file's row (or Show Outline) | its functions and types under it in the files, a method inside its class (in Markdown, its headings); the one you're in is marked, a click goes there |
+| **Search in files** (above the files) | the project searched, the results in the files' place; Esc empties it, then goes back to the files |
 | ⌘P `file:42:7` | open a file at a place, as compilers print it |
 | ⌘F | find in the file (with lines selected, only in them); ↑ ↓ bring back earlier searches, ⌥↵ puts a cursor on every match; ⌘E searches for the selection, ⌘G the next |
 | ⌘⇧F / ⌘⇧H | search / replace across the project (the chevron also picks which files: `*.rs, src/, !tests`; **Tabs**, only the files open) |
@@ -39,6 +40,8 @@ Settings open with ⌘, / Ctrl+,. They're saved in `~/.config/null/settings.json
 | right-click a tab → Move Below | the two sides one above the other (dragged, a tab offers "Open below" too); the line between them resizes |
 | one click on a file | it opens in a preview tab (its name slanted), which the next file clicked replaces; edit it or double-click it (or its tab) to keep it (Settings → Preview tabs) |
 | right-click a tab → Pin Tab | it stays first, out of "Close Others" and "Close All"; its pin unpins it |
+| ⌥-click a file (or its menu → Open to the Side) | it opens in the other half of the window, split if it isn't |
+| typing in the files | goes to the first file or folder whose name starts so, also one inside a closed folder (opened to show it) |
 | ⌘⇧N / ⌥⌘O | a new window / a recent project |
 | drop from the Finder | files open; on a folder in the files, they're copied there; on the terminal, their paths are typed in |
 | ⌥⌘↵ | focus mode: only the code |
@@ -74,6 +77,11 @@ in every folder and run in their own.
 
 The window remembers its folders: open its first one again (or pick it in Recent) and the
 others come back with it.
+
+Files show their language's logo (Rust's, Python's…) in the files, ⌘P and their tabs, in
+one quiet colour; other files keep a dot. The caret glides to where it goes and the text
+eases when it scrolls: View → Stop Smooth Caret and Scrolling (or ⌘K, or Settings → Cursor)
+makes both jump instead.
 
 ## Writing
 
@@ -268,6 +276,70 @@ or the Dock, it comes back to the last project. Sessions are small files in Null
 (`~/Library/Application Support/Null/sessions` on macOS, `%LOCALAPPDATA%\Null\sessions` on
 Windows, `~/.local/share/null/sessions` on Linux; `NULL_DATA_DIR` overrides it).
 
+## Folders inside WSL (Windows)
+
+**Open WSL Folder…** (in ⌘K or the File menu) opens a folder inside WSL, starting from your
+Linux home; `null .` typed in a WSL shell does the same (after Install Shell Command). Null
+reads and writes the files through Windows' WSL share, and runs everything else inside Linux,
+in the folder's Linux path: the terminal is your Linux shell, git is Linux's (its settings and
+credentials), and language servers run and install there (into `~/.local/share/null`, with
+Node.js when the distribution has none). Tasks and tests are written for that shell. Changes
+made in WSL by other programs are noticed within a couple of seconds.
+
+On WSL 1, servers built on Node.js (Python's, TypeScript's, and others) can't run: Node.js
+doesn't start there. Move the distribution to WSL 2 (`wsl --set-version Ubuntu 2`, with its
+name); the other servers work on both.
+
+## Folders on servers (SSH)
+
+**Open SSH Folder…** (in ⌘K or the File menu) asks for a server, as you'd give it to `ssh`
+(`me@example.com`, a name from `~/.ssh/config`, `box#2222` for another port; those you've
+used and those in your config are listed), connects, then lists your home folder there to
+pick a folder from. `null ssh://me@example.com/home/me/app` opens one from a terminal (with
+`/~/app` for one in your home folder). Open Recent lists them too.
+
+Null uses your own `ssh`: your keys, your agent and your `~/.ssh/config`. Nothing is
+installed on the server; it needs a shell and the usual tools (Linux, or a Mac). Files are
+read and written through one connection that stays open; the terminal, git and language
+servers run on the server, in the folder (language servers install there, into
+`~/.local/share/null`, with Node.js when the server has none). Saving writes the whole file
+beside the old one, then swaps it in; Move to Trash uses the server's Trash
+(`~/.local/share/Trash`). Changes made on the server by other programs are noticed within a
+few seconds. Search looks through the files on the server first, and reads only those that
+can match.
+
+Your keys and agent are used as `ssh` uses them. When `ssh` asks something (a password, a
+key's passphrase, whether to trust a server it hasn't met), Null asks it in the window; an
+answer is kept in memory until Null quits, so the terminal's `ssh` to that server doesn't
+ask again. On a Mac and Linux, Null shares one connection to each server between
+everything it runs there, so programs start at once.
+
+The project's Python environment, the Tests panel and the debugger work there as they do
+here. File History keeps a server file's earlier versions on this computer, from what Null
+last read or saved of it. Pictures open from the server; pictures in Markdown on a server
+show their description, as pictures from the web do.
+
+## New versions
+
+Null doesn't look for updates unless asked: turn on "Tell me when a new version is out" (on
+the welcome's last step, or Settings → Appearance) and once a day it reads the latest
+release's details from GitHub; "Check for Updates" in ⌘K asks right away. A newer one shows
+as "Null 0.2.0 is out · Update" in the status bar.
+
+Nothing is installed until you click Update. Null then downloads the package for how you
+installed it, checks it's the release (its details are signed with Null's own key, and the
+package must have the digest they give), and says "Restart to Update": Null quits as usual
+(asking about unsaved changes), the new version is put in place, and it starts again. Not
+restarted, it's installed the next time Null quits.
+
+- Windows (installed with setup.exe): the installer runs again, quietly, with your choices.
+- Mac: the app is replaced where it is.
+- Linux: the binary (`~/.local/bin/null`, or where you put the .tar.gz's) is replaced; a
+  .deb is installed again, the system asking for your password.
+
+The Windows zip, a build from source, or a folder Null can't write to: "Null 0.2.0 is out"
+opens null-ide.com instead.
+
 ## Code intelligence
 
 Completions, errors, info on hover and go to definition come from language servers. Null
@@ -275,17 +347,29 @@ knows which one each language needs, finds it if it's installed (Xcode's clangd 
 sourcekit-lsp included), and otherwise offers to install it with one click, from the status
 bar or Settings → Language servers, into its own folder rather than the system.
 
+Nothing else needs installing first: servers that are npm packages bring their own Node.js
+when the computer has none (the official build, downloaded into Null's folder and used only
+for them), and servers that are programs of their own are downloaded from their makers'
+releases. Every download is checked against the checksum Null was built with.
+
 | Language | Server | Installed with |
 |---|---|---|
-| Rust | rust-analyzer | rustup |
-| Python | pyright | npm (needs Node.js) |
+| Rust | rust-analyzer | rustup when you have it, else downloaded |
+| Python | pyright | npm |
 | TypeScript, JavaScript | typescript-language-server | npm |
-| C, C++, Objective-C | clangd | comes with Xcode's command line tools |
-| Go | gopls | go |
+| C, C++, Objective-C | clangd | Xcode's command line tools on macOS, else downloaded |
+| Go | gopls | go (needs Go) |
 | Swift | sourcekit-lsp | comes with Xcode |
 | Shell | bash-language-server | npm |
 | HTML, CSS, JSON | vscode-langservers-extracted | npm |
 | YAML | yaml-language-server | npm |
+| Markdown | marksman | downloaded |
+| Lua | lua-language-server | downloaded |
+| PHP | intelephense | npm |
+| Svelte | svelte-language-server | npm |
+| Dockerfile | dockerfile-language-server | npm |
+| C# | csharp-ls | dotnet (needs the .NET SDK) |
+| Dart | the Dart SDK's own | comes with the Dart SDK |
 
 With a server running: ⌘R (or F2) renames a symbol everywhere, right where it's written;
 ⇧F12 lists where it's used (⌘-clicking a definition does too), ⌃⌥H where a function is
@@ -325,8 +409,12 @@ Settings) turns it off entirely.
   it, ⌥→ takes the next word, ⌘→ the rest of the line, ⌥⇥ shows another option; typing along
   keeps it, and deleting back brings an earlier one straight back. It knows what the whole
   project defines (a local index, no AI) and the other open files. They come from a code model made to fill in the middle
-  (StarCoder2 on NVIDIA, Qwen2.5-Coder on Ollama; changeable in Settings → AI), which sees the
+  (Codestral on Mistral, Qwen2.5-Coder on Ollama; changeable in Settings → AI), which sees the
   file and the files it includes or imports, and can write a whole body after `{` or `:`.
+  They can come from another provider than answers (Settings → AI → Suggestions come from).
+  Claude Code and Codex take seconds to answer, too slow between two keystrokes: with them,
+  Null asks once where suggestions should come from (Mistral's free Codestral, Ollama on
+  your computer, another key you have, or names from the file only).
   `NULL_AI_LOG=<file>` logs how long each request takes.
 
 Choose where answers come from in Settings → AI:
@@ -347,6 +435,33 @@ Choose where answers come from in Settings → AI:
 Each provider comes with recommended models (one click in Settings → AI) and a thinking
 level: quick by default, more for harder questions. Suggestions while typing always use the
 least thinking, and their own model, a fill-in-the-middle code model where there is one.
+
+**Notes on code.** ⌥⌘N (Ctrl+Alt+N) writes a note on the cursor's line: it sits quietly
+under the line and moves with it as you edit; click it to change it, empty it to remove it.
+Notes are yours: kept in Null's own folder (never in the project, nothing to commit by
+accident), and they find their line again when the file changed elsewhere. **Notes…** in ⌘K
+lists every note in the project. An answer from ⌘I can be kept as a note too ("Keep as note"),
+and asked about further ("Ask a follow-up", which goes with the questions before it).
+
+**Review before committing.** **Review** in the Git panel has AI read the selected changes and
+leave a note on each line it has doubts about (a bug, a missed case), marked "AI"; it never
+changes the code. Reviewing again replaces those notes. After a test fails, **Explain Test
+Failure** in ⌘K opens the failed test with a note on why, from what its run said.
+
+**What the AI reads.** With ⌘I, only what the request needs: the file when it's short, or in
+a long one the lines around the code with an outline of the rest; the definitions that code
+uses from elsewhere in the project (from Null's own index of the project, no language server
+needed); and the project's conventions (`AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`
+or `CONVENTIONS.md`, for providers other than Claude Code and Codex, which read them
+themselves). The field says what goes with the request and about how many tokens. What stays
+the same from one request to the next is sent first, so providers can take it from their
+cache (Anthropic's is asked for; OpenAI, Gemini, DeepSeek and others do it by themselves), and
+an AI task's conversation is cached as it grows, so each step pays only for what's new.
+
+**Tokens.** Settings → AI → AI usage shows this month's tokens (and how many came from a
+cache); "AI Usage" in ⌘K says the last request's too. A monthly limit (1M, 5M or 20M tokens)
+stops every AI request, suggestions included, once it's reached, until the next month. The
+counts stay on your computer (`ai-usage.json` in Null's folder).
 
 API keys are read from the provider's usual variable (`MISTRAL_API_KEY`, `GROQ_API_KEY`,
 `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `NVIDIA_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) when set,

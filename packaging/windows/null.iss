@@ -3,7 +3,7 @@
 ; folder on the PATH), "Open with Null" on folders and files, and an uninstaller in
 ; Settings > Apps (which asks whether the settings, keys and data go too). Built by package.ps1:
 ;
-;     iscc /DVersion=0.1.1 packaging\windows\null.iss
+;     iscc /DVersion=0.2.0 packaging\windows\null.iss
 
 #ifndef Version
   #define Version "0.0.0"

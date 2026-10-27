@@ -1,14 +1,27 @@
-# A version tag (v0.1.0) builds Null for the three platforms and makes a draft GitHub
-# release of them, its notes from CHANGELOG.md, to look over before publishing. A pull
-# request labelled `package` builds them too, without a release: they're on its run's
-# page, to try before merging.
+# A merge into main with a version not released yet (Cargo.toml's) builds Null for the
+# three platforms and makes a draft GitHub release of them, tagged v<version> once it's
+# published, its notes from CHANGELOG.md, to look over first. Merges into dev build
+# nothing (CI checks pull requests). Started by hand on a branch, it builds the platform
+# asked for (no release), to try before merging:
+#   gh workflow run release.yml --ref feature/x -f platform=windows
 name: Release
 
 on:
   push:
-    tags: ["v*"]
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "docs/**"
+      - "scripts/trailer/**"
+      - "scripts/build-site.sh"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which package to build
+        type: choice
+        options: [windows, linux, macos, all]
+        default: windows
 
 permissions:
   contents: write
@@ -18,15 +31,38 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Cargo.toml's version, and whether main has it to release: a merge into main without a
+  # new version (it's released already, or its draft is there) builds nothing.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          release=false
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::notice::v$version is released (or drafted) already: bump the version in Cargo.toml to release."
+            else
+              release=true
+            fi
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
   macos:
-    if: startsWith(github.ref, 'refs/tags/') || contains(github.event.pull_request.labels.*.name, 'package')
+    needs: version
+    if: needs.version.outputs.release == 'true' || inputs.platform == 'macos' || inputs.platform == 'all'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: The tag is Cargo.toml's version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: test "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" = "$GITHUB_REF_NAME"
       # Intel and Apple silicon in one app, in a disk image.
       - run: packaging/macos/bundle.sh --release
       - uses: actions/upload-artifact@v4
@@ -35,7 +71,8 @@ jobs:
           path: target/release/Null-*.dmg
 
   windows:
-    if: startsWith(github.ref, 'refs/tags/') || contains(github.event.pull_request.labels.*.name, 'package')
+    needs: version
+    if: needs.version.outputs.release == 'true' || inputs.platform == 'windows' || inputs.platform == 'all'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,8 +89,11 @@ jobs:
             target/release/null-*-setup.exe
 
   linux:
-    if: startsWith(github.ref, 'refs/tags/') || contains(github.event.pull_request.labels.*.name, 'package')
-    runs-on: ubuntu-latest
+    needs: version
+    if: needs.version.outputs.release == 'true' || inputs.platform == 'linux' || inputs.platform == 'all'
+    # The oldest Ubuntu GitHub still has: a binary needs the C library it was built
+    # against or newer (one built on the latest didn't start on 24.04).
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -73,9 +113,11 @@ jobs:
             target/release/null-*.deb
 
   release:
-    needs: [macos, windows, linux]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [version, macos, windows, linux]
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -85,20 +127,37 @@ jobs:
       # This version's part of the changelog: from its heading to the next.
       - name: Notes
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$VERSION"
           awk -v v="## $version" '$0 ~ "^## " { on = index($0, v) == 1; next } on' CHANGELOG.md > notes.md
           test -s notes.md
       # Each package once, under a name without the version: the site's links always get
       # the latest (releases/latest/download/null-windows-x86_64.zip).
       - name: Names that stay
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$VERSION"
           mv "dist/Null-$version.dmg" dist/Null-macos.dmg
           mv "dist/null-$version-windows-x86_64.zip" dist/null-windows-x86_64.zip
           mv "dist/null-$version-windows-x86_64-setup.exe" dist/null-windows-x86_64-setup.exe
           mv "dist/null-$version-linux-x86_64.tar.gz" dist/null-linux-x86_64.tar.gz
           mv "dist/null-$version-amd64.deb" dist/null-linux-amd64.deb
+      # What Null's Update reads: the version and each package's SHA-256, signed with the
+      # release key (its public half is in src/updates.rs). No key, no release.
+      - name: Signed update details
+        env:
+          NULL_UPDATE_KEY: ${{ secrets.NULL_UPDATE_KEY }}
+        run: |
+          test -n "$NULL_UPDATE_KEY" || { echo "The NULL_UPDATE_KEY secret is missing"; exit 1; }
+          python3 - "$VERSION" <<'PY'
+          import hashlib, json, os, sys
+          files = {f: hashlib.sha256(open(f"dist/{f}", "rb").read()).hexdigest() for f in sorted(os.listdir("dist"))}
+          json.dump({"version": sys.argv[1], "files": files}, open("dist/update.json", "w"), separators=(",", ":"))
+          PY
+          umask 077
+          printf '%s\n' "$NULL_UPDATE_KEY" > "$RUNNER_TEMP/key.pem"
+          openssl pkeyutl -sign -inkey "$RUNNER_TEMP/key.pem" -rawin -in dist/update.json -out dist/update.json.sig
+          rm "$RUNNER_TEMP/key.pem"
+          cat dist/update.json
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --title "Null ${GITHUB_REF_NAME#v}" --notes-file notes.md
+        run: gh release create "v$VERSION" dist/* --draft --target "$GITHUB_SHA" --title "Null $VERSION" --notes-file notes.md

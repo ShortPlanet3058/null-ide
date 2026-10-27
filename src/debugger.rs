@@ -244,6 +244,18 @@ pub fn inline_values(lines: &[(usize, String)], locals: &[(String, String)]) -> 
 
 /// For a Rust program: the lldb command that teaches it Rust's types (so a `&str` or a
 /// `String` shows its text), from the toolchain's own formatters, when they're there.
+/// The same, for a program in `dir`: its server's Rust, for a folder on one.
+pub fn rust_formatters_for(dir: &Path) -> Option<String> {
+    let Some(remote) = crate::remote::of(dir) else { return rust_formatters() };
+    let script = format!(
+        "PATH=\"{}\"; s=$(rustc --print sysroot) && f=\"$s/lib/rustlib/etc/lldb_lookup.py\" && [ -f \"$f\" ] && printf '%s' \"$f\"",
+        crate::remote::path_inside()
+    );
+    let found = crate::remote::run(&remote.host, &script).ok().filter(|o| o.success())?;
+    let script = String::from_utf8_lossy(&found.stdout).trim().to_string();
+    (!script.is_empty()).then(|| format!("command script import \"{script}\""))
+}
+
 pub fn rust_formatters() -> Option<String> {
     let rustc = crate::tools::find("rustc")?;
     let output = crate::tools::command(rustc).args(["--print", "sysroot"]).output().ok()?;
@@ -371,7 +383,7 @@ impl Debugger {
             self.output.clear();
         }
         self.program = Some(program.clone());
-        let Some(adapter_path) = crate::dap::find_adapter() else {
+        let Some(adapter_path) = crate::dap::find_adapter_for(&cwd) else {
             self.state = DebugState::Idle;
             return self.append_output(&format!("{}\n", crate::dap::GET_ADAPTER), cx);
         };
@@ -1167,6 +1179,41 @@ int main(void) {
         assert!(output.contains("args 2 two words|mode fast|in "), "{output}");
         assert!(output.lines().any(|l| l.trim_end().ends_with("/run")), "{output}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A C program on a server (built there with `gcc -g -O0 -o main main.c` in
+    /// `/root/cproj`, lldb-dap installed): `NULL_TEST_SERVER=me@box cargo test
+    /// debugs_on_a_server -- --ignored`.
+    #[gpui::test]
+    #[ignore]
+    fn debugs_on_a_server(cx: &mut TestAppContext) {
+        let Ok(host) = std::env::var("NULL_TEST_SERVER") else { return };
+        let dir = crate::remote::path(&host, "/root/cproj");
+        let (program, source) = (dir.join("main"), dir.join("main.c"));
+        let debugger = cx.new(|_| Debugger::default());
+        // In add(): `int sum = a + b;` (line 4, from 0: 3).
+        let at = crate::editor::Breakpoint { line: 3, condition: None };
+        debugger.update(cx, |d, cx| d.start(Run::new(program, dir.clone()), vec![(source, vec![at])], Vec::new(), cx));
+        let stopped = wait_for(cx, &debugger, |d| matches!(d.state, DebugState::Stopped(_)));
+        let output = debugger.read_with(cx, |d, _| d.output.clone());
+        assert!(stopped, "never stopped: {output}");
+        let stop = debugger.read_with(cx, |d, _| match &d.state {
+            DebugState::Stopped(stop) => stop.clone(),
+            _ => unreachable!(),
+        });
+        let (path, line) = stop.place.clone().unwrap();
+        assert_eq!((path, line), (dir.join("main.c"), 3), "the server's file, as Null names it");
+        assert!(stop.locals.iter().any(|(name, value)| name == "a" && value == "0"), "{:?}", stop.locals);
+        assert_eq!(stop.frames[0].name, "add");
+        debugger.update(cx, |d, cx| {
+            d.set_breakpoints(&dir.join("main.c"), &[]);
+            d.resume("continue", cx)
+        });
+        assert!(
+            wait_for(cx, &debugger, |d| d.output.contains("total 6")),
+            "{}",
+            debugger.read_with(cx, |d, _| d.output.clone())
+        );
     }
 
     /// `cargo test debugs_a_c_program -- --ignored`

@@ -46,7 +46,14 @@ The Mac app is signed ad hoc unless `NULL_SIGN_IDENTITY` names a Developer ID.
 
 `scripts/check-platform.sh windows` (or `linux`) type-checks Null for that platform without
 a virtual machine; `NULL_CHECK=clippy scripts/check-platform.sh windows --all-targets -- -D
-warnings` lints it. CI builds, lints and tests every pull request on macOS, Windows and Linux.
+warnings` lints it. `scripts/check.sh` runs all of what CI checks, on the Mac (`--quick`
+skips the tests). CI builds, lints and tests a pull request on macOS, Windows and Linux once
+it's ready (drafts are checked locally); a package to try before merging is built on demand:
+`gh workflow run release.yml --ref <branch> -f platform=windows` (or `linux`, `macos`, `all`).
+
+Packages are built only then, and when a merge into `main` carries a version not released
+yet (Cargo.toml's): that builds the three platforms and makes a draft release, tagged
+`v<version>` when it's published. Merges into `dev` build no packages.
 
 ## Looking at it
 

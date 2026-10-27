@@ -637,6 +637,26 @@ impl Welcome {
                         ),
                 ),
             )
+            // On the way out: whether to be told of new versions (off unless chosen).
+            .when(last, |d| {
+                let on = cx.global::<Settings>().check_for_updates;
+                d.child(
+                    div().w(px(720.)).max_w_full().mx_auto().pb(px(14.)).child(
+                        div()
+                            .id("updates")
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .text_size(px(ui::T_MD))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme.foreground))
+                            .child(ui::checkbox(on, false, &theme))
+                            .child("Tell me when a new version is out (Null asks GitHub once a day, nothing about you)")
+                            .on_click(|_, _, cx| settings::update(cx, |s| s.check_for_updates = !s.check_for_updates)),
+                    ),
+                )
+            })
             .child(
                 // Lined up with the step above: same width, same edges.
                 div()

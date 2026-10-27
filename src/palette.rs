@@ -77,6 +77,9 @@ pub enum PaletteKind {
     /// A path typed, for when the system has no file dialog to show (Linux without a
     /// desktop portal): what's in the folder typed so far, listed.
     Path(PathFor),
+    /// A server to open a folder on, as ssh takes it (`me@box`): those in `~/.ssh/config`
+    /// and those used before, listed.
+    Server,
 }
 
 /// What a typed path is for.
@@ -106,7 +109,9 @@ impl PathFor {
 pub fn path_candidates(typed: &str, home: &Path, files_too: bool) -> Vec<PathBuf> {
     let typed = typed.trim();
     let expand = |t: &str| -> PathBuf {
-        if t.is_empty() || t == "~" {
+        if crate::remote::is_remote(Path::new(t)) {
+            PathBuf::from(t)
+        } else if t.is_empty() || t == "~" {
             home.to_path_buf()
         } else if let Some(rest) = t.strip_prefix("~/").or_else(|| t.strip_prefix("~\\")) {
             home.join(rest)
@@ -126,17 +131,15 @@ pub fn path_candidates(typed: &str, home: &Path, files_too: bool) -> Vec<PathBuf
     let start = start.to_lowercase();
     let expanded = expand(typed);
     let into = start.is_empty();
-    let mut found: Vec<(bool, bool, String, PathBuf)> = std::fs::read_dir(&dir)
+    let mut found: Vec<(bool, bool, String, PathBuf)> = crate::project_fs::read_dir(&dir)
         .into_iter()
         .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let is_dir = path.is_dir();
+        .filter_map(|(path, meta)| {
+            let is_dir = meta.is_dir();
             if !is_dir && !files_too {
                 return None;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = path.file_name()?.to_string_lossy().into_owned();
             let lower = name.to_lowercase();
             // (Hidden ones only once a dot is typed.)
             if lower.starts_with('.') && !start.starts_with('.') {
@@ -148,7 +151,7 @@ pub fn path_candidates(typed: &str, home: &Path, files_too: bool) -> Vec<PathBuf
         .collect();
     found.sort();
     let mut paths: Vec<PathBuf> = found.into_iter().map(|(.., p)| p).take(60).collect();
-    if !into && start != "." && start != ".." && expanded.is_dir() {
+    if !into && start != "." && start != ".." && crate::project_fs::is_dir(&expanded) {
         paths.retain(|p| *p != expanded);
         paths.insert(0, expanded);
     }
@@ -199,6 +202,7 @@ impl PaletteKind {
             PaletteKind::Commands => "Commands",
             PaletteKind::Path(f) if f.files_too() => "A file's path: ~/code/app/main.rs",
             PaletteKind::Path(_) => "A folder's path: ~/code/app",
+            PaletteKind::Server => "A server, as for ssh: me@example.com",
         }
     }
 }
@@ -420,6 +424,9 @@ enum Item {
     Project(usize),
     /// Run what's typed, as a command.
     RunTyped,
+    Server(usize),
+    /// Connect to what's typed, as a server.
+    ServerTyped,
 }
 
 struct Row {
@@ -459,6 +466,8 @@ pub enum PaletteEvent {
     SearchSettings(String),
     /// A path typed (no file dialog on this system), and what it's for.
     PathChosen(PathFor, PathBuf),
+    /// A server to open a folder on.
+    ServerChosen(String),
 }
 
 pub struct Palette {
@@ -480,6 +489,8 @@ pub struct Palette {
     branches: Vec<crate::git::Branch>,
     tasks: Vec<crate::tasks::ProjectTask>,
     projects: Vec<PathBuf>,
+    /// The servers offered, for a folder on one.
+    servers: Vec<String>,
     /// Symbols of the open file: their line is enough, and moving through them shows each.
     in_file: bool,
     roots: crate::roots::ProjectRoots,
@@ -545,7 +556,7 @@ impl Palette {
         let recent_files = options
             .recent_files
             .into_iter()
-            .filter(|p| p.is_file())
+            .filter(|p| crate::remote::is_remote(p) || p.is_file())
             .take(MAX_RECENT)
             .map(|p| FileEntry::new(p, &options.roots))
             .collect();
@@ -569,6 +580,7 @@ impl Palette {
             branches: options.branches,
             tasks: options.tasks,
             projects: options.projects,
+            servers: if kind == PaletteKind::Server { crate::remote::hosts_to_offer() } else { Vec::new() },
             roots: options.roots.clone(),
             rows: Vec::new(),
             selected: 0,
@@ -627,6 +639,18 @@ impl Palette {
                 self.projects = path_candidates(&query, &home, f.files_too());
                 for i in 0..self.projects.len() {
                     self.push(Item::Project(i), Vec::new(), false);
+                }
+            }
+            PaletteKind::Server => {
+                let typed = query.trim().to_lowercase();
+                if !typed.is_empty() && !self.servers.iter().any(|s| s.to_lowercase() == typed) {
+                    self.push(Item::ServerTyped, Vec::new(), false);
+                }
+                for i in 0..self.servers.len() {
+                    let name = self.servers[i].to_lowercase();
+                    if let Some(at) = name.find(&typed) {
+                        self.push(Item::Server(i), (at..at + typed.len()).collect(), false);
+                    }
                 }
             }
         }
@@ -1015,6 +1039,17 @@ impl Palette {
             | PaletteKind::Branch
             | PaletteKind::Run
             | PaletteKind::Projects => {}
+            PaletteKind::Server => {
+                let chosen = match self.rows.get(ix).map(|r| r.item) {
+                    Some(Item::Server(i)) => Some(self.servers[i].clone()),
+                    Some(Item::ServerTyped) => Some(self.query.trim().to_string()),
+                    _ => None,
+                };
+                if let Some(host) = chosen.filter(|h| !h.is_empty()) {
+                    cx.emit(PaletteEvent::ServerChosen(host));
+                }
+                return;
+            }
             PaletteKind::Path(f) => {
                 let chosen = match self.rows.get(ix).map(|r| r.item) {
                     Some(Item::Project(i)) => Some(self.projects[i].clone()),
@@ -1077,6 +1112,8 @@ impl Palette {
             }
             Item::Project(i) => cx.emit(PaletteEvent::OpenProject(self.projects[i].clone())),
             Item::RunTyped => cx.emit(PaletteEvent::RunCommand(self.query.clone(), None)),
+            // (Confirmed above, for the servers' list.)
+            Item::Server(_) | Item::ServerTyped => {}
         }
     }
 
@@ -1178,7 +1215,7 @@ impl Palette {
         };
         let dim = theme.muted;
         let accent = if selected { theme.caret } else { theme.faint };
-        let file_marker = || div().size(px(5.)).rounded(px(2.)).bg(accent).into_any_element();
+        let file_marker = |path: &Path| crate::file_icons::marker(path, accent);
         let (marker, label, right): (AnyElement, AnyElement, Option<AnyElement>) = match row.item {
             Item::Command(i) => {
                 let command = &self.commands[i];
@@ -1216,7 +1253,7 @@ impl Palette {
                 let marked = highlights_in(&name, file.name_start);
                 let folder = file.relative[..file.name_start].trim_end_matches(['/', '\\']).to_string();
                 (
-                    file_marker(),
+                    file_marker(&file.path),
                     StyledText::new(name).with_highlights(marked).into_any_element(),
                     (!folder.is_empty()).then(|| div().text_color(dim).child(folder).into_any_element()),
                 )
@@ -1265,14 +1302,27 @@ impl Palette {
                 let home = crate::tools::home_dir();
                 let place = match home.as_ref().and_then(|h| path.parent()?.strip_prefix(h).ok()) {
                     Some(rest) => Path::new("~").join(rest).display().to_string(),
-                    None => path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+                    None => path.parent().map(crate::remote::shown).unwrap_or_default(),
                 };
                 (
-                    file_marker(),
+                    // (A folder: no language.)
+                    file_marker(Path::new("")),
                     StyledText::new(name).with_highlights(marked).into_any_element(),
                     Some(div().text_color(dim).child(place).into_any_element()),
                 )
             }
+            Item::Server(i) => (
+                div().text_size(px(ui::T_MD)).text_color(dim).child("›").into_any_element(),
+                StyledText::new(self.servers[i].clone())
+                    .with_highlights(highlights_in(&self.servers[i], 0))
+                    .into_any_element(),
+                None,
+            ),
+            Item::ServerTyped => (
+                div().text_size(px(ui::T_MD)).text_color(accent).child("›").into_any_element(),
+                div().child(format!("Connect to {}", self.query.trim())).into_any_element(),
+                Some(div().text_color(dim).child("with your SSH keys").into_any_element()),
+            ),
             Item::RunTyped => (
                 div().text_size(px(ui::T_MD)).text_color(accent).child("›").into_any_element(),
                 div().code_font(cx).text_size(px(ui::T_MD)).child(self.query.clone()).into_any_element(),
@@ -1461,6 +1511,7 @@ impl Palette {
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
             PaletteKind::Task => "↵ start",
             PaletteKind::Path(_) => "↵ choose",
+            PaletteKind::Server => "↵ connect",
             PaletteKind::Ex => "↵ run",
             PaletteKind::Run => "↵ run",
             PaletteKind::Projects if cfg!(target_os = "macos") => "↵ open · ⌘↵ new window · ⌘⌫ off the list",
@@ -1542,6 +1593,19 @@ fn rank_files(files: &[FileEntry], query: &str, recent: &HashSet<PathBuf>) -> Ve
 type Listed = ((Vec<PathBuf>, Vec<String>), Vec<FileEntry>);
 static LISTED: std::sync::Mutex<Option<Listed>> = std::sync::Mutex::new(None);
 
+/// The project's files as ⌘P last listed them, when it listed these folders (else none).
+pub(crate) fn files_listed(roots: &[PathBuf]) -> Vec<PathBuf> {
+    LISTED
+        .lock()
+        .ok()
+        .and_then(|last| {
+            last.as_ref()
+                .filter(|((r, _), _)| r == roots)
+                .map(|(_, files)| files.iter().map(|f| f.path.clone()).collect())
+        })
+        .unwrap_or_default()
+}
+
 /// The project's files listed a moment after it opens (in the background), so the first
 /// ⌘P shows them at once.
 pub(crate) fn list_files_soon(roots: crate::roots::ProjectRoots, cx: &mut App) {
@@ -1590,6 +1654,19 @@ pub(crate) fn list_files(root: &Path, hide: &[String]) -> Vec<FileEntry> {
 fn list_files_under(root: &Path, roots: &crate::roots::ProjectRoots, hide: &[String]) -> Vec<FileEntry> {
     use ignore::WalkState;
     let hidden = crate::project_index::hidden_rules(root, hide);
+    // A server's: listed there, in one go.
+    if let Some(remote) = crate::remote::of(root) {
+        let listed = crate::remote::list_files(&remote.host, &remote.path, MAX_FILES * 4).unwrap_or_default();
+        let mut files: Vec<FileEntry> = listed
+            .iter()
+            .map(|p| crate::remote::path(&remote.host, p))
+            .filter(|p| !hidden.matched_path_or_any_parents(p, false).is_ignore())
+            .map(|p| FileEntry::new(p, roots))
+            .collect();
+        files.sort_by(|a, b| a.relative.cmp(&b.relative));
+        files.truncate(MAX_FILES);
+        return files;
+    }
     let found: std::sync::Mutex<Vec<FileEntry>> = std::sync::Mutex::new(Vec::new());
     ignore::WalkBuilder::new(root)
         .hidden(false)

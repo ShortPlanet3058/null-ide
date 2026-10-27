@@ -1,6 +1,6 @@
 [package]
 name = "null-ide"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 license-file = "LICENSE"
 description = "A calm, fast code editor where nothing gets in your way."
@@ -21,6 +21,8 @@ gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 # notebook's charts, `data:` images in Markdown).
 base64 = "0.22"
 sha2 = "0.10"
+# Checks an update is signed with the release key (Ed25519; already there, under ureq).
+ring = "0.17"
 ignore = "0.4"
 # Already in the build through gpui: SVGs drawn here, in the right colours and sharp
 # (gpui's own path swaps red and blue, at 1×); with the pictures in them (PNG, JPEG, GIF,
@@ -67,6 +69,14 @@ ratex-layout = "0.1.14"
 ratex-types = "0.1.14"
 ratex-svg = { version = "0.1.14", features = ["embed-fonts"] }
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+tar = { version = "0.4", default-features = false }
+zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2"] }
+flate2 = "1"
+tree-sitter-java = "0.23.5"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-php = "0.25.1"
+tree-sitter-lua = "0.5.0"
 
 # The Mac's own spell checker and color panel. Already built for GPUI: only the parts used are named.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -87,6 +97,10 @@ libc = "0.2"
 # (Already there, under keyring: to make the desktop's keyring when it has none.)
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 secret-service = { version = "5", features = ["crypto-rust"] }
+
+[target.'cfg(windows)'.dependencies]
+# The window's handle, to keep it from taking input while a dialog is over it (modal.rs).
+raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

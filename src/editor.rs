@@ -23,6 +23,7 @@ mod links;
 mod mac_keys;
 mod marks;
 mod meaning;
+mod notes;
 mod numbers;
 mod refactor;
 mod reindent;
@@ -39,6 +40,7 @@ pub use assist::{Block, BlockKind};
 pub use bookmarks::{NextBookmark, PreviousBookmark, ToggleBookmark};
 pub use breakpoints::{BreakWhen, Breakpoint, ToggleBreakpoint};
 pub use completion::CompletionMenu;
+pub use notes::{AddNote, LineNote};
 
 /// Markdown for `html` copied along with `text`, when it's the same words (not left over
 /// from an earlier copy) and says more than the plain text does.
@@ -234,6 +236,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     conflicts::bind_keys(cx);
     breakpoints::bind_keys(cx);
     bookmarks::bind_keys(cx);
+    notes::bind_keys(cx);
     structure::bind_keys(cx);
     numbers::bind_keys(cx);
     counterpart::bind_keys(cx);
@@ -458,6 +461,8 @@ pub enum EditorEvent {
     BreakpointsChanged,
     /// The bookmarks changed (set, removed, or moved by an edit).
     BookmarksChanged,
+    /// A note on a line was written, changed or removed, or notes moved with their lines.
+    NotesChanged,
     /// A right-click in the text, at this place in the window: the workspace shows what can
     /// be done there.
     TextMenu(Point<Pixels>, usize),
@@ -571,6 +576,8 @@ pub struct Editor {
     pub untitled_name: Option<String>,
     /// A file that isn't text, as its bytes (the first `HEX_LIMIT` of them), to show in hex.
     binary: Option<std::sync::Arc<Vec<u8>>>,
+    /// A picture on a server, as read from there (gpui shows only this computer's files).
+    server_image: Option<gpui::ImageSource>,
     hex_scroll: gpui::UniformListScrollHandle,
     /// The file was deleted on disk while open (a checkout, the terminal): the text is
     /// still here, and saving puts the file back.
@@ -795,6 +802,10 @@ pub struct Editor {
     /// An AI task's changes to this file, being reviewed.
     review: Option<review::Review>,
     note: Option<assist::Note>,
+    /// Notes on this file's lines (`code_notes`), and one being written.
+    line_notes: Vec<LineNote>,
+    line_notes_revision: u64,
+    note_draft: Option<notes::NoteDraft>,
     /// Conversations shown between the lines (a pull request's review comments).
     threads: Vec<assist::Thread>,
     /// The text's width the blocks drawn over it were last sized for.
@@ -836,6 +847,10 @@ type DiskStamp = (u64, std::time::SystemTime);
 /// Whether the file can't be written by Null (its permissions, its owner, a read-only
 /// disk): its tab shows a lock.
 fn is_read_only(path: &Path) -> bool {
+    // (A server's file: saving says so if it can't be written.)
+    if crate::remote::is_remote(path) {
+        return false;
+    }
     // (Asked of the system on Unix: the owner and groups count, not only the mode bits.)
     #[cfg(unix)]
     {
@@ -851,7 +866,7 @@ fn is_read_only(path: &Path) -> bool {
 }
 
 fn disk_stamp(path: &Path) -> Option<DiskStamp> {
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = crate::project_fs::metadata(path).ok()?;
     Some((meta.len(), meta.modified().ok()?))
 }
 
@@ -893,6 +908,11 @@ pub struct ReadFile {
     path: PathBuf,
     read: std::io::Result<(String, crate::encoding::Encoding)>,
     made: Option<(Option<String>, Buffer, Fingerprint)>,
+    /// How it opens when it isn't text, and its size, time and whether it can be written:
+    /// asked as it's read (a server's file is asked of the network).
+    preview: Option<crate::preview::Preview>,
+    stamp: Option<DiskStamp>,
+    read_only: bool,
 }
 
 /// A stand-in's file (see `Editor::stand_in`): its size, and where it was asked to show
@@ -955,6 +975,7 @@ impl Editor {
             preview: None,
             untitled_name: None,
             binary: None,
+            server_image: None,
             hex_scroll: gpui::UniformListScrollHandle::new(),
             missing: false,
             disk_changed: false,
@@ -1083,6 +1104,9 @@ impl Editor {
             ai_change: None,
             review: None,
             note: None,
+            line_notes: Vec::new(),
+            line_notes_revision: 0,
+            note_draft: None,
             threads: Vec::new(),
             blocks_width: None,
             trace_opened: None,
@@ -1207,7 +1231,7 @@ impl Editor {
         };
         // An image, or a file that isn't text: shown (by `from_read`), not made a buffer.
         let preview = crate::preview::of(&path, &read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind()));
-        let made = match (&read, preview) {
+        let made = match (&read, &preview) {
             (Ok((text, _)), None) => {
                 // A notebook: its cells as text to write in.
                 let cells = is_notebook_path(&path).then(|| crate::notebook::to_cells_text(text)).flatten();
@@ -1227,7 +1251,8 @@ impl Editor {
             }
             _ => None,
         };
-        ReadFile { path, read, made }
+        let (stamp, read_only) = (disk_stamp(&path), is_read_only(&path));
+        ReadFile { path, read, made, preview, stamp, read_only }
     }
 
     /// An editor of a file read (see `read_file`).
@@ -1237,10 +1262,9 @@ impl Editor {
         lsp: Option<Entity<LspStore>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let ReadFile { path, read, made } = read;
+        let ReadFile { path, read, made, preview, stamp, read_only } = read;
         // An image, or a file that isn't text: shown, never edited or saved over.
-        if let Some(preview) = crate::preview::of(&path, &read.as_ref().map(|(t, _)| t.as_str()).map_err(|e| e.kind()))
-        {
+        if let Some(preview) = preview {
             let mut editor = Self::new(Buffer::new(), Some(path), cx);
             editor.preview = Some(preview);
             editor.read_bytes();
@@ -1268,8 +1292,8 @@ impl Editor {
         editor.on_disk = Some(on_disk);
         editor.measure_longest_line(cx);
         editor.find_conflicts_meanwhile(cx);
-        editor.disk_stamp = disk_stamp(&editor.path.clone().unwrap_or_default());
-        editor.read_only = is_read_only(&editor.path.clone().unwrap_or_default());
+        editor.disk_stamp = stamp;
+        editor.read_only = read_only;
         editor.encoding = encoding;
         // A notebook opens as it reads, its cells (its JSON isn't written by hand: ⌘⇧V
         // shows it); one that doesn't read as a notebook, as the text it is.
@@ -1418,7 +1442,7 @@ impl Editor {
 
     /// Notes whether the file is gone from disk; true when it is.
     pub fn check_missing(&mut self, cx: &mut Context<Self>) -> bool {
-        let missing = self.path.as_ref().is_some_and(|p| !p.exists());
+        let missing = self.path.as_ref().is_some_and(|p| !crate::project_fs::exists(p));
         if missing != self.missing {
             self.missing = missing;
             cx.notify();
@@ -1443,7 +1467,7 @@ impl Editor {
         );
         // What's there now (moved: the same file; saved as over another: that one, which
         // the save goes over as asked): what a later save checks the disk against.
-        self.on_disk = std::fs::read(&path).ok().and_then(|bytes| {
+        self.on_disk = crate::project_fs::read(&path).ok().and_then(|bytes| {
             crate::encoding::decode_exactly(&bytes, self.encoding)
                 .or_else(|| crate::encoding::decode_as(bytes, self.encoding))
                 .map(|text| fingerprint(&text))
@@ -1559,6 +1583,7 @@ impl Editor {
         self.first_line_after_edit(cx);
         self.breakpoints_after_edit(cx);
         self.bookmarks_after_edit(cx);
+        self.notes_after_edit(cx);
         // Cursors from before an edit aren't somewhere to go back to.
         self.cursor_history.clear();
         self.close_hover(cx);
@@ -3156,11 +3181,11 @@ impl Editor {
         let Some(target) = (1..100)
             .map(|n| if n == 1 { format!("pasted-{stamp}.{ext}") } else { format!("pasted-{stamp}-{n}.{ext}") })
             .map(|name| dir.join(name))
-            .find(|p| !p.exists())
+            .find(|p| !crate::project_fs::exists(p))
         else {
             return;
         };
-        if let Err(error) = std::fs::write(&target, &image.bytes) {
+        if let Err(error) = crate::project_fs::write(&target, &image.bytes) {
             return self.show_notice(at, format!("Couldn't save the image: {error}"), cx);
         }
         let link = crate::markdown_view::link_to(&dir, &target);
@@ -3350,7 +3375,7 @@ impl Editor {
         if self.buffer.is_dirty() {
             return Err("Save or undo the changes first: this reads the file again.".into());
         }
-        let bytes = std::fs::read(&path).map_err(|_| "The file couldn't be read.".to_string())?;
+        let bytes = crate::project_fs::read(&path).map_err(|_| "The file couldn't be read.".to_string())?;
         let text = crate::encoding::decode_exactly(&bytes, encoding)
             .ok_or_else(|| format!("This file isn't {} text.", encoding.label()))?;
         // Text after all: shown, and written, as text is (its line endings, its indentation).
@@ -3458,7 +3483,7 @@ impl Editor {
         // size or time changed, and as its own encoding (one reopened in isn't guessed again).
         if let (Some(path), Some(read)) = (&self.path, self.on_disk)
             && disk_stamp(path) != self.disk_stamp
-            && let Ok(bytes) = std::fs::read(path)
+            && let Ok(bytes) = crate::project_fs::read(path)
         {
             let now = crate::encoding::decode_exactly(&bytes, self.encoding)
                 .or_else(|| crate::encoding::decode_as(bytes, self.encoding))
@@ -3482,7 +3507,7 @@ impl Editor {
         if self.missing
             && let Some(parent) = path.parent()
         {
-            std::fs::create_dir_all(parent).ok();
+            crate::project_fs::create_dir_all(parent).ok();
         }
         let text = self.buffer.to_string();
         // A notebook: its cells written back into its JSON (never the cells' text as it).
@@ -4669,7 +4694,11 @@ impl Render for Editor {
         if let Some(opening) = &self.opening {
             let theme = cx.global::<Theme>();
             let name = self.file_name();
-            let size = crate::preview::file_size(opening.bytes);
+            // (A server's file: its size isn't asked for first.)
+            let size = match opening.bytes {
+                0 => String::new(),
+                bytes => format!(" ({})", crate::preview::file_size(bytes)),
+            };
             return div()
                 .track_focus(&self.focus_handle)
                 .size_full()
@@ -4677,7 +4706,7 @@ impl Render for Editor {
                 .items_center()
                 .justify_center()
                 .text_color(theme.muted)
-                .child(format!("Opening {name} ({size})…"))
+                .child(format!("Opening {name}{size}…"))
                 .into_any_element();
         }
         if self.reading && self.is_svg() {
@@ -4822,6 +4851,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::quick_fix))
             .on_action(cx.listener(Self::toggle_breakpoint))
             .on_action(cx.listener(Self::toggle_bookmark))
+            .on_action(cx.listener(Self::add_note))
             .on_action(cx.listener(Self::next_bookmark))
             .on_action(cx.listener(Self::previous_bookmark))
             .on_action(cx.listener(Self::expand_selection))
@@ -5306,13 +5336,16 @@ impl Editor {
 
     /// A file that isn't text: its bytes read, for the hex view (none for anything else).
     fn read_bytes(&mut self) {
-        use std::io::Read;
         self.binary = match (&self.preview, &self.path) {
-            (Some(crate::preview::Preview::NotText { .. }), Some(path)) => std::fs::File::open(path).ok().map(|file| {
-                let mut bytes = Vec::new();
-                file.take(HEX_LIMIT as u64).read_to_end(&mut bytes).ok();
-                std::sync::Arc::new(bytes)
-            }),
+            (Some(crate::preview::Preview::NotText { .. }), Some(path)) => {
+                crate::project_fs::read_head(path, HEX_LIMIT).ok().map(std::sync::Arc::new)
+            }
+            _ => None,
+        };
+        self.server_image = match (&self.preview, &self.path) {
+            (Some(crate::preview::Preview::Image { .. }), Some(path)) if crate::remote::is_remote(path) => {
+                server_image(path)
+            }
             _ => None,
         };
     }
@@ -5417,7 +5450,7 @@ impl Editor {
         let content = match (preview, &self.path) {
             (crate::preview::Preview::Image { .. }, Some(path)) => {
                 let name = name.clone().unwrap_or_default();
-                img(path.clone())
+                img(self.server_image.clone().unwrap_or_else(|| path.clone().into()))
                     .size_full()
                     .object_fit(ObjectFit::ScaleDown)
                     .with_fallback(move || note(format!("Couldn't show {name}")).into_any_element())
@@ -5533,6 +5566,27 @@ fn utc_stamp(secs: u64) -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}-{:02}{:02}{:02}", rest / 3600, rest % 3600 / 60, rest % 60)
+}
+
+/// A picture on a server, read from there: gpui draws pictures from this computer's files,
+/// so it's given the bytes (an SVG drawn here, as a local one is).
+fn server_image(path: &std::path::Path) -> Option<gpui::ImageSource> {
+    let bytes = crate::project_fs::read(path).ok()?;
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let format = match extension.as_str() {
+        "svg" => {
+            let (image, _) = crate::svg_image::draw(&bytes, 2., None)?;
+            return Some(gpui::ImageSource::Render(image));
+        }
+        "png" => gpui::ImageFormat::Png,
+        "jpg" | "jpeg" => gpui::ImageFormat::Jpeg,
+        "gif" => gpui::ImageFormat::Gif,
+        "webp" => gpui::ImageFormat::Webp,
+        "bmp" => gpui::ImageFormat::Bmp,
+        "tif" | "tiff" => gpui::ImageFormat::Tiff,
+        _ => return None,
+    };
+    Some(gpui::ImageSource::Image(std::sync::Arc::new(gpui::Image::from_bytes(format, bytes))))
 }
 
 #[cfg(test)]

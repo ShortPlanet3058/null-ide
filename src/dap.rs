@@ -30,6 +30,60 @@ pub struct DebugAdapter {
     child: Mutex<Child>,
     next_seq: AtomicI64,
     pending: Pending,
+    /// An adapter on a server: the paths in what goes to it and comes from it, translated.
+    server: Option<String>,
+}
+
+/// The adapter for a program in `cwd`: on its server for a folder on one (its path there).
+pub fn find_adapter_for(cwd: &Path) -> Option<PathBuf> {
+    let Some(remote) = crate::remote::of(cwd) else { return find_adapter() };
+    let names: Vec<String> = std::iter::once("lldb-dap".to_string())
+        .chain((14..=22).rev().map(|v| format!("lldb-dap-{v}")))
+        .chain(std::iter::once("lldb-vscode".to_string()))
+        .collect();
+    let script = format!(
+        "PATH=\"{}\"; for p in {}; do command -v \"$p\" && exit 0; done; exit 1",
+        crate::remote::path_inside(),
+        names.join(" ")
+    );
+    let found = crate::remote::run(&remote.host, &script).ok().filter(|o| o.success())?;
+    let path = String::from_utf8_lossy(&found.stdout).lines().next()?.trim().to_string();
+    path.starts_with('/').then(|| PathBuf::from(path))
+}
+
+/// What goes to an adapter on `host`: every path of Null's there (`/ssh:host:/…`) as the
+/// server has it.
+fn to_server(host: &str, value: Value) -> Value {
+    match value {
+        Value::String(text) => match crate::remote::of(Path::new(&text)).filter(|r| r.host == host) {
+            Some(remote) => Value::String(remote.path),
+            None => Value::String(text),
+        },
+        Value::Array(items) => Value::Array(items.into_iter().map(|v| to_server(host, v)).collect()),
+        Value::Object(map) => Value::Object(map.into_iter().map(|(k, v)| (k, to_server(host, v))).collect()),
+        other => other,
+    }
+}
+
+/// What comes from an adapter on `host`: the paths it names (a stack frame's file, a
+/// breakpoint's) as Null reaches them.
+fn for_null(host: &str, value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(|v| for_null(host, v)).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, v)| match v {
+                    Value::String(text)
+                        if matches!(key.as_str(), "path" | "program" | "cwd") && text.starts_with('/') =>
+                    {
+                        (key, Value::String(crate::remote::path(host, &text).to_string_lossy().into_owned()))
+                    }
+                    v => (key, for_null(host, v)),
+                })
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// The debugger Null drives: lldb-dap, on the PATH or (on macOS) the one with Xcode; on
@@ -56,12 +110,19 @@ pub const GET_ADAPTER: &str = if cfg!(target_os = "macos") {
 impl DebugAdapter {
     /// Starts the adapter and returns it with a stream of its events and requests.
     pub fn spawn(program: &Path, cwd: &Path) -> io::Result<(Self, mpsc::UnboundedReceiver<AdapterMessage>)> {
-        let mut child = crate::tools::command(program)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+        // A folder on a server: the adapter runs there, in the folder.
+        let server = crate::remote::of(cwd);
+        let mut command = match &server {
+            Some(remote) => crate::remote::command(&remote.host, Some(&remote.path), &program.to_string_lossy(), &[]),
+            None => {
+                let mut command = crate::tools::command(program);
+                command.current_dir(cwd);
+                command
+            }
+        };
+        let server = server.map(|r| r.host);
+        let host = server.clone();
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
         let pending: Pending = Arc::default();
@@ -70,6 +131,10 @@ impl DebugAdapter {
         std::thread::Builder::new().name("dap-reader".into()).spawn(move || {
             let mut reader = BufReader::new(stdout);
             while let Some(message) = crate::lsp::read_message(&mut reader) {
+                let message = match &host {
+                    Some(host) => for_null(host, message),
+                    None => message,
+                };
                 match message["type"].as_str() {
                     Some("response") => {
                         let reply = if message["success"].as_bool() == Some(true) {
@@ -99,11 +164,16 @@ impl DebugAdapter {
             // The adapter exited: fail whatever is still waiting.
             replies.lock().unwrap().clear();
         })?;
-        let adapter = Self { stdin: Mutex::new(stdin), child: Mutex::new(child), next_seq: AtomicI64::new(1), pending };
+        let adapter =
+            Self { stdin: Mutex::new(stdin), child: Mutex::new(child), next_seq: AtomicI64::new(1), pending, server };
         Ok((adapter, rx))
     }
 
     fn send(&self, message: Value) {
+        let message = match &self.server {
+            Some(host) => to_server(host, message),
+            None => message,
+        };
         let body = message.to_string();
         let mut stdin = self.stdin.lock().unwrap();
         let _ = write!(stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).and_then(|()| stdin.flush());
@@ -131,5 +201,23 @@ impl DebugAdapter {
 impl Drop for DebugAdapter {
     fn drop(&mut self) {
         let _ = self.child.lock().unwrap().kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_adapter_on_a_server_gets_its_paths_and_null_gets_its_own() {
+        let file = crate::remote::path("box", "/home/me/app/src/main.rs").to_string_lossy().into_owned();
+        let sent = to_server("box", json!({ "source": { "path": file }, "lines": [3], "name": "main.rs" }));
+        assert_eq!(sent, json!({ "source": { "path": "/home/me/app/src/main.rs" }, "lines": [3], "name": "main.rs" }));
+        let back = for_null(
+            "box",
+            json!({ "stackFrames": [{ "source": { "path": "/home/me/app/src/main.rs" }, "name": "/x" }] }),
+        );
+        assert_eq!(back["stackFrames"][0]["source"]["path"], file);
+        assert_eq!(back["stackFrames"][0]["name"], "/x");
     }
 }

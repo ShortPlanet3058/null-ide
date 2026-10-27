@@ -7,7 +7,7 @@ use crate::fonts::Fonts;
 use crate::git;
 use crate::key_prompt::{KeyPrompt, KeyPromptEvent};
 use crate::lsp_store::{LspStore, Readiness};
-use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleWordWrap};
+use crate::menus::{self, Quit, ToggleFadeWhileTyping, ToggleSmoothMotion, ToggleWordWrap};
 use crate::palette::{Category, Command, Palette, PaletteEvent, PaletteKind, PaletteOptions, PathFor, format_keys};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
 use crate::settings::AutoSave;
@@ -20,9 +20,9 @@ use crate::ui::px;
 use crate::welcome::{Welcome, WelcomeEvent};
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, ScrollStrategy,
-    SharedString, Subscription, Task, UniformListScrollHandle, Window, WindowControlArea, actions, div, prelude::*,
-    relative, svg, uniform_list,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, SharedString,
+    Subscription, Task, UniformListScrollHandle, Window, WindowControlArea, actions, div, prelude::*, relative, svg,
+    uniform_list,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -160,8 +160,8 @@ actions!(
         ShowOutline,
         ShowChanges,
         ImportVsCodeSettings,
-        GoToOutlineMatch,
-        ClearOutlineFilter,
+        /// Esc in project search: what's typed cleared, or (nothing typed) back to the files.
+        LeaveSearch,
         ShowTests,
         ToggleAutocomplete,
         ToggleTerminal,
@@ -200,8 +200,28 @@ actions!(
         TurnOffAi,
         TurnOnAi,
         SetApiKey,
+        /// The key of the provider suggestions come from, when not the provider of answers.
+        SetSuggestionsKey,
+        /// How many tokens AI used: the last request, and this month.
+        ShowAiUsage,
+        /// Every note on the project's code, to go to.
+        ShowNotes,
+        /// The failed test at the cursor (or the first one that failed) explained by AI.
+        ExplainTestFailure,
+        /// Asks now whether a newer Null is out.
+        CheckForUpdates,
+        /// The newer Null out: downloaded, checked and installed; once it's ready, Null
+        /// restarts with it.
+        UpdateNull,
+        /// A folder inside WSL as the project (Windows).
+        OpenWslFolder,
+        /// A folder on a server, over SSH, as the project.
+        OpenSshFolder,
     ]
 );
+
+/// Where ssh's answer goes (see `askpass`).
+type SshAnswer = futures::channel::oneshot::Sender<Option<String>>;
 
 /// ⌘1…⌘8: the tab at that place on the side in use; ⌘9: its last one.
 #[derive(Clone, PartialEq, gpui::Action)]
@@ -240,8 +260,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-f11", StepOut, ctx),
         KeyBinding::new("enter", AddWatch, Some("DebugWatch")),
         KeyBinding::new("enter", EvaluateInDebugger, Some("DebugConsole")),
-        KeyBinding::new("enter", GoToOutlineMatch, Some("OutlineFilter")),
-        KeyBinding::new("escape", ClearOutlineFilter, Some("OutlineFilter")),
+        KeyBinding::new("escape", LeaveSearch, Some("ProjectSearch")),
         KeyBinding::new("enter", ConfirmTerminalName, Some("TerminalName")),
         KeyBinding::new("escape", CancelTerminalName, Some("TerminalName")),
         KeyBinding::new("f8", NextProblem, ctx),
@@ -508,6 +527,23 @@ fn test_programs(messages: &str, of_src: bool) -> Vec<PathBuf> {
 
 /// Of the test `programs`, the one that has test `id` (each is asked for its list, and
 /// given 10 seconds to answer).
+/// cargo with `args`, in `dir`: on its server for a folder on one.
+fn cargo_in(dir: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    if let Some(remote) = crate::remote::of(dir) {
+        return crate::remote::command(&remote.host, Some(&remote.path), "cargo", args).output();
+    }
+    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
+    crate::tools::command(cargo).args(args).current_dir(dir).output()
+}
+
+/// A path cargo printed, run for `dir`, as Null reaches it (a server's in Null's form).
+fn printed_in(dir: &Path, path: PathBuf) -> PathBuf {
+    match crate::remote::of(dir) {
+        Some(remote) => crate::remote::path(&remote.host, &path.to_string_lossy()),
+        None => path,
+    }
+}
+
 fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathBuf> {
     if programs.len() == 1 {
         return programs.first().cloned();
@@ -518,6 +554,13 @@ fn program_with_test(programs: &[PathBuf], id: &str, cwd: &Path) -> Option<PathB
 fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
     use std::io::Read;
     use std::process::Stdio;
+    // On a server: asked there (10 seconds at most).
+    if let (Some(remote), Some(on)) = (crate::remote::of(cwd), crate::remote::of(program)) {
+        let q = crate::remote::quote;
+        let script = format!("cd {} && timeout 10 {} --list --exact {}", q(&remote.path), q(&on.path), q(id));
+        return crate::remote::run(&remote.host, &script)
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l == format!("{id}: test")));
+    }
     let Ok(mut child) = crate::tools::command(program)
         .args(["--list", "--exact", id])
         .current_dir(cwd)
@@ -561,7 +604,7 @@ fn lists_test(program: &Path, id: &str, cwd: &Path) -> bool {
 }
 
 fn cargo_program(root: &Path) -> Option<PathBuf> {
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let manifest = crate::project_fs::read_to_string(&root.join("Cargo.toml")).ok()?;
     let mut section = String::new();
     let (mut package, mut bin) = (None, None);
     for line in manifest.lines() {
@@ -582,7 +625,8 @@ fn cargo_program(root: &Path) -> Option<PathBuf> {
         }
     }
     let name = bin.or(package)?;
-    let exe = if cfg!(windows) { format!("{name}.exe") } else { name };
+    // (A server's: Linux's, no .exe.)
+    let exe = if cfg!(windows) && !crate::remote::is_remote(root) { format!("{name}.exe") } else { name };
     Some(root.join("target").join("debug").join(exe))
 }
 
@@ -770,8 +814,9 @@ pub struct Workspace {
     project_search: Entity<ProjectSearch>,
     /// On while the sidebar shows project search instead of files.
     sidebar_search: Transition,
-    /// The sidebar shows the open file's outline instead of the files (when not searching).
-    sidebar_outline: bool,
+    /// The open file's outline as last given to the files (its editor, text and caret's
+    /// symbol), so it's given again only when that changes.
+    tree_outline: Option<(gpui::EntityId, u64, Option<usize>)>,
     /// The sidebar shows the project's tests (see `crate::test_at::discover`).
     sidebar_tests: bool,
     /// The sidebar shows the Changes tab (git).
@@ -796,6 +841,8 @@ pub struct Workspace {
     testable: bool,
     /// How each test (file, name) did when last run.
     test_status: std::collections::HashMap<(PathBuf, String), TestStatus>,
+    /// The output of the last run where a test failed, for explaining it.
+    failed_run: Option<String>,
     /// A run's output that came before the project's tests were known (see `find_tests`).
     results_waiting: Vec<crate::terminal::Ran>,
     /// The tests run from the list, and the command running them.
@@ -807,11 +854,6 @@ pub struct Workspace {
     /// (a big file's isn't worked out again on every keystroke).
     outline_at: Instant,
     outline_later: Option<Task<()>>,
-    outline_scroll: UniformListScrollHandle,
-    /// The item the caret was in when last drawn: the list follows it to another.
-    outline_followed: Option<(gpui::EntityId, usize)>,
-    /// The Outline view's filter line.
-    outline_filter: Entity<crate::text_input::TextInput>,
     tabs: Vec<Tab>,
     /// The tab with the keyboard: the one shown on the side being worked in.
     active: Option<usize>,
@@ -849,7 +891,7 @@ pub struct Workspace {
     /// Actions run from the palette lately, most recent first.
     recent_commands: Vec<&'static str>,
     /// Watches the project folder so the tree and open files follow changes made elsewhere.
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Option<Box<dyn notify::Watcher>>,
     watch_task: Option<Task<()>>,
     index_task: Option<Task<()>>,
     session_task: Option<Task<()>>,
@@ -952,11 +994,18 @@ pub struct Workspace {
     ignore_rules: Vec<(PathBuf, ignore::gitignore::Gitignore)>,
     /// The AI answer panel, while open.
     key_prompt: Option<(Entity<KeyPrompt>, Subscription)>,
+    /// What ssh asks, asked here (see `askpass`): the one shown, with whoever waits for its
+    /// answer (the same question asked again meanwhile, all of them), then those after it.
+    ssh_prompt: Option<(Entity<crate::ssh_prompt::SshPrompt>, Subscription, Vec<SshAnswer>)>,
+    ssh_questions: std::collections::VecDeque<crate::askpass::Ask>,
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
     /// The notices shown lately, newest last (Recent Notices lists them).
     past_notices: Vec<(String, std::time::SystemTime)>,
     notice_task: Option<Task<()>>,
+    /// Where suggestions come from was asked this session (answers from a command line
+    /// tool, too slow for them): asked once.
+    asked_suggestions: bool,
     /// A notice for when Null comes back to the front (a command finished meanwhile).
     notice_on_return: Option<String>,
     /// The terminal, once opened. It keeps running while the panel is hidden.
@@ -1003,6 +1052,12 @@ impl Workspace {
         let subscriptions = vec![
             cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
                 FileTreeEvent::Open(path) | FileTreeEvent::Created(path) => this.open_file(path.clone(), window, cx),
+                FileTreeEvent::OpenToTheSide(path) => this.open_to_the_side(path.clone(), window, cx),
+                FileTreeEvent::GoToLine(path, row) => {
+                    let (path, row) = (path.clone(), *row);
+                    this.open_file(path, window, cx);
+                    this.go_to_outline_row(row, window, cx);
+                }
                 FileTreeEvent::Preview(path) => {
                     this.open_file_passing(path.clone(), window, cx);
                     window.focus(&this.tree.focus_handle(cx));
@@ -1048,7 +1103,11 @@ impl Workspace {
                     }
                 }
             }),
-            cx.observe_global::<Settings>(|this, cx| this.apply_settings(cx)),
+            cx.observe_global_in::<Settings>(window, |this, window, cx| {
+                this.apply_settings(cx);
+                this.ask_where_suggestions_come_from(window, cx);
+                this.check_for_updates_soon(cx);
+            }),
             cx.observe(&lsp, |_, _, cx| cx.notify()),
             cx.subscribe(&lsp, |this, _, event, cx| match event {
                 crate::lsp_store::LspEvent::Installed(result) => {
@@ -1127,7 +1186,7 @@ impl Workspace {
             lsp,
             project_search,
             sidebar_search: Transition::new(false),
-            sidebar_outline: false,
+            tree_outline: None,
             sidebar_tests: false,
             sidebar_git: false,
             git_view,
@@ -1141,15 +1200,13 @@ impl Workspace {
             testable,
             tests_task: None,
             test_status: std::collections::HashMap::new(),
+            failed_run: None,
             results_waiting: Vec::new(),
             tests_running: None,
             tests_scroll: UniformListScrollHandle::new(),
             outline: None,
             outline_at: Instant::now(),
             outline_later: None,
-            outline_scroll: UniformListScrollHandle::new(),
-            outline_followed: None,
-            outline_filter: cx.new(|cx| crate::text_input::TextInput::new("Filter", cx)),
             tabs: Vec::new(),
             shown: [None, None],
             split_ratio: 0.5,
@@ -1234,10 +1291,13 @@ impl Workspace {
             pending_commands: Vec::new(),
             ignore_rules,
             key_prompt: None,
+            ssh_prompt: None,
+            ssh_questions: std::collections::VecDeque::new(),
             notice: None,
             past_notices: Vec::new(),
             notice_on_return: None,
             notice_task: None,
+            asked_suggestions: false,
             focus_before_palette: None,
             _subscriptions: subscriptions,
         };
@@ -1254,16 +1314,6 @@ impl Workspace {
         .detach();
         let git_events = cx.subscribe_in(&workspace.git_view, window, Self::git_view_event);
         workspace._subscriptions.push(git_events);
-        // Typed in the Outline's filter: the list shows what fits.
-        let filter_changes =
-            cx.subscribe(&workspace.outline_filter, |this, filter, _: &crate::text_input::TextInputEvent, cx| {
-                // Emptied (by ⌫ too): the list follows the caret again.
-                if filter.read(cx).text().is_empty() {
-                    this.outline_followed = None;
-                }
-                cx.notify()
-            });
-        workspace._subscriptions.push(filter_changes);
         workspace._subscriptions.push(debugger_events);
         workspace._subscriptions.push(debugger_changes);
         // A key while a tab's or the text's menu is open: it closes, as menus do, and does
@@ -1296,6 +1346,8 @@ impl Workspace {
             if window.is_window_active() {
                 let root = this.tree.read(cx).root().to_path_buf();
                 crate::settings::use_project(&root, cx);
+                // What's typed in its terminal is for Linux's shell when its folder's in WSL.
+                crate::shell::set_linux_project(crate::wsl::is_wsl(&root) || crate::remote::is_remote(&root));
             }
             if window.is_window_active()
                 && let Some(message) = this.notice_on_return.take()
@@ -1329,6 +1381,9 @@ impl Workspace {
                 cx,
             );
         }
+        // Already answering from a command line tool with suggestions on: asked once, here.
+        cx.defer_in(window, |this, window, cx| this.ask_where_suggestions_come_from(window, cx));
+        workspace.check_for_updates_soon(cx);
         workspace
     }
 
@@ -1392,7 +1447,8 @@ impl Workspace {
     /// Opens the project as it was: its tabs (caret and scroll included), folders and terminal.
     pub fn restore_session(&mut self, session: crate::session::Session, window: &mut Window, cx: &mut Context<Self>) {
         // The window's other folders first (those still there), so their folders open below.
-        let others: Vec<PathBuf> = session.roots.iter().filter(|r| r.is_dir()).cloned().collect();
+        let others: Vec<PathBuf> =
+            session.roots.iter().filter(|r| crate::remote::is_remote(r) || r.is_dir()).cloned().collect();
         // (Each added, whichever were already there.)
         if others.into_iter().filter(|r| self.roots.add(r.clone())).count() > 0 {
             self.roots_changed(window, cx);
@@ -1583,24 +1639,13 @@ impl Workspace {
     /// Watches the project folder (and the window's others); changes made elsewhere
     /// (terminal, git, other apps) show up in the tree and in open files.
     fn watch(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        use notify::Watcher;
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
-        let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-            if let Ok(event) = result
-                && !matches!(event.kind, notify::EventKind::Access(_))
-            {
-                tx.unbounded_send(event.paths).ok();
-            }
-        });
-        let Ok(mut watcher) = watcher else { return };
-        if watcher.watch(&root, notify::RecursiveMode::Recursive).is_err() {
-            return;
+        if let Some(server) = crate::remote::of(&root) {
+            self._watcher = None;
+            self.watch_server(server.host, tx);
+        } else {
+            self.watch_here(root, tx);
         }
-        // (The window's other folders, on the same watcher.)
-        for other in self.roots.all().iter().filter(|r| **r != root) {
-            watcher.watch(other, notify::RecursiveMode::Recursive).ok();
-        }
-        self._watcher = Some(watcher);
         self.watch_task = Some(cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             while let Some(first) = rx.next().await {
@@ -1617,6 +1662,70 @@ impl Workspace {
                 }
             }
         }));
+    }
+
+    /// The window's folders on a server: what changed there looked for every few seconds,
+    /// on a thread of its own (until the watch is replaced: nobody listening).
+    fn watch_server(&mut self, host: String, tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>) {
+        let folders: Vec<String> = self
+            .roots
+            .all()
+            .iter()
+            .filter_map(|r| crate::remote::of(r))
+            .filter(|r| r.host == host)
+            .map(|r| r.path)
+            .collect();
+        let stamp = format!(
+            "/tmp/null-watch-{:x}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        );
+        std::thread::Builder::new()
+            .name("ssh-watch".into())
+            .spawn(move || {
+                while !tx.is_closed() {
+                    if let Ok(changed) = crate::remote::changed_since(&host, &folders, &stamp)
+                        && !changed.is_empty()
+                    {
+                        let paths: Vec<PathBuf> = changed.iter().map(|p| crate::remote::path(&host, p)).collect();
+                        for path in &paths {
+                            crate::project_fs::forget(path);
+                        }
+                        if tx.unbounded_send(paths).is_err() {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(3));
+                }
+            })
+            .ok();
+    }
+
+    /// The window's folders on this computer: the system tells of changes.
+    fn watch_here(&mut self, root: PathBuf, tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>) {
+        let handler = move |result: notify::Result<notify::Event>| {
+            if let Ok(event) = result
+                && !matches!(event.kind, notify::EventKind::Access(_))
+            {
+                tx.unbounded_send(event.paths).ok();
+            }
+        };
+        // A folder inside WSL: Windows isn't told of changes there, so they're looked for
+        // every couple of seconds instead.
+        let watcher: notify::Result<Box<dyn notify::Watcher>> = if crate::wsl::is_wsl(&root) {
+            let config = notify::Config::default().with_poll_interval(Duration::from_secs(2));
+            notify::PollWatcher::new(handler, config).map(|w| Box::new(w) as Box<dyn notify::Watcher>)
+        } else {
+            notify::recommended_watcher(handler).map(|w| Box::new(w) as Box<dyn notify::Watcher>)
+        };
+        let Ok(mut watcher) = watcher else { return };
+        if watcher.watch(&root, notify::RecursiveMode::Recursive).is_err() {
+            return;
+        }
+        // (The window's other folders, on the same watcher; a server's aren't its to watch.)
+        for other in self.roots.all().iter().filter(|r| **r != root && !crate::remote::is_remote(r)) {
+            watcher.watch(other, notify::RecursiveMode::Recursive).ok();
+        }
+        self._watcher = Some(watcher);
     }
 
     fn files_changed(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -1839,7 +1948,6 @@ impl Workspace {
     /// The Git sidebar tab clicked: the Git view as it was left (its tab kept).
     fn show_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_git = true;
-        self.sidebar_outline = false;
         self.sidebar_tests = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
@@ -2146,7 +2254,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Info,
             &format!("Bring your changes along to {}?", branch.name),
             Some("Switching as they are would overwrite them. Null sets them aside, switches, and puts them back."),
@@ -2734,7 +2843,8 @@ impl Workspace {
         } else {
             "It goes back to how it was at the last commit.".to_string()
         };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("Discard the changes to {name}?"),
             Some(&detail),
@@ -2774,7 +2884,8 @@ impl Workspace {
             return;
         }
         let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("Discard every change in {files}?"),
             Some(&format!("They go back to the last commit. New files go to the {}.", crate::fs_ops::TRASH)),
@@ -3062,8 +3173,10 @@ impl Workspace {
         let lsp = self.lsp.clone();
         // A very big file: its tab at once, a stand-in until it's read in the background (a
         // gigabyte would hold the window still for seconds).
-        let size = std::fs::metadata(&path).map_or(0, |m| m.len());
-        let editor = if size > READ_IN_BACKGROUND_FROM {
+        // (One on a server too: reading it waits on the network.)
+        let remote = crate::remote::is_remote(&path);
+        let size = if remote { 0 } else { std::fs::metadata(&path).map_or(0, |m| m.len()) };
+        let editor = if size > READ_IN_BACKGROUND_FROM || remote {
             let editor = cx.new(|cx| Editor::stand_in(path.clone(), size, cx));
             self.read_in_background(editor.clone(), path, window, cx);
             editor
@@ -3221,6 +3334,21 @@ impl Workspace {
         self.add_twin(&source, other, window, cx);
     }
 
+    /// Open to the Side (⌥-click in the files): the file in the other half of the window,
+    /// split if it isn't; already open on this side, a second copy there.
+    fn open_to_the_side(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let other = if self.is_split() { 1 - self.focused_side().min(1) } else { 1 };
+        if !self.is_split() {
+            self.stacked = false;
+        }
+        let open_here = self.tabs.iter().find(|t| t.side != other && t.editor.read(cx).path() == Some(path.as_path()));
+        let open_there = self.tabs.iter().any(|t| t.side == other && t.editor.read(cx).path() == Some(path.as_path()));
+        match open_here.map(|t| t.editor.clone()) {
+            Some(source) if !open_there => self.add_twin(&source, other, window, cx),
+            _ => self.open_file_on(path, Some(other), window, cx),
+        }
+    }
+
     fn add_twin(&mut self, source: &Entity<Editor>, side: usize, window: &mut Window, cx: &mut Context<Self>) {
         // (Its file still being read: nothing to share yet.)
         if source.read(cx).is_opening() {
@@ -3353,6 +3481,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> [Subscription; 2] {
         let editor = editor.clone();
+        self.give_notes(&editor, cx);
         [
             cx.observe(&editor, |this, editor, cx| {
                 this.sync_preview(&editor, cx);
@@ -3572,6 +3701,7 @@ impl Workspace {
                     }
                     this.schedule_session_save(cx);
                 }
+                EditorEvent::NotesChanged => this.keep_notes(editor, cx),
                 EditorEvent::BookmarksChanged => {
                     // The other copy of the file, on the other side, has the same bookmarks.
                     let (path, lines) = {
@@ -3634,7 +3764,8 @@ impl Workspace {
             self.show_notice("Only the app (Null.app) uninstalls itself.".into(), cx);
             return;
         };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             "Uninstall Null?",
             Some(
@@ -3763,16 +3894,22 @@ impl Workspace {
     }
 
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let path = crate::remote::plain(path);
+        // On a server not reached yet: reached first, off the window's thread (ssh may ask
+        // for a password, asked in the window, which mustn't be waiting), then opened.
+        if let Some(server) = crate::remote::of(&path).filter(|s| !crate::remote::is_connected(&s.host)) {
+            return self
+                .connect_then(server.host, window, cx, move |this, window, cx| this.open_path(path, window, cx));
+        }
+        let is_dir = crate::project_fs::is_dir(&path);
         // A folder another window has open: that window comes forward.
-        if path.is_dir()
-            && let Some(other) = crate::window_on(&path, Some(window.window_handle()), cx)
-        {
+        if is_dir && let Some(other) = crate::window_on(&path, Some(window.window_handle()), cx) {
             cx.defer(move |cx| {
                 other.update(cx, |_, window, _| window.activate_window()).ok();
             });
             return;
         }
-        if path.is_dir() {
+        if is_dir {
             // The project being left keeps its session.
             self.save_session(cx);
             self.confirm_unsaved(CloseAction::SwitchProject(path), window, cx);
@@ -3782,6 +3919,8 @@ impl Workspace {
     }
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let path = crate::remote::plain(crate::wsl::plain(path));
+        crate::shell::set_linux_project(crate::wsl::is_wsl(&path) || crate::remote::is_remote(&path));
         self.roots = crate::roots::ProjectRoots::new(path.clone());
         self.git_root = path.clone();
         self.git_view.update(cx, |view, cx| view.set_repos(Vec::new(), cx));
@@ -4124,7 +4263,8 @@ impl Workspace {
             && let Some(message) = self.commands_running(cx)
         {
             let leave = if matches!(action, CloseAction::Quit) { "Quit" } else { "Close" };
-            let answer = window.prompt(
+            let answer = crate::modal::ask(
+                window,
                 PromptLevel::Warning,
                 &message,
                 Some(if matches!(action, CloseAction::Quit) { "Quitting stops it." } else { "Closing stops it." }),
@@ -4179,7 +4319,8 @@ impl Workspace {
             [one] => format!("Save changes to {}?", one.read(cx).file_name()),
             many => format!("Save changes to {} files?", many.len()),
         };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &message,
             Some("Your changes will be lost if you don't save them."),
@@ -4591,7 +4732,8 @@ impl Workspace {
     /// Saving a file that changed on disk under unsaved edits: which version stays.
     fn resolve_save_conflict(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         let name = editor.read(cx).file_name();
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("{name} changed on disk since you started editing it."),
             Some("Saving writes your version over it. Reloading takes the one on disk, losing your edits."),
@@ -4676,7 +4818,8 @@ impl Workspace {
     /// Null's name and version, where it comes from.
     fn about(&mut self, _: &AboutNull, window: &mut Window, cx: &mut Context<Self>) {
         let detail = format!("{}\n{}", env!("CARGO_PKG_DESCRIPTION"), env!("CARGO_PKG_REPOSITORY"));
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Info,
             &format!("Null {}", env!("CARGO_PKG_VERSION")),
             Some(&detail),
@@ -4739,10 +4882,16 @@ impl Workspace {
     /// Folders added to the window: each a heading in the files, searched, watched, listed in
     /// ⌘P. One already in the window (or inside one) changes nothing.
     pub fn add_roots(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        // (A server not reached yet: reached first, as in `open_path`.)
+        if let Some(host) =
+            paths.iter().filter_map(|p| crate::remote::of(p)).map(|s| s.host).find(|h| !crate::remote::is_connected(h))
+        {
+            return self.connect_then(host, window, cx, move |this, window, cx| this.add_roots(paths, window, cx));
+        }
         let mut added = Vec::new();
         for path in paths {
-            let path = dunce::canonicalize(&path).unwrap_or(path);
-            if path.is_dir() && self.roots.add(path.clone()) {
+            let path = crate::remote::plain(crate::wsl::plain(crate::project_fs::canonicalize(&path).unwrap_or(path)));
+            if crate::project_fs::is_dir(&path) && self.roots.add(path.clone()) {
                 added.push(path);
             }
         }
@@ -4803,7 +4952,8 @@ impl Workspace {
             }
             _ => format!("Add these {} folders to this window, or copy them in?", names.len()),
         };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Info,
             &title,
             Some("Added, it shows beside the others, where it is. Copied, it goes into the folder."),
@@ -4844,6 +4994,128 @@ impl Workspace {
                 None
             }
         }
+    }
+
+    /// Open WSL Folder…: a folder inside WSL, typed from the distribution's home (Windows'
+    /// file dialog shows WSL's files too, but not as a place of its own).
+    fn open_wsl_folder(&mut self, _: &OpenWslFolder, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async {
+                    crate::wsl::distros().into_iter().map(|d| (crate::wsl::home(&d), d)).collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let Some((home, distro)) = found.first() else {
+                    return this.show_notice(
+                        "WSL isn't installed: “wsl --install” in PowerShell installs it, with Ubuntu.".into(),
+                        cx,
+                    );
+                };
+                let start = crate::wsl::windows_path(distro, home.as_deref().unwrap_or("/"));
+                this.open_palette_with(
+                    PaletteKind::Path(PathFor::Folder),
+                    Some(format!("A folder in {distro}")),
+                    Vec::new(),
+                    window,
+                    cx,
+                );
+                if let Some((palette, _)) = &this.palette {
+                    let typed = format!("{}\\", start.display());
+                    palette.update(cx, |palette, cx| palette.set_query(&typed, cx));
+                }
+                if found.len() > 1 {
+                    let others: Vec<String> =
+                        found[1..].iter().map(|(_, d)| format!("\\\\wsl.localhost\\{d}")).collect();
+                    this.show_notice(format!("Other distributions: {}", others.join(", ")), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The server's folder Null last closed on, reopened once the server answers (meanwhile
+    /// the window is Null's own empty folder); not when another folder was opened meanwhile.
+    pub fn reopen_server_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(server) = crate::remote::of(&path) else { return };
+        self.show_notice(format!("Connecting to {}…", server.host), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let host = server.host.clone();
+            let reached = cx.background_executor().spawn(async move { crate::remote::connect(&host) }).await;
+            this.update_in(cx, |this, window, cx| match reached {
+                Ok(_) if crate::session::is_scratch(this.roots.primary()) => {
+                    this.notice = None;
+                    this.open_path(path, window, cx);
+                }
+                Ok(_) => {}
+                Err(error) => this.show_notice(format!("{error} The folder is in Open Recent."), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Connects to `host` off the window's thread (what ssh asks is asked in the window
+    /// meanwhile), then does `then`; or says why it couldn't.
+    fn connect_then(
+        &mut self,
+        host: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        self.show_notice(format!("Connecting to {host}…"), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let asked = host.clone();
+            let reached = cx.background_executor().spawn(async move { crate::remote::connect(&asked) }).await;
+            this.update_in(cx, |this, window, cx| match reached {
+                Ok(_) => {
+                    this.notice = None;
+                    then(this, window, cx);
+                }
+                Err(error) => this.show_notice(error.to_string(), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Open SSH Folder…: a server first (as ssh takes it: `me@box`, a name from
+    /// `~/.ssh/config`), then a folder on it, typed from its home folder.
+    fn open_ssh_folder(&mut self, _: &OpenSshFolder, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette_with(PaletteKind::Server, None, Vec::new(), window, cx);
+    }
+
+    /// Connects to `host` (off the main thread: it can take a moment), then asks for a
+    /// folder there, from its home folder; or says why it couldn't.
+    fn connect_to_server(&mut self, host: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_notice(format!("Connecting to {host}…"), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let asked = host.clone();
+            let home = cx.background_executor().spawn(async move { crate::remote::connect(&asked) }).await;
+            this.update_in(cx, |this, window, cx| match home {
+                Err(error) => this.show_notice(error.to_string(), cx),
+                Ok(home) => {
+                    this.notice = None;
+                    this.open_palette_with(
+                        PaletteKind::Path(PathFor::Folder),
+                        Some(format!("A folder on {host}")),
+                        Vec::new(),
+                        window,
+                        cx,
+                    );
+                    let start = crate::remote::path(&host, &home).display().to_string();
+                    let typed = if start.ends_with('/') { start } else { format!("{start}/") };
+                    if let Some((palette, _)) = &this.palette {
+                        palette.update(cx, |palette, cx| palette.set_query(&typed, cx));
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// No file dialog on this system (Linux without a desktop portal, as on a bare window
@@ -4970,6 +5242,9 @@ impl Workspace {
             (File, "New Folder in Project…".into(), Box::new(crate::file_tree::NewFolder)),
             (File, OPEN_LABEL.into(), Box::new(Open)),
             (File, "Open Folder…".into(), Box::new(OpenFolder)),
+            #[cfg(windows)]
+            (File, "Open WSL Folder…".into(), Box::new(OpenWslFolder)),
+            (File, "Open SSH Folder…".into(), Box::new(OpenSshFolder)),
             (File, "Add Folder to Window…".into(), Box::new(AddFolderToWindow)),
             (File, "Open Recent…".into(), Box::new(OpenRecent)),
             (File, "Open Folder in New Window…".into(), Box::new(NewWindow)),
@@ -5020,6 +5295,8 @@ impl Workspace {
             (Go, "Next Bookmark".into(), Box::new(crate::editor::NextBookmark)),
             (Go, "Previous Bookmark".into(), Box::new(crate::editor::PreviousBookmark)),
             (Go, "Bookmarks…".into(), Box::new(ShowBookmarks)),
+            (Edit, "Add Note".into(), Box::new(crate::editor::AddNote)),
+            (Go, "Notes…".into(), Box::new(ShowNotes)),
             (App, "Edit Snippets…".into(), Box::new(EditSnippets)),
             (View, "Run Selection in Terminal".into(), Box::new(RunSelectionInTerminal)),
             (Edit, "Paste from History…".into(), Box::new(PasteFromHistory)),
@@ -5048,6 +5325,11 @@ impl Workspace {
                 View,
                 toggle(settings.fade_bars_while_typing, "Stop Fading Bars While Typing", "Fade Bars While Typing"),
                 Box::new(ToggleFadeWhileTyping),
+            ),
+            (
+                View,
+                toggle(settings.smooth_motion, "Stop Smooth Caret and Scrolling", "Smooth Caret and Scrolling"),
+                Box::new(ToggleSmoothMotion),
             ),
             (Appearance, theme_label(ThemeName::Null), theme_action(ThemeName::Null)),
             (Appearance, theme_label(ThemeName::Ash), theme_action(ThemeName::Ash)),
@@ -5140,6 +5422,8 @@ impl Workspace {
             (View, "Split Terminal".into(), Box::new(SplitTerminal)),
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
             (App, "About Null".into(), Box::new(AboutNull)),
+            (App, "Check for Updates".into(), Box::new(CheckForUpdates)),
+            (App, "Update Null".into(), Box::new(UpdateNull)),
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
@@ -5310,6 +5594,10 @@ impl Workspace {
         }
         if settings.ai.ready() {
             commands.push((Ai, "Ask About This File…".into(), Box::new(AskAi)));
+            if self.test_status.values().any(|s| *s == TestStatus::Failed) {
+                commands.push((Ai, "Explain Test Failure".into(), Box::new(ExplainTestFailure)));
+            }
+            commands.push((Ai, "AI Usage".into(), Box::new(ShowAiUsage)));
             if self.active.is_some() {
                 commands.push((Ai, "Edit with AI…".into(), Box::new(crate::editor::InlineAssist)));
             }
@@ -5484,6 +5772,11 @@ impl Workspace {
                 if let Some((panel, _)) = &this.settings_panel {
                     panel.update(cx, |panel, cx| panel.search_for(&query, cx));
                 }
+            }
+            PaletteEvent::ServerChosen(host) => {
+                let host = host.clone();
+                this.close_palette(window, cx);
+                this.connect_to_server(host, window, cx);
             }
             PaletteEvent::PathChosen(purpose, path) => {
                 let path = path.clone();
@@ -6312,6 +6605,7 @@ impl Workspace {
                 self.refresh_git(cx);
             }
             GitViewEvent::Draft(files) => self.write_commit_message_into(files.clone(), cx),
+            GitViewEvent::Review(files) => self.review_with_ai(files.clone(), cx),
             GitViewEvent::ShowCommit(commit) => self.show_commit(commit.clone(), window, cx),
             GitViewEvent::ShowPull(number) => self.show_github(*number, false, window, cx),
             GitViewEvent::ShowIssue(number) => self.show_github(*number, true, window, cx),
@@ -6336,7 +6630,7 @@ impl Workspace {
             return self.show_notice(format!("{}.", git::not_a_repository()), cx);
         };
         let asked = rebase.then(|| {
-            window.prompt(
+            crate::modal::ask(window,
                 PromptLevel::Info,
                 &format!("Rebase {here} onto {branch}?"),
                 Some(&format!("Its commits are redone one by one on top of {branch}. They become new commits, so any already pushed would need a force push.")),
@@ -6394,7 +6688,8 @@ impl Workspace {
     /// The banner's Stop: the merge (rebase, …) undone, after asking.
     fn stop_joining(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.joining.clone() else { return };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Warning,
             &format!("Stop {}?", joining_name(state.kind)),
             Some("Everything goes back to how it was before, including conflicts already resolved."),
@@ -6453,9 +6748,9 @@ impl Workspace {
                         [git::Decision::Keep, git::Decision::Theirs],
                     ),
                 };
-                let Ok(answer) =
-                    this.update_in(cx, |_, window, cx| window.prompt(PromptLevel::Info, &title, None, &buttons, cx))
-                else {
+                let Ok(answer) = this.update_in(cx, |_, window, cx| {
+                    crate::modal::ask(window, PromptLevel::Info, &title, None, &buttons, cx)
+                }) else {
                     return;
                 };
                 let decision = match answer.await {
@@ -6566,7 +6861,6 @@ impl Workspace {
     }
 
     fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_outline = false;
         self.sidebar_tests = false;
         self.sidebar_git = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
@@ -6575,28 +6869,54 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Show Outline: the open file's functions and types, under it in the files (shown
+    /// there already: hidden again).
     fn show_outline(&mut self, _: &ShowOutline, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_outline(window, cx);
-        // Typing then narrows it (Esc goes back to the text), when there's an outline.
-        let has_outline = self
-            .active_editor()
-            .cloned()
-            .is_some_and(|editor| self.outline_items(&editor, 1_000_000, cx).is_some_and(|items| !items.is_empty()));
-        if has_outline {
-            window.focus(&self.outline_filter.focus_handle(cx));
+        let files_shown = !self.sidebar_search.on && !self.sidebar_tests && !self.sidebar_git;
+        if files_shown && cx.global::<Settings>().sidebar_visible && self.tree.read(cx).outline_open() {
+            return self.tree.update(cx, |tree, cx| tree.show_outline(false, cx));
         }
+        self.open_outline(window, cx);
     }
 
-    /// The Outline in the sidebar (its tab clicked: the text keeps the keys).
+    /// The files shown, with the open file's outline opened under it.
     fn open_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_outline = true;
-        self.sidebar_tests = false;
-        self.sidebar_git = false;
-        self.outline_followed = None;
-        self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
-        settings::update(cx, |s| s.sidebar_visible = true);
-        self.leave_hidden_focus(window, cx);
-        cx.notify();
+        self.show_files(&ShowFiles, window, cx);
+        self.sync_tree_outline(cx);
+        self.tree.update(cx, |tree, cx| tree.show_outline(true, cx));
+    }
+
+    /// The open file's outline, given to the files when it changed (its text, or the symbol
+    /// the caret's in).
+    fn sync_tree_outline(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned().filter(|e| e.read(cx).path().is_some()) else {
+            if self.tree_outline.take().is_some() {
+                self.tree.update(cx, |tree, cx| tree.set_outline(None, Vec::new(), None, cx));
+            }
+            return;
+        };
+        let (id, revision, row, path) = {
+            let e = editor.read(cx);
+            (editor.entity_id(), e.buffer.revision(), e.caret_point().0, e.path().map(Path::to_path_buf))
+        };
+        let items = self.outline_items(&editor, 1_000_000, cx);
+        let current = items.as_ref().and_then(|items| crate::outline::current(items, row));
+        let key = Some((id, revision, current));
+        if self.tree_outline == key {
+            return;
+        }
+        self.tree_outline = key;
+        let symbols: Vec<crate::file_tree::Symbol> = items
+            .iter()
+            .flat_map(|items| items.iter())
+            .map(|item| crate::file_tree::Symbol {
+                name: item.name.clone().into(),
+                kind: item.kind,
+                row: item.row,
+                depth: item.depth,
+            })
+            .collect();
+        self.tree.update(cx, |tree, cx| tree.set_outline(path, symbols, current, cx));
     }
 
     /// Your settings from VS Code (the one used last, of VS Code, Insiders, VSCodium and
@@ -6630,7 +6950,8 @@ impl Workspace {
             return self.show_notice(format!("Null already has your {editor} settings."), cx);
         }
         let count = if changed.len() == 1 { "1 setting".to_string() } else { format!("{} settings", changed.len()) };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             PromptLevel::Info,
             &format!("Bring over {count} from {editor}?"),
             Some(&changed.join("\n")),
@@ -6655,33 +6976,18 @@ impl Workspace {
         .detach();
     }
 
-    /// ⏎ in the Outline's filter: to the first item that fits.
-    fn go_to_outline_match(&mut self, _: &GoToOutlineMatch, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor().cloned() else { return };
-        let Some(items) = self.outline_items(&editor, 1_000_000, cx) else { return };
-        let query = self.outline_filter.read(cx).text().to_string();
-        if let Some(&(ix, _)) = crate::outline::filtered(&items, &query).iter().find(|(_, fits)| *fits) {
-            self.go_to_outline_row(items[ix].row, window, cx);
+    /// Esc in project search: what's typed cleared; nothing typed, back to the files.
+    fn leave_search(&mut self, _: &LeaveSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_search.read(cx).has_query(cx) {
+            return self.project_search.update(cx, |search, cx| search.focus(Some(String::new()), window, cx));
         }
-    }
-
-    /// Esc in the Outline's filter: emptied, or (already empty) back to the text.
-    fn clear_outline_filter(&mut self, _: &ClearOutlineFilter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.outline_filter.read(cx).text().is_empty() {
-            if let Some(editor) = self.active_editor() {
-                window.focus(&editor.focus_handle(cx));
-            }
-        } else {
-            self.outline_filter.update(cx, |input, cx| input.set_text("", cx));
-            self.outline_followed = None;
-        }
-        cx.notify();
+        self.show_files(&ShowFiles, window, cx);
+        self.focus_main(window, cx);
     }
 
     /// The project's tests in the sidebar, looked for again (they may have changed).
     fn show_tests(&mut self, _: &ShowTests, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_tests = true;
-        self.sidebar_outline = false;
         self.sidebar_git = false;
         self.sidebar_search.set(false, SIDEBAR_SLIDE, SIDEBAR_SLIDE);
         settings::update(cx, |s| s.sidebar_visible = true);
@@ -6818,7 +7124,10 @@ impl Workspace {
         // The terminal reports the command from its first program on (`(cd web && npx jest x)`
         // comes back as `npx jest x`): ours if it ends ours.
         let ours = self.tests_running.as_ref().is_some_and(|(command, _)| {
-            *command == ran.command || (ran.command.len() >= 8 && command.ends_with(ran.command.as_str()))
+            *command == ran.command
+                || (ran.command.len() >= 8 && command.ends_with(ran.command.as_str()))
+                // (A prompt Null doesn't know the end of, `➜  app git:(main) ✗`, still before it.)
+                || (command.len() >= 8 && ran.command.ends_with(command.as_str()))
         });
         let running = if ours { self.tests_running.take().map(|(_, which)| which) } else { None };
         if results.is_empty() && running.is_none() {
@@ -6838,12 +7147,15 @@ impl Workspace {
                 None => outcomes.push((id, passed)),
             }
         }
+        if outcomes.iter().any(|(_, passed)| !passed) {
+            self.failed_run = Some(ran.output.clone());
+        }
         for (id, passed) in outcomes {
             let status = if passed { TestStatus::Passed } else { TestStatus::Failed };
             // The ones run, when it was from the list; any of that name, when typed.
             let targets: Vec<&(PathBuf, String)> = match &running {
-                Some(which) => which.iter().filter(|(_, n)| *n == id).collect(),
-                None => known.iter().filter(|(_, n)| *n == id).collect(),
+                Some(which) => which.iter().filter(|(_, n)| crate::test_at::same_test(n, &id)).collect(),
+                None => known.iter().filter(|(_, n)| crate::test_at::same_test(n, &id)).collect(),
             };
             for target in targets {
                 self.test_status.insert(target.clone(), status);
@@ -7098,116 +7410,6 @@ impl Workspace {
 
     /// The Outline view: the open file's functions and types (its headings, in Markdown),
     /// the one the caret is in marked; a click goes there.
-    fn render_outline(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.global::<Theme>().clone();
-        let quiet = |text: String| ui::empty_state(text, &theme).into_any_element();
-        let Some(editor) = self.active_editor().cloned() else {
-            return quiet("Open a file to see its outline".into());
-        };
-        let (id, row, name) = {
-            let e = editor.read(cx);
-            (editor.entity_id(), e.caret_point().0, e.file_name())
-        };
-        let Some(items) = self.outline_items(&editor, 1_000_000, cx) else {
-            return quiet(format!("{name} is too long for an outline"));
-        };
-        if items.is_empty() {
-            return quiet(format!("No functions or types in {name}"));
-        }
-        let query = self.outline_filter.read(cx).text().to_string();
-        let shown = crate::outline::filtered(&items, &query);
-        let current = crate::outline::current(&items, row);
-        // The caret went into another: the list brings it into view (unless filtered).
-        if let Some(ix) = current
-            && query.trim().is_empty()
-            && self.outline_followed != Some((id, ix))
-        {
-            self.outline_followed = Some((id, ix));
-            self.outline_scroll.scroll_to_item(ix, ScrollStrategy::Center);
-        }
-        let filter = ui::field(&theme)
-            .key_context("OutlineFilter")
-            .flex_none()
-            .mx(px(12.))
-            .mt(px(10.))
-            .mb(px(2.))
-            .text_color(theme.foreground)
-            .child(self.outline_filter.clone());
-        let list = if shown.is_empty() {
-            quiet(format!("Nothing in {name} called that"))
-        } else {
-            self.outline_list(items, shown, current, cx)
-        };
-        div().size_full().flex().flex_col().child(filter).child(div().flex_1().min_h_0().child(list)).into_any_element()
-    }
-
-    /// The outline's rows: `shown` (indexes into `items`, and whether each fits the filter;
-    /// those only around one that does are faint).
-    fn outline_list(
-        &mut self,
-        items: std::rc::Rc<Vec<crate::outline::Item>>,
-        shown: Vec<(usize, bool)>,
-        current: Option<usize>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        uniform_list(
-            "outline",
-            shown.len(),
-            cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
-                let theme = cx.global::<Theme>().clone();
-                range
-                    .map(|at| {
-                        let (ix, fits) = shown[at];
-                        let item = &items[ix];
-                        let here = current == Some(ix);
-                        let heading = item.kind.starts_with('#');
-                        let row = item.row;
-                        // The sidebar's width, inset a little so the highlight has rounded ends.
-                        let line = div()
-                            .id(("outline-row", ix))
-                            .w_full()
-                            .h(px(ui::ROW))
-                            .pl(px(12. + 14. * item.depth.min(8) as f32))
-                            .pr(px(10.))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .rounded(px(ui::R_ROW))
-                            .cursor_pointer()
-                            .text_size(px(ui::T_MD))
-                            .text_color(if here {
-                                theme.foreground
-                            } else if fits {
-                                theme.muted
-                            } else {
-                                theme.faint
-                            })
-                            .when(here, |r| r.bg(theme.hairline))
-                            .when(!here, |r| r.hover(|s| s.bg(ui::hover(&theme))))
-                            // Code by its name in the code's font, the word defining it beside it;
-                            // a heading as written, its depth saying its level.
-                            .child(
-                                div().min_w_0().truncate().when(!heading, |d| d.code_font(cx)).child(item.name.clone()),
-                            )
-                            .when(!heading, |r| {
-                                r.child(
-                                    div().flex_none().text_size(px(ui::T_SM)).text_color(theme.faint).child(item.kind),
-                                )
-                            })
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.go_to_outline_row(row, window, cx)
-                            }));
-                        div().w_full().px(px(6.)).child(line).into_any_element()
-                    })
-                    .collect()
-            }),
-        )
-        .track_scroll(self.outline_scroll.clone())
-        .size_full()
-        .pt(px(6.))
-        .into_any_element()
-    }
-
     /// Shows the theme of your own called `name`, saying what in it couldn't be read.
     fn use_own_theme(&mut self, name: &str, cx: &mut Context<Self>) {
         match crate::theme::own::load(name) {
@@ -7282,11 +7484,6 @@ impl Workspace {
         if search_hidden && self.project_search.focus_handle(cx).contains_focused(window, cx) {
             self.focus_main(window, cx);
         }
-        // The Outline's filter, out of sight: the keys back to the text.
-        let outline_hidden = !self.sidebar_outline || !cx.global::<Settings>().sidebar_visible;
-        if outline_hidden && self.outline_filter.focus_handle(cx).is_focused(window) {
-            self.focus_main(window, cx);
-        }
         // The commit message (or another git field), out of sight: the same.
         let git_hidden = !self.sidebar_git || self.sidebar_search.on || !cx.global::<Settings>().sidebar_visible;
         if git_hidden && self.git_view.focus_handle(cx).contains_focused(window, cx) {
@@ -7346,7 +7543,7 @@ impl Workspace {
             "spec",
             "__tests__",
         ];
-        let signs = |dir: &Path| SIGNS.iter().any(|name| dir.join(name).exists());
+        let signs = |dir: &Path| SIGNS.iter().any(|name| crate::project_fs::exists(&dir.join(name)));
         let test_file = |name: &str| {
             name.starts_with("test_") && name.ends_with(".py")
                 || name.ends_with("_test.py")
@@ -7357,17 +7554,13 @@ impl Workspace {
         if signs(root) {
             return true;
         }
-        let Ok(entries) = std::fs::read_dir(root) else { return false };
-        entries.flatten().take(500).any(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(entries) = crate::project_fs::read_dir(root) else { return false };
+        entries.into_iter().take(500).any(|(path, meta)| {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             if name.starts_with('.') || name == "node_modules" || name == "target" {
                 return false;
             }
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => signs(&entry.path()),
-                Ok(_) => test_file(&name),
-                Err(_) => false,
-            }
+            if meta.is_dir() { signs(&path) } else { test_file(&name) }
         })
     }
 
@@ -7376,13 +7569,11 @@ impl Workspace {
         let badge = if conflicts > 0 { conflicts } else { self.git_status.len() };
         let theme = cx.global::<Theme>();
         let searching = self.sidebar_search.on;
-        let outlining = !searching && self.sidebar_outline;
         let testing = !searching && self.sidebar_tests;
         let changes = !searching && self.sidebar_git;
         let tab = |id: &'static str, label: &'static str, on: bool| {
             ui::segment(on, theme)
                 .id(id)
-                // (Five side by side: room for their names.)
                 .px(px(4.))
                 .min_w_0()
                 .flex_1()
@@ -7397,27 +7588,16 @@ impl Workspace {
             .pt(px(10.))
             .child(
                 ui::segmented(theme)
-                    .child(
-                        tab("files", "Files", !searching && !outlining && !testing && !changes)
-                            .active(|s| s.opacity(0.7))
-                            .on_click(
-                                cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
-                            ),
-                    )
-                    .child(
-                        tab("outline", "Outline", outlining)
-                            .active(|s| s.opacity(0.7))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_outline(window, cx))),
-                    )
+                    // (Search is the files' too: their field, above them.)
+                    .child(tab("files", "Files", !testing && !changes).active(|s| s.opacity(0.7)).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.show_files(&ShowFiles, window, cx)),
+                    ))
                     // (Only for a project that has tests, or may: none found, it goes.)
                     .when(testing || self.may_have_tests(cx), |strip| {
                         strip.child(tab("tests", "Tests", testing).active(|s| s.opacity(0.7)).on_click(
                             cx.listener(|this, _: &ClickEvent, window, cx| this.show_tests(&ShowTests, window, cx)),
                         ))
                     })
-                    .child(tab("search", "Search", searching).active(|s| s.opacity(0.7)).on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
-                    ))
                     .child(
                         tab("changes", "Git", changes)
                             .gap(px(3.))
@@ -7445,6 +7625,10 @@ impl Workspace {
 
     fn toggle_fade_while_typing(&mut self, _: &ToggleFadeWhileTyping, _: &mut Window, cx: &mut Context<Self>) {
         settings::update(cx, |s| s.fade_bars_while_typing = !s.fade_bars_while_typing);
+    }
+
+    fn toggle_smooth_motion(&mut self, _: &ToggleSmoothMotion, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update(cx, |s| s.smooth_motion = !s.smooth_motion);
     }
 
     /// ⌃⌥Z (⌥Z off a Mac): wrapping on or off for the kind of file at hand, prose or code.
@@ -7522,6 +7706,412 @@ impl Workspace {
 
     fn set_api_key(&mut self, _: &SetApiKey, window: &mut Window, cx: &mut Context<Self>) {
         let provider = cx.global::<Settings>().ai.provider;
+        self.ask_for_key(provider, window, cx);
+    }
+
+    /// A file's notes, from the project's, on their lines as the file is now.
+    fn give_notes(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
+        let Some(root) = self.roots.root_of(&path).map(Path::to_path_buf) else { return };
+        let Some(relative) = crate::code_notes::relative(&root, &path) else { return };
+        let notes = crate::code_notes::load(&root);
+        if !notes.iter().any(|n| n.path == relative) {
+            return;
+        }
+        let text = editor.read(cx).buffer.to_string();
+        let lines: Vec<&str> = text.lines().collect();
+        let on_lines: Vec<crate::editor::LineNote> = notes
+            .iter()
+            .filter(|n| n.path == relative)
+            .map(|n| crate::editor::LineNote {
+                id: n.id,
+                line: crate::code_notes::find_line(n, &lines),
+                text: n.text.clone(),
+                by_ai: n.by_ai,
+            })
+            .collect();
+        editor.update(cx, |editor, cx| editor.set_line_notes(on_lines, cx));
+    }
+
+    /// A file's notes as its editor has them now, kept with the project's (each with its
+    /// line's text, to find it again), and its other copy given them too.
+    fn keep_notes(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let (path, on_lines, text) = {
+            let e = editor.read(cx);
+            let Some(path) = e.path().map(Path::to_path_buf) else { return };
+            (path, e.line_notes().to_vec(), e.buffer.to_string())
+        };
+        let Some(root) = self.roots.root_of(&path).map(Path::to_path_buf) else { return };
+        let Some(relative) = crate::code_notes::relative(&root, &path) else { return };
+        let mut notes = crate::code_notes::load(&root);
+        let created: std::collections::HashMap<u64, (u64, bool)> =
+            notes.iter().filter(|n| n.path == relative).map(|n| (n.id, (n.created, n.review))).collect();
+        notes.retain(|n| n.path != relative);
+        let lines: Vec<&str> = text.lines().collect();
+        notes.extend(on_lines.iter().map(|n| crate::code_notes::CodeNote {
+            id: n.id,
+            path: relative.clone(),
+            line: n.line,
+            anchor: lines.get(n.line).map_or(String::new(), |l| l.trim().to_string()),
+            text: n.text.clone(),
+            by_ai: n.by_ai,
+            review: created.get(&n.id).is_some_and(|(_, review)| *review),
+            created: created.get(&n.id).map_or_else(crate::code_notes::now, |(when, _)| *when),
+        }));
+        crate::code_notes::save(&root, &notes);
+        for tab in &self.tabs {
+            if tab.editor != *editor && tab.editor.read(cx).path() == Some(path.as_path()) {
+                let twin_notes = on_lines.clone();
+                tab.editor.update(cx, |twin, cx| twin.set_line_notes(twin_notes, cx));
+            }
+        }
+    }
+
+    /// Review: the changes about to be committed, read by AI, which leaves a note on each
+    /// line it has doubts about (bugs, missed cases), never a change. A new review of a file
+    /// replaces its notes from the last one.
+    fn review_with_ai(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if files.is_empty() {
+            return self.show_notice("Nothing to review: no changes are selected.".into(), cx);
+        }
+        let settings = cx.global::<Settings>().ai.clone();
+        let root = self.git_root.clone();
+        let Some(project) = self.roots.root_of(&root).map(Path::to_path_buf).or_else(|| Some(root.clone())) else {
+            return;
+        };
+        const REVIEWING: &str = "Reviewing the changes…";
+        self.show_notice(REVIEWING.into(), cx);
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            let diff_root = root.clone();
+            let review_files = files.clone();
+            let diff = cx
+                .background_executor()
+                .spawn(async move {
+                    let changes: Vec<(String, Option<String>, Option<String>)> = review_files
+                        .iter()
+                        .map(|path| {
+                            let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
+                            let name = path.strip_prefix(&diff_root).unwrap_or(path).display().to_string();
+                            let before = git::committed_text(path, encoding);
+                            let after = crate::encoding::read(path).ok().map(|(text, _)| text);
+                            (name, before, after)
+                        })
+                        .collect();
+                    changes_as_diff(&changes, REVIEW_DIFF_CHARS)
+                })
+                .await;
+            let prompt = crate::ai::Prompt {
+                system:
+                    "You review a change to code before it's committed, as a careful colleague would. Look only for \
+                         real problems in the lines added or changed: bugs, cases not handled, wrong behaviour, data \
+                         loss, security issues, a mismatch with code around it. Not style, naming or taste. For each \
+                         problem, reply with one line of JSON: {\"file\": \"the path after b/\", \"line\": the line \
+                         number in the new file, \"code\": \"that line exactly as written\", \"note\": \"one or two \
+                         short plain sentences: what's wrong and why\"}. At most 8 lines, the most important first. No \
+                         emoji, no markdown, nothing else. If there's nothing worth pointing out, reply with nothing."
+                        .into(),
+                user: diff,
+                max_tokens: Some(2000),
+                ..Default::default()
+            };
+            let mut events = crate::ai::stream(settings, prompt);
+            let mut answer = String::new();
+            while let Some(event) = events.next().await {
+                match event {
+                    crate::ai::AiEvent::Text(chunk) => answer.push_str(&chunk),
+                    crate::ai::AiEvent::Done => break,
+                    crate::ai::AiEvent::Failed(error) => {
+                        this.update(cx, |this, cx| this.show_notice(format!("Couldn't review: {error}"), cx)).ok();
+                        return;
+                    }
+                }
+            }
+            this.update(cx, |this, cx| {
+                let found = review_findings(&answer);
+                let mut notes = crate::code_notes::load(&project);
+                // The last review of these files gives way to this one.
+                let reviewed: Vec<String> =
+                    files.iter().filter_map(|f| crate::code_notes::relative(&project, f)).collect();
+                notes.retain(|n| !(n.review && reviewed.contains(&n.path)));
+                let mut left = 0;
+                for (file, line, code, note) in found {
+                    let path = root.join(&file);
+                    let Some(relative) = crate::code_notes::relative(&project, &path) else { continue };
+                    if !reviewed.contains(&relative) {
+                        continue;
+                    }
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    let lines: Vec<&str> = text.lines().collect();
+                    let mut placed = crate::code_notes::CodeNote {
+                        id: crate::code_notes::new_id() + left as u64,
+                        path: relative,
+                        line: line.saturating_sub(1),
+                        anchor: code.trim().to_string(),
+                        text: note,
+                        by_ai: true,
+                        review: true,
+                        created: crate::code_notes::now(),
+                    };
+                    placed.line = crate::code_notes::find_line(&placed, &lines);
+                    placed.anchor = lines.get(placed.line).map_or(String::new(), |l| l.trim().to_string());
+                    notes.push(placed);
+                    left += 1;
+                }
+                crate::code_notes::save(&project, &notes);
+                // The open files show them now.
+                let editors: Vec<Entity<Editor>> = this.tabs.iter().map(|t| t.editor.clone()).collect();
+                for editor in &editors {
+                    this.give_notes(editor, cx);
+                }
+                let message = match left {
+                    0 => "Reviewed: nothing worth pointing out in these changes.".to_string(),
+                    1 => "Reviewed: 1 note on the changes (Notes… lists it).".to_string(),
+                    n => format!("Reviewed: {n} notes on the changes (Notes… lists them)."),
+                };
+                this.show_notice(message, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The failed test at the cursor, else the first that failed: opened, and explained by AI
+    /// in a note under it, from what its run said.
+    fn explain_test_failure(&mut self, _: &ExplainTestFailure, window: &mut Window, cx: &mut Context<Self>) {
+        let failed: Vec<(PathBuf, String, usize)> = self
+            .tests
+            .iter()
+            .flat_map(|files| files.iter())
+            .flat_map(|f| f.tests.iter().map(move |t| (f.path.clone(), t.id.clone(), t.line)))
+            .filter(|(path, id, _)| self.test_status.get(&(path.clone(), id.clone())) == Some(&TestStatus::Failed))
+            .collect();
+        let here = self.active_editor().and_then(|e| {
+            let e = e.read(cx);
+            Some((e.path()?.to_path_buf(), e.caret_point().0))
+        });
+        // The one at the cursor: the failed test that starts last before it, in this file.
+        let at_cursor = here.as_ref().and_then(|(path, line)| {
+            failed.iter().filter(|(p, _, l)| p == path && l <= line).max_by_key(|(_, _, l)| *l)
+        });
+        let Some((path, id, line)) = at_cursor.or(failed.first()).cloned() else {
+            return self.show_notice("No test failed in the last run.".into(), cx);
+        };
+        let output = failure_output(self.failed_run.as_deref().unwrap_or_default(), &id);
+        self.open_file(path.clone(), window, cx);
+        if let Some(editor) = self.active_editor().filter(|e| e.read(cx).path() == Some(path.as_path())).cloned() {
+            editor.update(cx, |editor, cx| editor.explain_failure(line, output, window, cx));
+        }
+    }
+
+    /// Notes…: every note on the project's code, to go to.
+    fn show_notes(&mut self, _: &ShowNotes, window: &mut Window, cx: &mut Context<Self>) {
+        let mut rows: Vec<crate::palette::Location> = Vec::new();
+        for root in self.roots.all().to_vec() {
+            for note in crate::code_notes::load(&root) {
+                let path = note.path.split('/').fold(root.clone(), |p, part| p.join(part));
+                let by = if note.by_ai { "AI: " } else { "" };
+                let first = note.text.lines().next().unwrap_or_default();
+                rows.push(crate::palette::Location {
+                    path,
+                    position: lsp_types::Position::new(note.line as u32, 0),
+                    text: format!("{by}{first}"),
+                    kind: crate::palette::LocationKind::Reference,
+                });
+            }
+        }
+        if rows.is_empty() {
+            let keys = ui::keys(&crate::editor::AddNote, "⌥⌘N", cx);
+            return self.show_notice(format!("No notes yet: {keys} writes one on the cursor's line."), cx);
+        }
+        rows.sort_by(|a, b| (&a.path, a.position.line).cmp(&(&b.path, b.position.line)));
+        self.open_locations("Notes".into(), rows, window, cx);
+    }
+
+    /// When asked to be told of new versions: what the last check found, and a new check
+    /// a few seconds after launch if the last is a day old (once a run, whatever the windows).
+    fn check_for_updates_soon(&mut self, cx: &mut Context<Self>) {
+        // (An update that couldn't be put in place at the last quit: said, and Update again.)
+        if let Some(version) = crate::updates::not_installed() {
+            self.show_notice(
+                format!("Null {version} couldn't be installed: Update in the status bar tries again."),
+                cx,
+            );
+        }
+        if !cx.global::<Settings>().check_for_updates || !crate::updates::first_this_run() {
+            return;
+        }
+        crate::updates::remember();
+        cx.notify();
+        if !crate::updates::due() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(8)).await;
+            let found = cx.background_executor().spawn(async { crate::updates::check() }).await;
+            if let Ok(Some(_)) = found {
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Check for Updates: asked now, and said.
+    fn check_for_updates(&mut self, _: &CheckForUpdates, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_notice("Checking for a new version…".into(), cx);
+        cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async { crate::updates::check() }).await;
+            this.update(cx, |this, cx| {
+                let message = match found {
+                    Ok(Some(version)) if crate::updates::how().is_some() => {
+                        format!("Null {version} is out: Update in the status bar installs it.")
+                    }
+                    Ok(Some(version)) => format!("Null {version} is out: get it at null-ide.com."),
+                    Ok(None) => format!("Null {} is the latest version.", crate::updates::current()),
+                    Err(error) => error,
+                };
+                this.show_notice(message, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Update Null: the newer version downloaded and checked (its progress in the status
+    /// bar), then Null restarts with it. Where Null can't replace itself, null-ide.com.
+    fn update_null(&mut self, _: &UpdateNull, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::updates::State;
+        match crate::updates::state() {
+            State::Ready(_) => {
+                crate::updates::restart_after();
+                self.quit(&Quit, window, cx);
+            }
+            State::Getting(..) => {}
+            State::Out(_) if crate::updates::how().is_none() => cx.open_url(crate::updates::DOWNLOAD),
+            State::Out(_) => self.get_update(cx),
+            State::Nothing => self.check_for_updates(&CheckForUpdates, window, cx),
+        }
+    }
+
+    fn get_update(&mut self, cx: &mut Context<Self>) {
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded::<u8>();
+        // (Every window's status bar shows how far it is.)
+        cx.spawn(async move |_, cx| {
+            while futures::StreamExt::next(&mut receiver).await.is_some() {
+                cx.update(|cx| cx.refresh_windows()).ok();
+            }
+        })
+        .detach();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let got = cx
+                .background_executor()
+                .spawn(async move { crate::updates::get(move |percent| drop(sender.unbounded_send(percent))) })
+                .await;
+            this.update(cx, |this, cx| {
+                let message = match got {
+                    Ok(version) => {
+                        format!("Null {version} is ready: Restart to Update, or it's installed when Null quits.")
+                    }
+                    Err(error) => error,
+                };
+                this.show_notice(message, cx);
+                cx.refresh_windows();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn show_ai_usage(&mut self, _: &ShowAiUsage, _: &mut Window, cx: &mut Context<Self>) {
+        use crate::ai_usage::short;
+        let month = crate::ai_usage::this_months();
+        let last = crate::ai_usage::last().map_or(String::new(), |u| {
+            let cached = if u.cached > 0 { format!(" ({} from cache)", short(u.cached)) } else { String::new() };
+            format!(" Last request: {} read{cached}, {} written.", short(u.input), short(u.output))
+        });
+        let limit =
+            cx.global::<Settings>().ai.monthly_token_limit.map_or(String::new(), |l| format!(" Limit: {}.", short(l)));
+        self.show_notice(
+            format!(
+                "This month: {} tokens in {} requests ({} from cache).{last}{limit}",
+                short(month.usage.total()),
+                month.requests,
+                short(month.usage.cached)
+            ),
+            cx,
+        );
+    }
+
+    fn set_suggestions_key(&mut self, _: &SetSuggestionsKey, window: &mut Window, cx: &mut Context<Self>) {
+        let provider = cx.global::<Settings>().ai.suggestion_provider();
+        self.ask_for_key(provider, window, cx);
+    }
+
+    /// Suggestions wanted, answers from a command line tool (seconds to start, too slow
+    /// for them), and nothing said yet about where suggestions come from: Settings, there,
+    /// once a session.
+    fn ask_where_suggestions_come_from(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ai = &cx.global::<Settings>().ai;
+        if self.asked_suggestions || self.welcome.is_some() || !ai.suggestions_unchosen() {
+            return;
+        }
+        self.asked_suggestions = true;
+        let tool = ai.provider.label();
+        // Names only until something else is picked: what it was, and asked only this once.
+        settings::update(cx, |s| s.ai.suggestions = Some(ProviderId::Off));
+        // Settings, showing just that choice.
+        self.open_settings_at(Some(Section::Ai), window, cx);
+        if let Some((panel, _)) = &self.settings_panel {
+            panel.update(cx, |panel, cx| panel.search_for("suggestions", cx));
+        }
+        self.show_notice(format!("{tool} is too slow for suggestions as you type: choose where they come from."), cx);
+    }
+
+    /// What ssh asks, asked in this window: now, or after the question already shown (the
+    /// same question again waits for the same answer).
+    pub fn ask_for_ssh(&mut self, ask: crate::askpass::Ask, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((prompt, _, waiting)) = &mut self.ssh_prompt {
+            if prompt.read(cx).asks(&ask.prompt) {
+                waiting.push(ask.answer);
+            } else {
+                self.ssh_questions.push_back(ask);
+            }
+            return;
+        }
+        if self.focus_before_palette.is_none() {
+            self.focus_before_palette = window.focused(cx);
+        }
+        let prompt = cx.new(|cx| crate::ssh_prompt::SshPrompt::new(ask.prompt, cx));
+        let subscription = cx.subscribe_in(&prompt, window, |this, _, event, window, cx| {
+            let crate::ssh_prompt::SshPromptEvent::Answered(answer) = event;
+            this.answer_ssh(answer.clone(), window, cx);
+        });
+        window.focus(&prompt.focus_handle(cx));
+        window.activate_window();
+        self.ssh_prompt = Some((prompt, subscription, vec![ask.answer]));
+        cx.notify();
+    }
+
+    /// ssh's question answered (or not): told to all who asked it, and the next one asked.
+    fn answer_ssh(&mut self, answer: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, _, waiting)) = self.ssh_prompt.take() {
+            for sender in waiting {
+                let _ = sender.send(answer.clone());
+            }
+        }
+        match self.ssh_questions.pop_front() {
+            Some(next) => self.ask_for_ssh(next, window, cx),
+            None => {
+                if let Some(focus) = self.focus_before_palette.take() {
+                    window.focus(&focus);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn ask_for_key(&mut self, provider: ProviderId, window: &mut Window, cx: &mut Context<Self>) {
         if !provider.uses_api_key() {
             let message = match provider {
                 ProviderId::Off => "Choose a provider first with “AI: Use …”.".to_string(),
@@ -7548,9 +8138,11 @@ impl Workspace {
             self.past_notices.remove(0);
         }
         self.past_notices.push((message.clone(), std::time::SystemTime::now()));
+        // (A longer one, as why a server can't be reached and what to do, stays to be read.)
+        let shown_for = Duration::from_secs((4 + message.chars().count() as u64 / 25).min(10));
         self.notice = Some((message, Instant::now()));
         self.notice_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(4)).await;
+            cx.background_executor().timer(shown_for).await;
             this.update(cx, |this, cx| {
                 this.notice = None;
                 cx.notify();
@@ -7734,10 +8326,10 @@ impl Workspace {
         if let Some(launch) = launches.into_iter().min_by_key(crate::launch::Launch::runs_tests) {
             return self.debug_launch(root, launch, cx);
         }
-        if root.join("Cargo.toml").is_file() {
+        if crate::project_fs::is_file(&root.join("Cargo.toml")) {
             return self.build_and_debug(root, vec!["build".into()], None, cx);
         }
-        match self.debug_program.clone().filter(|p| p.is_file()) {
+        match self.debug_program.clone().filter(|p| crate::project_fs::is_file(p)) {
             Some(program) => self.debug(program, cx),
             None => self.choose_program_to_debug(window, cx),
         }
@@ -7771,14 +8363,16 @@ impl Workspace {
         }
         // Its program cargo's (in a target folder) or not there yet: built as a Rust
         // project's is, first. One built some other way runs as it is.
+        // (A server's files asked of it.)
+        let is_file = |p: &Path| crate::project_fs::is_file(p);
         let cargo_s = launch.program.as_ref().is_none_or(|p| {
-            !p.is_file()
+            !is_file(p)
                 || p.strip_prefix(&root).is_ok_and(|inside| inside.components().any(|c| c.as_os_str() == "target"))
         });
-        if root.join("Cargo.toml").is_file() && cargo_s {
+        if is_file(&root.join("Cargo.toml")) && cargo_s {
             return self.build_and_debug(root, vec!["build".into()], Some(launch), cx);
         }
-        let Some(program) = launch.program.clone().filter(|p| p.is_file()) else {
+        let Some(program) = launch.program.clone().filter(|p| is_file(p)) else {
             let missing = launch.program.as_ref().map_or("its program".into(), |p| p.display().to_string());
             return self.debugger.update(cx, |d, cx| {
                 d.set_building(None, cx);
@@ -7827,16 +8421,13 @@ impl Workspace {
             let built = cx
                 .background_executor()
                 .spawn(async move {
-                    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
                     // (Its messages say where each program went: a target folder set
                     // elsewhere, a workspace's.)
-                    let built = crate::tools::command(cargo)
-                        .args(&cargo_args)
-                        .arg("--message-format=json-render-diagnostics")
-                        .current_dir(&cwd)
-                        .output();
+                    let mut args: Vec<&str> = cargo_args.iter().map(String::as_str).collect();
+                    args.push("--message-format=json-render-diagnostics");
+                    let built = cargo_in(&cwd, &args);
                     // Rust's own formatters, so its strings and collections show their contents.
-                    (built, crate::debugger::rust_formatters())
+                    (built, crate::debugger::rust_formatters_for(&cwd))
                 })
                 .await;
             let (built, formatters) = built;
@@ -7846,11 +8437,11 @@ impl Workspace {
                     // `cargo test --no-run`: its one test program (a plain program is built
                     // beside it for the tests to run, but isn't what's debugged).
                     match &test_programs(&messages, false)[..] {
-                        [only] => Some(only.clone()),
+                        [only] => Some(printed_in(&root, only.clone())),
                         _ => None,
                     }
                 } else {
-                    built_program(&messages, usual.as_deref()).or(usual)
+                    built_program(&messages, usual.as_deref()).map(|p| printed_in(&root, p)).or(usual)
                 }
             });
             this.update(cx, |this, cx| {
@@ -7864,7 +8455,9 @@ impl Workspace {
                     (Err(error), _) => Some(format!("Couldn't run cargo: {error}\n")),
                     (_, None) if tests => Some("Couldn't tell which test program to debug: name one target.\n".into()),
                     (_, None) => Some("Couldn't tell which program this project builds.\n".into()),
-                    (_, Some(p)) if !p.is_file() => Some(format!("{} wasn't built.\n", p.display())),
+                    (_, Some(p)) if !crate::project_fs::is_file(p) => {
+                        Some(format!("{} wasn't built.\n", crate::remote::shown(p)))
+                    }
                     _ => None,
                 };
                 match message {
@@ -7919,17 +8512,18 @@ impl Workspace {
             let found = cx
                 .background_executor()
                 .spawn(async move {
-                    let cargo = crate::tools::find("cargo").unwrap_or_else(|| PathBuf::from("cargo"));
-                    let built = crate::tools::command(cargo)
-                        .args(["test", "--no-run", "--message-format=json-render-diagnostics"])
-                        .args(&target)
-                        .current_dir(&krate)
-                        .output();
+                    let mut args = vec!["test", "--no-run", "--message-format=json-render-diagnostics"];
+                    args.extend(target.iter().map(String::as_str));
+                    let built = cargo_in(&krate, &args);
                     let program = built.as_ref().ok().filter(|o| o.status.success()).and_then(|output| {
                         let messages = String::from_utf8_lossy(&output.stdout);
-                        program_with_test(&test_programs(&messages, target.is_empty()), &id, &krate)
+                        let programs: Vec<PathBuf> = test_programs(&messages, target.is_empty())
+                            .into_iter()
+                            .map(|p| printed_in(&krate, p))
+                            .collect();
+                        program_with_test(&programs, &id, &krate)
                     });
-                    (built, program, crate::debugger::rust_formatters())
+                    (built, program, crate::debugger::rust_formatters_for(&krate))
                 })
                 .await;
             let (built, program, formatters) = found;
@@ -8538,9 +9132,13 @@ impl Workspace {
     fn add_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // In a Python project with its own environment: made the shell's, as activating does.
         let root = self.roots.root_for(&dir).to_path_buf();
+        let linux = crate::wsl::is_wsl(&dir) || crate::remote::is_remote(&dir);
         let activate =
             self.roots.contains(&dir).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
-                let shell = if cfg!(windows) {
+                // (Inside WSL or on a server: a POSIX shell there, whichever it is.)
+                let shell = if linux {
+                    "sh".to_string()
+                } else if cfg!(windows) {
                     crate::shell::windows_program()
                 } else {
                     std::env::var("SHELL")
@@ -8549,9 +9147,14 @@ impl Workspace {
                         .or_else(crate::terminal_watch::account_shell)
                         .unwrap_or_default()
                 };
+                // (An environment without its activate script: nothing typed, rather than an error.)
+                let folder = if cfg!(windows) && !linux { "Scripts" } else { "bin" };
+                if !crate::project_fs::exists(&env.join(folder).join("activate")) {
+                    return None;
+                }
                 // From where the shell starts: short when it's the project's folder.
                 let env = env.strip_prefix(&dir).map(Path::to_path_buf).unwrap_or(env);
-                crate::python_env::activate_command(&env, &shell)
+                crate::python_env::activate_command(&env, &shell, linux)
             });
         let shell = match Shell::start(dir) {
             Ok(shell) => shell,
@@ -8600,6 +9203,8 @@ impl Workspace {
                     this.results_waiting.push(ran.clone());
                 } else {
                     this.read_test_results(ran);
+                    // (How they did, shown now: nothing else may draw the window again soon.)
+                    cx.notify();
                 }
                 this.read_reported(ran, cx);
                 // `poetry install`, `poetry env use`: Poetry's environments are kept outside
@@ -9370,6 +9975,7 @@ impl Workspace {
         let subscription = cx.subscribe_in(&welcome, window, |this, _, WelcomeEvent::Finished, window, cx| {
             this.welcome = None;
             this.focus_main(window, cx);
+            this.ask_where_suggestions_come_from(window, cx);
             cx.notify();
         });
         window.focus(&welcome.focus_handle(cx));
@@ -9478,7 +10084,7 @@ impl Workspace {
     fn install_language_server(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf)) else { return };
         let Some(server) = crate::servers::for_path(&path) else { return };
-        if let Err(reason) = crate::servers::can_install(server) {
+        if let Err(reason) = crate::servers::can_install_for(server, self.root(cx)) {
             return self.show_notice(reason, cx);
         }
         self.lsp.update(cx, |lsp, cx| lsp.install(&path, cx));
@@ -9679,6 +10285,14 @@ impl Workspace {
                         }
                     }));
                 let (name, folder) = labels[ix].clone();
+                // Its language's logo, as the files have it: quieter than its name.
+                let logo = editor.path().and_then(crate::file_icons::for_path).map(|logo| {
+                    svg().path(logo).size(px(11.)).flex_none().text_color(if active || resting {
+                        theme.muted
+                    } else {
+                        theme.faint
+                    })
+                });
                 let dragged = DraggedTab { editor: tab.editor.clone(), label: name.clone().into() };
                 div()
                     .id(("tab", ix))
@@ -9720,7 +10334,9 @@ impl Workspace {
                         div()
                             .min_w_0()
                             .flex()
+                            .items_center()
                             .gap(px(6.))
+                            .children(logo)
                             // Deleted on disk: struck through, until saved back.
                             .child(
                                 div()
@@ -9733,14 +10349,7 @@ impl Workspace {
                             )
                             // Can't be written (its permissions): a lock, faintly.
                             .when(read_only, |d| {
-                                d.child(
-                                    svg()
-                                        .path("icons/lock.svg")
-                                        .size(px(11.))
-                                        .flex_none()
-                                        .mt(px(3.))
-                                        .text_color(theme.faint),
-                                )
+                                d.child(svg().path("icons/lock.svg").size(px(11.)).flex_none().text_color(theme.faint))
                             })
                             .children(folder.map(|f| div().flex_none().text_color(theme.faint).child(f))),
                     )
@@ -10279,6 +10888,64 @@ const COMMIT_DIFF_CHARS: usize = 24_000;
 
 /// What changed in files (name, committed text, text now), as a unified diff, cut short
 /// past `max` characters.
+/// What a run said about the test `id`: its own part of the output (cargo's "---- id stdout
+/// ----", pytest's "____ name ____", the lines that name it), else the end of the output;
+/// cut to size.
+fn failure_output(output: &str, id: &str) -> String {
+    const MAX: usize = 6_000;
+    let lines: Vec<&str> = output.lines().collect();
+    let name = id.rsplit([':', '.', ' ']).next().unwrap_or(id);
+    let start = lines.iter().position(|l| {
+        let l = l.trim();
+        (l.starts_with("----") && l.contains(id)) || (l.starts_with("___") && l.contains(name))
+    });
+    let part: Vec<&str> = match start {
+        Some(start) => {
+            let end = lines[start + 1..]
+                .iter()
+                .position(|l| {
+                    let l = l.trim();
+                    (l.starts_with("----") && l.ends_with("----")) || l.starts_with("___") || l == "failures:"
+                })
+                .map_or(lines.len(), |i| start + 1 + i);
+            lines[start..end].to_vec()
+        }
+        None => lines[lines.len().saturating_sub(80)..].to_vec(),
+    };
+    let text = part.join("\n");
+    if text.len() <= MAX {
+        return text;
+    }
+    let mut cut = text.len() - MAX;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    format!("[…]\n{}", &text[cut..])
+}
+
+/// How much of the changes a review reads, at most.
+const REVIEW_DIFF_CHARS: usize = 60_000;
+
+/// A review's answer, line by line: (file, line, the line's code, the note). Lines that
+/// aren't what was asked for are left out.
+fn review_findings(answer: &str) -> Vec<(String, usize, String, String)> {
+    answer
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim().trim_end_matches(',')).ok())
+        .filter_map(|v| {
+            let file = v["file"].as_str()?.trim_start_matches("b/").to_string();
+            let note = v["note"].as_str()?.trim().to_string();
+            (!note.is_empty()).then_some((
+                file,
+                v["line"].as_u64().unwrap_or(1) as usize,
+                v["code"].as_str().unwrap_or_default().to_string(),
+                note,
+            ))
+        })
+        .take(8)
+        .collect()
+}
+
 fn changes_as_diff(changes: &[(String, Option<String>, Option<String>)], max: usize) -> String {
     let mut out = String::new();
     for (name, before, after) in changes {
@@ -10378,8 +11045,12 @@ fn cmd_script(exe: &Path) -> String {
 fn git_bash_script(exe: &Path) -> String {
     let exe = exe.display().to_string().replace('\\', "/");
     format!(
-        "#!/bin/sh\n# Opens files and folders in Null from Git Bash: `null .`, `null a.rs:42`, `null --wait <file>`.\n\
-         case \"$1\" in --version|-V|--help|-h) exec \"{exe}\" \"$1\" ;; esac\n\
+        "#!/bin/sh\n# Opens files and folders in Null from Git Bash (and a WSL shell): `null .`, `null a.rs:42`, `null --wait <file>`.\n\
+         exe=\"{exe}\"\n\
+         # In WSL: Null's own path as Linux has it, and paths given in Windows' form.\n\
+         [ -n \"$WSL_DISTRO_NAME\" ] && exe=$(wslpath -u \"$exe\")\n\
+         win() {{ cygpath -aw \"$1\" 2>/dev/null || wslpath -aw \"$1\" 2>/dev/null || printf '%s' \"$1\"; }}\n\
+         case \"$1\" in --version|-V|--help|-h) exec \"$exe\" \"$1\" ;; esac\n\
          wait=\n\
          [ \"$1\" = --wait ] && {{ wait=1; shift; }}\n\
          [ $# -eq 0 ] && set -- .\n\
@@ -10388,14 +11059,14 @@ fn git_bash_script(exe: &Path) -> String {
          if [ -z \"$wait\" ] && [ $# -gt 1 ]; then folders=1; for p in \"$@\"; do [ -d \"$p\" ] || folders=; done; fi\n\
          if [ -n \"$folders\" ]; then\n\
          \tn=$#\n\
-         \tfor p in \"$@\"; do set -- \"$@\" \"$(cygpath -aw \"$p\" 2>/dev/null || printf '%s' \"$p\")\"; done\n\
+         \tfor p in \"$@\"; do set -- \"$@\" \"$(win \"$p\")\"; done\n\
          \tshift \"$n\"\n\
-         \t\"{exe}\" \"$@\" &\n\
+         \t\"$exe\" \"$@\" &\n\
          \texit 0\n\
          fi\n\
          for p in \"$@\"; do\n\
-         \tw=$(cygpath -aw \"$p\" 2>/dev/null || printf '%s' \"$p\")\n\
-         \tif [ -n \"$wait\" ]; then \"{exe}\" --wait \"$w\"; else \"{exe}\" \"$w\" & fi\n\
+         \tw=$(win \"$p\")\n\
+         \tif [ -n \"$wait\" ]; then \"$exe\" --wait \"$w\"; else \"$exe\" \"$w\" & fi\n\
          done\n"
     )
 }
@@ -10626,15 +11297,38 @@ impl Render for Workspace {
         let switch = self.render_sidebar_switch(cx);
         let sidebar_content = if self.sidebar_search.on {
             div().flex_1().min_h_0().pt(px(6.)).child(self.project_search.clone())
-        } else if self.sidebar_outline && sidebar_width > 0.5 {
-            // (Read only while it shows.)
-            div().flex_1().min_h_0().child(self.render_outline(cx))
         } else if self.sidebar_git && sidebar_width > 0.5 {
             div().flex_1().min_h_0().child(self.git_view.clone())
         } else if self.sidebar_tests && sidebar_width > 0.5 {
             div().flex_1().min_h_0().child(self.render_tests(cx))
         } else {
-            div().flex_1().min_h_0().child(self.tree.clone())
+            // The files, a field above them to search in them (it becomes the search).
+            if sidebar_width > 0.5 {
+                self.sync_tree_outline(cx);
+            }
+            let theme = cx.global::<Theme>();
+            let keys = crate::palette::shortcut(&SearchProject, cx);
+            let field = ui::field(theme)
+                .id("search-in-files")
+                .flex_none()
+                .mx(px(12.))
+                .mt(px(10.))
+                .mb(px(2.))
+                .gap(px(8.))
+                .cursor_text()
+                .text_color(theme.faint)
+                .child(div().flex_1().child("Search in files"))
+                .children(keys.map(|k| div().flex_none().text_size(px(ui::T_SM)).child(k)))
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.search_project(&SearchProject, window, cx)),
+                );
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(field)
+                .child(div().flex_1().min_h_0().child(self.tree.clone()))
         };
 
         let root = self.roots.primary().to_path_buf();
@@ -10715,7 +11409,8 @@ impl Render for Workspace {
                 let home = crate::tools::home_dir();
                 let shown = match home.as_ref().and_then(|h| root.strip_prefix(h).ok()) {
                     Some(rest) => Path::new("~").join(rest).display().to_string(),
-                    None => root.display().to_string(),
+                    // (A server's folder as people write it: `me@box:/home/me/app`.)
+                    None => crate::remote::shown(&root),
                 };
                 (vec![shorten_path(&shown, STATUS_PATH_CHARS)], (0, 0))
             }
@@ -10949,7 +11644,10 @@ impl Render for Workspace {
         let tab_menu = self.render_tab_menu(cx);
         let text_menu = self.render_text_menu(cx);
         let tab_switcher = self.render_tab_switcher(cx);
-        let overlay: Option<AnyElement> = if let Some((palette, _)) = &self.palette {
+        let overlay: Option<AnyElement> = if let Some((prompt, ..)) = &self.ssh_prompt {
+            // (What ssh asks waits on nothing else: a connection hangs on it.)
+            Some(prompt.clone().into_any_element())
+        } else if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
             Some(panel.clone().into_any_element())
@@ -10958,6 +11656,7 @@ impl Render for Workspace {
         };
         let ai_provider = cx.global::<Settings>().ai.active();
         let ai_dot = ai_provider != ProviderId::Off && (crate::ai::working() || crate::ai::failed_lately());
+        let update = crate::updates::state();
         if ai_dot && self.ai_dot_watch.is_none() {
             self.ai_dot_watch = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
@@ -11317,6 +12016,36 @@ impl Render for Workspace {
             }))
             // AI's only mark: a dot, while it answers (or just after it failed). Its name shows
             // on hover; a click opens its settings.
+            // A newer Null out: Update gets it, then Restart to Update.
+            .when(update != crate::updates::State::Nothing, |bar| {
+                use crate::updates::State;
+                let (label, tip) = match &update {
+                    State::Out(version) if crate::updates::how().is_some() => (
+                        format!("Null {version} is out · Update"),
+                        "Download it, check it's the release and install it",
+                    ),
+                    State::Out(version) => (format!("Null {version} is out"), "Get it at null-ide.com"),
+                    State::Getting(version, percent) => (format!("Getting Null {version} · {percent}%"), ""),
+                    _ => (
+                        "Restart to Update".to_string(),
+                        "Null quits, the new version is put in place, and it starts again",
+                    ),
+                };
+                let getting = matches!(update, State::Getting(..));
+                bar.child(div().id("update").flex_none().whitespace_nowrap().text_color(theme.muted).child(label).when(
+                    !getting,
+                    |d| {
+                        d.cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .tooltip(ui::tip(tip.to_string(), None))
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.update_null(&UpdateNull, window, cx)
+                                }),
+                            )
+                    },
+                ))
+            })
             .when(ai_dot, |bar| {
                 let failed = !crate::ai::working();
                 let dot = if failed { theme.error.opacity(0.8) } else { theme.caret.opacity(0.6) };
@@ -11558,10 +12287,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_task))
             .on_action(cx.listener(|this, _: &RunTestAtCursor, window, cx| this.run_test(true, window, cx)))
             .on_action(cx.listener(Self::debug_test))
-            .on_action(cx.listener(Self::go_to_outline_match))
             .on_action(cx.listener(Self::import_vs_code_settings))
             .on_action(cx.listener(Self::show_changes))
-            .on_action(cx.listener(Self::clear_outline_filter))
+            .on_action(cx.listener(Self::leave_search))
             .on_action(cx.listener(|this, _: &DebugAgain, window, cx| match this.debugged_test.clone() {
                 Some(test) => this.debug_rust_test(test, cx),
                 None => this.start_debugging(&StartDebugging, window, cx),
@@ -11645,6 +12373,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_fade_while_typing))
+            .on_action(cx.listener(Self::toggle_smooth_motion))
             .on_action(cx.listener(Self::toggle_word_wrap))
             .on_action(cx.listener(Self::toggle_autocomplete))
             .on_action(cx.listener(Self::toggle_terminal))
@@ -11675,6 +12404,14 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_folder))
             .on_action(cx.listener(Self::show_all_commands))
             .on_action(cx.listener(Self::set_api_key))
+            .on_action(cx.listener(Self::set_suggestions_key))
+            .on_action(cx.listener(Self::show_ai_usage))
+            .on_action(cx.listener(Self::show_notes))
+            .on_action(cx.listener(Self::explain_test_failure))
+            .on_action(cx.listener(Self::check_for_updates))
+            .on_action(cx.listener(Self::update_null))
+            .on_action(cx.listener(Self::open_wsl_folder))
+            .on_action(cx.listener(Self::open_ssh_folder))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -11802,6 +12539,10 @@ impl Render for Workspace {
                                     return;
                                 }
                                 this.key_prompt = None;
+                                // (ssh's question, clicked away: not answered.)
+                                if this.ssh_prompt.is_some() {
+                                    return this.answer_ssh(None, window, cx);
+                                }
                                 this.close_palette(window, cx);
                             }),
                         )
@@ -13421,8 +14162,9 @@ mod tests {
         cx.run_until_parked();
         workspace.update_in(cx, |w, window, cx| {
             assert_eq!(w.outline.as_ref().unwrap().2.len(), 4);
+            // (Shown in the files, under the open file: still there with them.)
             w.show_files(&ShowFiles, window, cx);
-            assert!(!w.sidebar_outline);
+            assert!(w.tree.read(cx).outline_open());
         });
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -13717,7 +14459,9 @@ mod tests {
         assert!(lines.contains(&r#"if "%~1"=="" (start "" "C:\Program Files\Null\null.exe" "%CD%\." & exit /b)"#));
         // Git Bash's: valid sh, Null run by its forward-slashed path.
         let sh = git_bash_script(Path::new(r"C:\Program Files\Null\null.exe"));
-        assert!(sh.contains(r#""C:/Program Files/Null/null.exe" "$w" &"#), "{sh}");
+        assert!(sh.contains(r#"exe="C:/Program Files/Null/null.exe""#) && sh.contains(r#""$exe" "$w" &"#), "{sh}");
+        // From a WSL shell: Null's own path as Linux has it, the paths given in Windows' form.
+        assert!(sh.contains("wslpath -u") && sh.contains("wslpath -aw"), "{sh}");
         #[cfg(unix)]
         {
             let file = crate::tools::test_dir("git-bash-null").join("null");
@@ -14829,6 +15573,38 @@ esac
     }
 
     #[test]
+    fn a_failure_is_read_from_its_own_part_of_the_output() {
+        let cargo = "running 2 tests\ntest cart::tests::adds ... FAILED\n\nfailures:\n\n\
+            ---- cart::tests::adds stdout ----\nthread panicked at src/cart.rs:9:5:\nleft: 2\nright: 3\n\n\
+            ---- cart::tests::other stdout ----\nnot this\n\nfailures:\n    cart::tests::adds\n";
+        let part = failure_output(cargo, "cart::tests::adds");
+        assert!(part.starts_with("---- cart::tests::adds stdout ----") && part.contains("right: 3"), "{part}");
+        assert!(!part.contains("not this"));
+        let pytest = "____ test_total ____\n    assert total() == 3\nE   assert 2 == 3\n____ test_other ____\nno\n";
+        let part = failure_output(pytest, "tests/test_cart.py::test_total");
+        assert!(part.contains("E   assert 2 == 3") && !part.contains("no\n"), "{part}");
+        // Not found by name: the end of the run.
+        assert_eq!(failure_output("a\nb\n", "x"), "a\nb");
+    }
+
+    #[test]
+    fn a_review_is_read_line_by_line() {
+        let answer = "Here is what I found:\n\
+            {\"file\": \"b/src/cart.rs\", \"line\": 12, \"code\": \"return x;\", \"note\": \"x can be zero.\"},\n\
+            {\"file\": \"src/order.rs\", \"line\": 3, \"note\": \"  Never saved.  \"}\n\
+            {\"file\": \"src/x.rs\", \"note\": \"\"}\n\
+            not json";
+        assert_eq!(
+            review_findings(answer),
+            [
+                ("src/cart.rs".to_string(), 12, "return x;".to_string(), "x can be zero.".to_string()),
+                ("src/order.rs".to_string(), 3, String::new(), "Never saved.".to_string()),
+            ]
+        );
+        assert!(review_findings("").is_empty());
+    }
+
+    #[test]
     fn code_is_copied_as_a_markdown_block() {
         let lines = ["    if a {".to_string(), "        b();".into(), "    }".into()];
         assert_eq!(
@@ -15482,11 +16258,12 @@ esac
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The Outline's filter: shown with Show Outline, ⏎ goes to the first that fits, Esc
-    /// empties it, then goes back to the text.
+    /// The outline under the open file, in the files: Show Outline opens it there (and closes
+    /// it), its symbols under the file's row, one clicked goes to its line; Esc in the
+    /// search in files: what's typed cleared, then back to the files.
     #[gpui::test]
-    fn the_outline_filters(cx: &mut gpui::TestAppContext) {
-        let dir = crate::tools::test_dir("outline-filter");
+    fn the_outline_unfolds_under_the_open_file(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("outline-in-files");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -15508,22 +16285,29 @@ esac
         });
         cx.run_until_parked();
         workspace.update_in(cx, |w, window, cx| {
-            assert!(w.outline_filter.focus_handle(cx).is_focused(window), "typing goes to the filter");
-            w.outline_filter.update(cx, |input, cx| input.set_text("cls", cx));
+            let tree = w.tree.read(cx);
+            assert!(tree.outline_open());
+            assert_eq!(tree.shown_symbols(), ["Shop", "open", "close"]);
+            // A symbol clicked: to its line.
+            let path = dir.join("shop.py");
+            w.tree.update(cx, |_, cx| cx.emit(crate::file_tree::FileTreeEvent::GoToLine(path, 4)));
+            let _ = window;
         });
         cx.run_until_parked();
-        cx.dispatch_action(GoToOutlineMatch);
-        cx.run_until_parked();
         workspace.update_in(cx, |w, window, cx| {
-            let editor = w.active_editor().unwrap().clone();
-            assert_eq!(editor.read(cx).caret_point().0, 4, "at close");
-            // Esc: emptied first, then back to the text.
-            window.focus(&w.outline_filter.focus_handle(cx));
-            w.clear_outline_filter(&ClearOutlineFilter, window, cx);
-            assert!(w.outline_filter.read(cx).text().is_empty());
-            assert!(w.outline_filter.focus_handle(cx).is_focused(window));
-            w.clear_outline_filter(&ClearOutlineFilter, window, cx);
-            assert!(editor.focus_handle(cx).is_focused(window));
+            assert_eq!(w.active_editor().unwrap().read(cx).caret_point().0, 4, "at close");
+            // Show Outline again: closed.
+            w.show_outline(&ShowOutline, window, cx);
+            assert!(!w.tree.read(cx).outline_open());
+            assert!(w.tree.read(cx).shown_symbols().is_empty());
+            // Esc in the search: what's typed goes, then the search does.
+            w.search_project(&SearchProject, window, cx);
+            assert!(w.sidebar_search.on);
+            w.project_search.update(cx, |search, cx| search.focus(Some("shop".into()), window, cx));
+            w.leave_search(&LeaveSearch, window, cx);
+            assert!(w.sidebar_search.on && !w.project_search.read(cx).has_query(cx));
+            w.leave_search(&LeaveSearch, window, cx);
+            assert!(!w.sidebar_search.on);
         });
         std::fs::remove_dir_all(&dir).ok();
     }

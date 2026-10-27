@@ -43,31 +43,23 @@ impl Preview {
 /// How a file opens: `None` for text, the preview otherwise. `text` is what reading it as
 /// text gave (see `encoding::read`), so the file is read once.
 pub fn of(path: &Path, text: &Result<&str, std::io::ErrorKind>) -> Option<Preview> {
-    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    // (Its size only when it's shown: text isn't asked about again.)
+    let size = || crate::project_fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if IMAGES.contains(&ext.as_str()) {
-        let head = read_head(path);
-        return Some(Preview::Image { bytes, size: image_size(&head) });
+        let head = crate::project_fs::read_head(path, 64 * 1024).unwrap_or_default();
+        return Some(Preview::Image { bytes: size(), size: image_size(&head) });
     }
     match text {
         // A NUL byte: UTF-8, maybe, but not text anyone types.
-        Ok(text) if text.as_bytes().iter().take(8192).any(|&b| b == 0) => Some(Preview::NotText { bytes }),
+        Ok(text) if text.as_bytes().iter().take(8192).any(|&b| b == 0) => Some(Preview::NotText { bytes: size() }),
         Ok(_) => None,
-        Err(std::io::ErrorKind::InvalidData) => Some(Preview::NotText { bytes }),
+        Err(std::io::ErrorKind::InvalidData) => Some(Preview::NotText { bytes: size() }),
         // Not there yet: an empty editor, and saving makes the file.
         Err(std::io::ErrorKind::NotFound) => None,
         Err(std::io::ErrorKind::PermissionDenied) => Some(Preview::Unreadable { why: "Null isn't allowed to read it" }),
         Err(_) => Some(Preview::Unreadable { why: "It couldn't be read" }),
     }
-}
-
-fn read_head(path: &Path) -> Vec<u8> {
-    use std::io::Read;
-    let mut head = Vec::new();
-    if let Ok(file) = std::fs::File::open(path) {
-        file.take(64 * 1024).read_to_end(&mut head).ok();
-    }
-    head
 }
 
 pub fn file_size(bytes: u64) -> String {

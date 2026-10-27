@@ -1,7 +1,82 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
+Null updates itself, opens folders inside WSL and on servers over SSH, installs language
+servers on a computer with nothing else installed, and asks AI for less.
+
+- Folders on servers: File History keeps a server file's earlier versions (from what Null
+  last read or saved of it, no extra trip to the server), and pictures open from there.
+  F5 follows a server project's .vscode/launch.json (it wasn't read there), with lldb-dap
+  on the server.
+- Relative line numbers (Settings → Editor): lines counted from the cursor's, as a count
+  before a move goes (Vim's 5j); a fold counts as one line.
+- Update: a newer version out shows as "Null 0.2.0 is out · Update" in the status bar; a
+  click downloads it, checks it's the release (signed details, and the package's SHA-256),
+  then Restart to Update puts it in place and starts Null again (or it's installed when Null
+  quits). Windows' installer, the Mac app, Linux's binary or .deb; elsewhere null-ide.com.
+- Windows: AltGr and dead keys type in the terminal (an AZERTY's ~ # \\ { [ ê), and no
+  shortcut takes a key AltGr types with (Ctrl+Alt+0 and Ctrl+Alt+= kept @ and } from
+  being typed on an AZERTY; Reset Zoom and Zoom In stay in the View menu there).
+- Opening a server's folder from Open Recent connects first instead of freezing, and Open
+  Recent lists each folder once.
+- The sidebar is quieter: Files, Tests and Git. Search is a field above the files (⌘⇧F),
+  its results in their place; the outline opens under the open file, from the arrow at the
+  end of its row or Show Outline.
+- SSH: passwords, passphrases and trusting a new server asked in the window (Windows too);
+  git through the open connection; a server's folder reopened at launch once reachable;
+  Python environments, the Tests panel and the debugger on servers.
+- Tests: results read where the terminal can't see its programs (servers, WSL, Windows);
+  unittest run on a `tests/` folder that isn't a package finds its tests.
+- Files show their language's logo where they had a dot (the files, ⌘P) and in their tabs,
+  in the dot's one colour.
+- Open to the Side: ⌥-click a file, or its menu, opens it in the other half of the window.
+- Typing in the files also finds a file inside a closed folder, and opens the folders to it.
+- Smooth caret and scrolling can be turned off (View menu, ⌘K, Settings → Cursor).
+- Language servers install without npm's update check.
+- Folders on servers over SSH: Open SSH Folder… (a server, then a folder from its home), or
+  `null ssh://me@box/path`. With your own ssh, keys and config, nothing installed there:
+  files through one connection, the terminal, git and language servers run on the server,
+  saves are whole, Move to Trash uses the server's Trash, changes there show within seconds,
+  search narrows files on the server first.
+- CI runs once a pull request is ready, not on drafts or after merges; packages are built
+  when a new version reaches main, or on demand, per platform.
+- Folders inside WSL (Windows): Open WSL Folder…, or `null .` in a WSL shell. Files are read
+  through Windows' WSL share; the terminal, git and language servers run inside Linux, in the
+  folder's Linux path, and servers install there (Node.js along when the distribution has
+  none). Changes made there are looked for every couple of seconds. On WSL 1, servers built
+  on Node.js say they need WSL 2 (Node.js doesn't start there).
+- Windows: while a question is open ("Save changes?"), the window behind it takes no keys or
+  clicks; `null --version` and `null --help` print in the console they're typed in.
+- "Tell me when a new version is out" (off until turned on, on the welcome's last step or in
+  Settings): once a day Null asks GitHub for its latest release, and says so in the status
+  bar when there's a newer one. "Check for Updates" in ⌘K asks now.
+- Notes on code: ⌥⌘N (Ctrl+Alt+N) writes a note under the cursor's line; it moves with its
+  line and is kept privately in Null's folder, never in the project. Notes… lists them.
+- An answer from ⌘I can be asked about further (each follow-up goes with the questions
+  before it) and kept as a note on the code.
+- Review in the Git panel: AI reads the changes about to be committed and leaves a note on
+  each line it has doubts about, never a change. Explain Test Failure (⌘K) explains the last
+  failed test from what its run said.
+- AI reads less and pays less: ⌘I sends a long file's lines around the code with an outline
+  of the rest instead of the whole file, the definitions the code uses from elsewhere in the
+  project, and the project's AGENTS.md or CLAUDE.md; the field says what goes and about how
+  many tokens. What stays the same is sent first and cached (Anthropic's cache is asked
+  for; AI tasks cache their conversation as it grows).
+- Tokens are counted: Settings → AI → AI usage, "AI Usage" in ⌘K, and an optional monthly
+  limit.
+- Language servers install on a computer with nothing else installed: the ones that need
+  Node.js bring their own (downloaded into Null's folder, used only for them), and
+  rust-analyzer, clangd (on Windows and Linux), Markdown's and Lua's are downloaded as
+  programs. Every download is checked against the checksum Null was built with.
+- New languages: Markdown, Lua, PHP, Svelte, Dockerfile, C# and Dart.
+- Java, C#, Ruby, PHP and Lua are coloured by their real grammars (they had only basic
+  colours); SCSS and LESS take CSS's.
+- Language servers start with Null's own search path (Homebrew's Node, nvm's…), even when
+  Null is opened from the Dock; uppercase extensions (`MAIN.CPP`) find their server.
+- Suggestions while typing work with Claude Code and Codex: they come from a fast model of
+  their own (Settings → AI → Suggestions come from), since the command line tools take
+  seconds to answer. Null asks once where they should come from.
 - Null is now proprietary software (All Rights Reserved): free to use as distributed by
   the author, its code public for transparency, but not to be redistributed, resold or
   reused (see LICENSE). 0.1.1 and earlier keep the license they were published under.

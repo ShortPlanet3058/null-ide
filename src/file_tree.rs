@@ -1,3 +1,4 @@
+use crate::fonts::CodeFont;
 use crate::fs_ops;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::Theme;
@@ -156,6 +157,10 @@ impl Render for EntryGhost {
 pub enum FileTreeEvent {
     /// Open and move to the file (double-click, Enter).
     Open(PathBuf),
+    /// To a line of the open file (one of its symbols, under its row, clicked).
+    GoToLine(PathBuf, usize),
+    /// Open the file in the other half of the window (⌥-click, Open to the Side).
+    OpenToTheSide(PathBuf),
     /// Two files picked, compared: the first against the second.
     Compare(PathBuf, PathBuf),
     /// Show the file but keep the keyboard in the tree (single click, arrows),
@@ -209,6 +214,28 @@ enum RowKind {
     NewItem {
         is_dir: bool,
     },
+    /// One of the open file's functions or types, under its row (`outline.symbols[i]`).
+    Symbol(usize),
+}
+
+/// A function, type or heading of the open file, as its outline lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Symbol {
+    pub name: SharedString,
+    /// The word that defines it (`fn`, `class`), or the heading's `##`.
+    pub kind: &'static str,
+    /// Its line (from 0).
+    pub row: usize,
+    pub depth: usize,
+}
+
+/// The open file's outline, shown under its row when opened there.
+#[derive(Clone, Debug, PartialEq)]
+struct Outline {
+    path: PathBuf,
+    symbols: Vec<Symbol>,
+    /// The one the caret is in.
+    current: Option<usize>,
 }
 
 struct Row {
@@ -277,11 +304,13 @@ fn runs_when_opened(path: &Path) -> bool {
         return true;
     }
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
-            return true;
-        }
+    if crate::project_fs::metadata(path).is_ok_and(|m| m.executable()) {
+        return true;
+    }
+    // (A server's file, from Windows: its mode says.)
+    #[cfg(not(unix))]
+    if crate::remote::is_remote(path) && crate::project_fs::metadata(path).is_ok_and(|m| m.executable()) {
+        return true;
     }
     false
 }
@@ -318,6 +347,7 @@ fn default_browser() -> Option<std::path::PathBuf> {
 #[derive(Clone, Copy, PartialEq)]
 enum MenuItem {
     Open,
+    OpenToTheSide,
     OpenInBrowser,
     /// In the app the system opens its kind with (Preview, Numbers...).
     OpenWithApp,
@@ -347,6 +377,7 @@ impl MenuItem {
     fn label(self) -> &'static str {
         match self {
             MenuItem::Open => "Open",
+            MenuItem::OpenToTheSide => "Open to the Side",
             MenuItem::OpenInBrowser => "Open in Browser",
             MenuItem::OpenWithApp => "Open with Default App",
             MenuItem::NewFile => "New File…",
@@ -428,6 +459,9 @@ pub struct FileTree {
     pub ask_before_renaming: bool,
     /// What's been typed to go to a file by its name (as in the Finder), and when.
     typed: (String, Instant),
+    /// The open file's outline, and whether it's shown under the file.
+    outline: Option<Outline>,
+    outline_open: bool,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -458,6 +492,8 @@ impl FileTree {
             errors: HashSet::new(),
             error_folders: HashSet::new(),
             typed: (String::new(), Instant::now()),
+            outline: None,
+            outline_open: false,
         };
         tree.rebuild();
         tree
@@ -504,7 +540,9 @@ impl FileTree {
 
     /// Expands folders again, as they were last time.
     pub fn expand_folders(&mut self, folders: &[PathBuf], cx: &mut Context<Self>) {
-        let inside = |p: &PathBuf| self.roots.iter().any(|r| p.starts_with(r)) && p.is_dir();
+        // (A server's folders aren't asked about one by one: a gone one just lists nothing.)
+        let inside =
+            |p: &PathBuf| self.roots.iter().any(|r| p.starts_with(r)) && (crate::remote::is_remote(p) || p.is_dir());
         let folders: Vec<PathBuf> = folders.iter().filter(|p| inside(p)).cloned().collect();
         self.expanded.extend(folders);
         self.rebuild();
@@ -630,6 +668,9 @@ impl FileTree {
     /// The folder's entries, folders first. Everything inside an ignored folder is ignored
     /// (dimmed) too: `node_modules/x` as well as `node_modules`.
     fn read_dir(dir: &Path, inside_ignored: bool, hidden: &ignore::gitignore::Gitignore) -> Vec<Entry> {
+        if crate::remote::is_remote(dir) {
+            return Self::read_server_dir(dir, inside_ignored, hidden);
+        }
         let visible: HashSet<PathBuf> = ignore::WalkBuilder::new(dir)
             .max_depth(Some(1))
             .hidden(false)
@@ -653,6 +694,51 @@ impl FileTree {
                     name: e.file_name().to_string_lossy().into_owned().into(),
                     is_dir,
                     ignored: inside_ignored || !visible.contains(&path),
+                    path,
+                })
+            })
+            .collect();
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        entries
+    }
+
+    /// A server's folder (see `read_dir`): git's rules from the `.gitignore`s here and in the
+    /// folders above, up to the repository's (those their listings show, read).
+    fn read_server_dir(dir: &Path, inside_ignored: bool, hidden: &ignore::gitignore::Gitignore) -> Vec<Entry> {
+        let Ok(listed) = crate::project_fs::read_dir(dir) else { return Vec::new() };
+        let mut levels = Vec::new();
+        let mut at = Some(dir);
+        while let Some(folder) = at.filter(|f| crate::remote::is_remote(f)) {
+            let file = folder.join(".gitignore");
+            if crate::project_fs::exists_now(&file, false)
+                && let Ok(text) = crate::project_fs::read_to_string(&file)
+            {
+                levels.push(crate::project_index::rules_from(folder, &[text]));
+            }
+            if crate::project_fs::exists_now(&folder.join(".git"), false) {
+                break;
+            }
+            at = folder.parent();
+        }
+        // (The nearest `.gitignore` that says something decides.)
+        let ignored = |path: &Path, is_dir: bool| {
+            levels.iter().find_map(|rules| match rules.matched(path, is_dir) {
+                ignore::Match::Ignore(_) => Some(true),
+                ignore::Match::Whitelist(_) => Some(false),
+                ignore::Match::None => None,
+            }) == Some(true)
+        };
+        let mut entries: Vec<Entry> = listed
+            .into_iter()
+            .filter_map(|(path, meta)| {
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                if ALWAYS_HIDDEN.contains(&name.as_str()) || hidden.matched(&path, meta.is_dir()).is_ignore() {
+                    return None;
+                }
+                Some(Entry {
+                    name: name.into(),
+                    is_dir: meta.is_dir(),
+                    ignored: inside_ignored || ignored(&path, meta.is_dir()),
                     path,
                 })
             })
@@ -718,8 +804,15 @@ impl FileTree {
             // The folders gone through, as they really are: a link back up ends the chain.
             let mut seen: Vec<PathBuf> = Vec::new();
             while expanded && !self.new_item_in(&entry.path) {
-                match dunce::canonicalize(&entry.path) {
-                    Ok(real) if !seen.contains(&real) => seen.push(real),
+                // (A server's folders as they're named: no asking each where it leads. A
+                // chain that long is a link going round.)
+                let real = if crate::remote::is_remote(&entry.path) {
+                    Ok(entry.path.clone())
+                } else {
+                    dunce::canonicalize(&entry.path)
+                };
+                match real {
+                    Ok(real) if !seen.contains(&real) && seen.len() < 64 => seen.push(real),
                     _ => break,
                 }
                 let inner = match self.children.get(&entry.path) {
@@ -741,7 +834,26 @@ impl FileTree {
             }
             let chain = chain.map(|(head, names)| (head, names.into()));
             let (path, ignored) = (entry.path.clone(), entry.ignored);
+            let is_dir = entry.is_dir;
             self.rows.push(Row { kind: RowKind::Entry(entry), depth, expanded, chain });
+            // The open file's outline, under it, when opened there.
+            if !is_dir
+                && self.outline_open
+                && let Some(outline) = self.outline.as_ref().filter(|o| o.path == path)
+            {
+                let symbols: Vec<Row> = outline
+                    .symbols
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| Row {
+                        kind: RowKind::Symbol(i),
+                        depth: depth + 1 + s.depth.min(6),
+                        expanded: false,
+                        chain: None,
+                    })
+                    .collect();
+                self.rows.extend(symbols);
+            }
             if expanded {
                 self.push_new_item_row(&path, depth + 1);
                 self.push_children_of(&path, depth + 1, ignored);
@@ -813,10 +925,74 @@ impl FileTree {
         (0..self.rows.len()).filter_map(|i| self.entry_at(i)).map(|e| e.name.to_string()).collect()
     }
 
+    /// The symbols shown under the open file, in order.
+    #[cfg(test)]
+    pub fn shown_symbols(&self) -> Vec<String> {
+        let Some(outline) = &self.outline else { return Vec::new() };
+        self.rows
+            .iter()
+            .filter_map(|r| match r.kind {
+                RowKind::Symbol(i) => outline.symbols.get(i).map(|s| s.name.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn entry_at(&self, ix: usize) -> Option<&Entry> {
         match &self.rows.get(ix)?.kind {
             RowKind::Entry(entry) => Some(entry),
-            RowKind::NewItem { .. } => None,
+            RowKind::NewItem { .. } | RowKind::Symbol(_) => None,
+        }
+    }
+
+    /// The open file's outline (`path`'s symbols, the caret in `current`): shown under its
+    /// row when that's opened. Laid out again only when something changed.
+    pub fn set_outline(
+        &mut self,
+        path: Option<PathBuf>,
+        symbols: Vec<Symbol>,
+        current: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let outline = path.map(|path| Outline { path, symbols, current });
+        if outline == self.outline {
+            return;
+        }
+        // (Only the caret's place changed: the row it's on brought into view.)
+        let moved =
+            matches!((&outline, &self.outline), (Some(a), Some(b)) if a.path == b.path && a.symbols == b.symbols);
+        self.outline = outline;
+        if self.outline_open {
+            self.rebuild();
+            if moved {
+                self.reveal_current_symbol();
+            }
+            cx.notify();
+        }
+    }
+
+    /// The outline under the open file, shown or not (and the file brought into view).
+    pub fn show_outline(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.outline_open = open;
+        if let Some(path) = self.outline.as_ref().map(|o| o.path.clone()).filter(|_| open) {
+            self.expand_to(&path);
+        }
+        self.rebuild();
+        if open {
+            self.reveal_current_symbol();
+        }
+        cx.notify();
+    }
+
+    pub fn outline_open(&self) -> bool {
+        self.outline_open
+    }
+
+    /// The symbol the caret is in, in view.
+    fn reveal_current_symbol(&mut self) {
+        let Some(current) = self.outline.as_ref().and_then(|o| o.current) else { return };
+        if let Some(ix) = self.rows.iter().position(|r| matches!(r.kind, RowKind::Symbol(i) if i == current)) {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
     }
 
@@ -857,6 +1033,14 @@ impl FileTree {
         cx: &mut Context<Self>,
     ) {
         let Some(entry) = self.entry_at(ix).cloned() else { return };
+        // ⌥-click on a file: in the other half of the window.
+        if modifiers.alt && !entry.is_dir && !modifiers.secondary() && !modifiers.shift {
+            self.also.clear();
+            self.selected = Some(entry.path.clone());
+            self.menu = None;
+            cx.emit(FileTreeEvent::OpenToTheSide(entry.path));
+            return cx.notify();
+        }
         // ⌘-click picks one more (or lets one go); ⇧-click, all from the one picked to here.
         if modifiers.secondary() || modifiers.shift {
             self.menu = None;
@@ -929,6 +1113,22 @@ impl FileTree {
             self.also.clear();
             self.selected = self.entry_at(ix).map(|e| e.path.clone());
             self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        // Nothing shown by that name: a file in a closed folder (the project's files as ⌘P
+        // lists them), the one nearest the top, its folders opened.
+        let deeper = crate::palette::files_listed(&self.roots)
+            .into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().starts_with(prefix)))
+            .min_by_key(|p| (p.components().count(), p.clone()));
+        if let Some(path) = deeper {
+            self.expand_to(&path);
+            self.also.clear();
+            self.selected = Some(path);
+            self.rebuild();
+            self.reveal_selected();
             cx.stop_propagation();
             cx.notify();
         }
@@ -1285,7 +1485,8 @@ impl FileTree {
         }
         let Some(entry) = self.selected_entry().filter(|e| !self.is_root(&e.path)) else { return };
         let what = if entry.is_dir { "folder" } else { "file" };
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             gpui::PromptLevel::Warning,
             &format!("Move the {what} “{}” to the {}?", entry.name, fs_ops::TRASH),
             Some(&format!("You can restore it from the {}.", fs_ops::TRASH)),
@@ -1303,7 +1504,8 @@ impl FileTree {
 
     /// Several picked: one question for them all, then each to the Trash.
     fn trash_picked(&mut self, picked: Vec<Entry>, window: &mut Window, cx: &mut Context<Self>) {
-        let answer = window.prompt(
+        let answer = crate::modal::ask(
+            window,
             gpui::PromptLevel::Warning,
             &format!("Move these {} items to the {}?", picked.len(), fs_ops::TRASH),
             Some(&format!("You can restore them from the {}.", fs_ops::TRASH)),
@@ -1491,7 +1693,7 @@ impl FileTree {
                 items
             }
             Some(e) => {
-                let mut items = vec![Open];
+                let mut items = vec![Open, OpenToTheSide];
                 if opens_in_browser(&e.path) {
                     items.push(OpenInBrowser);
                 }
@@ -1543,6 +1745,11 @@ impl FileTree {
             MenuItem::Open => {
                 if let Some(entry) = target {
                     cx.emit(FileTreeEvent::Open(entry.path));
+                }
+            }
+            MenuItem::OpenToTheSide => {
+                if let Some(entry) = target {
+                    cx.emit(FileTreeEvent::OpenToTheSide(entry.path));
                 }
             }
             MenuItem::OpenInBrowser => {
@@ -1652,7 +1859,7 @@ impl FileTree {
         let row = &self.rows[ix];
         // Rows sit inset from the sidebar's edges, so their highlight has rounded ends.
         let indent = px(10. + row.depth as f32 * INDENT);
-        let marker = |is_dir: bool, turn: f32, color: gpui::Hsla, dot: gpui::Hsla| {
+        let marker = |path: &Path, is_dir: bool, turn: f32, color: gpui::Hsla, dot: gpui::Hsla| {
             if is_dir {
                 div().size(px(14.)).flex().items_center().justify_center().child(
                     svg()
@@ -1662,12 +1869,8 @@ impl FileTree {
                         .with_transformation(Transformation::rotate(radians(turn * std::f32::consts::FRAC_PI_2))),
                 )
             } else {
-                div()
-                    .size(px(14.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(div().size(px(5.)).rounded(px(2.)).bg(dot))
+                // (Its language's logo, in the dot's colour, when it has one.)
+                div().size(px(14.)).flex().items_center().justify_center().child(crate::file_icons::marker(path, dot))
             }
         };
         // The error (like "already exists") sits at the end of the field, in red.
@@ -1707,10 +1910,34 @@ impl FileTree {
             .pr(px(6.))
             .text_size(px(ui::T_MD));
         match &row.kind {
+            RowKind::Symbol(i) => {
+                let Some((outline, symbol)) = self.outline.as_ref().and_then(|o| Some((o, o.symbols.get(*i)?))) else {
+                    return base.into_any_element();
+                };
+                let here = outline.current == Some(*i);
+                let heading = symbol.kind.starts_with('#');
+                let (path, line) = (outline.path.clone(), symbol.row);
+                // Code by its name in the code's font, the word defining it beside it; a
+                // heading as written (as the Outline listed them).
+                base.text_color(if here { theme.foreground } else { theme.muted })
+                    .when(here, |r| r.bg(theme.hairline))
+                    .when(!here, |r| r.hover(|s| s.bg(ui::hover(theme))))
+                    .cursor_pointer()
+                    .child(div().w(px(14.)).flex_none())
+                    .child(div().min_w_0().truncate().when(!heading, |d| d.code_font(cx)).child(symbol.name.clone()))
+                    .when(!heading, |r| {
+                        r.child(div().flex_none().text_size(px(ui::T_SM)).text_color(theme.faint).child(symbol.kind))
+                    })
+                    .active(|s| s.opacity(0.7))
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.emit(FileTreeEvent::GoToLine(path.clone(), line));
+                    }))
+                    .into_any_element()
+            }
             RowKind::NewItem { is_dir } => {
                 let edit = self.edit.as_ref().expect("a new-item row exists only while editing");
                 base.key_context("TreeEdit")
-                    .child(marker(*is_dir, 0., theme.muted, theme.faint))
+                    .child(marker(Path::new(""), *is_dir, 0., theme.muted, theme.faint))
                     .child(name_field(edit))
                     .into_any_element()
             }
@@ -1770,7 +1997,13 @@ impl FileTree {
                     .when(active, |r| r.bg(theme.accent_soft))
                     .when(selected && !active, |r| r.bg(theme.hairline))
                     .when(!active && !selected, |r| r.hover(|s| s.bg(ui::hover(theme))))
-                    .child(marker(entry.is_dir, turn, if active { theme.foreground } else { theme.muted }, dot));
+                    .child(marker(
+                        &entry.path,
+                        entry.is_dir,
+                        turn,
+                        if active { theme.foreground } else { theme.muted },
+                        dot,
+                    ));
                 if editing_this(&path) {
                     let edit = self.edit.as_ref().unwrap();
                     row_el.key_context("TreeEdit").child(name_field(edit)).into_any_element()
@@ -1791,6 +2024,43 @@ impl FileTree {
                                 .truncate()
                                 .when(heading, |d| d.text_size(px(ui::T_XS)).font_weight(gpui::FontWeight::SEMIBOLD))
                                 .child(shown),
+                        )
+                        // The open file: its outline opened (and closed) under it, from the
+                        // end of its row.
+                        .when(
+                            active
+                                && !entry.is_dir
+                                && self.outline.as_ref().is_some_and(|o| o.path == entry.path && !o.symbols.is_empty()),
+                            |r| {
+                                let open = self.outline_open;
+                                r.child(
+                                    div()
+                                        .id("outline-toggle")
+                                        .flex_none()
+                                        .size(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(ui::R_KEY))
+                                        .hover(|s| s.bg(ui::hover(theme)))
+                                        .tooltip(ui::tip(if open { "Hide outline" } else { "Show outline" }, None))
+                                        .child(
+                                            svg()
+                                                .path(CHEVRON)
+                                                .size(px(11.))
+                                                .text_color(theme.faint)
+                                                .with_transformation(Transformation::rotate(radians(if open {
+                                                    std::f32::consts::FRAC_PI_2
+                                                } else {
+                                                    0.
+                                                }))),
+                                        )
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.show_outline(!open, cx);
+                                        })),
+                                )
+                            },
                         )
                         // A folder with changes inside: a small dot at the end.
                         .when(holds_changes || holds_errors, |r| {
@@ -2085,7 +2355,7 @@ mod tests {
                 .iter()
                 .filter_map(|r| match &r.kind {
                     RowKind::Entry(e) => Some(format!("{}{}", "  ".repeat(r.depth), e.name)),
-                    RowKind::NewItem { .. } => None,
+                    RowKind::NewItem { .. } | RowKind::Symbol(_) => None,
                 })
                 .collect::<Vec<_>>()
         };

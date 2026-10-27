@@ -196,6 +196,7 @@ pub fn register(keymap: Keymap, cx: &mut App) {
     crate::project_search::bind_keys(cx);
     crate::terminal::bind_keys(cx);
     crate::key_prompt::bind_keys(cx);
+    crate::ssh_prompt::bind_keys(cx);
     crate::text_input::bind_keys(cx);
     crate::git_view::bind_keys(cx);
     crate::commit_page::bind_keys(cx);
@@ -227,12 +228,62 @@ fn localize(cx: &mut App) {
     let layout = cx.keyboard_layout().name().to_string();
     let mapper = cx.keyboard_mapper().clone();
     let local = if cfg!(windows) {
-        bindings.iter().map(|b| in_place(b, mapper.as_ref())).collect()
+        bindings.iter().map(|b| in_place(b, mapper.as_ref())).filter(|b| !takes_altgr(b)).collect()
     } else {
         with_digit_row(bindings, &layout)
     };
     cx.clear_key_bindings();
     cx.bind_keys(local);
+}
+
+/// Whether `binding` is on Ctrl+Alt with a key AltGr types something with: Windows has
+/// AltGr as Ctrl+Alt, so it would keep that key from typing (an AZERTY's AltGr+à is @,
+/// AltGr+= is }). The action is still in the menus and the palette.
+fn takes_altgr(binding: &KeyBinding) -> bool {
+    binding.keystrokes().iter().any(|k| {
+        let m = &k.inner().modifiers;
+        m.control && m.alt && !m.platform && types_with_altgr(&k.inner().key, m.shift)
+    })
+}
+
+#[cfg(windows)]
+fn types_with_altgr(key: &str, shift: bool) -> bool {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn VkKeyScanW(ch: u16) -> i16;
+        fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
+        fn ToUnicode(key: u32, scan: u32, state: *const u8, out: *mut u16, len: i32, flags: u32) -> i32;
+    }
+    let mut chars = key.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else { return false };
+    let mut unit = [0u16; 2];
+    let [unit] = c.encode_utf16(&mut unit) else { return false };
+    // SAFETY: no pointers but ToUnicode's, to buffers of the sizes given.
+    unsafe {
+        let scanned = VkKeyScanW(*unit);
+        if scanned == -1 {
+            return false;
+        }
+        let key = (scanned as u16 & 0xff) as u32;
+        let mut state = [0u8; 256];
+        // Ctrl, Alt, left Ctrl and right Alt: what AltGr is; and Shift.
+        for held in [0x11, 0x12, 0xA2, 0xA5] {
+            state[held] = 0x80;
+        }
+        if shift {
+            state[0x10] = 0x80;
+            state[0xA0] = 0x80;
+        }
+        let mut out = [0u16; 8];
+        // (Flag 4: the keyboard's state, a dead key pressed, stays as it was.)
+        let typed = ToUnicode(key, MapVirtualKeyW(key, 0), state.as_ptr(), out.as_mut_ptr(), 8, 4);
+        typed < 0 || (typed > 0 && char::from_u32(out[0] as u32).is_some_and(|c| !c.is_control()))
+    }
+}
+
+#[cfg(not(windows))]
+fn types_with_altgr(_: &str, _: bool) -> bool {
+    false
 }
 
 /// `keys` as a preset's binding of them reads once localized (Windows moves symbols).

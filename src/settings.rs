@@ -436,11 +436,19 @@ pub struct Settings {
     pub line_spacing: LineSpacing,
     /// Where the line numbers show.
     pub line_numbers: LineNumbers,
+    /// Lines numbered from the cursor's (1, 2, 3 above and below it; its own keeps its
+    /// number): what a count before a move goes by (Vim's 5j).
+    pub relative_line_numbers: bool,
     /// Where spaces and tabs show, as faint dots and dashes.
     pub whitespace: ShowWhitespace,
     pub sidebar_visible: bool,
     /// Dim the title bar, sidebar and status bar while typing.
     pub fade_bars_while_typing: bool,
+    /// The caret glides to where it goes and the text eases when it scrolls; off, both jump.
+    pub smooth_motion: bool,
+    /// Say when a newer Null is out (once a day, Null reads the latest release's details from
+    /// GitHub). Off until the person turns it on. Installing is always their click.
+    pub check_for_updates: bool,
     /// Wrap long lines to the width of the editor instead of scrolling sideways.
     pub word_wrap: bool,
     /// Markdown and plain text wrap on their own: they're paragraphs, not code.
@@ -543,9 +551,12 @@ impl Default for Settings {
             ui_zoom: 1.,
             line_spacing: LineSpacing::Normal,
             line_numbers: LineNumbers::Shown,
+            relative_line_numbers: false,
             whitespace: ShowWhitespace::Selection,
             sidebar_visible: true,
             fade_bars_while_typing: true,
+            smooth_motion: true,
+            check_for_updates: false,
             word_wrap: false,
             wrap_prose: true,
             wrap_at_guide: false,
@@ -1649,6 +1660,12 @@ mod tests {
             let off = Settings { match_appearance: false, ..s };
             assert_eq!(off.shown_theme(cx), ThemeName::Null);
         });
+    }
+
+    #[test]
+    fn the_caret_glides_and_the_text_eases_unless_told_not_to() {
+        assert!(Settings::default().smooth_motion);
+        assert!(!Settings::parse(r#"{ "smooth_motion": false }"#).unwrap().smooth_motion);
     }
 
     #[test]
