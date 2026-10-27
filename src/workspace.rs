@@ -5579,8 +5579,7 @@ impl Workspace {
             ]);
         }
         // With AI switched off, nothing about it shows up.
-        // (The Mac's spell checker: none elsewhere yet.)
-        if crate::spell::AVAILABLE {
+        if crate::spell::available() {
             let label = toggle(settings.spell_check, "Hide Spelling Mistakes", "Show Spelling Mistakes");
             commands.push((View, label, Box::new(ToggleSpellCheck)));
         }

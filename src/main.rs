@@ -645,6 +645,7 @@ fn main() {
         // The spell checker started once the window's up, then what's shown checked.
         cx.spawn(async move |cx| {
             cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            cx.background_executor().spawn(async { spell::load() }).await;
             cx.update(|cx| {
                 let _step = trace::step(|| "spell checker started".into());
                 spell::warm();
