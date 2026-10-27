@@ -16,6 +16,19 @@ NOTE = "(An answer from the stand-in AI used for screenshots.)"
 
 def answer(system: str, user: str) -> str:
     """What a model might say to this request, made up from the request itself."""
+    if "small change to part of a file" in system and "merge conflict" in user:
+        # Both sides kept, the markers (and how it was before) left out.
+        found = re.search(r"<selection[^>]*>\n?(.*?)</selection>", user, re.S)
+        kept, before = [], False
+        for line in (found.group(1) if found else "").splitlines():
+            if line.startswith(("<<<<<<<", ">>>>>>>")):
+                continue
+            if line.startswith(("|||||||", "=======")):
+                before = line.startswith("|||||||")
+                continue
+            if not before and line not in kept:
+                kept.append(line)
+        return "\n".join(kept) + "\n"
     if "small change to part of a file" in system:
         # The selection, changed visibly: numbers grown, and a line about it.
         found = re.search(r"<selection[^>]*>\n?(.*?)</selection>", user, re.S)

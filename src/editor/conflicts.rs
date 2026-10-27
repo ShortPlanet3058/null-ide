@@ -1,5 +1,7 @@
 //! Merge conflicts: the blocks git leaves between `<<<<<<<` and `>>>>>>>`. Each side is
-//! tinted faintly, ⌘. offers to keep one side or both, and ⌥F8 goes from one to the next.
+//! tinted faintly, ⌘. offers to keep one side or both (or, with AI on, to have it write
+//! one version of both, shown as a change to keep or undo), and ⌥F8 goes from one to the
+//! next.
 
 use super::fixes::FixMenu;
 use super::{EditKind, Editor, Selection};
@@ -55,6 +57,9 @@ enum Keep {
 }
 
 const CHOICES: [Keep; 3] = [Keep::Current, Keep::Incoming, Keep::Both];
+
+/// After the choices, with AI on.
+const RESOLVE_WITH_AI: &str = "✦ Resolve with AI";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Marker {
@@ -213,7 +218,10 @@ impl Editor {
             Some(label) => format!("Keep {plain} ({label})"),
             None => format!("Keep {plain}"),
         };
-        let titles = [side(conflict.start, "current"), side(conflict.end, "incoming"), "Keep both".to_string()];
+        let mut titles = vec![side(conflict.start, "current"), side(conflict.end, "incoming"), "Keep both".to_string()];
+        if cx.global::<crate::settings::Settings>().ai.ready() {
+            titles.push(RESOLVE_WITH_AI.to_string());
+        }
         let fixes = titles
             .into_iter()
             .map(|title| CodeActionOrCommand::Command(Command { title, command: String::new(), arguments: None }))
@@ -231,6 +239,26 @@ impl Editor {
             spelling: None,
         });
         cx.notify();
+    }
+
+    /// ✦ Resolve with AI: ⌘I on the conflict, asked to write one version of both sides; it
+    /// comes as a change, to keep (⇥) or undo (Esc).
+    pub(super) fn resolve_with_ai(&mut self, conflict: Conflict, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.conflicts().contains(&conflict) {
+            return;
+        }
+        let lines = self.lines_char_range(&conflict.lines());
+        self.single_cursor();
+        self.selection = Selection { anchor: lines.start, head: lines.end };
+        let label = |line: usize| label(&self.buffer.line_text(line)).map_or(String::new(), |l| format!(" ({l})"));
+        let base = if conflict.base.is_some() { ", the part after ||||||| how it was before both" } else { "" };
+        let instruction = format!(
+            "Resolve this merge conflict: write one version that keeps what each side changed (the current \
+             side{} first, then the incoming side{}{base}), without the conflict markers.",
+            label(conflict.start),
+            label(conflict.end)
+        );
+        self.change_with_ai(instruction, window, cx);
     }
 
     /// Replaces the conflict with the side (or sides) picked from its list.
@@ -332,6 +360,26 @@ mod tests {
             // Undo brings the conflict back in one step.
             e.undo(&super::super::Undo, window, cx);
             assert_eq!(e.conflicts().len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn ai_writes_one_version_of_the_conflict(cx: &mut TestAppContext) {
+        let (e, cx) = editor(cx, TWO);
+        cx.update(|_, cx| {
+            let ai = &mut cx.global_mut::<crate::settings::Settings>().ai;
+            ai.provider = crate::ai::ProviderId::Ollama;
+            ai.enabled = true;
+        });
+        e.update_in(cx, |e, window, cx| {
+            e.set_caret_point((4, 0), cx);
+            e.quick_fix(&super::super::QuickFix, window, cx);
+            let menu = e.fix_menu.as_ref().expect("the conflict's choices");
+            let titles: Vec<&str> = menu.fixes.iter().map(super::super::fixes::title).collect();
+            assert_eq!(titles.last(), Some(&RESOLVE_WITH_AI));
+            e.accept_fix(3, window, cx);
+            // ⌘I on the whole conflict, markers included, already writing.
+            assert_eq!(e.ai_writing_lines(), Some(1..6));
         });
     }
 
