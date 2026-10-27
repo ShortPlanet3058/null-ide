@@ -108,6 +108,11 @@ makes both jump instead.
 - Files no language server knows (YAML, shell, a language not installed yet) still get
   suggestions: the file's own words, nearest first. In Markdown and text, only on ⌃Space.
   A path being written (`./`, `src/`, `img/`) lists what's in that folder.
+- **The same change elsewhere**: type over a word (rename `count` to `total` by hand, or
+  paste a word over it) and once you stop, the other places in the file the old word stands
+  get a faint dot beside their line, and the line a faint "⇥ same change in 3 more places".
+  ⇥ from the word changes the next one (each its own undo), and the next; Esc lets them be,
+  and any other edit forgets them. (⌘R renames by meaning, with a language server.)
 - **Bookmarks**: ⌘F2 marks the caret's line (its number turns amber), F3 and ⇧F3 go round
   them (Ctrl+Alt+L and Ctrl+Alt+J off the Mac), and **Bookmarks…** (⌘K) lists them in every open file. They move with the code and
   are kept with the project.

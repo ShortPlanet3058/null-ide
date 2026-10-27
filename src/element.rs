@@ -425,6 +425,8 @@ pub struct Prepaint {
     test_dots: Vec<(Bounds<Pixels>, u8)>,
     /// Bookmarked lines when line numbers are hidden (shown, the number takes the accent).
     bookmark_dots: Vec<Bounds<Pixels>>,
+    /// The places a word typed over still stands (see `repeat_edit`).
+    repeat_dots: Vec<Bounds<Pixels>>,
     /// The line the debugger stopped on: a band across it, and a mark in the gutter.
     execution: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
     /// Faint lines down the indentation, one per level.
@@ -894,6 +896,8 @@ impl Element for EditorElement {
                 .then(|| crate::palette::shortcut(&crate::editor::QuickFix, cx))
                 .flatten()
                 .map(|keys| format!("{BLAME_GAP}{keys} to resolve"));
+            // A word typed over: its line says where else it can be changed.
+            let repeat_tip = editor.repeat_tip();
             // In a changed line, the words that changed (drawn plainer in the old line, and
             // tinted on both sides below).
             let words = editor.word_changes(lines_shown.clone());
@@ -1050,7 +1054,11 @@ impl Element for EditorElement {
                     let tip = resolve_tip
                         .as_ref()
                         .filter(|_| row.last && conflicts.iter().any(|c| c.start == row.line))
-                        .cloned();
+                        .cloned()
+                        .or_else(|| {
+                            let (line, tip) = repeat_tip.as_ref().filter(|_| row.last)?;
+                            (*line == row.line).then(|| format!("{BLAME_GAP}{tip}"))
+                        });
                     let lens_here = lens_note.clone().filter(|_| row.last && row.line == caret_line);
                     let (suffix, suffix_text) = if row.last && editor.is_folded(row.line) {
                         (vec![run(FOLDED.len(), &font, theme.muted)], FOLDED.to_string())
@@ -1318,6 +1326,18 @@ impl Element for EditorElement {
                     (!rows.is_empty()).then(|| {
                         // Inside a breakpoint's dot, smaller, so both show.
                         let mark = if editor.breakpoints.contains(&line) { px(4.) } else { mark };
+                        let y = row_top(rows.start) + (line_height - mark) / 2.;
+                        Bounds::new(point(bounds.left() + px(9.) - mark / 2., y), size(mark, mark))
+                    })
+                })
+                .collect();
+            let repeat_dots: Vec<Bounds<Pixels>> = editor
+                .repeat_lines()
+                .into_iter()
+                .filter(|&line| lines_shown.contains(&line) && !editor.is_bookmarked(line))
+                .filter_map(|line| {
+                    let rows = rows_of(line..line + 1);
+                    (!rows.is_empty()).then(|| {
                         let y = row_top(rows.start) + (line_height - mark) / 2.;
                         Bounds::new(point(bounds.left() + px(9.) - mark / 2., y), size(mark, mark))
                     })
@@ -1892,6 +1912,7 @@ impl Element for EditorElement {
                 breakpoint_dots,
                 test_dots,
                 bookmark_dots,
+                repeat_dots,
                 execution,
                 indent_guides,
                 line_guide,
@@ -1980,6 +2001,9 @@ impl Element for EditorElement {
         }
         for dot in &prepaint.bookmark_dots {
             window.paint_quad(fill(*dot, theme.caret).corner_radii(dot.size.width / 2.));
+        }
+        for dot in &prepaint.repeat_dots {
+            window.paint_quad(fill(*dot, theme.caret.opacity(0.45)).corner_radii(dot.size.width / 2.));
         }
         if let Some(band) = prepaint.assist_band {
             window.paint_quad(fill(band, theme.accent_soft));

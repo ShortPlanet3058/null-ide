@@ -28,6 +28,7 @@ mod notes;
 mod numbers;
 mod refactor;
 mod reindent;
+mod repeat_edit;
 mod review;
 mod rewrap;
 mod signature;
@@ -235,6 +236,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     fold::bind_keys(cx);
     fixes::bind_keys(cx);
     conflicts::bind_keys(cx);
+    repeat_edit::bind_keys(cx);
     breakpoints::bind_keys(cx);
     bookmarks::bind_keys(cx);
     notes::bind_keys(cx);
@@ -641,6 +643,12 @@ pub struct Editor {
     batch: Option<cursors::Batch>,
     /// Vim's mode and what's pending, when its keys are in use.
     vim: vim::Vim,
+    /// A word typed over, and the other places the old one stands (see `repeat_edit`).
+    repeat: Option<repeat_edit::Repeat>,
+    /// The edit under way is in that word.
+    repeat_follows: bool,
+    /// The edit under way is the change made at one of those places.
+    repeating: bool,
     _vim_keys: Subscription,
     /// The word ⌘D picked from a bare caret: its occurrences must be whole words too.
     word_pick: Option<Range<usize>>,
@@ -1006,6 +1014,9 @@ impl Editor {
             extra: Vec::new(),
             batch: None,
             vim: vim::Vim::default(),
+            repeat: None,
+            repeat_follows: false,
+            repeating: false,
             _vim_keys: vim::listen(cx),
             word_pick: None,
             occurrence_whole_word: false,
@@ -1576,6 +1587,7 @@ impl Editor {
         self.search_after_edit(cx);
         self.folds_after_edit(cx);
         self.ai_text_changed();
+        self.repeat_after_edit();
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
         self.hints_after_edit();
@@ -2513,6 +2525,7 @@ impl Editor {
         // Typing in a tag's name types in its pair's too.
         let linked = matches!(kind, EditKind::Typing | EditKind::Deleting).then(|| self.linked_tag(&range)).flatten();
         self.record_undo(kind);
+        self.repeat_before_edit(&range, text, kind);
         let mut end = self.buffer.replace(range.clone(), text);
         if let Some(linked) = linked {
             end = self.mirror_tag(linked, range.clone(), end - range.start, end);
@@ -2526,6 +2539,7 @@ impl Editor {
         self.marked = None;
         self.goal_column = None;
         self.text_changed(cx);
+        self.repeat_shown_when_settled(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
     }
@@ -4734,6 +4748,7 @@ impl Render for Editor {
             key_context.add("in_snippet");
         }
         self.ai_key_context(&mut key_context);
+        self.repeat_key_context(&mut key_context);
         let text = div()
             .key_context(key_context)
             .track_focus(&self.focus_handle)
@@ -4885,6 +4900,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::open_line))
             .on_action(cx.listener(Self::next_change))
             .on_action(cx.listener(Self::next_conflict))
+            .on_action(cx.listener(Self::repeat_edit))
+            .on_action(cx.listener(Self::forget_repeat))
             .on_action(cx.listener(Self::previous_conflict))
             .on_action(cx.listener(Self::previous_change))
             .on_action(cx.listener(Self::reverse_lines))
