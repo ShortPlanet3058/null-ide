@@ -997,6 +997,8 @@ pub struct Workspace {
     /// What ssh asks, asked here (see `askpass`): the one shown, with whoever waits for its
     /// answer (the same question asked again meanwhile, all of them), then those after it.
     ssh_prompt: Option<(Entity<crate::ssh_prompt::SshPrompt>, Subscription, Vec<SshAnswer>)>,
+    /// Whether to move what's picked in the files to the Trash.
+    trash_prompt: Option<(Entity<crate::trash_prompt::TrashPrompt>, Subscription)>,
     ssh_questions: std::collections::VecDeque<crate::askpass::Ask>,
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
@@ -1065,6 +1067,9 @@ impl Workspace {
                 FileTreeEvent::Renamed { from, to } => this.paths_renamed(from, to, cx),
                 FileTreeEvent::RenameRequested { from, to } => this.queue_rename(from.clone(), to.clone(), cx),
                 FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
+                FileTreeEvent::AskToTrash { question, detail } => {
+                    this.ask_to_trash(question.clone(), detail.clone(), window, cx)
+                }
                 FileTreeEvent::OpenTerminal(dir) => this.open_terminal_in(dir.clone(), window, cx),
                 FileTreeEvent::FindInFolder(dir) => this.find_in_folder(dir, window, cx),
                 // Two files picked in the tree: the first opened, compared with the second.
@@ -1292,6 +1297,7 @@ impl Workspace {
             ignore_rules,
             key_prompt: None,
             ssh_prompt: None,
+            trash_prompt: None,
             ssh_questions: std::collections::VecDeque::new(),
             notice: None,
             past_notices: Vec::new(),
@@ -8068,6 +8074,28 @@ impl Workspace {
         self.show_notice(format!("{tool} is too slow for suggestions as you type: choose where they come from."), cx);
     }
 
+    /// Whether to move what's picked in the files to the Trash, asked in the window.
+    fn ask_to_trash(&mut self, question: String, detail: String, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.new(|cx| crate::trash_prompt::TrashPrompt::new(question, detail, cx));
+        let subscription = cx.subscribe_in(&prompt, window, |this, _, event, window, cx| {
+            let crate::trash_prompt::TrashPromptEvent::Answered { trash, dont_ask } = *event;
+            this.answer_trash(trash, dont_ask, window, cx);
+        });
+        window.focus(&prompt.focus_handle(cx));
+        self.trash_prompt = Some((prompt, subscription));
+        cx.notify();
+    }
+
+    fn answer_trash(&mut self, trash: bool, dont_ask: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.trash_prompt = None;
+        if dont_ask {
+            crate::settings::update(cx, |s| s.confirm_trash = false);
+            self.show_notice("Not asked again: Settings → Window brings the question back.".into(), cx);
+        }
+        self.tree.update(cx, |tree, cx| tree.trash_asked(trash, window, cx));
+        cx.notify();
+    }
+
     /// What ssh asks, asked in this window: now, or after the question already shown (the
     /// same question again waits for the same answer).
     pub fn ask_for_ssh(&mut self, ask: crate::askpass::Ask, window: &mut Window, cx: &mut Context<Self>) {
@@ -11647,6 +11675,8 @@ impl Render for Workspace {
         let overlay: Option<AnyElement> = if let Some((prompt, ..)) = &self.ssh_prompt {
             // (What ssh asks waits on nothing else: a connection hangs on it.)
             Some(prompt.clone().into_any_element())
+        } else if let Some((prompt, _)) = &self.trash_prompt {
+            Some(prompt.clone().into_any_element())
         } else if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
@@ -12542,6 +12572,10 @@ impl Render for Workspace {
                                 // (ssh's question, clicked away: not answered.)
                                 if this.ssh_prompt.is_some() {
                                     return this.answer_ssh(None, window, cx);
+                                }
+                                // (Nor the Trash's: nothing moved.)
+                                if this.trash_prompt.is_some() {
+                                    return this.answer_trash(false, false, window, cx);
                                 }
                                 this.close_palette(window, cx);
                             }),
@@ -16084,9 +16118,10 @@ esac
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
         cx.dispatch_action(TrashFile);
         cx.run_until_parked();
-        assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Cancel");
+        workspace.update(cx, |w, _| assert!(w.trash_prompt.is_some(), "asked in the window"));
+        cx.simulate_keystrokes("escape");
         cx.run_until_parked();
+        workspace.update(cx, |w, _| assert!(w.trash_prompt.is_none()));
         assert!(renamed.exists());
         std::fs::remove_dir_all(&dir).ok();
     }

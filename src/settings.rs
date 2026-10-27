@@ -471,6 +471,8 @@ pub struct Settings {
     /// A file clicked once in the files opens in a passing tab, which the next one replaces
     /// until it's edited or double-clicked.
     pub preview_tabs: bool,
+    /// Ask before moving files to the Trash (off once "Don't ask again" is ticked).
+    pub confirm_trash: bool,
     /// Brackets coloured by how deep they are, a pair the same colour.
     pub bracket_colours: bool,
     /// Every line's problem written at its end, faintly (otherwise only the caret's line's).
@@ -567,6 +569,7 @@ impl Default for Settings {
             organize_imports_on_save: false,
             format_on_paste: false,
             preview_tabs: true,
+            confirm_trash: true,
             bracket_colours: false,
             problems_at_line_ends: false,
             auto_save: AutoSave::Off,
