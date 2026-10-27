@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Folders on servers: File History keeps a server file's earlier versions (from what Null
+  last read or saved of it, no extra trip to the server), and pictures open from there.
 - Relative line numbers (Settings → Editor): lines counted from the cursor's, as a count
   before a move goes (Vim's 5j); a fold counts as one line.
 - Update: a newer version out shows as "Null 0.2.0 is out · Update" in the status bar; a

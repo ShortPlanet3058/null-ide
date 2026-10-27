@@ -1,6 +1,9 @@
 //! What a file held before Null wrote over it, kept for a while in the data folder: going
 //! back needs no git, and works between commits. A burst of saves (auto-save while typing)
 //! keeps one version a minute; a file keeps its last 50, for 30 days. Big files aren't kept.
+//!
+//! A server's file is kept here too, from what Null last read or wrote of it (asking the
+//! server again before each save would cost a trip over the network).
 
 use std::path::{Path, PathBuf};
 
@@ -45,6 +48,31 @@ fn millis(time: std::time::SystemTime) -> i64 {
     time.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
+/// A server file's bytes as Null last read or wrote them, and when.
+type Seen = std::collections::HashMap<PathBuf, (Vec<u8>, i64)>;
+
+/// What each server file held when Null last read or wrote it (small ones).
+static ON_SERVERS: std::sync::Mutex<Option<Seen>> = std::sync::Mutex::new(None);
+/// Server files remembered at most (the oldest go first).
+const ON_SERVERS_MAX: usize = 200;
+
+/// What a server's file holds, as Null just read or wrote it.
+pub fn seen_on_server(path: &Path, bytes: &[u8]) {
+    let Ok(mut seen) = ON_SERVERS.lock() else { return };
+    let seen = seen.get_or_insert_with(Default::default);
+    if bytes.len() as u64 > MAX_BYTES {
+        seen.remove(path);
+        return;
+    }
+    if seen.len() >= ON_SERVERS_MAX
+        && !seen.contains_key(path)
+        && let Some(oldest) = seen.iter().min_by_key(|(_, (_, at))| *at).map(|(p, _)| p.clone())
+    {
+        seen.remove(&oldest);
+    }
+    seen.insert(path.to_path_buf(), (bytes.to_vec(), millis(std::time::SystemTime::now())));
+}
+
 /// About to write `new` over the file at `path` (its real path, links followed): what it
 /// holds now is kept, unless it's big, the same, or what was kept last.
 pub fn keep_before_writing(path: &Path, new: &[u8]) {
@@ -53,16 +81,22 @@ pub fn keep_before_writing(path: &Path, new: &[u8]) {
 
 /// `keep_before_writing`, `now` being the time (Unix milliseconds).
 fn keep_at(path: &Path, new: &[u8], now: i64) {
-    let Ok(meta) = std::fs::metadata(path) else { return };
-    if !meta.is_file() || meta.len() > MAX_BYTES || meta.len() == 0 {
-        return;
-    }
-    let Ok(old) = std::fs::read(path) else { return };
-    if old == new {
+    let (old, time) = if crate::remote::is_remote(path) {
+        let seen = ON_SERVERS.lock().ok().and_then(|s| s.as_ref()?.get(path).cloned());
+        let Some(seen) = seen else { return };
+        seen
+    } else {
+        let Ok(meta) = std::fs::metadata(path) else { return };
+        if !meta.is_file() || meta.len() > MAX_BYTES {
+            return;
+        }
+        let Ok(old) = std::fs::read(path) else { return };
+        (old, meta.modified().map(millis).unwrap_or(0))
+    };
+    if old.is_empty() || old == new {
         return;
     }
     let Some(dir) = folder(path) else { return };
-    let time = meta.modified().map(millis).unwrap_or(0);
     let kept = versions(path);
     if let Some(last) = kept.first() {
         if std::fs::read(&last.file).is_ok_and(|bytes| bytes == old) {
@@ -90,7 +124,11 @@ fn keep_at(path: &Path, new: &[u8], now: i64) {
 
 /// The versions kept of the file at `path`, newest first.
 pub fn versions(path: &Path) -> Vec<Saved> {
-    let path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = if crate::remote::is_remote(path) {
+        path.to_path_buf()
+    } else {
+        dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    };
     let Some(dir) = folder(&path) else { return Vec::new() };
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut found: Vec<Saved> = entries.filter_map(Result::ok).filter_map(|e| saved(e.path())).collect();
@@ -190,6 +228,23 @@ mod tests {
         keep_at(&file, b"abcd\n", now + 1);
         assert_eq!(versions(&file).len(), 2);
         std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(folder(&file).unwrap()).ok();
+    }
+
+    /// A server's file: what Null last read or wrote of it is what's kept, no trip there.
+    #[test]
+    fn a_server_file_keeps_what_null_last_saw() {
+        let file = crate::remote::path("box", &format!("/home/me/null-history-{}.txt", std::process::id()));
+        let now = millis(std::time::SystemTime::now());
+        // Never seen: nothing to keep.
+        keep_at(&file, b"new\n", now);
+        assert!(versions(&file).is_empty());
+        seen_on_server(&file, b"as read\n");
+        keep_at(&file, b"edited\n", now);
+        seen_on_server(&file, b"edited\n");
+        let texts: Vec<String> =
+            versions(&file).iter().map(|s| s.text(crate::encoding::Encoding::default()).unwrap()).collect();
+        assert_eq!(texts, ["as read\n"]);
         std::fs::remove_dir_all(folder(&file).unwrap()).ok();
     }
 }

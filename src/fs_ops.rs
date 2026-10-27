@@ -205,11 +205,14 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SAVES: AtomicU64 = AtomicU64::new(0);
-    // On a server: whole or not at all there too (its local history isn't kept: each save
-    // would read the file back over the network first).
+    // On a server: whole or not at all there too; its history from what Null last saw of it.
     if let Some(at) = crate::remote::of(path) {
         crate::project_fs::forget(path);
-        return crate::remote::write_whole(&at, bytes);
+        let path = crate::remote::path(&at.host, &at.path);
+        crate::local_history::keep_before_writing(&path, bytes);
+        crate::remote::write_whole(&at, bytes)?;
+        crate::local_history::seen_on_server(&path, bytes);
+        return Ok(());
     }
     let target = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let existing = std::fs::metadata(&target).ok();
