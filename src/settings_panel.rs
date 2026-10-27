@@ -833,8 +833,8 @@ impl SettingsPanel {
                 &theme,
             ),
         ];
-        // (The spell checker is the Mac's own: none to offer elsewhere yet.)
-        if crate::spell::AVAILABLE {
+        // (On Linux, only with dictionaries to read.)
+        if crate::spell::available() {
             rows.extend([
                 Self::row(
                     "Spelling",

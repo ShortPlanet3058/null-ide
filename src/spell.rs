@@ -1,26 +1,47 @@
-//! Spelling where text is words: Markdown and text files, and comments in code. The Mac's
-//! own checker does it. A line is checked in each of the first languages set in System
-//! Settings, and it's in the one it has the fewest mistakes in: "teh" is a word in
-//! Indonesian, not in an English sentence, and "fôte" is wrong in a French one. Each line
-//! is asked about once. Names, addresses, paths and code aren't words: never marked.
+//! Spelling where text is words: Markdown and text files, and comments in code. The
+//! system's own checker does it: the Mac's, Windows', and on Linux the Hunspell
+//! dictionaries the system has (as LibreOffice and Firefox use). A line is checked in each
+//! of the person's first languages, and it's in the one it has the fewest mistakes in:
+//! "teh" is a word in Indonesian, not in an English sentence, and "fôte" is wrong in a
+//! French one. Each line is asked about once. Names, addresses, paths and code aren't
+//! words: never marked.
 
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-/// Whether the Mac's checker has started (see `warm`): until it has, lines aren't checked,
-/// so opening a file never waits for it (its first use took 48 ms of the first drawing).
+/// Whether the checker has started (see `warm`): until it has, lines aren't checked,
+/// so opening a file never waits for it (the Mac's first use took 48 ms of the first
+/// drawing; Linux's dictionaries take longer to read).
 static READY: AtomicBool = AtomicBool::new(cfg!(test));
 
-/// The checker started (its languages found), once the window is up.
-/// Whether there's a spell checker to ask: the Mac's (Windows' and Linux's to come).
-pub const AVAILABLE: bool = cfg!(target_os = "macos");
+/// Whether there's a spell checker to ask: the Mac's, Windows', or on Linux dictionaries
+/// to read.
+pub fn available() -> bool {
+    #[cfg(all(unix, not(target_os = "macos"), not(test)))]
+    return !hunspell::files().is_empty();
+    #[allow(unreachable_code)]
+    true
+}
 
+/// What takes a while to start, off the window's thread: Linux's dictionaries read.
+pub fn load() {
+    #[cfg(all(unix, not(target_os = "macos"), not(test)))]
+    LazyLock::force(&hunspell::DICTIONARIES);
+}
+
+/// The checker started (its languages found), once the window is up (after `load`).
 pub fn warm() {
     #[cfg(all(target_os = "macos", not(test)))]
     LazyLock::force(&mac::LANGUAGES);
     READY.store(true, Ordering::Relaxed);
+}
+
+/// Of the mistakes found in a line in each language, the fewest (see the top).
+#[cfg_attr(test, allow(dead_code))]
+fn fewest(found: impl Iterator<Item = Vec<Range<usize>>>) -> Option<Vec<Range<usize>>> {
+    found.min_by_key(Vec::len)
 }
 
 /// Lines asked about (by a hash of their text), and the byte ranges in them the checker
@@ -108,8 +129,8 @@ pub fn misspelled_words(line: &str, keep: impl Fn(&Range<usize>) -> bool) -> Vec
     checked.into_iter().filter(|r| wrong.iter().any(|w| w.start < r.end && r.start < w.end)).collect()
 }
 
-/// UTF-16 units (as the Mac counts) of `text` to its bytes.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// UTF-16 units (as the Mac and Windows count) of `text` to its bytes.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn bytes_of(text: &str, units: Range<usize>) -> Range<usize> {
     let (mut unit, mut start, mut end) = (0, text.len(), text.len());
     for (byte, c) in text.char_indices() {
@@ -130,7 +151,8 @@ pub fn guesses(word: &str) -> Vec<String> {
     checker::guesses(word)
 }
 
-/// `word` is right from now on, here and in every app that uses the Mac's dictionary.
+/// `word` is right from now on: here and in every app that uses the system's dictionary
+/// (the Mac, Windows), or on Linux in Null's own list (`words.txt` in its data folder).
 pub fn learn(word: &str) {
     checker::learn(word);
     if let Ok(mut known) = KNOWN.lock() {
@@ -169,14 +191,8 @@ mod mac {
     /// What's wrong in `line` in the language it has the fewest mistakes in.
     pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
         let text = NSString::from_str(line);
-        let mut best: Option<Vec<Range<usize>>> = None;
-        for language in LANGUAGES.iter() {
-            let wrong = wrong_in_language(line, &text, Some(&NSString::from_str(language)));
-            if best.as_ref().is_none_or(|b| wrong.len() < b.len()) {
-                best = Some(wrong);
-            }
-        }
-        best.unwrap_or_else(|| wrong_in_language(line, &text, None))
+        let each = LANGUAGES.iter().map(|l| wrong_in_language(line, &text, Some(&NSString::from_str(l))));
+        super::fewest(each).unwrap_or_else(|| wrong_in_language(line, &text, None))
     }
 
     fn wrong_in_language(line: &str, text: &NSString, language: Option<&NSString>) -> Vec<Range<usize>> {
@@ -217,16 +233,280 @@ mod mac {
     }
 }
 
-/// Elsewhere (for now), nothing is marked.
-#[cfg(all(not(target_os = "macos"), not(test)))]
-mod checker {
-    pub fn wrong_in(_: &str) -> Vec<std::ops::Range<usize>> {
-        Vec::new()
+#[cfg(all(windows, not(test)))]
+use win as checker;
+
+/// Windows' own checker (Settings → Time & language: the languages added there).
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+mod win {
+    use std::ops::Range;
+    use windows::Win32::Foundation::S_OK;
+    use windows::Win32::Globalization::{
+        GetUserDefaultLocaleName, ISpellChecker, ISpellCheckerFactory, SpellCheckerFactory,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    };
+    use windows::core::{HSTRING, PWSTR};
+
+    thread_local! {
+        /// This thread's checkers, one a language: made where they're used, as COM wants.
+        static CHECKERS: Vec<ISpellChecker> = checkers(&languages());
     }
-    pub fn guesses(_: &str) -> Vec<String> {
-        Vec::new()
+
+    /// The person's own language (their regional format's), then English.
+    fn languages() -> Vec<String> {
+        let mut name = [0u16; 85];
+        // Safety: the buffer's length is passed with it.
+        let length = unsafe { GetUserDefaultLocaleName(&mut name) };
+        let mut tags = Vec::new();
+        if length > 1 {
+            tags.push(String::from_utf16_lossy(&name[..length as usize - 1]));
+        }
+        if !tags.iter().any(|t| t.starts_with("en")) {
+            tags.push("en-US".into());
+        }
+        tags
     }
-    pub fn learn(_: &str) {}
+
+    /// A checker for each of `tags` Windows has a dictionary for.
+    pub(super) fn checkers(tags: &[String]) -> Vec<ISpellChecker> {
+        // Safety: COM started on this thread (already started on the window's: said, and
+        // fine), then plain calls on the factory it gives.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let Ok(factory) =
+                CoCreateInstance::<_, ISpellCheckerFactory>(&SpellCheckerFactory, None, CLSCTX_INPROC_SERVER)
+            else {
+                return Vec::new();
+            };
+            tags.iter()
+                .map(|tag| HSTRING::from(tag.as_str()))
+                .filter(|tag| factory.IsSupported(tag).is_ok_and(|yes| yes.as_bool()))
+                .filter_map(|tag| factory.CreateSpellChecker(&tag).ok())
+                .take(3)
+                .collect()
+        }
+    }
+
+    pub(super) fn wrong_in_language(checker: &ISpellChecker, line: &str) -> Vec<Range<usize>> {
+        let mut wrong = Vec::new();
+        // Safety: COM calls on a checker made on this thread; each error read once.
+        unsafe {
+            let Ok(errors) = checker.Check(&HSTRING::from(line)) else { return wrong };
+            loop {
+                let mut error = None;
+                if errors.Next(&mut error) != S_OK {
+                    break;
+                }
+                let Some(error) = error else { break };
+                if let (Ok(start), Ok(length)) = (error.StartIndex(), error.Length()) {
+                    let (start, length) = (start as usize, length as usize);
+                    wrong.push(super::bytes_of(line, start..start + length));
+                }
+            }
+        }
+        wrong
+    }
+
+    pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
+        CHECKERS.with(|checkers| super::fewest(checkers.iter().map(|c| wrong_in_language(c, line))).unwrap_or_default())
+    }
+
+    pub(super) fn guesses_from(checker: &ISpellChecker, word: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        // Safety: COM calls on a checker made on this thread; each string given back is
+        // copied, then freed as COM says.
+        unsafe {
+            let Ok(guesses) = checker.Suggest(&HSTRING::from(word)) else { return found };
+            loop {
+                let mut one = [PWSTR::null()];
+                let mut fetched = 0;
+                if guesses.Next(&mut one, Some(&mut fetched)) != S_OK || fetched == 0 {
+                    break;
+                }
+                found.extend(one[0].to_string().ok());
+                CoTaskMemFree(Some(one[0].0 as *const _));
+            }
+        }
+        found
+    }
+
+    /// Guesses from the languages it's wrong in.
+    pub fn guesses(word: &str) -> Vec<String> {
+        CHECKERS.with(|checkers| {
+            let mut found: Vec<String> = Vec::new();
+            for checker in checkers.iter().filter(|c| !wrong_in_language(c, word).is_empty()) {
+                for guess in guesses_from(checker, word) {
+                    if !found.contains(&guess) {
+                        found.push(guess);
+                    }
+                }
+            }
+            found
+        })
+    }
+
+    pub fn learn(word: &str) {
+        CHECKERS.with(|checkers| {
+            for checker in checkers {
+                // Safety: a COM call on a checker made on this thread.
+                unsafe { checker.Add(&HSTRING::from(word)).ok() };
+            }
+        });
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos"), not(test)))]
+use hunspell as checker;
+
+/// Hunspell's dictionaries, as Linux has them (`hunspell-fr`, `hunspell-en-us`…), read by
+/// spellbook; and the words learned, in Null's own list.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg_attr(test, allow(dead_code))]
+mod hunspell {
+    use spellbook::Dictionary;
+    use std::ops::Range;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    /// Where distributions put them.
+    const FOLDERS: &[&str] =
+        &["/usr/share/hunspell", "/usr/share/myspell/dicts", "/usr/share/myspell", "/usr/local/share/hunspell"];
+
+    pub(super) static DICTIONARIES: LazyLock<Mutex<Vec<Dictionary>>> = LazyLock::new(|| {
+        let mut read: Vec<Dictionary> = files().iter().filter_map(|(aff, dic)| dictionary(aff, dic)).collect();
+        for word in learned() {
+            for dictionary in &mut read {
+                dictionary.add(&word).ok();
+            }
+        }
+        Mutex::new(read)
+    });
+
+    /// The languages wanted, from the environment (`LANGUAGE`, `LANG`…: "fr_FR", then
+    /// "fr"), then English.
+    fn wanted() -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for var in ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"] {
+            for part in std::env::var(var).unwrap_or_default().split(':') {
+                let tag = part.split(['.', '@']).next().unwrap_or_default();
+                if tag.is_empty() || tag == "C" || tag == "POSIX" {
+                    continue;
+                }
+                names.push(tag.to_string());
+                if let Some((language, _)) = tag.split_once('_') {
+                    names.push(language.to_string());
+                }
+            }
+        }
+        names.extend(["en_US", "en_GB", "en"].map(String::from));
+        let mut unique = Vec::new();
+        for name in names {
+            if !unique.contains(&name) {
+                unique.push(name);
+            }
+        }
+        unique
+    }
+
+    /// The dictionaries (.aff and .dic) for the languages wanted, one a language, at most
+    /// three, found in `folders`.
+    pub(super) fn files_in(folders: &[&Path], wanted: &[String]) -> Vec<(PathBuf, PathBuf)> {
+        let mut found: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut languages: Vec<String> = Vec::new();
+        for name in wanted {
+            let language = name.split('_').next().unwrap_or(name).to_string();
+            if languages.contains(&language) {
+                continue;
+            }
+            let pair = folders.iter().map(|f| (f.join(format!("{name}.aff")), f.join(format!("{name}.dic"))));
+            if let Some(pair) = pair.into_iter().find(|(aff, dic)| aff.is_file() && dic.is_file()) {
+                found.push(pair);
+                languages.push(language);
+            }
+            if found.len() == 3 {
+                break;
+            }
+        }
+        found
+    }
+
+    pub fn files() -> Vec<(PathBuf, PathBuf)> {
+        static FILES: LazyLock<Vec<(PathBuf, PathBuf)>> = LazyLock::new(|| {
+            let folders: Vec<&Path> = FOLDERS.iter().map(Path::new).collect();
+            files_in(&folders, &wanted())
+        });
+        FILES.clone()
+    }
+
+    /// A dictionary's text: UTF-8, else Latin-1 (older ones say `SET ISO8859-1`).
+    fn text(path: &Path) -> Option<String> {
+        let bytes = std::fs::read(path).ok()?;
+        Some(String::from_utf8(bytes).unwrap_or_else(|e| e.into_bytes().iter().map(|&b| b as char).collect()))
+    }
+
+    pub(super) fn dictionary(aff: &Path, dic: &Path) -> Option<Dictionary> {
+        Dictionary::new(&text(aff)?, &text(dic)?).ok()
+    }
+
+    fn learned_file() -> Option<PathBuf> {
+        Some(crate::tools::data_dir()?.join("words.txt"))
+    }
+
+    fn learned() -> Vec<String> {
+        let text = learned_file().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+        text.lines().map(str::trim).filter(|w| !w.is_empty()).map(String::from).collect()
+    }
+
+    /// Whether `dictionary` has `word`: as written, with a straight apostrophe, or (French's
+    /// "l’été") the word after it.
+    pub(super) fn knows(dictionary: &Dictionary, word: &str) -> bool {
+        let straight = word.replace('’', "'");
+        dictionary.check(word)
+            || dictionary.check(&straight)
+            || straight.rsplit_once('\'').is_some_and(|(_, after)| after.chars().count() > 1 && dictionary.check(after))
+    }
+
+    pub(super) fn wrong_in_language(dictionary: &Dictionary, line: &str) -> Vec<Range<usize>> {
+        super::words(line).into_iter().filter(|r| !knows(dictionary, &line[r.clone()])).collect()
+    }
+
+    pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
+        let Ok(dictionaries) = DICTIONARIES.lock() else { return Vec::new() };
+        super::fewest(dictionaries.iter().map(|d| wrong_in_language(d, line))).unwrap_or_default()
+    }
+
+    /// Guesses from the languages it's wrong in.
+    pub fn guesses(word: &str) -> Vec<String> {
+        let Ok(dictionaries) = DICTIONARIES.lock() else { return Vec::new() };
+        let mut found: Vec<String> = Vec::new();
+        for dictionary in dictionaries.iter().filter(|d| !knows(d, word)) {
+            let mut guesses = Vec::new();
+            dictionary.suggest(word, &mut guesses);
+            for guess in guesses {
+                if !found.contains(&guess) {
+                    found.push(guess);
+                }
+            }
+        }
+        found
+    }
+
+    pub fn learn(word: &str) {
+        if let Ok(mut dictionaries) = DICTIONARIES.lock() {
+            for dictionary in dictionaries.iter_mut() {
+                dictionary.add(word).ok();
+            }
+        }
+        if let Some(file) = learned_file() {
+            use std::io::Write;
+            file.parent().map(std::fs::create_dir_all);
+            let opened = std::fs::OpenOptions::new().create(true).append(true).open(file);
+            opened.and_then(|mut f| writeln!(f, "{word}")).ok();
+        }
+    }
 }
 
 /// Tests get a small dictionary of their own: the same everywhere, and nothing learned
@@ -288,6 +568,44 @@ mod tests {
         // The Mac counts in UTF-16: "été 😀 teh" → bytes.
         let text = "été 😀 teh";
         assert_eq!(&text[bytes_of(text, 7..10)], "teh");
+    }
+
+    /// Windows' own checker, for real (CI's Windows has English).
+    #[test]
+    #[cfg(windows)]
+    fn windows_checker_answers() {
+        let checkers = super::win::checkers(&["en-US".to_string()]);
+        let Some(english) = checkers.first() else { return eprintln!("no English checker here") };
+        let line = "This release fixes teh crash when you recieve a big file.";
+        let found: Vec<&str> = super::win::wrong_in_language(english, line).into_iter().map(|r| &line[r]).collect();
+        assert_eq!(found, ["teh", "recieve"]);
+        assert!(super::win::guesses_from(english, "recieve").contains(&"receive".to_string()));
+    }
+
+    /// Linux's: Hunspell dictionaries found where distributions put them, read, and asked.
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn hunspell_dictionaries_answer() {
+        let dir = crate::tools::test_dir("hunspell");
+        let aff = "SET UTF-8\nTRY esianrtolcdugmphbyfvkwz'\nSFX S Y 1\nSFX S 0 s .\n";
+        std::fs::write(dir.join("en_US.aff"), aff).unwrap();
+        std::fs::write(dir.join("en_US.dic"), "4\ncat/S\nreceive\nthe\ndon't\n").unwrap();
+        std::fs::write(dir.join("fr.aff"), "SET UTF-8\n").unwrap();
+        std::fs::write(dir.join("fr.dic"), "2\nété\nl'\n").unwrap();
+        let wanted = ["fr_FR", "fr", "en_US", "en"].map(String::from);
+        let files = super::hunspell::files_in(&[dir.as_path()], &wanted);
+        // One a language, in the order wanted (fr_FR has none: fr's).
+        let names: Vec<_> = files.iter().map(|(_, dic)| dic.file_name().unwrap().to_owned()).collect();
+        assert_eq!(names, ["fr.dic", "en_US.dic"]);
+        let english = super::hunspell::dictionary(&files[1].0, &files[1].1).unwrap();
+        let line = "the cats don't recieve teh";
+        let found: Vec<&str> =
+            super::hunspell::wrong_in_language(&english, line).into_iter().map(|r| &line[r]).collect();
+        assert_eq!(found, ["recieve", "teh"]);
+        let french = super::hunspell::dictionary(&files[0].0, &files[0].1).unwrap();
+        assert!(super::hunspell::knows(&french, "l’été"));
+        // The real ones, if this computer has any.
+        println!("wanted here: {:?}", super::hunspell::files());
     }
 
     /// The Mac's own checker, for real (run by hand: it asks AppKit).

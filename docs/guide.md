@@ -134,9 +134,12 @@ makes both jump instead.
   its `//`, `>` or list indent. The ⌃ keys of macOS text fields work too: ⌃A ⌃E, ⌃K and
   ⌃Y, ⌃T, ⌃O, ⌃L to center the caret's line, and ⌘J to bring the selection back into view;
   ⌃⌥← → go by the parts of a name (`parse` `Http` `Request`), ⌃⌥⇧ selecting, ⌃⌥⌫ and ⌃⌥⌦ deleting.
-- Misspelled words in Markdown, text and comments get a faint wavy line, checked (on the Mac, for now) by the
-  Mac's own speller in the languages set in System Settings (each line in the one it reads
-  best in, so French and English mix); code is never marked. **⌘.** on one offers corrections.
+- Misspelled words in Markdown, text and comments get a faint wavy line, checked by the
+  system's own speller: the Mac's (the languages set in System Settings), Windows' (your
+  language and English, when Windows has them), and on Linux the Hunspell dictionaries
+  installed (`hunspell-fr`, `hunspell-en-us`…; your language and English). Each line is
+  checked in the one it reads best in, so French and English mix; code is never marked.
+  **⌘.** on one offers corrections, or learns the word (on Linux, in Null's `words.txt`).
 - Colours written in CSS, HTML, scripts and theme files (`#f80`, `rgb()`, `hsl()`) show a
   small square of themselves just before; on the Mac, a click on it opens its colour panel, and the
   colour picked there is written back the way the first was (one undo takes it back).

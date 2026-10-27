@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Spelling on Windows and Linux: Windows' own speller, and on Linux the Hunspell
+  dictionaries installed, in your language and English, each line in the one it reads best
+  in (it was the Mac's only).
 - Merge conflicts: ✦ Resolve with AI (⌘. in a conflict, with AI on) writes one version
   keeping what each side changed, shown as a change to keep (⇥) or undo (Esc).
 - What's new: after an update, a notice says which version is installed, and a click on it
