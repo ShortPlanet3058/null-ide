@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+Null updates itself, opens folders inside WSL and on servers over SSH, installs language
+servers on a computer with nothing else installed, and asks AI for less.
 
 - Folders on servers: File History keeps a server file's earlier versions (from what Null
   last read or saved of it, no extra trip to the server), and pictures open from there.
@@ -36,8 +39,8 @@
   files through one connection, the terminal, git and language servers run on the server,
   saves are whole, Move to Trash uses the server's Trash, changes there show within seconds,
   search narrows files on the server first.
-- CI runs once a pull request is ready, not on drafts or after merges; packages are built on
-  demand, per platform.
+- CI runs once a pull request is ready, not on drafts or after merges; packages are built
+  when a new version reaches main, or on demand, per platform.
 - Folders inside WSL (Windows): Open WSL Folder…, or `null .` in a WSL shell. Files are read
   through Windows' WSL share; the terminal, git and language servers run inside Linux, in the
   folder's Linux path, and servers install there (Node.js along when the distribution has
@@ -47,7 +50,7 @@
   clicks; `null --version` and `null --help` print in the console they're typed in.
 - "Tell me when a new version is out" (off until turned on, on the welcome's last step or in
   Settings): once a day Null asks GitHub for its latest release, and says so in the status
-  bar when there's a newer one. "Check for Updates" in ⌘K asks now. Nothing is installed.
+  bar when there's a newer one. "Check for Updates" in ⌘K asks now.
 - Notes on code: ⌥⌘N (Ctrl+Alt+N) writes a note under the cursor's line; it moves with its
   line and is kept privately in Null's folder, never in the project. Notes… lists them.
 - An answer from ⌘I can be asked about further (each follow-up goes with the questions
