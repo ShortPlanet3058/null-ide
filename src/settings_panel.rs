@@ -609,6 +609,14 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Relative line numbers",
+                Some("Counted from the cursor's line, as a count before a move goes (Vim's 5j)"),
+                Self::toggle("relative-numbers", s.relative_line_numbers, &theme, cx, |s| {
+                    s.relative_line_numbers = !s.relative_line_numbers
+                }),
+                &theme,
+            ),
+            Self::row(
                 "Spaces and tabs",
                 Some("Shown as faint dots and dashes; at line ends, where they're left by mistake"),
                 {

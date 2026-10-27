@@ -436,6 +436,9 @@ pub struct Settings {
     pub line_spacing: LineSpacing,
     /// Where the line numbers show.
     pub line_numbers: LineNumbers,
+    /// Lines numbered from the cursor's (1, 2, 3 above and below it; its own keeps its
+    /// number): what a count before a move goes by (Vim's 5j).
+    pub relative_line_numbers: bool,
     /// Where spaces and tabs show, as faint dots and dashes.
     pub whitespace: ShowWhitespace,
     pub sidebar_visible: bool,
@@ -548,6 +551,7 @@ impl Default for Settings {
             ui_zoom: 1.,
             line_spacing: LineSpacing::Normal,
             line_numbers: LineNumbers::Shown,
+            relative_line_numbers: false,
             whitespace: ShowWhitespace::Selection,
             sidebar_visible: true,
             fade_bars_while_typing: true,

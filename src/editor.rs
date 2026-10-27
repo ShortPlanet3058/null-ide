@@ -576,6 +576,8 @@ pub struct Editor {
     pub untitled_name: Option<String>,
     /// A file that isn't text, as its bytes (the first `HEX_LIMIT` of them), to show in hex.
     binary: Option<std::sync::Arc<Vec<u8>>>,
+    /// A picture on a server, as read from there (gpui shows only this computer's files).
+    server_image: Option<gpui::ImageSource>,
     hex_scroll: gpui::UniformListScrollHandle,
     /// The file was deleted on disk while open (a checkout, the terminal): the text is
     /// still here, and saving puts the file back.
@@ -973,6 +975,7 @@ impl Editor {
             preview: None,
             untitled_name: None,
             binary: None,
+            server_image: None,
             hex_scroll: gpui::UniformListScrollHandle::new(),
             missing: false,
             disk_changed: false,
@@ -5339,6 +5342,12 @@ impl Editor {
             }
             _ => None,
         };
+        self.server_image = match (&self.preview, &self.path) {
+            (Some(crate::preview::Preview::Image { .. }), Some(path)) if crate::remote::is_remote(path) => {
+                server_image(path)
+            }
+            _ => None,
+        };
     }
 
     /// A file that isn't text, as its bytes: sixteen to a row, the offset before them and
@@ -5441,7 +5450,7 @@ impl Editor {
         let content = match (preview, &self.path) {
             (crate::preview::Preview::Image { .. }, Some(path)) => {
                 let name = name.clone().unwrap_or_default();
-                img(path.clone())
+                img(self.server_image.clone().unwrap_or_else(|| path.clone().into()))
                     .size_full()
                     .object_fit(ObjectFit::ScaleDown)
                     .with_fallback(move || note(format!("Couldn't show {name}")).into_any_element())
@@ -5557,6 +5566,27 @@ fn utc_stamp(secs: u64) -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}-{:02}{:02}{:02}", rest / 3600, rest % 3600 / 60, rest % 60)
+}
+
+/// A picture on a server, read from there: gpui draws pictures from this computer's files,
+/// so it's given the bytes (an SVG drawn here, as a local one is).
+fn server_image(path: &std::path::Path) -> Option<gpui::ImageSource> {
+    let bytes = crate::project_fs::read(path).ok()?;
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let format = match extension.as_str() {
+        "svg" => {
+            let (image, _) = crate::svg_image::draw(&bytes, 2., None)?;
+            return Some(gpui::ImageSource::Render(image));
+        }
+        "png" => gpui::ImageFormat::Png,
+        "jpg" | "jpeg" => gpui::ImageFormat::Jpeg,
+        "gif" => gpui::ImageFormat::Gif,
+        "webp" => gpui::ImageFormat::Webp,
+        "bmp" => gpui::ImageFormat::Bmp,
+        "tif" | "tiff" => gpui::ImageFormat::Tiff,
+        _ => return None,
+    };
+    Some(gpui::ImageSource::Image(std::sync::Arc::new(gpui::Image::from_bytes(format, bytes))))
 }
 
 #[cfg(test)]

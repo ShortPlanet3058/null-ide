@@ -583,7 +583,10 @@ fn meta_of(fields: &[&str]) -> Option<Meta> {
 }
 
 pub fn read(at: &RemotePath) -> io::Result<Vec<u8>> {
-    Ok(run_ok(&at.host, &format!("cat -- {}", quote(&at.path)))?.stdout)
+    let bytes = run_ok(&at.host, &format!("cat -- {}", quote(&at.path)))?.stdout;
+    // (What it held, for its local history at the next save.)
+    crate::local_history::seen_on_server(&path(&at.host, &at.path), &bytes);
+    Ok(bytes)
 }
 
 pub fn write(at: &RemotePath, bytes: &[u8]) -> io::Result<()> {

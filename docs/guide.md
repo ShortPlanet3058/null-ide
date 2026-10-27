@@ -308,14 +308,16 @@ beside the old one, then swaps it in; Move to Trash uses the server's Trash
 few seconds. Search looks through the files on the server first, and reads only those that
 can match.
 
-Null signs in with keys, not passwords: if `ssh` asks for a password, add your key to the
-server (`ssh-copy-id me@example.com`), or to your agent (`ssh-add`) if it has a passphrase.
-A server you've never connected to must be accepted once with `ssh` in a terminal. On a Mac
-and Linux, Null shares one connection to each server between everything it runs there, so
-programs start at once.
+Your keys and agent are used as `ssh` uses them. When `ssh` asks something (a password, a
+key's passphrase, whether to trust a server it hasn't met), Null asks it in the window; an
+answer is kept in memory until Null quits, so the terminal's `ssh` to that server doesn't
+ask again. On a Mac and Linux, Null shares one connection to each server between
+everything it runs there, so programs start at once.
 
-Not on a server: the project's Python environment, tests in the Tests panel, the debugger,
-and local history of saves.
+The project's Python environment, the Tests panel and the debugger work there as they do
+here. File History keeps a server file's earlier versions on this computer, from what Null
+last read or saved of it. Pictures open from the server; pictures in Markdown on a server
+show their description, as pictures from the web do.
 
 ## New versions
 

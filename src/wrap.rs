@@ -93,6 +93,13 @@ impl WrapMap {
         }
     }
 
+    /// How many shown lines from `from` to `to` (a fold counts as its first line).
+    pub fn shown_lines_between(&self, from: usize, to: usize) -> usize {
+        let (low, high) = if from <= to { (from, to) } else { (to, from) };
+        let hidden: usize = self.hidden.iter().map(|r| r.end.min(high + 1).saturating_sub(r.start.max(low + 1))).sum();
+        high - low - hidden
+    }
+
     pub fn is_hidden(&self, line: usize) -> bool {
         let i = self.hidden.partition_point(|r| r.end <= line);
         self.hidden.get(i).is_some_and(|r| r.contains(&line))
@@ -446,6 +453,10 @@ mod tests {
         assert_eq!(map.to_display(3, 0, &buffer), (1, 0));
         assert_eq!(map.to_offset(2, 0, &buffer), buffer.line_to_char(4));
         assert!(map.text_rows(2).is_empty());
+        // Counted from line 0 (relative numbers): the fold's lines aren't.
+        assert_eq!(map.shown_lines_between(0, 3), 1);
+        assert_eq!(map.shown_lines_between(4, 0), 2);
+        assert_eq!(map.shown_lines_between(3, 4), 1);
         // Unfolding brings them back.
         map.set_hidden(Vec::new());
         map.update(&buffer, None, &[]);
