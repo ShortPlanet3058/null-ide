@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The same change elsewhere: a word typed over (a name renamed by hand) marks the other
+  places in the file the old word stands; ⇥ from the word changes them one by one, Esc
+  lets them be.
 - Spelling on Windows and Linux: Windows' own speller, and on Linux the Hunspell
   dictionaries installed, in your language and English, each line in the one it reads best
   in (it was the Mac's only).
