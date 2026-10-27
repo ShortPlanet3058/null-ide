@@ -18,7 +18,14 @@ const ENV: &str = "NULL_ASKPASS";
 struct Question {
     secret: String,
     prompt: String,
+    /// Answered only from this run's answers, never asked in the window: an ssh started
+    /// by Null's window's own thread, which can't show a question while it waits for ssh.
+    #[serde(default)]
+    known_only: bool,
 }
+
+/// Set on an ssh whose questions are answered only from this run's answers.
+const KNOWN_ONLY: &str = "NULL_ASKPASS_KNOWN_ONLY";
 
 #[derive(Serialize, Deserialize)]
 struct Answer {
@@ -87,7 +94,7 @@ fn answer(stream: TcpStream, expected: &str) {
     if question.secret != expected {
         return;
     }
-    let answer = known(&question.prompt).or_else(|| ask(&question.prompt));
+    let answer = known(&question.prompt).or_else(|| (!question.known_only).then(|| ask(&question.prompt)).flatten());
     if let Some(answer) = &answer
         && kept(&question.prompt)
     {
@@ -134,6 +141,14 @@ pub fn questions() -> futures::channel::mpsc::UnboundedReceiver<Ask> {
     rx
 }
 
+/// The same, for an ssh that mustn't ask in the window (started by the window's own
+/// thread: it would wait for itself): this run's answers only.
+pub fn environment_known_only() -> Option<Vec<(&'static str, String)>> {
+    let mut environment = environment()?;
+    environment.push((KNOWN_ONLY, "1".into()));
+    Some(environment)
+}
+
 /// What ssh is given so it asks Null (None: it can't, and asks nothing).
 pub fn environment() -> Option<Vec<(&'static str, String)>> {
     // (Tests' ssh asks nothing.)
@@ -158,7 +173,8 @@ pub fn answered_for_ssh() -> Option<i32> {
     let prompt = std::env::args().nth(1).unwrap_or_default();
     let (port, secret) = address.split_once(' ')?;
     let port: u16 = port.parse().ok()?;
-    Some(match ask_running(port, secret, &prompt) {
+    let known_only = std::env::var_os(KNOWN_ONLY).is_some();
+    Some(match ask_running(port, secret, &prompt, known_only) {
         Some(answer) => {
             let mut out = std::io::stdout();
             let _ = writeln!(out, "{answer}");
@@ -170,9 +186,10 @@ pub fn answered_for_ssh() -> Option<i32> {
 }
 
 /// `prompt` asked of the Null listening on `port`, with its secret.
-fn ask_running(port: u16, secret: &str, prompt: &str) -> Option<String> {
+fn ask_running(port: u16, secret: &str, prompt: &str, known_only: bool) -> Option<String> {
     let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).ok()?;
-    let question = serde_json::to_string(&Question { secret: secret.to_string(), prompt: prompt.to_string() }).ok()?;
+    let question =
+        serde_json::to_string(&Question { secret: secret.to_string(), prompt: prompt.to_string(), known_only }).ok()?;
     stream.write_all(format!("{question}\n").as_bytes()).ok()?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).ok()?;
@@ -195,11 +212,13 @@ mod tests {
             assert_eq!(ask.prompt, "me@box's password: ");
             ask.answer.send(Some("typed".into())).unwrap();
         });
-        assert_eq!(ask_running(port, &secret, "me@box's password: ").as_deref(), Some("typed"));
+        assert_eq!(ask_running(port, &secret, "me@box's password: ", false).as_deref(), Some("typed"));
         window.join().unwrap();
         // (Kept for this run: no window asked.)
-        assert_eq!(ask_running(port, &secret, "me@box's password: ").as_deref(), Some("typed"));
-        assert_eq!(ask_running(port, "wrong", "me@box's password: "), None);
+        assert_eq!(ask_running(port, &secret, "me@box's password: ", false).as_deref(), Some("typed"));
+        assert_eq!(ask_running(port, "wrong", "me@box's password: ", false), None);
+        // (Answers only from this run's: one never given isn't asked in the window.)
+        assert_eq!(ask_running(port, &secret, "other@box's password: ", true), None);
         forget();
     }
 

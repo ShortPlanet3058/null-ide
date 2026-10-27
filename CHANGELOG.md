@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Windows: AltGr and dead keys type in the terminal (an AZERTY's ~ # \\ { [ ê), and no
+  shortcut takes a key AltGr types with (Ctrl+Alt+0 and Ctrl+Alt+= kept @ and } from
+  being typed on an AZERTY; Reset Zoom and Zoom In stay in the View menu there).
+- Opening a server's folder from Open Recent connects first instead of freezing, and Open
+  Recent lists each folder once.
 - The sidebar is quieter: Files, Tests and Git. Search is a field above the files (⌘⇧F),
   its results in their place; the outline opens under the open file, from the arrow at the
   end of its row or Show Outline.

@@ -388,6 +388,8 @@ fn main() {
     if let Some(code) = askpass::answered_for_ssh() {
         std::process::exit(code);
     }
+    // (ssh started from here asks nothing in the window: see `remote::asking`.)
+    remote::note_main_thread();
     if answered_in_the_terminal() {
         return;
     }
@@ -410,6 +412,12 @@ fn main() {
     trace::mark("what to open worked out");
     // Off the Mac: a Null already running opens it instead (a waiting one is its own).
     let request = instance::Request { root: root.clone(), others: others.clone(), file: file.clone(), place };
+    // A server's folder (`null ssh://box/app`): Null's own empty folder first, the server's
+    // once it's reached (the window doesn't wait on it, and ssh may ask for a password).
+    let (root, server) = match remote::is_remote(&root).then(session::scratch_folder).flatten() {
+        Some(scratch) => (scratch, Some(root)),
+        None => (root, None),
+    };
     let mut handed = match instance::launch(&request, wait) {
         instance::Launch::HandedOver => return,
         instance::Launch::First(handed) => handed,
@@ -516,6 +524,19 @@ fn main() {
                                 .ok();
                             return;
                         }
+                        // A server's folder: in the window in front, once the server's reached.
+                        if remote::is_remote(&request.root)
+                            && let Some(handle) = cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>())
+                        {
+                            let root = request.root.clone();
+                            handle
+                                .update(cx, |workspace, window, cx| {
+                                    window.activate_window();
+                                    workspace.open_paths(vec![root], window, cx);
+                                })
+                                .ok();
+                            return;
+                        }
                         let root = request.root.clone();
                         open_project_window_now(request.root, request.file, request.place, cx);
                         add_folders(&root, request.others, cx);
@@ -570,7 +591,7 @@ fn main() {
                 cx.update(|cx| {
                     if !handed_paths.load(std::sync::atomic::Ordering::SeqCst) && cx.windows().is_empty() {
                         open_project_window_now(root.clone(), file, place, cx);
-                        reopen_server_project(&root, cx);
+                        reopen_server_project(&root, server.clone(), cx);
                     }
                 })
                 .ok();
@@ -582,7 +603,7 @@ fn main() {
             let first = root.clone();
             open_project_window_now(root, file, place, cx);
             add_folders(&first, others, cx);
-            reopen_server_project(&first, cx);
+            reopen_server_project(&first, server, cx);
         }
         trace::mark("window opened");
         // The spell checker started once the window's up, then what's shown checked.
@@ -723,13 +744,15 @@ fn open_waiting_window(root: PathBuf, file: Option<PathBuf>, place: Option<(u32,
     }
 }
 
-/// Started on Null's own empty folder when it last closed on a server's: that folder again,
-/// once the server's reached (the window doesn't wait on it).
-fn reopen_server_project(root: &std::path::Path, cx: &mut gpui::App) {
+/// Started on Null's own empty folder for a server's (`server`, or the one it last closed
+/// on): that folder, once the server's reached (the window doesn't wait on it).
+fn reopen_server_project(root: &std::path::Path, server: Option<PathBuf>, cx: &mut gpui::App) {
     if !session::is_scratch(root) {
         return;
     }
-    let (Some(server), Some(handle)) = (session::last_server_project(), window_on(root, None, cx)) else { return };
+    let (Some(server), Some(handle)) = (server.or_else(session::last_server_project), window_on(root, None, cx)) else {
+        return;
+    };
     handle.update(cx, |workspace, window, cx| workspace.reopen_server_project(server, window, cx)).ok();
 }
 

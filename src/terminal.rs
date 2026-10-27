@@ -351,6 +351,10 @@ enum LinkTarget {
 
 pub struct TerminalView {
     focus_handle: FocusHandle,
+    /// A character being composed (a dead key's `~`, an input method's), not typed yet.
+    marked: Option<String>,
+    /// Where the cursor was drawn last: where an input method shows what it offers.
+    cursor_bounds: Option<gpui::Bounds<Pixels>>,
     term: Arc<FairMutex<Term<Listener>>>,
     sender: EventLoopSender,
     size: GridSize,
@@ -608,6 +612,8 @@ impl TerminalView {
             folder: Some(cwd),
             _events: events,
             _watching: watching,
+            marked: None,
+            cursor_bounds: None,
         }
     }
 
@@ -787,6 +793,12 @@ impl TerminalView {
         if !self.focus_handle.is_focused(window) {
             return;
         }
+        // Text (a letter, what AltGr or ⌥ types, a dead key's accent): the system composes
+        // it and hands it over as text (see the input handler below), so `~` then `a` is
+        // `ã`, and AZERTY's AltGr+8 is `\`.
+        if is_text(&event.keystroke) {
+            return;
+        }
         let app_cursor = self.term.lock().mode().contains(TermMode::APP_CURSOR);
         if let Some(bytes) = key_to_bytes(&event.keystroke, app_cursor) {
             // Return at the shell's prompt: a command begins here.
@@ -800,6 +812,15 @@ impl TerminalView {
             cx.stop_propagation();
             cx.notify();
         }
+    }
+
+    /// Text typed (as the system composed it), to the shell.
+    fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // Typing jumps back to the prompt if the view was scrolled up.
+        self.term.lock().scroll_display(Scroll::Bottom);
+        self.term.lock().selection = None;
+        self.write(text.as_bytes().to_vec());
+        cx.notify();
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -1513,6 +1534,23 @@ impl TerminalView {
 }
 
 /// What a key press sends to the shell, as the escape sequences terminals use.
+/// Whether a key types text, to come as text through the input handler rather than be
+/// sent as a key: a character, with no Ctrl and (but for a Mac's ⌥, which types
+/// characters) no Alt.
+fn is_text(keystroke: &Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    let typed = keystroke.key_char.as_deref().filter(|c| !c.is_empty() && !c.chars().any(char::is_control));
+    let Some(typed) = typed else { return false };
+    let single = keystroke.key.chars().count() == 1 || keystroke.key == "space";
+    // (Ctrl+Alt is AltGr to Windows, which types with it what AltGr types: AZERTY's
+    // Ctrl+Alt+8 is `\`.)
+    let altgr = cfg!(windows) && m.control && m.alt && typed != keystroke.key;
+    single
+        && !m.platform
+        && !m.function
+        && (altgr || (!m.control && (!m.alt || (cfg!(target_os = "macos") && typed != keystroke.key))))
+}
+
 pub fn key_to_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = &keystroke.modifiers;
     if m.platform {
@@ -1719,6 +1757,72 @@ impl IntoElement for TerminalElement {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+/// Text typed into the terminal, as the system composed it: written to the shell as it is.
+/// A character still being composed (a dead key) is held until it's done.
+impl gpui::EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        _: &mut Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<gpui::UTF16Selection> {
+        let end = self.marked.as_ref().map_or(0, |m| m.encode_utf16().count());
+        Some(gpui::UTF16Selection { range: end..end, reversed: false })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
+        self.marked.as_ref().map(|m| 0..m.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+        self.marked = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = None;
+        if !text.is_empty() {
+            self.type_text(text, cx);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = (!text.is_empty()).then(|| text.to_string());
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        _: gpui::Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        self.cursor_bounds
+    }
+
+    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
     }
 }
 
@@ -1931,6 +2035,12 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         let theme = cx.global::<Theme>().clone();
+        // Typed text comes through here (see the input handler), and an input method's
+        // offers show by the cursor.
+        let focus = self.view.read(cx).focus_handle.clone();
+        let cursor = prepaint.cursor;
+        self.view.update(cx, |view, _| view.cursor_bounds = cursor);
+        window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, self.view.clone()), cx);
         window.paint_quad(fill(bounds, theme.background));
         for (rect, color) in &prepaint.backgrounds {
             window.paint_quad(fill(*rect, *color));
@@ -1991,6 +2101,32 @@ fn shell_words(paths: &[std::path::PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What types text comes as text (composed by the system: AltGr, dead keys); what
+    /// doesn't is sent as keys.
+    #[test]
+    fn text_keys_come_as_text() {
+        let key = |modifiers: Modifiers, key: &str, typed: Option<&str>| Keystroke {
+            modifiers,
+            key: key.into(),
+            key_char: typed.map(str::to_string),
+        };
+        let none = Modifiers::default();
+        // AZERTY's AltGr+8 on Windows: no Ctrl or Alt said, `\\` typed.
+        assert!(is_text(&key(none, "8", Some("\\"))));
+        assert!(is_text(&key(none, "a", Some("a"))));
+        assert!(is_text(&key(none, "space", Some(" "))));
+        assert!(!is_text(&key(Modifiers { control: true, ..none }, "c", Some("c"))));
+        assert!(!is_text(&key(none, "enter", Some("\n"))));
+        assert!(!is_text(&key(none, "escape", None)));
+        // Alt + a key: Meta (Alt+B back a word), but a Mac's ⌥ types characters.
+        let alt = key(Modifiers { alt: true, ..none }, "b", Some("∫"));
+        assert_eq!(is_text(&alt), cfg!(target_os = "macos"));
+        assert!(!is_text(&key(Modifiers { alt: true, ..none }, "b", Some("b"))));
+        // Ctrl+Alt+8 on AZERTY: AltGr's `\\` on Windows.
+        let ctrl_alt = key(Modifiers { control: true, alt: true, ..none }, "8", Some("\\"));
+        assert_eq!(is_text(&ctrl_alt), cfg!(windows));
+    }
 
     /// Files dragged in from the files are typed as the shell's folder reaches them.
     #[test]
