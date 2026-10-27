@@ -51,6 +51,10 @@ skips the tests). CI builds, lints and tests a pull request on macOS, Windows an
 it's ready (drafts are checked locally); a package to try before merging is built on demand:
 `gh workflow run release.yml --ref <branch> -f platform=windows` (or `linux`, `macos`, `all`).
 
+Packages are built only then, and when a merge into `main` carries a version not released
+yet (Cargo.toml's): that builds the three platforms and makes a draft release, tagged
+`v<version>` when it's published. Merges into `dev` build no packages.
+
 ## Looking at it
 
 `scripts/qa/shot.sh STEPS OUT.png [PROJECT]` runs a debug build on a copy of a project, plays

@@ -1,7 +1,7 @@
 # Builds, lints and tests Null on the three platforms it runs on, for a pull request once
 # it's ready (a draft is checked on the Mac: scripts/check.sh), and when started by hand.
 # Not again on the merge: the pull request's run was on the merged result already. Changes
-# to the site, the docs or the trailer alone build nothing.
+# to the site, the docs, the trailer or the release workflow alone build nothing.
 name: CI
 
 on:
@@ -14,6 +14,7 @@ on:
       - "scripts/trailer/**"
       - "scripts/build-site.sh"
       - ".github/workflows/site.yml"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 # (A draft's run, which builds nothing, has a group of its own: pushed as the pull request
