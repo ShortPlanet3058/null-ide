@@ -341,6 +341,9 @@ restarted, it's installed the next time Null quits.
 The Windows zip, a build from source, or a folder Null can't write to: "Null 0.2.0 is out"
 opens null-ide.com instead.
 
+After an update, a notice says which version is installed; a click on it shows what changed
+since the version you had. "What's New" in ⌘K shows it again.
+
 ## Code intelligence
 
 Completions, errors, info on hover and go to definition come from language servers. Null

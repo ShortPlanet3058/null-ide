@@ -210,6 +210,8 @@ actions!(
         ExplainTestFailure,
         /// Asks now whether a newer Null is out.
         CheckForUpdates,
+        /// What changed in this version (since the one before, after an update).
+        WhatsNew,
         /// The newer Null out: downloaded, checked and installed; once it's ready, Null
         /// restarts with it.
         UpdateNull,
@@ -1002,6 +1004,8 @@ pub struct Workspace {
     ssh_questions: std::collections::VecDeque<crate::askpass::Ask>,
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
+    /// What a click on the notice does, if anything.
+    notice_click: Option<Box<dyn gpui::Action>>,
     /// The notices shown lately, newest last (Recent Notices lists them).
     past_notices: Vec<(String, std::time::SystemTime)>,
     notice_task: Option<Task<()>>,
@@ -1303,6 +1307,7 @@ impl Workspace {
             past_notices: Vec::new(),
             notice_on_return: None,
             notice_task: None,
+            notice_click: None,
             asked_suggestions: false,
             focus_before_palette: None,
             _subscriptions: subscriptions,
@@ -5429,6 +5434,7 @@ impl Workspace {
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
             (App, "About Null".into(), Box::new(AboutNull)),
             (App, "Check for Updates".into(), Box::new(CheckForUpdates)),
+            (App, "What's New".into(), Box::new(WhatsNew)),
             (App, "Update Null".into(), Box::new(UpdateNull)),
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
@@ -7937,6 +7943,12 @@ impl Workspace {
     /// When asked to be told of new versions: what the last check found, and a new check
     /// a few seconds after launch if the last is a day old (once a run, whatever the windows).
     fn check_for_updates_soon(&mut self, cx: &mut Context<Self>) {
+        // Just updated: said once, and a click shows what changed.
+        if crate::whats_new::to_tell().is_some() {
+            let message = format!("Null {} is installed: click to see what's new.", crate::updates::current());
+            self.show_notice(message, cx);
+            self.notice_click = Some(Box::new(WhatsNew));
+        }
         // (An update that couldn't be put in place at the last quit: said, and Update again.)
         if let Some(version) = crate::updates::not_installed() {
             self.show_notice(
@@ -7960,6 +7972,30 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// What's New: the changes since the version before (this one's, if it's not known),
+    /// read in the preview of a Markdown file of Null's own, which can't be changed.
+    fn whats_new(&mut self, _: &WhatsNew, window: &mut Window, cx: &mut Context<Self>) {
+        let since = crate::whats_new::since().flatten();
+        let Some(path) = crate::tools::data_dir().map(|d| d.join("What's New.md")) else { return };
+        let written = path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| std::fs::write(&path, crate::whats_new::text(since.as_deref())));
+        if let Err(error) = written {
+            return self.show_notice(format!("What's New couldn't be shown: {error}"), cx);
+        }
+        self.open_file(path.clone(), window, cx);
+        if let Some(editor) = self.active_editor().filter(|e| e.read(cx).path() == Some(path.as_path())) {
+            editor.update(cx, |editor, cx| {
+                editor.read_only = true;
+                if !editor.reading {
+                    editor.toggle_markdown_preview(&crate::editor::ToggleMarkdownPreview, window, cx);
+                }
+            });
+        }
     }
 
     /// Check for Updates: asked now, and said.
@@ -8169,10 +8205,12 @@ impl Workspace {
         // (A longer one, as why a server can't be reached and what to do, stays to be read.)
         let shown_for = Duration::from_secs((4 + message.chars().count() as u64 / 25).min(10));
         self.notice = Some((message, Instant::now()));
+        self.notice_click = None;
         self.notice_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(shown_for).await;
             this.update(cx, |this, cx| {
                 this.notice = None;
+                this.notice_click = None;
                 cx.notify();
             })
             .ok();
@@ -12439,6 +12477,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_notes))
             .on_action(cx.listener(Self::explain_test_failure))
             .on_action(cx.listener(Self::check_for_updates))
+            .on_action(cx.listener(Self::whats_new))
             .on_action(cx.listener(Self::update_null))
             .on_action(cx.listener(Self::open_wsl_folder))
             .on_action(cx.listener(Self::open_ssh_folder))
@@ -12587,8 +12626,14 @@ impl Render for Workspace {
                 div().absolute().top_0().left_0().size_full().occlude().child(welcome).into_any_element()
             }))
             .children(self.notice.as_ref().map(|(message, _)| {
+                let click = self.notice_click.as_ref().map(|a| a.boxed_clone());
                 div().absolute().bottom(px(44.)).left_0().w_full().flex().justify_center().child(
                     div()
+                        .id("notice")
+                        .when_some(click, |d, action| {
+                            d.cursor_pointer()
+                                .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+                        })
                         .max_w(px(560.))
                         .px(px(14.))
                         .py(px(8.))

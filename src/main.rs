@@ -98,6 +98,7 @@ mod updates;
 mod user_keys;
 mod vscode_import;
 mod welcome;
+mod whats_new;
 mod window_frame;
 mod word_blocks;
 mod workspace;

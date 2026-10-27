@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- What's new: after an update, a notice says which version is installed, and a click on it
+  shows the changes since the version before (What's New in ⌘K, any time).
 - AI fields take several lines: ⇧↵ starts one in ⌘I, a follow-up question and an AI task
   (⌥⌘I), and pasted text keeps its lines; the field grows up to 8 rows, then scrolls.
 - ⌘I without a selection changes the function, class, CSS rule or HTML element the cursor is
