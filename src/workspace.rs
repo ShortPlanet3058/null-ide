@@ -3891,6 +3891,13 @@ impl Workspace {
     }
 
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let path = crate::remote::plain(path);
+        // On a server not reached yet: reached first, off the window's thread (ssh may ask
+        // for a password, asked in the window, which mustn't be waiting), then opened.
+        if let Some(server) = crate::remote::of(&path).filter(|s| !crate::remote::is_connected(&s.host)) {
+            return self
+                .connect_then(server.host, window, cx, move |this, window, cx| this.open_path(path, window, cx));
+        }
         let is_dir = crate::project_fs::is_dir(&path);
         // A folder another window has open: that window comes forward.
         if is_dir && let Some(other) = crate::window_on(&path, Some(window.window_handle()), cx) {
@@ -3909,7 +3916,7 @@ impl Workspace {
     }
 
     fn switch_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let path = crate::wsl::plain(path);
+        let path = crate::remote::plain(crate::wsl::plain(path));
         crate::shell::set_linux_project(crate::wsl::is_wsl(&path) || crate::remote::is_remote(&path));
         self.roots = crate::roots::ProjectRoots::new(path.clone());
         self.git_root = path.clone();
@@ -4872,9 +4879,15 @@ impl Workspace {
     /// Folders added to the window: each a heading in the files, searched, watched, listed in
     /// ⌘P. One already in the window (or inside one) changes nothing.
     pub fn add_roots(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        // (A server not reached yet: reached first, as in `open_path`.)
+        if let Some(host) =
+            paths.iter().filter_map(|p| crate::remote::of(p)).map(|s| s.host).find(|h| !crate::remote::is_connected(h))
+        {
+            return self.connect_then(host, window, cx, move |this, window, cx| this.add_roots(paths, window, cx));
+        }
         let mut added = Vec::new();
         for path in paths {
-            let path = crate::wsl::plain(crate::project_fs::canonicalize(&path).unwrap_or(path));
+            let path = crate::remote::plain(crate::wsl::plain(crate::project_fs::canonicalize(&path).unwrap_or(path)));
             if crate::project_fs::is_dir(&path) && self.roots.add(path.clone()) {
                 added.push(path);
             }
@@ -5035,6 +5048,31 @@ impl Workspace {
                 }
                 Ok(_) => {}
                 Err(error) => this.show_notice(format!("{error} The folder is in Open Recent."), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Connects to `host` off the window's thread (what ssh asks is asked in the window
+    /// meanwhile), then does `then`; or says why it couldn't.
+    fn connect_then(
+        &mut self,
+        host: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        self.show_notice(format!("Connecting to {host}…"), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let asked = host.clone();
+            let reached = cx.background_executor().spawn(async move { crate::remote::connect(&asked) }).await;
+            this.update_in(cx, |this, window, cx| match reached {
+                Ok(_) => {
+                    this.notice = None;
+                    then(this, window, cx);
+                }
+                Err(error) => this.show_notice(error.to_string(), cx),
             })
             .ok();
         })

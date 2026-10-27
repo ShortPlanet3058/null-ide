@@ -146,7 +146,11 @@ pub fn command(host: &str, folder: Option<&str>, program: &str, args: &[&str]) -
 /// What ssh asks (a password, a passphrase, whether to trust a server), asked in Null's
 /// window (see `askpass`); where it can't be, nothing asked: it fails at once instead.
 fn asking(command: &mut std::process::Command) {
-    match crate::askpass::environment() {
+    // (From the window's own thread: what was answered already, nothing asked: the window
+    // couldn't show the question while it waits.)
+    let environment =
+        if on_main_thread() { crate::askpass::environment_known_only() } else { crate::askpass::environment() };
+    match environment {
         Some(environment) => {
             command.envs(environment);
         }
@@ -351,6 +355,37 @@ struct Server {
 const SESSIONS: usize = 3;
 
 static SERVERS: Mutex<Vec<(String, Arc<Server>)>> = Mutex::new(Vec::new());
+
+/// The thread the app's windows run on (see `note_main_thread`).
+static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// Says this is the thread the windows run on (called once, as Null starts).
+pub fn note_main_thread() {
+    let _ = MAIN_THREAD.set(std::thread::current().id());
+}
+
+fn on_main_thread() -> bool {
+    MAIN_THREAD.get().is_some_and(|main| *main == std::thread::current().id())
+}
+
+/// Whether Null has a connection to `host` open (a folder there can be read at once).
+pub fn is_connected(host: &str) -> bool {
+    let Some(server) = SERVERS.lock().ok().and_then(|s| s.iter().find(|(h, _)| h == host).map(|(_, s)| s.clone()))
+    else {
+        return false;
+    };
+    // (One busy is one open.)
+    server.sessions.iter().any(|s| s.try_lock().map_or(true, |s| s.is_some()))
+}
+
+/// A server's path in one form, however it was joined (Windows joins with `\`); others as
+/// they are.
+pub fn plain(path: PathBuf) -> PathBuf {
+    match of(&path) {
+        Some(remote) => self::path(&remote.host, &remote.path),
+        None => path,
+    }
+}
 
 fn server(host: &str) -> Arc<Server> {
     let mut servers = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -712,6 +747,7 @@ mod tests {
         assert_eq!(of(proj.parent().unwrap().parent().unwrap()).unwrap().path, "/home");
         assert_eq!(of(Path::new("/ssh:box:/home").parent().unwrap()).unwrap().path, "/");
         assert_eq!(shown(&proj), "box:/home/me/proj");
+        assert_eq!(plain(PathBuf::from(r"/ssh:box:/home/me\proj")), proj);
         assert_eq!(destination("box#2222"), ("box", Some("2222")));
         assert_eq!(destination("me@box"), ("me@box", None));
     }

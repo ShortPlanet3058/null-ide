@@ -302,8 +302,18 @@ fn recent_projects_file() -> Option<PathBuf> {
     Some(sessions_dir()?.join("recent-projects.json"))
 }
 
+/// The projects kept in `file`, each in one form (a WSL folder as `\\wsl.localhost\…`, a
+/// server's with `/`), once each: kept before those forms were settled, they'd show twice.
 fn read_recent(file: &Path) -> Vec<PathBuf> {
-    std::fs::read_to_string(file).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+    let read: Vec<PathBuf> =
+        std::fs::read_to_string(file).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+    let mut recent: Vec<PathBuf> = Vec::new();
+    for path in read.into_iter().map(|p| crate::remote::plain(crate::wsl::plain(p))) {
+        if !recent.contains(&path) {
+            recent.push(path);
+        }
+    }
+    recent
 }
 
 /// An empty folder of Null's own, the window's project when no folder is open (the very
@@ -329,6 +339,7 @@ fn remember_recent_project(root: &Path) {
 
 /// Puts `root` first in the list kept in `file`.
 fn remember_in(file: &Path, root: &Path) {
+    let root = &crate::remote::plain(crate::wsl::plain(root.to_path_buf()));
     let mut recent = read_recent(file);
     if recent.first().is_some_and(|p| p == root) {
         return;
