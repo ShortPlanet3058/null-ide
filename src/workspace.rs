@@ -8326,10 +8326,10 @@ impl Workspace {
         if let Some(launch) = launches.into_iter().min_by_key(crate::launch::Launch::runs_tests) {
             return self.debug_launch(root, launch, cx);
         }
-        if root.join("Cargo.toml").is_file() {
+        if crate::project_fs::is_file(&root.join("Cargo.toml")) {
             return self.build_and_debug(root, vec!["build".into()], None, cx);
         }
-        match self.debug_program.clone().filter(|p| p.is_file()) {
+        match self.debug_program.clone().filter(|p| crate::project_fs::is_file(p)) {
             Some(program) => self.debug(program, cx),
             None => self.choose_program_to_debug(window, cx),
         }
@@ -8363,14 +8363,16 @@ impl Workspace {
         }
         // Its program cargo's (in a target folder) or not there yet: built as a Rust
         // project's is, first. One built some other way runs as it is.
+        // (A server's files asked of it.)
+        let is_file = |p: &Path| crate::project_fs::is_file(p);
         let cargo_s = launch.program.as_ref().is_none_or(|p| {
-            !p.is_file()
+            !is_file(p)
                 || p.strip_prefix(&root).is_ok_and(|inside| inside.components().any(|c| c.as_os_str() == "target"))
         });
-        if root.join("Cargo.toml").is_file() && cargo_s {
+        if is_file(&root.join("Cargo.toml")) && cargo_s {
             return self.build_and_debug(root, vec!["build".into()], Some(launch), cx);
         }
-        let Some(program) = launch.program.clone().filter(|p| p.is_file()) else {
+        let Some(program) = launch.program.clone().filter(|p| is_file(p)) else {
             let missing = launch.program.as_ref().map_or("its program".into(), |p| p.display().to_string());
             return self.debugger.update(cx, |d, cx| {
                 d.set_building(None, cx);

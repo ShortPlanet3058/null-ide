@@ -32,7 +32,7 @@ const NATIVE: &[&str] = &["lldb", "lldb-dap", "lldb-vscode", "cppdbg", "cppvsdbg
 
 /// The configurations of `root`'s `.vscode/launch.json` Null can run, in its order.
 pub fn read(root: &Path, file: Option<&Path>) -> Vec<Launch> {
-    let Ok(text) = std::fs::read_to_string(root.join(".vscode/launch.json")) else { return Vec::new() };
+    let Ok(text) = crate::project_fs::read_to_string(&root.join(".vscode/launch.json")) else { return Vec::new() };
     parse(&text, root, file)
 }
 
@@ -116,8 +116,12 @@ fn parse(text: &str, root: &Path, file: Option<&Path>) -> Vec<Launch> {
         .collect()
 }
 
-/// `path` as written, from the project's folder when it's relative.
+/// `path` as written, from the project's folder when it's relative. On a server, as Null
+/// names its paths (`${workspaceFolder}` is filled in as the server has it).
 fn absolute(root: &Path, path: &str) -> PathBuf {
+    if let Some(at) = crate::remote::of(root) {
+        return if path.starts_with('/') { crate::remote::path(&at.host, path) } else { root.join(path) };
+    }
     let path = PathBuf::from(path);
     if path.is_absolute() { path } else { root.join(path) }
 }
@@ -125,6 +129,19 @@ fn absolute(root: &Path, path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_s_program_is_named_as_null_names_its_paths() {
+        let root = crate::remote::path("box", "/home/me/app");
+        let text = r#"{ "configurations": [
+            { "type": "lldb", "request": "launch", "name": "app", "program": "${workspaceFolder}/main",
+              "args": ["${workspaceFolder}/data"], "cwd": "${workspaceFolder}" } ] }"#;
+        let launch = parse(text, &root, None).remove(0);
+        assert_eq!(launch.program, Some(root.join("main")));
+        assert_eq!(launch.cwd, root);
+        // What the program's given is as the server has it.
+        assert_eq!(launch.args, ["/home/me/app/data"]);
+    }
 
     #[test]
     fn reads_the_configurations_null_can_run() {
