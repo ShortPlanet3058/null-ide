@@ -210,6 +210,9 @@ actions!(
         ExplainTestFailure,
         /// Asks now whether a newer Null is out.
         CheckForUpdates,
+        /// The newer Null out: downloaded, checked and installed; once it's ready, Null
+        /// restarts with it.
+        UpdateNull,
         /// A folder inside WSL as the project (Windows).
         OpenWslFolder,
         /// A folder on a server, over SSH, as the project.
@@ -5420,6 +5423,7 @@ impl Workspace {
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
             (App, "About Null".into(), Box::new(AboutNull)),
             (App, "Check for Updates".into(), Box::new(CheckForUpdates)),
+            (App, "Update Null".into(), Box::new(UpdateNull)),
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
         ];
@@ -7927,6 +7931,13 @@ impl Workspace {
     /// When asked to be told of new versions: what the last check found, and a new check
     /// a few seconds after launch if the last is a day old (once a run, whatever the windows).
     fn check_for_updates_soon(&mut self, cx: &mut Context<Self>) {
+        // (An update that couldn't be put in place at the last quit: said, and Update again.)
+        if let Some(version) = crate::updates::not_installed() {
+            self.show_notice(
+                format!("Null {version} couldn't be installed: Update in the status bar tries again."),
+                cx,
+            );
+        }
         if !cx.global::<Settings>().check_for_updates || !crate::updates::first_this_run() {
             return;
         }
@@ -7952,11 +7963,60 @@ impl Workspace {
             let found = cx.background_executor().spawn(async { crate::updates::check() }).await;
             this.update(cx, |this, cx| {
                 let message = match found {
+                    Ok(Some(version)) if crate::updates::how().is_some() => {
+                        format!("Null {version} is out: Update in the status bar installs it.")
+                    }
                     Ok(Some(version)) => format!("Null {version} is out: get it at null-ide.com."),
                     Ok(None) => format!("Null {} is the latest version.", crate::updates::current()),
                     Err(error) => error,
                 };
                 this.show_notice(message, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Update Null: the newer version downloaded and checked (its progress in the status
+    /// bar), then Null restarts with it. Where Null can't replace itself, null-ide.com.
+    fn update_null(&mut self, _: &UpdateNull, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::updates::State;
+        match crate::updates::state() {
+            State::Ready(_) => {
+                crate::updates::restart_after();
+                self.quit(&Quit, window, cx);
+            }
+            State::Getting(..) => {}
+            State::Out(_) if crate::updates::how().is_none() => cx.open_url(crate::updates::DOWNLOAD),
+            State::Out(_) => self.get_update(cx),
+            State::Nothing => self.check_for_updates(&CheckForUpdates, window, cx),
+        }
+    }
+
+    fn get_update(&mut self, cx: &mut Context<Self>) {
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded::<u8>();
+        // (Every window's status bar shows how far it is.)
+        cx.spawn(async move |_, cx| {
+            while futures::StreamExt::next(&mut receiver).await.is_some() {
+                cx.update(|cx| cx.refresh_windows()).ok();
+            }
+        })
+        .detach();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let got = cx
+                .background_executor()
+                .spawn(async move { crate::updates::get(move |percent| drop(sender.unbounded_send(percent))) })
+                .await;
+            this.update(cx, |this, cx| {
+                let message = match got {
+                    Ok(version) => {
+                        format!("Null {version} is ready: Restart to Update, or it's installed when Null quits.")
+                    }
+                    Err(error) => error,
+                };
+                this.show_notice(message, cx);
+                cx.refresh_windows();
             })
             .ok();
         })
@@ -11594,7 +11654,7 @@ impl Render for Workspace {
         };
         let ai_provider = cx.global::<Settings>().ai.active();
         let ai_dot = ai_provider != ProviderId::Off && (crate::ai::working() || crate::ai::failed_lately());
-        let update = cx.global::<Settings>().check_for_updates.then(crate::updates::known).flatten();
+        let update = crate::updates::state();
         if ai_dot && self.ai_dot_watch.is_none() {
             self.ai_dot_watch = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
@@ -11954,20 +12014,35 @@ impl Render for Workspace {
             }))
             // AI's only mark: a dot, while it answers (or just after it failed). Its name shows
             // on hover; a click opens its settings.
-            // A newer Null out (when asked to be told): where to get it.
-            .when_some(update, |bar, version| {
-                bar.child(
-                    div()
-                        .id("update")
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .cursor_pointer()
-                        .text_color(theme.muted)
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(format!("Null {version} is out"))
-                        .tooltip(ui::tip("Get it at null-ide.com".to_string(), None))
-                        .on_click(|_, _, cx| cx.open_url(crate::updates::DOWNLOAD)),
-                )
+            // A newer Null out: Update gets it, then Restart to Update.
+            .when(update != crate::updates::State::Nothing, |bar| {
+                use crate::updates::State;
+                let (label, tip) = match &update {
+                    State::Out(version) if crate::updates::how().is_some() => (
+                        format!("Null {version} is out · Update"),
+                        "Download it, check it's the release and install it",
+                    ),
+                    State::Out(version) => (format!("Null {version} is out"), "Get it at null-ide.com"),
+                    State::Getting(version, percent) => (format!("Getting Null {version} · {percent}%"), ""),
+                    _ => (
+                        "Restart to Update".to_string(),
+                        "Null quits, the new version is put in place, and it starts again",
+                    ),
+                };
+                let getting = matches!(update, State::Getting(..));
+                bar.child(div().id("update").flex_none().whitespace_nowrap().text_color(theme.muted).child(label).when(
+                    !getting,
+                    |d| {
+                        d.cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .tooltip(ui::tip(tip.to_string(), None))
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.update_null(&UpdateNull, window, cx)
+                                }),
+                            )
+                    },
+                ))
             })
             .when(ai_dot, |bar| {
                 let failed = !crate::ai::working();
@@ -12332,6 +12407,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_notes))
             .on_action(cx.listener(Self::explain_test_failure))
             .on_action(cx.listener(Self::check_for_updates))
+            .on_action(cx.listener(Self::update_null))
             .on_action(cx.listener(Self::open_wsl_folder))
             .on_action(cx.listener(Self::open_ssh_folder))
             .on_action(cx.listener(Self::increase_font_size))

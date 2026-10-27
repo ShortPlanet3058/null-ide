@@ -58,7 +58,9 @@ jobs:
 
   linux:
     if: startsWith(github.ref, 'refs/tags/') || inputs.platform == 'linux' || inputs.platform == 'all'
-    runs-on: ubuntu-latest
+    # The oldest Ubuntu GitHub still has: a binary needs the C library it was built
+    # against or newer (one built on the latest didn't start on 24.04).
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -103,6 +105,23 @@ jobs:
           mv "dist/null-$version-windows-x86_64-setup.exe" dist/null-windows-x86_64-setup.exe
           mv "dist/null-$version-linux-x86_64.tar.gz" dist/null-linux-x86_64.tar.gz
           mv "dist/null-$version-amd64.deb" dist/null-linux-amd64.deb
+      # What Null's Update reads: the version and each package's SHA-256, signed with the
+      # release key (its public half is in src/updates.rs). No key, no release.
+      - name: Signed update details
+        env:
+          NULL_UPDATE_KEY: ${{ secrets.NULL_UPDATE_KEY }}
+        run: |
+          test -n "$NULL_UPDATE_KEY" || { echo "The NULL_UPDATE_KEY secret is missing"; exit 1; }
+          python3 - "${GITHUB_REF_NAME#v}" <<'PY'
+          import hashlib, json, os, sys
+          files = {f: hashlib.sha256(open(f"dist/{f}", "rb").read()).hexdigest() for f in sorted(os.listdir("dist"))}
+          json.dump({"version": sys.argv[1], "files": files}, open("dist/update.json", "w"), separators=(",", ":"))
+          PY
+          umask 077
+          printf '%s\n' "$NULL_UPDATE_KEY" > "$RUNNER_TEMP/key.pem"
+          openssl pkeyutl -sign -inkey "$RUNNER_TEMP/key.pem" -rawin -in dist/update.json -out dist/update.json.sig
+          rm "$RUNNER_TEMP/key.pem"
+          cat dist/update.json
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}

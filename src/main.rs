@@ -388,6 +388,11 @@ fn main() {
     if let Some(code) = askpass::answered_for_ssh() {
         std::process::exit(code);
     }
+    // Started by Null as it quit, to install an update (see `updates`).
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--finish-update") {
+        std::process::exit(updates::finish(&std::env::args().skip(2).collect::<Vec<_>>()));
+    }
     // (ssh started from here asks nothing in the window: see `remote::asking`.)
     remote::note_main_thread();
     if answered_in_the_terminal() {
@@ -408,7 +413,14 @@ fn main() {
     // Started by the Mac with nothing to open (the Dock, the Finder, or `null a b` through
     // `open -a`, whose paths come a moment later as "open these").
     let by_the_system = cfg!(target_os = "macos") && std::env::args().len() <= 1;
-    let Opening { root, others, file, place, wait } = resolve_args();
+    let Opening { mut root, mut others, file, place, wait } = resolve_args();
+    // Restarted after an update: its windows again (the first one here, the rest once it's open).
+    let mut reopen = if std::env::args().len() <= 1 { updates::windows_to_reopen() } else { Vec::new() };
+    if !reopen.is_empty() {
+        let mut first = reopen.remove(0).into_iter();
+        root = first.next().unwrap_or(root);
+        others = first.collect();
+    }
     trace::mark("what to open worked out");
     // Off the Mac: a Null already running opens it instead (a waiting one is its own).
     let request = instance::Request { root: root.clone(), others: others.clone(), file: file.clone(), place };
@@ -548,6 +560,8 @@ fn main() {
         }
         // Local history past its month goes, now and then.
         std::thread::spawn(local_history::sweep);
+        // An update put in place at the last quit leaves its files.
+        std::thread::spawn(updates::tidy);
         settings::init(cx);
         find_bar::init(cx);
         keymap::register(cx.global::<settings::Settings>().keymap, cx);
@@ -564,9 +578,17 @@ fn main() {
         menus::init(cx);
         menus::set(cx);
         // The Ollama Null started (see `ollama`) goes with it.
-        cx.on_app_quit(|_| {
+        cx.on_app_quit(|cx| {
             ollama::stop();
             instance::forget();
+            updates::keep_windows(
+                cx.windows()
+                    .into_iter()
+                    .filter_map(|w| w.downcast::<Workspace>())
+                    .filter_map(|h| h.read(cx).ok().map(|w| w.roots().all().to_vec()))
+                    .collect(),
+            );
+            updates::install_on_quit();
             async {}
         })
         .detach();
@@ -604,6 +626,18 @@ fn main() {
             open_project_window_now(root, file, place, cx);
             add_folders(&first, others, cx);
             reopen_server_project(&first, server, cx);
+        }
+        // (Each on its own: a server's waits for it.)
+        for folders in reopen {
+            let mut folders = folders.into_iter();
+            let Some(first) = folders.next() else { continue };
+            let (opened, server) = match remote::is_remote(&first).then(session::scratch_folder).flatten() {
+                Some(scratch) => (scratch, Some(first)),
+                None => (first, None),
+            };
+            open_project_window_now(opened.clone(), None, None, cx);
+            add_folders(&opened, folders.collect(), cx);
+            reopen_server_project(&opened, server, cx);
         }
         trace::mark("window opened");
         // The spell checker started once the window's up, then what's shown checked.
@@ -821,6 +855,7 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
 /// asks about them; once none is left, Null quits.
 /// Quitting was called off in one window: none of them counts as done asking any more.
 pub(crate) fn quit_cancelled(cx: &mut gpui::App) {
+    updates::restart_called_off();
     for handle in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
         handle.update(cx, |workspace, _, _| workspace.quitting = false).ok();
     }
