@@ -166,9 +166,17 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
+/// A GET, asked again once on a connection the other end had closed (kept for reuse).
+fn call(agent: &ureq::Agent, url: &str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    match agent.get(url).call() {
+        Err(ureq::Error::Io(_)) => agent.get(url).call(),
+        answer => answer,
+    }
+}
+
 /// A small file's bytes; None when it isn't there.
 fn fetch(agent: &ureq::Agent, url: &str) -> Result<Option<Vec<u8>>, String> {
-    match agent.get(url).call() {
+    match call(agent, url) {
         Ok(response) => response
             .into_body()
             .read_to_vec()
@@ -302,7 +310,7 @@ pub fn get(progress: impl Fn(u8)) -> Result<String, String> {
         set_state(State::Out(version.clone()));
         message
     };
-    let response = agent.get(&url).call().map_err(|e| failed(format!("Couldn't download the update: {e}")))?;
+    let response = call(&agent, &url).map_err(|e| failed(format!("Couldn't download the update: {e}")))?;
     let size = response.body().content_length();
     let mut reader = response.into_body().into_with_config().limit(u64::MAX).reader();
     let path = dir.join(name);
@@ -497,9 +505,8 @@ mod tests {
     /// what Null reads, with the key it has.
     #[test]
     fn reads_what_the_release_workflow_signs() {
-        let signature: Vec<u8> = (0..64)
-            .map(|i| u8::from_str_radix(&SIGNED_SAMPLE[i * 2..i * 2 + 2], 16).unwrap())
-            .collect();
+        let signature: Vec<u8> =
+            (0..64).map(|i| u8::from_str_radix(&SIGNED_SAMPLE[i * 2..i * 2 + 2], 16).unwrap()).collect();
         let manifest = verified(br#"{"version":"0.0.1","files":{}}"#, &signature, &KEY).unwrap();
         assert_eq!(manifest.version, "0.0.1");
     }
