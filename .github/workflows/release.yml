@@ -58,7 +58,9 @@ jobs:
 
   linux:
     if: startsWith(github.ref, 'refs/tags/') || inputs.platform == 'linux' || inputs.platform == 'all'
-    runs-on: ubuntu-latest
+    # The oldest Ubuntu GitHub still has: a binary needs the C library it was built
+    # against or newer (one built on the latest didn't start on 24.04).
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
