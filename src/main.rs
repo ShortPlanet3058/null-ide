@@ -92,6 +92,7 @@ mod text_input;
 mod theme;
 mod tools;
 mod trace;
+mod trash_prompt;
 mod ui;
 mod updates;
 mod user_keys;

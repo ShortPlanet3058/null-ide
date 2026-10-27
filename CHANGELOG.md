@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Moving files to the Trash asks in the window, with "Don't ask again" (space ticks it);
+  Settings → Window → Ask before moving to the Trash brings the question back.
+
 ## 0.2.0
 
 Null updates itself, opens folders inside WSL and on servers over SSH, installs language

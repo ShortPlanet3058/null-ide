@@ -182,7 +182,8 @@ makes both jump instead.
   red, its folders a red dot. **Find in Folder…** searches one folder from its menu.
   ⌘-click picks several files (⇧-click, all those between): their menu moves them to the
   Trash with one question, copies their paths, or compares two files; dragged, they all move
-  (onto Markdown, a link each).
+  (onto Markdown, a link each). The question before the Trash has "Don't ask again" (space
+  ticks it); Settings → Window → Ask before moving to the Trash brings it back.
   Folders that each hold only the next open together, as one row (`src / main / java`):
   new files, drops and renames there go to the last of them.
 - Selected text drags to where it's dropped (⌥ copies it); a file dragged from the files
