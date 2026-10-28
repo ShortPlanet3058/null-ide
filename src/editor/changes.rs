@@ -19,6 +19,8 @@ pub(super) struct Blame {
     line: usize,
     revision: u64,
     text: String,
+    /// The commit, opened by a click on the text.
+    commit: String,
 }
 
 impl Editor {
@@ -80,6 +82,12 @@ impl Editor {
         Some((blame.line, blame.text.as_str()))
     }
 
+    /// The commit the caret's line's blame names.
+    pub fn line_blame_commit(&self) -> Option<&str> {
+        let blame = self.blame.as_ref().filter(|b| b.revision == self.buffer.revision())?;
+        Some(blame.commit.as_str())
+    }
+
     /// After the caret moves: keep what's shown for its line, or ask git once it rests.
     pub(super) fn refresh_blame(&mut self, cx: &mut Context<Self>) {
         let line = self.buffer.point(self.selection.head).0;
@@ -101,6 +109,7 @@ impl Editor {
             let blame =
                 cx.background_executor().spawn(async move { git::blame_line(&path, &text.to_string(), line) }).await;
             let Some(blame) = blame else { return };
+            let commit = blame.id.clone();
             let now =
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
             let mut text = format!("{}, {}", blame.author, git::ago(blame.time, now));
@@ -117,7 +126,7 @@ impl Editor {
             }
             this.update(cx, |this, cx| {
                 if this.buffer.revision() == revision && this.buffer.point(this.selection.head).0 == line {
-                    this.blame = Some(Blame { line, revision, text });
+                    this.blame = Some(Blame { line, revision, text, commit });
                     cx.notify();
                 }
             })

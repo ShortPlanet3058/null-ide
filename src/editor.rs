@@ -429,6 +429,8 @@ pub enum EditorEvent {
     NeedsPath,
     /// A command to run in the terminal (a code lens's "▶ Run Test").
     RunCommand(String),
+    /// A commit's page to show (a click on the line's blame).
+    ShowCommit(String),
     /// Vim's `:`: its command line, to open.
     VimCommandLine,
     /// The file changed on disk while there were unsaved edits here.

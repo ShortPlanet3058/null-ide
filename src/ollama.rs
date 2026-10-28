@@ -36,6 +36,24 @@ fn answers(address: &SocketAddr) -> bool {
     TcpStream::connect_timeout(address, Duration::from_millis(300)).is_ok()
 }
 
+/// The models Ollama at `base` has installed (its `/api/tags`), by name: empty when it
+/// doesn't answer. Asks over the network: off the main thread.
+pub fn installed(base: &str) -> Vec<String> {
+    if cfg!(test) || crate::system_clipboard::kept_apart() {
+        return Vec::new();
+    }
+    let root = base.trim_end_matches('/').trim_end_matches("/v1");
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(3))).build().into();
+    let Ok(mut response) = agent.get(&format!("{root}/api/tags")).call() else { return Vec::new() };
+    let Ok(json) = response.body_mut().read_json::<serde_json::Value>() else { return Vec::new() };
+    names_of(&json)
+}
+
+/// The names in Ollama's list of models.
+fn names_of(json: &serde_json::Value) -> Vec<String> {
+    json["models"].as_array().into_iter().flatten().filter_map(|m| m["name"].as_str().map(str::to_string)).collect()
+}
+
 /// Before asking Ollama at `base`: started if it's this computer's, isn't running, and is
 /// installed. Waits a few seconds for it to answer. (Runs off the main thread.)
 pub fn ensure_running(base: &str) {
@@ -113,6 +131,14 @@ pub fn stop() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn reads_the_models_installed() {
+        let json = serde_json::json!({ "models": [{ "name": "qwen2.5-coder:1.5b" }, { "name": "llama3.2:3b" }] });
+        assert_eq!(super::names_of(&json), ["qwen2.5-coder:1.5b", "llama3.2:3b"]);
+        assert!(super::names_of(&serde_json::json!({})).is_empty());
+    }
+
     use super::*;
 
     #[test]

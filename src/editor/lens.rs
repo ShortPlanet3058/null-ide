@@ -22,6 +22,8 @@ pub enum LensAction {
     Implementations(usize),
     /// A command, run in the terminal (`cargo test -- --exact x`).
     Run(String),
+    /// A commit's page (the one the line's blame names).
+    Commit(String),
 }
 
 /// One part of a line's lens: its words, and what a click does.
@@ -232,6 +234,7 @@ impl Editor {
                 self.go_to_target(crate::lsp_store::Target::Implementation, cx);
             }
             LensAction::Run(command) => cx.emit(EditorEvent::RunCommand(command)),
+            LensAction::Commit(id) => cx.emit(EditorEvent::ShowCommit(id)),
         }
         let _ = window;
         true

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A click on who last changed the line (at its end, with Show Who Changed the Line on)
+  opens that commit.
+- Settings → AI with Ollama lists the models it has installed, first, to pick with a click.
+- Files that hold secrets (`.env`, private keys, `.npmrc`…) are never sent to AI: ⌘I says so
+  there, suggestions stay quiet, and Review and commit drafts leave them out.
+- Debugging: a variable or watch whose value changed since the last stop shows in amber.
+- Expand and Shrink Selection (⌥↑ ⌥↓) work on every cursor, each by its own syntax.
 - More from the outside audit:
   - The commit message's body field takes several lines and keeps them (Undo Last Commit
     gave back a body flattened onto one line).

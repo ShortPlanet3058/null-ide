@@ -299,6 +299,8 @@ pub struct Watch {
     pub expression: String,
     /// Its value, or why it has none (not in scope here); None until worked out.
     pub value: Option<Result<String, String>>,
+    /// Its value isn't the one it had at the last stop (shown so).
+    pub changed: bool,
 }
 
 pub struct Debugger {
@@ -397,6 +399,11 @@ impl Debugger {
         let adapter = Arc::new(adapter);
         self.adapter = Some(adapter.clone());
         self.state = DebugState::Starting;
+        // (A new run: what the watches were in the last one isn't what changes compare to.)
+        for watch in &mut self.watches {
+            watch.value = None;
+            watch.changed = false;
+        }
         cx.notify();
 
         // Its events: stops, output, the end.
@@ -772,7 +779,7 @@ impl Debugger {
         if expression.is_empty() || self.watches.iter().any(|w| w.expression == expression) {
             return;
         }
-        self.watches.push(Watch { expression: expression.to_string(), value: None });
+        self.watches.push(Watch { expression: expression.to_string(), value: None, changed: false });
         self.evaluate_watches(cx);
         cx.notify();
     }
@@ -809,6 +816,7 @@ impl Debugger {
             this.update(cx, |this, cx| {
                 for (expression, value) in values {
                     if let Some(watch) = this.watches.iter_mut().find(|w| w.expression == expression) {
+                        watch.changed = matches!((&watch.value, &value), (Some(Ok(was)), Ok(now)) if was != now);
                         watch.value = Some(value);
                     }
                 }
