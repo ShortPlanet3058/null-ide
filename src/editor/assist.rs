@@ -110,6 +110,7 @@ pub(super) struct Change {
     pub(super) added: Vec<Range<usize>>,
     removed: Vec<(usize, Vec<String>)>,
     hint_line: usize,
+    /// The lines asked about, before the change.
     lines: Range<usize>,
     instruction: String,
 }
@@ -491,7 +492,8 @@ impl Editor {
             added,
             removed,
             hint_line: lines.start + new_lines,
-            lines: lines.start..lines.start + new_lines,
+            // (As they were: adjusting puts them back first.)
+            lines,
             instruction,
         });
         self.rebuild_blocks();
@@ -1477,6 +1479,24 @@ mod tests {
             e.apply_change("def f(x):\n    return x / 2\n".into(), "halve".into(), cx);
             assert_eq!(e.buffer.to_string(), "import os\ndef f(x):\n    return x / 0\n\nprint(f(1))\n");
             assert!(e.prompt.as_ref().is_some_and(|p| p.failed.is_some()), "said, not applied");
+        });
+    }
+
+    /// ⌘I again on a change adjusts it: the code goes back as it was, and the field is on
+    /// the lines first asked about (not as many as the change made, which would reach the
+    /// code below).
+    #[gpui::test]
+    fn adjusting_a_change_asks_about_the_lines_it_replaced(cx: &mut TestAppContext) {
+        let text = "def f(x):\n    return x\n\ndef g():\n    pass\n";
+        let (e, cx) = editor(cx, text);
+        e.update_in(cx, |e, window, cx| {
+            e.selection = Selection::caret(2);
+            e.open_inline_assist(false, window, cx);
+            assert_eq!(e.assist_target(), Some(0..2));
+            e.apply_change("def f(x):\n    y = x\n    z = y\n    return z\n".into(), "longer".into(), cx);
+            e.open_inline_assist(false, window, cx);
+            assert_eq!(e.buffer.to_string(), text);
+            assert_eq!(e.assist_target(), Some(0..2));
         });
     }
 

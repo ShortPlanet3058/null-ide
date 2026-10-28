@@ -32,7 +32,8 @@ pub fn record() {
         if std::fs::metadata(&file).is_ok_and(|m| m.len() > 1_000_000)
             && let Ok(text) = std::fs::read_to_string(&file)
         {
-            let half = text.len() / 2;
+            // (On a character's edge: a cut inside one would panic in here, and abort.)
+            let half = text.floor_char_boundary(text.len() / 2);
             let cut = text[half..].find("\n== ").map_or(half, |i| half + i);
             std::fs::write(&file, &text[cut..]).ok();
         }

@@ -164,8 +164,12 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Windows disks don't tell case apart.
-        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+        // The paths as the disk has them: on most Windows disks `NOTES.md` is `notes.md`,
+        // but a WSL folder (or a case-sensitive one) can hold both, two different files.
+        match (dunce::canonicalize(a), dunce::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
     }
 }
 

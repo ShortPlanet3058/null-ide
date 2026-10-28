@@ -3668,9 +3668,14 @@ impl Workspace {
                 EditorEvent::Rename { position, new_name } => {
                     let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
                     let request = this.lsp.read(cx).rename(&path, *position, new_name.clone());
+                    let (editor, asked_at) = (editor.clone(), editor.read(cx).revision());
                     cx.spawn_in(window, async move |this, cx| {
                         let result = request.await;
                         this.update_in(cx, |this, _, cx| match result {
+                            // (Typed into meanwhile: its places have moved.)
+                            Ok(_) if editor.read(cx).revision() != asked_at => {
+                                this.show_notice("The file changed while renaming. Rename again.".into(), cx)
+                            }
                             Ok(edit) => this.apply_workspace_edit(edit, cx),
                             Err(message) => this.show_notice(message, cx),
                         })
@@ -4455,23 +4460,27 @@ impl Workspace {
     }
 
     /// The unsaved files: path (None for a new one) and text, a file open twice once.
-    fn unsaved_files(&self, cx: &App) -> Vec<(Option<PathBuf>, String)> {
-        let mut unsaved: Vec<(Option<PathBuf>, String)> = Vec::new();
+    /// The unsaved files: path, text, and whether the file changed on disk under the edits.
+    fn unsaved_files(&self, cx: &App) -> Vec<(Option<PathBuf>, String, bool)> {
+        let mut unsaved: Vec<(Option<PathBuf>, String, bool)> = Vec::new();
         for tab in &self.tabs {
             let editor = tab.editor.read(cx);
             let path = editor.path().map(Path::to_path_buf);
-            if editor.buffer.is_dirty() && (path.is_none() || !unsaved.iter().any(|(p, _)| *p == path)) {
-                unsaved.push((path, editor.buffer.to_string()));
+            if editor.buffer.is_dirty() && (path.is_none() || !unsaved.iter().any(|(p, _, _)| *p == path)) {
+                unsaved.push((path, editor.buffer.to_string(), editor.disk_changed));
             }
         }
         unsaved
     }
 
-    fn backups_of(unsaved: Vec<(Option<PathBuf>, String)>) -> Vec<crate::session::Backup> {
+    fn backups_of(unsaved: Vec<(Option<PathBuf>, String, bool)>) -> Vec<crate::session::Backup> {
         unsaved
             .into_iter()
-            .map(|(path, text)| {
-                let disk = path.as_deref().and_then(crate::session::disk_fingerprint);
+            .map(|(path, text, changed_on_disk)| {
+                // Changed on disk under the edits: no fingerprint, so the file reads as
+                // changed when they're brought back, and saving asks first (the disk as it
+                // is now would make that change look like the one the edits started from).
+                let disk = path.as_deref().filter(|_| !changed_on_disk).and_then(crate::session::disk_fingerprint);
                 crate::session::Backup { path, text, disk }
             })
             .collect()
@@ -6365,7 +6374,22 @@ impl Workspace {
     fn file_reviewed(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
         let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
         if let Some(AiTaskRun { state: TaskState::Review(changes), .. }) = &mut self.ai_task {
-            changes.retain(|c| c.path != path);
+            // What was decided goes to disk, as Undo All's does: the task's file is there as
+            // it left it until then. A file it added, every line of it undone, goes to the
+            // Trash, as Undo All sends it.
+            if let Some(change) = changes.iter().find(|c| c.path == path) {
+                let (text, dirty) = (editor.read(cx).buffer.to_string(), editor.read(cx).buffer.is_dirty());
+                if change.kind == crate::ai_task::ChangeKind::Added && text.is_empty() {
+                    if let Err(error) = crate::ai_task::undo(change) {
+                        self.show_notice(format!("Couldn't move {} to the Trash: {error}", path.display()), cx);
+                    }
+                } else if dirty && text != change.after {
+                    editor.update(cx, |editor, cx| editor.save_to_disk(cx));
+                }
+            }
+            if let Some(AiTaskRun { state: TaskState::Review(changes), .. }) = &mut self.ai_task {
+                changes.retain(|c| c.path != path);
+            }
         }
         self.end_task_if_reviewed(cx);
     }
@@ -9804,6 +9828,8 @@ impl Workspace {
     /// its command, which may send more edits.
     fn run_fix(&mut self, path: PathBuf, fix: lsp_types::CodeActionOrCommand, cx: &mut Context<Self>) {
         let lsp = self.lsp.clone();
+        let editor = self.tabs.iter().map(|t| t.editor.clone()).find(|e| e.read(cx).path() == Some(path.as_path()));
+        let asked_at = editor.as_ref().map(|e| e.read(cx).revision());
         cx.spawn(async move |this, cx| {
             let (edit, command) = match fix {
                 lsp_types::CodeActionOrCommand::Command(command) => (None, Some(command)),
@@ -9828,6 +9854,11 @@ impl Workspace {
                 }
             };
             let Ok(request) = this.update(cx, |this, cx| {
+                // (Typed into while the fix was worked out: its places have moved.)
+                if editor.as_ref().map(|e| e.read(cx).revision()) != asked_at {
+                    this.show_notice("The file changed meanwhile. Try the fix again.".into(), cx);
+                    return None;
+                }
                 if let Some(edit) = edit {
                     this.apply_fix_edit(edit, cx);
                 }
@@ -9845,6 +9876,9 @@ impl Workspace {
 
     /// A fix's edits: quiet when they stay in the open file.
     fn apply_fix_edit(&mut self, edit: lsp_types::WorkspaceEdit, cx: &mut Context<Self>) {
+        if let Some(message) = self.stale_edit(&edit, cx) {
+            return self.show_notice(message, cx);
+        }
         let (_, files, failed) = self.apply_edit_to_files(edit, cx);
         if !failed.is_empty() {
             self.show_notice(format!("Couldn't write {}.", failed.join(", ")), cx);
@@ -9853,7 +9887,26 @@ impl Workspace {
         }
     }
 
+    /// An edit a server made for an older version of an open file (it was typed into
+    /// meanwhile): not applied, its places have moved. Said why.
+    fn stale_edit(&self, edit: &lsp_types::WorkspaceEdit, cx: &App) -> Option<String> {
+        let stale: Vec<String> = crate::lsp::edit_versions(edit)
+            .into_iter()
+            .filter_map(|(path, version)| {
+                // (A file open twice: the tab the server hears from is the one that counts.)
+                let open: Vec<_> =
+                    self.tabs.iter().map(|t| t.editor.read(cx)).filter(|e| e.path() == Some(path.as_path())).collect();
+                let current = open.is_empty() || open.iter().any(|e| e.lsp_version() == version);
+                (!current).then(|| open[0].file_name())
+            })
+            .collect();
+        (!stale.is_empty()).then(|| format!("{} changed meanwhile: nothing was changed. Try again.", stale.join(", ")))
+    }
+
     fn apply_workspace_edit(&mut self, edit: lsp_types::WorkspaceEdit, cx: &mut Context<Self>) {
+        if let Some(message) = self.stale_edit(&edit, cx) {
+            return self.show_notice(message, cx);
+        }
         let (places, files, failed) = self.apply_edit_to_files(edit, cx);
         let message = match (places, failed.is_empty()) {
             (0, _) => "Nothing to rename.".to_string(),
@@ -12974,6 +13027,73 @@ mod tests {
         cx.run_until_parked();
         let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
         cx.update(|window, cx| assert!(editor.focus_handle(cx).is_focused(window), "the keys stayed in the list"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A backup of a file changed on disk under its edits keeps no fingerprint: brought back
+    /// after a crash, the file still reads as changed (the disk as it is then isn't the
+    /// version the edits started from).
+    #[test]
+    fn a_backup_remembers_a_file_changed_on_disk() {
+        let dir = crate::tools::test_dir("backup-changed");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "theirs\n").unwrap();
+        let backups = Workspace::backups_of(vec![
+            (Some(file.clone()), "mine\n".into(), true),
+            (Some(file.clone()), "mine\n".into(), false),
+        ]);
+        assert_eq!(backups[0].disk, None);
+        assert_eq!(backups[1].disk, crate::session::disk_fingerprint(&file));
+    }
+
+    /// An AI task's change undone hunk by hunk: once the file's reviewed, the disk has
+    /// what was decided, not what the task wrote (Undo All writes it, so must this).
+    #[gpui::test]
+    fn a_task_s_change_undone_in_review_is_undone_on_disk(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("task-review-undo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\nTWO\nthree\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.ai_task = Some(AiTaskRun {
+                title: "shout".into(),
+                state: TaskState::Review(vec![crate::ai_task::FileChange {
+                    path: file.clone(),
+                    kind: crate::ai_task::ChangeKind::Changed,
+                    added: 1,
+                    removed: 1,
+                    before: "one\ntwo\nthree\n".into(),
+                    after: "one\nTWO\nthree\n".into(),
+                    yours_too: false,
+                }]),
+                child: Default::default(),
+                stop: Default::default(),
+                yours: HashSet::new(),
+                _task: None,
+            });
+            w.open_file(file.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        editor.update_in(cx, |e, window, cx| {
+            e.start_review("one\ntwo\nthree\n".into(), cx);
+            e.set_caret_point((1, 0), cx);
+            window.focus(&e.focus_handle(cx));
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\ntwo\nthree\n");
+        assert!(workspace.read_with(cx, |w, _| w.ai_task.is_none()), "every change reviewed");
         std::fs::remove_dir_all(&dir).ok();
     }
 
