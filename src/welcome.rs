@@ -512,7 +512,7 @@ impl Welcome {
                     &look_sub,
                     div()
                         .grid()
-                        .grid_cols(3)
+                        .grid_cols(4)
                         .gap(px(18.))
                         .children(ThemeName::ALL.into_iter().map(|name| {
                             div()
@@ -525,7 +525,7 @@ impl Welcome {
                                     name,
                                     settings.theme == name && settings.own_theme.is_none(),
                                     &theme,
-                                    1.45,
+                                    1.3,
                                 ))
                                 .child(div().text_size(px(ui::T_SM)).text_color(theme.faint).child(name.note()))
                                 .active(|s| s.opacity(0.7))

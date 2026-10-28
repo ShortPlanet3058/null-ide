@@ -152,7 +152,7 @@ h2 { font-size: clamp(38px, 5.6vw, 72px); }
 /* ---------- make it yours ---------- */
 .yours { padding: clamp(80px, 14vh, 160px) 0; }
 .theme-demo { max-width: calc(980px + 2 * var(--gutter)); margin: 60px auto 0; padding: 0 var(--gutter); }
-.theme-window { --bg: #000; --surface: #08080a; --fg: #ebe8e2; --muted: #8b8a92; --faint: #46464e; --line: #1d1d22; --raised: #141418; --caret: #f2b35b; --kw: #c6a6f6; --ty: #87c7e1; --fn: #f1d9a9; --st: #a9d59c; --nu: #f3a37e; --co: #5f626e; --pu: #8d8c96;
+.theme-window { --bg: #000; --surface: #000000; --fg: #ebe8e2; --muted: #8b8a92; --faint: #46464e; --line: #1d1d22; --raised: #0f0f12; --caret: #f2b35b; --kw: #c6a6f6; --ty: #87c7e1; --fn: #f1d9a9; --st: #a9d59c; --nu: #f3a37e; --co: #5f626e; --pu: #8d8c96;
   border-radius: 16px; overflow: hidden; background: var(--bg); color: var(--fg); box-shadow: 0 0 0 1px rgba(255, 255, 255, .09), 0 50px 120px -40px rgba(0, 0, 0, .9); transition: background .7s var(--ease), color .7s var(--ease); }
 .theme-window * { transition: color .7s var(--ease), background-color .7s var(--ease), border-color .7s var(--ease); }
 .tw-bar { display: flex; gap: 2px; padding: 10px 14px 0; background: var(--bg); border-bottom: 1px solid var(--line); }

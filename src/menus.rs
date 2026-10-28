@@ -278,6 +278,7 @@ pub fn set(cx: &mut App) {
                         MenuItem::action("Ash", crate::workspace::UseAshTheme),
                         MenuItem::action("Midnight", crate::workspace::UseMidnightTheme),
                         MenuItem::action("Moss", crate::workspace::UseMossTheme),
+                        MenuItem::action("High Contrast", crate::workspace::UseContrastTheme),
                         MenuItem::separator(),
                         MenuItem::action("Paper", crate::workspace::UsePaperTheme),
                         MenuItem::action("Dune", crate::workspace::UseDuneTheme),

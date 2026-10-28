@@ -152,6 +152,7 @@ actions!(
         UseAshTheme,
         UseMidnightTheme,
         UseMossTheme,
+        UseContrastTheme,
         UsePaperTheme,
         UseDuneTheme,
         SearchProject,
@@ -5399,6 +5400,7 @@ impl Workspace {
             (Appearance, theme_label(ThemeName::Ash), theme_action(ThemeName::Ash)),
             (Appearance, theme_label(ThemeName::Midnight), theme_action(ThemeName::Midnight)),
             (Appearance, theme_label(ThemeName::Moss), theme_action(ThemeName::Moss)),
+            (Appearance, theme_label(ThemeName::Contrast), theme_action(ThemeName::Contrast)),
             (Appearance, theme_label(ThemeName::Paper), theme_action(ThemeName::Paper)),
             (Appearance, theme_label(ThemeName::Dune), theme_action(ThemeName::Dune)),
             (Appearance, "New Theme of Your Own…".into(), Box::new(NewOwnTheme)),
@@ -11019,6 +11021,7 @@ pub fn theme_action(theme: ThemeName) -> Box<dyn Action> {
         ThemeName::Ash => Box::new(UseAshTheme),
         ThemeName::Midnight => Box::new(UseMidnightTheme),
         ThemeName::Moss => Box::new(UseMossTheme),
+        ThemeName::Contrast => Box::new(UseContrastTheme),
         ThemeName::Paper => Box::new(UsePaperTheme),
         ThemeName::Dune => Box::new(UseDuneTheme),
     }
@@ -12668,6 +12671,11 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|_, _: &UseMossTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Moss))),
+            )
+            .on_action(
+                cx.listener(|_, _: &UseContrastTheme, _, cx| {
+                    settings::update(cx, |s| s.pick_theme(ThemeName::Contrast))
+                }),
             )
             .on_action(
                 cx.listener(|_, _: &UsePaperTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Paper))),
