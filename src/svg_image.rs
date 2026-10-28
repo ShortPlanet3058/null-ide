@@ -42,10 +42,7 @@ pub fn draw(svg: &[u8], scale: f32, dir: Option<&std::path::Path>) -> Option<Dra
     let options = usvg::Options {
         fontdb: FONTS.clone(),
         resources_dir: dir.map(|d| d.to_path_buf()),
-        image_href_resolver: usvg::ImageHrefResolver {
-            resolve_string: Box::new(named_image),
-            ..Default::default()
-        },
+        image_href_resolver: usvg::ImageHrefResolver { resolve_string: Box::new(named_image), ..Default::default() },
         ..Default::default()
     };
     let tree = usvg::Tree::from_str(std::str::from_utf8(svg).ok()?, &options).ok()?;
