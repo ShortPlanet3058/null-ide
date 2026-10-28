@@ -87,6 +87,9 @@ type Open = (String, Vec<(String, String)>, Vec<Node>);
 /// A tolerant tree: an end tag closes the element it names (and any left open inside
 /// it), an end tag for nothing open is ignored, and a new `<p>` or `<li>` closes the one
 /// before.
+/// How deep elements go inside each other, at most.
+const DEEPEST: usize = 64;
+
 fn parse(html: &str) -> Vec<Node> {
     // The open elements, outermost first, each with what it holds so far.
     let mut stack: Vec<Open> = vec![(String::new(), Vec::new(), Vec::new())];
@@ -148,6 +151,11 @@ fn parse(html: &str) -> Vec<Node> {
             close_to(&mut stack, depth);
         }
         let self_closing = tag.trim_end().ends_with('/');
+        // (Nested deeper than any page needs: its tags left out, its text kept. Reading it
+        // back goes as deep as this does, and 100,000 `<div>`s would use up the stack.)
+        if stack.len() > DEEPEST {
+            continue;
+        }
         if VOID.contains(&name.as_str()) || self_closing {
             stack.last_mut().expect("the root").2.push(Node::Element { name, attributes, children: Vec::new() });
         } else {

@@ -52,7 +52,36 @@ fn command(dir: &Path) -> Command {
     // Asking (status) never writes git's index: that write was seen as a change, and set
     // every open file's committed version to be read again.
     command.env("GIT_OPTIONAL_LOCKS", "0");
+    if !crate::trust::is_trusted(dir) {
+        command.args(drivers_off(dir));
+    }
     command
+}
+
+/// For a folder not trusted (see `trust`): the filters its repository's own config names
+/// (commands git runs on files as `status` reads them), set to run nothing. One of yours
+/// (git-lfs's, in your own config) is left as it is.
+/// (Asked each time: only folders not trusted pay for it.)
+fn drivers_off(dir: &Path) -> Vec<String> {
+    let listed = crate::tools::command("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let mut off = Vec::new();
+    for line in listed.lines() {
+        let Some((scope, rest)) = line.split_once('\t') else { continue };
+        let key = rest.split_once(' ').map_or(rest, |(key, _)| key);
+        if matches!(scope, "local" | "worktree" | "command") {
+            off.extend(["-c".to_string(), format!("{key}=")]);
+            if let Some(name) = key.strip_prefix("filter.").and_then(|k| k.rsplit_once('.')).map(|(name, _)| name) {
+                off.extend(["-c".to_string(), format!("filter.{name}.required=false")]);
+            }
+        }
+    }
+    off
 }
 
 /// A path git printed (`--show-toplevel`, `--absolute-git-dir`) as Null reaches it: inside
@@ -1282,7 +1311,7 @@ pub fn blame_line(path: &Path, text: &str, line: usize) -> Option<LineBlame> {
     let dir = path.parent()?;
     let name = path.file_name()?.to_str()?;
     let range = format!("{},{}", line + 1, line + 1);
-    let args = ["blame", "--porcelain", "-L", &range, "--contents", "-", "--", name];
+    let args = ["blame", "--porcelain", "--no-textconv", "-L", &range, "--contents", "-", "--", name];
     let output = output_given(dir, &args, &[], Some(text.as_bytes())).ok()?;
     if !output.status.success() {
         return None;
@@ -1676,6 +1705,36 @@ mod tests {
         assert_eq!(status(&repo).len(), 1);
         assert!(!ran.exists(), "core.fsmonitor ran");
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A repository in a folder not trusted: the filters its own config names don't run as
+    /// Null reads it.
+    #[test]
+    #[cfg(unix)]
+    fn a_repository_s_filters_run_nothing_until_trusted() {
+        let dir = crate::tools::test_dir("git-filters");
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("untrusted");
+        std::fs::create_dir_all(&repo).unwrap();
+        if git(&repo, &["init", "-q"]).is_none() {
+            return;
+        }
+        std::fs::write(repo.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]).unwrap();
+        let ran = dir.join("ran");
+        for part in ["clean", "smudge"] {
+            git(&repo, &["config", &format!("filter.evil.{part}"), &format!("touch '{}'; cat", ran.display())])
+                .unwrap();
+        }
+        // (Read again, as after unzipping: what's on disk is hashed through the filter.)
+        std::fs::write(repo.join("a.txt"), "b\n").unwrap();
+        std::fs::remove_file(repo.join(".git/index")).unwrap();
+        git(&repo, &["reset", "-q"]).unwrap();
+        assert!(!status(&repo).is_empty());
+        assert!(!ran.exists(), "a filter ran");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn scratch_repo(name: &str) -> Option<PathBuf> {

@@ -346,6 +346,9 @@ impl Editor {
                 Some(format!("Installing {} failed: see the status bar.", server.name))
             }
             Readiness::Unavailable { program } => Some(format!("{program} didn't start.")),
+            Readiness::Untrusted => Some(format!(
+                "Safe mode: {label} support runs this folder's own code. Trust the folder from the status bar to turn it on."
+            )),
         }
     }
 

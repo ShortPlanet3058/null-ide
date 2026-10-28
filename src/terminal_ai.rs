@@ -24,14 +24,20 @@ pub fn asked_on_line(line: &str) -> Option<(usize, String)> {
     Some((line[at..].chars().count(), asked.to_string()))
 }
 
-/// Asks for the one command that does what was asked, in this terminal.
-pub fn command_prompt(asked: &str, terminal: &str, folder: &Path) -> Prompt {
-    // What's in the folder helps it name files right (the first few, names only).
+/// What's in `folder`, to help name files right: the first few names (read from disk:
+/// off the window's thread).
+pub fn names_in(folder: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(folder)
         .map(|entries| entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).take(200).collect())
         .unwrap_or_default();
     names.sort();
     names.truncate(40);
+    names
+}
+
+/// Asks for the one command that does what was asked, in this terminal (in `folder`, as
+/// its shell writes it, holding `names`).
+pub fn command_prompt(asked: &str, terminal: &str, folder: &str, names: &[String]) -> Prompt {
     Prompt {
         system: "You turn a request written in plain words into one command for the terminal described. Reply \
                  with the command only, on one line: no explanation, no markdown, no backticks, no prompt sign. \
@@ -39,8 +45,7 @@ pub fn command_prompt(asked: &str, terminal: &str, folder: &Path) -> Prompt {
                  or overwrite anything the request doesn't ask to."
             .into(),
         user: format!(
-            "Terminal: {terminal}\nFolder: {}\nIn it: {}\n\nRequest: {asked}",
-            folder.display(),
+            "Terminal: {terminal}\nFolder: {folder}\nIn it: {}\n\nRequest: {asked}",
             if names.is_empty() { "nothing".to_string() } else { names.join(", ") }
         ),
         max_tokens: Some(300),
@@ -52,12 +57,25 @@ pub fn command_prompt(asked: &str, terminal: &str, folder: &Path) -> Prompt {
 /// The command in an answer: its first line that has one, without a fence, backticks or a
 /// prompt sign, and nothing a shell would take as a key (control characters).
 pub fn command_in(answer: &str) -> Option<String> {
-    let text = crate::ai::strip_code_fence(answer);
+    let text = crate::ai::strip_code_fence(&without_thinking(answer));
     let line = text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("```"))?;
     let line = line.trim_matches('`').trim();
     let line = line.strip_prefix("$ ").or_else(|| line.strip_prefix("> ")).unwrap_or(line).trim();
     let line: String = line.chars().filter(|c| !c.is_control()).collect();
     (!line.is_empty()).then_some(line)
+}
+
+/// An answer without a reasoning model's thinking (`<think>…</think>`); still thinking,
+/// nothing yet.
+fn without_thinking(answer: &str) -> String {
+    let mut text = answer.to_string();
+    while let Some(start) = text.find("<think>") {
+        match text[start..].find("</think>") {
+            Some(end) => text.replace_range(start..start + end + "</think>".len(), ""),
+            None => text.truncate(start),
+        }
+    }
+    text
 }
 
 /// Programs that show text, so an `error` in what they print is the text's, not theirs.
@@ -105,7 +123,7 @@ pub fn went_wrong(command: &str, output: &str) -> bool {
 const EXPLAIN_CHARS: usize = 8_000;
 
 /// Asks what went wrong with `command`, from the end of what it printed.
-pub fn explain_prompt(command: &str, output: &str, terminal: &str, folder: &Path) -> Prompt {
+pub fn explain_prompt(command: &str, output: &str, terminal: &str, folder: &str) -> Prompt {
     let start = output.len().saturating_sub(EXPLAIN_CHARS);
     let start = (start..=output.len()).find(|&i| output.is_char_boundary(i)).unwrap_or(output.len());
     Prompt {
@@ -116,8 +134,7 @@ pub fn explain_prompt(command: &str, output: &str, terminal: &str, folder: &Path
                  sentence."
             .into(),
         user: format!(
-            "Terminal: {terminal}\nFolder: {}\nCommand: {command}\n\nWhat it printed (its end):\n{}",
-            folder.display(),
+            "Terminal: {terminal}\nFolder: {folder}\nCommand: {command}\n\nWhat it printed (its end):\n{}",
             &output[start..]
         ),
         max_tokens: Some(600),
@@ -130,6 +147,7 @@ pub fn explain_prompt(command: &str, output: &str, terminal: &str, folder: &Path
 pub fn explanation(answer: &str) -> (String, Option<String>) {
     let mut text = Vec::new();
     let mut fix = None;
+    let answer = without_thinking(answer);
     for line in answer.lines() {
         let trimmed = line.trim();
         if let Some(command) = trimmed.strip_prefix("FIX:") {
@@ -149,8 +167,13 @@ pub fn terminal_words(root: &Path) -> String {
     if crate::wsl::of(root).is_some() {
         return "the person's shell in WSL (Linux on Windows)".into();
     }
+    // (Windows PowerShell 5.1 has no `&&` or `||`: PowerShell 7's are wrong there.)
     if cfg!(windows) {
-        return "PowerShell on Windows".into();
+        return if crate::shell::windows_program() == "pwsh.exe" {
+            "PowerShell 7 on Windows".into()
+        } else {
+            "Windows PowerShell 5.1 on Windows (no && or ||)".into()
+        };
     }
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(crate::terminal_watch::account_shell);
     let shell = shell.as_deref().and_then(|s| s.rsplit('/').next()).unwrap_or("sh").to_string();
@@ -183,6 +206,9 @@ mod tests {
         assert_eq!(command_in("`ls -la`").as_deref(), Some("ls -la"));
         assert_eq!(command_in("rm x\x1b[A\r").as_deref(), Some("rm x[A"));
         assert_eq!(command_in("  \n"), None);
+        // A reasoning model's thinking isn't the command; still thinking, there's none yet.
+        assert_eq!(command_in("<think>\nls? no.\n</think>\ndu -sh *").as_deref(), Some("du -sh *"));
+        assert_eq!(command_in("<think>\nmaybe ls"), None);
     }
 
     #[test]
@@ -209,7 +235,7 @@ mod tests {
     #[test]
     fn the_end_of_long_output_is_sent() {
         let output = "é".repeat(EXPLAIN_CHARS);
-        let prompt = explain_prompt("make", &output, "zsh on macOS", Path::new("/tmp"));
+        let prompt = explain_prompt("make", &output, "zsh on macOS", "/tmp");
         assert!(prompt.user.len() < output.len() + 200);
         assert!(prompt.user.ends_with('é'));
     }

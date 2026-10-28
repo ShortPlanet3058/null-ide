@@ -123,7 +123,14 @@ impl Anchors {
 /// Links and images that would run a script when clicked aren't kept: a page opened from
 /// the disk runs them as the reader.
 fn safe_url(url: &str, image: bool) -> &str {
-    let scheme = url.trim_start().to_ascii_lowercase();
+    // As a browser reads it: what's before it up to a space left out, tabs and line
+    // breaks anywhere too (`\x01java\tscript:` is `javascript:` to it).
+    let scheme: String = url
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect::<String>()
+        .to_ascii_lowercase();
     let script = ["javascript:", "vbscript:"].iter().any(|s| scheme.starts_with(s));
     let data = scheme.starts_with("data:") && !(image && scheme.starts_with("data:image/"));
     if script || data { "#" } else { url }
@@ -326,6 +333,10 @@ mod tests {
         assert!(!html.to_lowercase().contains("javascript:"), "{html}");
         assert!(html.contains("src=\"data:image/png;base64,AA\""), "{html}");
         assert!(!html.contains("data:text/html"), "{html}");
+        // Read as a browser reads it: a control character before, a tab inside.
+        for url in ["\u{1}javascript:alert(1)", "java\tscript:alert(1)", "\u{1f}vbscript:x"] {
+            assert_eq!(safe_url(url, false), "#", "{url:?}");
+        }
     }
 
     #[test]

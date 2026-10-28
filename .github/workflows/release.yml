@@ -23,8 +23,10 @@ on:
         options: [windows, linux, macos, all]
         default: windows
 
+# Read only, but for the jobs that look for and make the release: the builds run other
+# people's code (actions, crates' build scripts) and get no token that can write.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,6 +37,9 @@ jobs:
   # new version (it's released already, or its draft is there) builds nothing.
   version:
     runs-on: ubuntu-latest
+    # (A draft is seen only with write access.)
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}
@@ -116,6 +121,8 @@ jobs:
     needs: [version, macos, windows, linux]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:

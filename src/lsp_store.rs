@@ -48,6 +48,8 @@ enum ServerState {
     InstallFailed(String),
     /// Installed, but it failed to start.
     Unavailable,
+    /// Not started: the folder isn't trusted to run its code (see `trust`).
+    Untrusted,
 }
 
 /// Whether code intelligence is usable for a file yet.
@@ -67,6 +69,8 @@ pub enum Readiness {
     Unavailable {
         program: &'static str,
     },
+    /// Not started: the folder isn't trusted (Safe mode).
+    Untrusted,
     Starting,
     /// Reading the project. Hover and go to definition don't answer yet.
     Indexing {
@@ -191,6 +195,8 @@ pub struct LspStore {
     servers: HashMap<ServerKey, ServerState>,
     /// The folder each folder's Python files are served from, worked out once.
     python_roots: std::cell::RefCell<HashMap<PathBuf, PathBuf>>,
+    /// Whether each file and server folder is in a trusted folder, as asked once (see `trust`).
+    trusted_folders: std::cell::RefCell<HashMap<PathBuf, bool>>,
     /// Servers started so far: a start's answer only counts for that start (a server
     /// restarted meanwhile is another).
     starts: u64,
@@ -232,6 +238,7 @@ impl LspStore {
             roots: vec![root],
             servers: HashMap::new(),
             python_roots: Default::default(),
+            trusted_folders: Default::default(),
             starts: 0,
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
@@ -341,6 +348,9 @@ impl LspStore {
 
     pub fn readiness(&self, path: &Path) -> Option<Readiness> {
         let config = config_for(path)?;
+        if !self.trusted(path) {
+            return Some(Readiness::Untrusted);
+        }
         let key = self.key_for(config, path);
         // (Installing is noted for the project's: it shows for a package's files too.)
         let project = self.servers.get(&self.project_key(config));
@@ -352,6 +362,7 @@ impl LspStore {
             Some(ServerState::Installing) => Readiness::Installing { server: config },
             Some(ServerState::InstallFailed(_)) => Readiness::InstallFailed { server: config },
             Some(ServerState::Unavailable) => Readiness::Unavailable { program: config.program },
+            Some(ServerState::Untrusted) => Readiness::Untrusted,
             Some(ServerState::Running { .. }) => match self.work_shown(config.name) {
                 (Some(percent), _) => Readiness::Indexing { percent },
                 (None, checking) => Readiness::Ready { checking },
@@ -425,6 +436,36 @@ impl LspStore {
         }));
     }
 
+    /// Whether `path` (a file, or a server's folder) is in a folder trusted to run its code
+    /// (asked once for each).
+    fn trusted(&self, path: &Path) -> bool {
+        *self.trusted_folders.borrow_mut().entry(path.to_path_buf()).or_insert_with(|| crate::trust::is_trusted(path))
+    }
+
+    /// After a folder was trusted, or stopped being: servers start (or stop) as it now is,
+    /// for every open file.
+    pub fn trust_changed(&mut self, cx: &mut Context<Self>) {
+        self.trusted_folders.borrow_mut().clear();
+        let stale: Vec<ServerKey> = self
+            .servers
+            .iter()
+            .filter(|(key, state)| matches!(state, ServerState::Untrusted) || !self.trusted(&key.1))
+            .map(|(key, _)| key.clone())
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for key in &stale {
+            self.servers.remove(key);
+        }
+        let open: Vec<(PathBuf, Rope)> = self.documents.iter().map(|(p, t)| (p.clone(), t.clone())).collect();
+        for (path, text) in open {
+            self.open(&path, text, cx);
+        }
+        cx.emit(LspEvent::DiagnosticsChanged);
+        cx.notify();
+    }
+
     pub fn has_server_for(&self, path: &Path) -> bool {
         config_for(path).is_some()
     }
@@ -433,6 +474,10 @@ impl LspStore {
     /// server has initialized, `f` is queued.
     fn with_server(&mut self, path: &Path, f: impl FnOnce(&LanguageServer) + 'static, cx: &mut Context<Self>) {
         let Some(config) = config_for(path) else { return };
+        // (A file in a folder not trusted isn't given to a server, even one running.)
+        if !self.trusted(path) {
+            return;
+        }
         let key = self.key_for(config, path);
         if !self.servers.contains_key(&key) {
             let state = self.start(config, key.1.clone(), cx);
@@ -478,6 +523,9 @@ impl LspStore {
 
     /// Starts `config`'s server for the folder `root` (see `key_for`).
     fn start(&mut self, config: &'static ServerConfig, root: PathBuf, cx: &mut Context<Self>) -> ServerState {
+        if !self.trusted(&root) {
+            return ServerState::Untrusted;
+        }
         let Some(program) = crate::servers::find_for(config, &root) else { return ServerState::Missing };
         crate::server_log::append(config.name, &format!("starting {}", program.display()));
         let (server, mut messages) = match LanguageServer::spawn_named(&program, config.args, &root, config.name) {

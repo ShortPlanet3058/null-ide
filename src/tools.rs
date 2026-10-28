@@ -55,6 +55,19 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     command
 }
 
+/// Stops `child` and what it started (an AI tool's own processes: `codex.cmd` is cmd.exe,
+/// running node), then waits for it. On Unix that's its process group: started in its own
+/// (`process_group(0)`).
+pub fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id().to_string();
+    #[cfg(windows)]
+    let _ = command("taskkill").args(["/T", "/F", "/PID", &pid]).output();
+    #[cfg(unix)]
+    let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).output();
+    child.kill().ok();
+    child.wait().ok();
+}
+
 /// Where a bare program name is installed, looked up once (`git` runs often).
 fn located(program: &std::ffi::OsStr) -> Option<PathBuf> {
     use std::sync::Mutex;

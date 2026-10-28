@@ -63,8 +63,8 @@ pub enum State {
 }
 
 static STATE: Mutex<State> = Mutex::new(State::Nothing);
-/// The package downloaded, and how it's installed.
-static READY: Mutex<Option<(Install, PathBuf)>> = Mutex::new(None);
+/// The package downloaded, how it's installed, and its SHA-256 (the signed one).
+static READY: Mutex<Option<(Install, PathBuf, String)>> = Mutex::new(None);
 /// Started again once the update is in place.
 static RESTART: AtomicBool = AtomicBool::new(false);
 
@@ -317,7 +317,8 @@ pub fn get(progress: impl Fn(u8)) -> Result<String, String> {
     };
     let response = call(&agent, &url).map_err(|e| failed(format!("Couldn't download the update: {e}")))?;
     let size = response.body().content_length();
-    let mut reader = response.into_body().into_with_config().limit(u64::MAX).reader();
+    // (Bigger than any package of Null's: not the release's, and not filling the disk.)
+    let mut reader = response.into_body().into_with_config().limit(1 << 30).reader();
     let path = dir.join(name);
     let part = dir.join(format!("{name}.part"));
     let mut out = std::fs::File::create(&part).map_err(|e| failed(format!("Couldn't save the update: {e}")))?;
@@ -348,7 +349,7 @@ pub fn get(progress: impl Fn(u8)) -> Result<String, String> {
     }
     std::fs::rename(&part, &path).map_err(|e| failed(format!("Couldn't save the update: {e}")))?;
     if let Ok(mut ready) = READY.lock() {
-        *ready = Some((how, path));
+        *ready = Some((how, path, digest));
     }
     set_state(State::Ready(version.clone()));
     Ok(version)
@@ -414,11 +415,11 @@ const NOT_INSTALLED: &str = "not-installed";
 /// Null is quitting: a downloaded update is put in place once it has, by a process of its
 /// own (Null's files can't be replaced while it runs, on Windows).
 pub fn install_on_quit() {
-    let Some((how, package)) = READY.lock().ok().and_then(|mut r| r.take()) else { return };
+    let Some((how, package, digest)) = READY.lock().ok().and_then(|mut r| r.take()) else { return };
     let State::Ready(version) = state() else { return };
     let restart = if RESTART.load(Ordering::Relaxed) { "1" } else { "0" };
     let pid = std::process::id().to_string();
-    if let Err(error) = start_installing(&how, &package, &pid, restart, &version) {
+    if let Err(error) = start_installing(&how, &package, &pid, restart, &version, &digest) {
         eprintln!("null: couldn't install the update: {error}");
     }
 }
@@ -441,7 +442,14 @@ pub fn not_installed() -> Option<String> {
 }
 
 #[cfg(windows)]
-fn start_installing(how: &Install, package: &Path, pid: &str, restart: &str, version: &str) -> std::io::Result<()> {
+fn start_installing(
+    how: &Install,
+    package: &Path,
+    pid: &str,
+    restart: &str,
+    version: &str,
+    _digest: &str,
+) -> std::io::Result<()> {
     let Install::Setup(exe) = how else { return Err(std::io::Error::other("not an installed Null")) };
     // (A copy runs the installer: Null's own file is replaced.)
     let helper = package.with_file_name("null-update.exe");
@@ -490,7 +498,14 @@ pub fn finish(args: &[String]) -> i32 {
 }
 
 #[cfg(unix)]
-fn start_installing(how: &Install, package: &Path, pid: &str, restart: &str, version: &str) -> std::io::Result<()> {
+fn start_installing(
+    how: &Install,
+    package: &Path,
+    pid: &str,
+    restart: &str,
+    version: &str,
+    digest: &str,
+) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     // Each waits for Null to quit ($1), puts the package ($3) in place of the app ($4) and
     // says so (ok), and starts it again if asked ($2). What's there stays when anything
@@ -523,8 +538,10 @@ rm -rf "$d"
 "#,
             bin,
         ),
+        // Installed as root from a copy only root can change, checked again there (its
+        // SHA-256, $6): the downloaded file is yours, and could be changed before you quit.
         Install::Deb(bin) => (
-            r#"pkexec dpkg -i "$3" && ok=1
+            r#"pkexec sh -c 'f=$(mktemp) || exit 1; cat "$1" > "$f" && [ "$(sha256sum "$f" | cut -d " " -f 1)" = "$2" ] && dpkg -i "$f"; r=$?; rm -f "$f"; exit $r' sh "$3" "$6" && ok=1
 "#,
             bin,
         ),
@@ -540,6 +557,7 @@ rm -rf "$d"
         .arg(package)
         .arg(target)
         .arg(version)
+        .arg(digest)
         // (Its own group: a terminal Null was started from doesn't stop it.)
         .process_group(0)
         .spawn()
@@ -623,7 +641,8 @@ mod tests {
         // Not restarting (or nothing to install): nothing kept.
         keep_windows(windows.clone());
         assert!(windows_to_reopen().is_empty());
-        *READY.lock().unwrap() = Some((Install::Binary(PathBuf::from("/x/null")), PathBuf::from("/x/u.tar.gz")));
+        *READY.lock().unwrap() =
+            Some((Install::Binary(PathBuf::from("/x/null")), PathBuf::from("/x/u.tar.gz"), String::new()));
         restart_after();
         keep_windows(windows.clone());
         restart_called_off();
@@ -663,11 +682,11 @@ mod tests {
                 done()
             })
         };
-        start_installing(&Install::Binary(bin.clone()), &dir.join("u.tar.gz"), &pid, "0", "9.9.9").unwrap();
+        start_installing(&Install::Binary(bin.clone()), &dir.join("u.tar.gz"), &pid, "0", "9.9.9", "").unwrap();
         assert!(waited(&|| std::fs::read_to_string(&bin).is_ok_and(|b| b == "new")), "replaced");
         std::fs::write(&bin, "old").unwrap();
         std::fs::write(dir.join("bad.tar.gz"), "not a package").unwrap();
-        start_installing(&Install::Binary(bin.clone()), &dir.join("bad.tar.gz"), &pid, "0", "9.9.9").unwrap();
+        start_installing(&Install::Binary(bin.clone()), &dir.join("bad.tar.gz"), &pid, "0", "9.9.9", "").unwrap();
         let told = dir.join(NOT_INSTALLED);
         assert!(waited(&|| std::fs::read_to_string(&told).is_ok_and(|v| v.trim() == "9.9.9")), "told");
         assert_eq!(std::fs::read_to_string(&bin).unwrap(), "old");

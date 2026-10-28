@@ -26,10 +26,17 @@ struct Question {
     /// the answer it was given didn't do.
     #[serde(default)]
     asker: u32,
+    /// The server ssh is reaching: an answer is given again only to the same one (a server
+    /// can write its own question, the same words as another's).
+    #[serde(default)]
+    host: String,
 }
 
 /// Set on an ssh whose questions are answered only from this run's answers.
 const KNOWN_ONLY: &str = "NULL_ASKPASS_KNOWN_ONLY";
+
+/// Set on ssh: the server it reaches (see `Question::host`).
+const HOST: &str = "NULL_ASKPASS_HOST";
 
 #[derive(Serialize, Deserialize)]
 struct Answer {
@@ -45,9 +52,9 @@ pub struct Ask {
 /// Where the questions go: the app takes them (see `serve`).
 static ASKS: Mutex<Option<futures::channel::mpsc::UnboundedSender<Ask>>> = Mutex::new(None);
 
-/// What the person answered this run, by question (a password asked again by the next
-/// connection is answered at once).
-static ANSWERED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// What the person answered this run, by server and question (a password asked again by
+/// the next connection to it is answered at once).
+static ANSWERED: Mutex<Vec<((String, String), String)>> = Mutex::new(Vec::new());
 
 /// Who asked what this run (an ssh's process, the question): the same ssh asking the same
 /// again was given a wrong answer.
@@ -109,18 +116,20 @@ fn answer(stream: TcpStream, expected: &str) {
         let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
         let again = (question.asker, question.prompt.clone());
         if asked.contains(&again) {
-            ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| *p != question.prompt);
+            let key = (question.host.clone(), question.prompt.clone());
+            ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _)| *k != key);
         } else {
             asked.push(again);
         }
     }
-    let answer = known(&question.prompt).or_else(|| (!question.known_only).then(|| ask(&question.prompt)).flatten());
+    let key = (question.host.clone(), question.prompt.clone());
+    let answer = known(&key).or_else(|| (!question.known_only).then(|| ask(&question.prompt)).flatten());
     if let Some(answer) = &answer
         && kept(&question.prompt)
     {
         let mut answered = ANSWERED.lock().unwrap_or_else(|e| e.into_inner());
-        answered.retain(|(p, _)| *p != question.prompt);
-        answered.push((question.prompt.clone(), answer.clone()));
+        answered.retain(|(k, _)| *k != key);
+        answered.push((key, answer.clone()));
     }
     if let Ok(reply) = serde_json::to_string(&Answer { answer }) {
         let _ = (&stream).write_all(format!("{reply}\n").as_bytes());
@@ -138,8 +147,8 @@ pub fn is_trust_question(prompt: &str) -> bool {
     prompt.contains("(yes/no")
 }
 
-fn known(prompt: &str) -> Option<String> {
-    ANSWERED.lock().ok()?.iter().find(|(p, _)| p == prompt).map(|(_, a)| a.clone())
+fn known(key: &(String, String)) -> Option<String> {
+    ANSWERED.lock().ok()?.iter().find(|(k, _)| k == key).map(|(_, a)| a.clone())
 }
 
 /// Forgets this run's answers (they didn't sign in: asked again next time).
@@ -163,14 +172,14 @@ pub fn questions() -> futures::channel::mpsc::UnboundedReceiver<Ask> {
 
 /// The same, for an ssh that mustn't ask in the window (started by the window's own
 /// thread: it would wait for itself): this run's answers only.
-pub fn environment_known_only() -> Option<Vec<(&'static str, String)>> {
-    let mut environment = environment()?;
+pub fn environment_known_only(host: &str) -> Option<Vec<(&'static str, String)>> {
+    let mut environment = environment(host)?;
     environment.push((KNOWN_ONLY, "1".into()));
     Some(environment)
 }
 
-/// What ssh is given so it asks Null (None: it can't, and asks nothing).
-pub fn environment() -> Option<Vec<(&'static str, String)>> {
+/// What ssh reaching `host` is given so it asks Null (None: it can't, and asks nothing).
+pub fn environment(host: &str) -> Option<Vec<(&'static str, String)>> {
     // (Tests' ssh asks nothing.)
     if cfg!(test) || crate::system_clipboard::kept_apart() {
         return None;
@@ -183,6 +192,7 @@ pub fn environment() -> Option<Vec<(&'static str, String)>> {
         // (Older ssh asks its askpass only with a display named.)
         ("DISPLAY", std::env::var("DISPLAY").ok().filter(|d| !d.is_empty()).unwrap_or_else(|| ":0".into())),
         (ENV, format!("{port} {secret}")),
+        (HOST, host.to_string()),
     ])
 }
 
@@ -194,12 +204,13 @@ pub fn answered_for_ssh() -> Option<i32> {
     let (port, secret) = address.split_once(' ')?;
     let port: u16 = port.parse().ok()?;
     let known_only = std::env::var_os(KNOWN_ONLY).is_some();
+    let host = std::env::var(HOST).unwrap_or_default();
     // (The ssh that started this one: on Windows not known, 0.)
     #[cfg(unix)]
     let asker = std::os::unix::process::parent_id();
     #[cfg(not(unix))]
     let asker = 0;
-    Some(match ask_running(port, secret, &prompt, known_only, asker) {
+    Some(match ask_running(port, secret, &prompt, known_only, asker, &host) {
         Some(answer) => {
             let mut out = std::io::stdout();
             let _ = writeln!(out, "{answer}");
@@ -211,11 +222,16 @@ pub fn answered_for_ssh() -> Option<i32> {
 }
 
 /// `prompt` asked of the Null listening on `port`, with its secret.
-fn ask_running(port: u16, secret: &str, prompt: &str, known_only: bool, asker: u32) -> Option<String> {
+fn ask_running(port: u16, secret: &str, prompt: &str, known_only: bool, asker: u32, host: &str) -> Option<String> {
     let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).ok()?;
-    let question =
-        serde_json::to_string(&Question { secret: secret.to_string(), prompt: prompt.to_string(), known_only, asker })
-            .ok()?;
+    let question = serde_json::to_string(&Question {
+        secret: secret.to_string(),
+        prompt: prompt.to_string(),
+        known_only,
+        asker,
+        host: host.to_string(),
+    })
+    .ok()?;
     stream.write_all(format!("{question}\n").as_bytes()).ok()?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).ok()?;
@@ -241,15 +257,18 @@ mod tests {
                 ask.answer.send(Some(typed.into())).unwrap();
             }
         });
-        assert_eq!(ask_running(port, &secret, password, false, 101).as_deref(), Some("typo"));
+        assert_eq!(ask_running(port, &secret, password, false, 101, "box").as_deref(), Some("typo"));
         // (Kept for this run: another ssh is answered at once, no window asked.)
-        assert_eq!(ask_running(port, &secret, password, false, 102).as_deref(), Some("typo"));
+        assert_eq!(ask_running(port, &secret, password, false, 102, "box").as_deref(), Some("typo"));
         // That ssh asking again: the answer didn't do. Asked in the window, not given again.
-        assert_eq!(ask_running(port, &secret, password, false, 102).as_deref(), Some("right"));
+        assert_eq!(ask_running(port, &secret, password, false, 102, "box").as_deref(), Some("right"));
         window.join().unwrap();
-        assert_eq!(ask_running(port, "wrong", password, false, 103), None);
+        assert_eq!(ask_running(port, "wrong", password, false, 103, "box"), None);
         // (Answers only from this run's: one never given isn't asked in the window.)
-        assert_eq!(ask_running(port, &secret, "other@box's password: ", true, 104), None);
+        assert_eq!(ask_running(port, &secret, "other@box's password: ", true, 104, "box"), None);
+        // Another server asking the same words isn't given the answer.
+        assert_eq!(ask_running(port, &secret, password, true, 105, "evil"), None);
+        assert_eq!(ask_running(port, &secret, password, true, 106, "box").as_deref(), Some("right"));
         forget();
     }
 

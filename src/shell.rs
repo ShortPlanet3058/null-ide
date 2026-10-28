@@ -126,6 +126,11 @@ pub fn and_then(commands: &[String], kind: Kind) -> String {
 
 /// Quoted even when plain (PowerShell's `$env:X=` wants a string).
 fn quote_always(word: &str, kind: Kind) -> String {
+    // A control character typed as it is would act as a key, even quoted (a file named
+    // `\x15id\r` erases the line and runs `id`): written as its code instead.
+    if word.chars().any(char::is_control) {
+        return quote_controls(word, kind);
+    }
     match kind {
         Kind::Posix => format!("'{}'", word.replace('\'', r"'\''")),
         // (In PowerShell's single quotes only a quote is special, doubled; its typographic
@@ -144,10 +149,60 @@ fn quote_always(word: &str, kind: Kind) -> String {
     }
 }
 
+/// `word`, holding control characters, quoted with each of those written as its code: in
+/// `$'…'` (bash, zsh, ksh), in PowerShell as `$([char]0x…)` in a double-quoted string.
+fn quote_controls(word: &str, kind: Kind) -> String {
+    let mut quoted = String::new();
+    match kind {
+        Kind::Posix => {
+            quoted.push_str("$'");
+            for c in word.chars() {
+                match c {
+                    '\\' | '\'' => {
+                        quoted.push('\\');
+                        quoted.push(c);
+                    }
+                    // (`\\x` for ASCII's: macOS's bash 3.2 has no `\\u`.)
+                    c if c.is_ascii_control() => quoted.push_str(&format!("\\x{:02x}", c as u32)),
+                    c if c.is_control() => quoted.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => quoted.push(c),
+                }
+            }
+            quoted.push('\'');
+        }
+        Kind::PowerShell => {
+            quoted.push('"');
+            for c in word.chars() {
+                match c {
+                    // (Its typographic double quotes are quotes too.)
+                    '`' | '$' | '"' | '“' | '”' | '„' => {
+                        quoted.push('`');
+                        quoted.push(c);
+                    }
+                    c if c.is_control() => quoted.push_str(&format!("$([char]0x{:x})", c as u32)),
+                    c => quoted.push(c),
+                }
+            }
+            quoted.push('"');
+        }
+    }
+    quoted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use Kind::*;
+
+    #[test]
+    fn control_characters_are_written_as_codes() {
+        assert_eq!(quote("a\u{15}id\r", Posix), r"$'a\x15id\x0d'");
+        assert_eq!(quote("it's\n", Posix), r"$'it\'s\x0a'");
+        assert_eq!(quote("a\u{15}$b\r", PowerShell), "\"a$([char]0x15)`$b$([char]0xd)\"");
+        for kind in [Posix, PowerShell] {
+            assert!(!quote("x\u{3}\u{1b}[A\u{7f}", kind).chars().any(char::is_control));
+        }
+    }
 
     #[test]
     fn lines_are_written_for_each_shell() {

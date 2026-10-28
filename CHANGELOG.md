@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- Security audit of 0.2.2, with fixes:
+  - Folders you trust: one Null hasn't seen before opens in Safe mode, its language
+    servers off (they run a project's own code: its `.venv`'s programs, its TypeScript,
+    Rust build scripts), its `.venv` not activated in the terminal, its settings file only
+    setting how text is edited. Trust Folder in the status bar turns it all on. The folders
+    you'd opened before are trusted.
+  - A project's `.null/settings.json` can't choose your AI (where your code and API key
+    go), your shortcuts or updates.
+  - git run by Null never runs the command a repository's own config names for `status`
+    (`core.fsmonitor`): opening a folder someone sent ran it. In Safe mode, its filters
+    don't run either.
+  - AI tasks don't read files that hold secrets, and don't write into `.git`, `.null`,
+    `.claude`, `.cargo`, `.venv` or `node_modules`.
+  - The terminal: a file whose name holds control characters, dropped in, can't press
+    keys (its name is written as codes); pasted text keeps only tabs and line breaks; a
+    program setting the clipboard (OSC 52) is said.
+  - SVGs read the images they name only from their own folder, and a packed one only to a
+    size; Markdown and pasted HTML nested thousands deep, or a huge paragraph, no longer
+    crash or freeze Null; Export as HTML keeps out `javascript:` links however written.
+  - SSH: a password typed for one server is never given to another asking the same words.
+  - Linux: a `.deb` update is checked again as it's installed, as root; Null takes its
+    lock before handing files to an older one's address.
+  - Stopping an AI task stops what its CLI started too (Codex's node on Windows).
+  - Terminal AI: the command isn't written if the line changed meanwhile (a paste); it's
+    told which PowerShell it writes for; a reasoning model's thinking is left out.
+  - TLS libraries updated (rustls, webpki) for their advisories.
+  - Also: a click on who changed the line finds the commit in the file's own repository;
+    changed values in the debugger are compared stop to stop, not when another call is
+    looked at; a notebook keeps its unedited cells exactly as written.
+
 - Null's own theme is black all the way round: the tab bar, sidebar, title and status bars
   are as black as the code, set apart by thin lines, so an OLED screen keeps those pixels off.
 - The terminal, with AI on: `# what you want` then Tab writes the command for it on the line

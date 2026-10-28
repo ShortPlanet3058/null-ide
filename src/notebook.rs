@@ -256,7 +256,10 @@ pub fn with_cells(json: &str, text: &str) -> Option<String> {
                     Value::Object(cell)
                 }
             };
-            cell["source"] = source_value(text);
+            // (A cell that didn't change keeps its source as written: its last line break too.)
+            if was.is_none_or(|o| old_cells[o] != (kind.clone(), text.clone())) {
+                cell["source"] = source_value(text);
+            }
             cell
         })
         .collect();

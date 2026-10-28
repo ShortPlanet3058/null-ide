@@ -62,16 +62,35 @@ pub fn holds_secrets(path: &Path) -> bool {
     if name == ".env" || ((name.starts_with(".env.") || name.ends_with(".env")) && !example) {
         return true;
     }
-    let keys = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk"];
+    let keys = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".p8", ".keytab", ".tfvars", ".gpg"];
     if keys.iter().any(|k| name.ends_with(k)) {
         return true;
     }
-    let private_keys = ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+    let private_keys = ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk"];
     if private_keys.iter().any(|k| name == *k || (name.starts_with(&format!("{k}.")) && !name.ends_with(".pub"))) {
         return true;
     }
-    [".netrc", ".npmrc", ".pypirc", ".pgpass", "credentials", "credentials.json", ".git-credentials", "secrets.json"]
-        .contains(&name.as_str())
+    [
+        ".netrc",
+        "_netrc",
+        ".npmrc",
+        ".pypirc",
+        ".pgpass",
+        "credentials",
+        "credentials.json",
+        ".git-credentials",
+        "secrets.json",
+        "secrets.yaml",
+        "secrets.yml",
+        ".envrc",
+        ".vault-token",
+        ".dockercfg",
+        "kubeconfig",
+        ".htpasswd",
+        "terraform.tfstate",
+        "terraform.tfstate.backup",
+    ]
+    .contains(&name.as_str())
 }
 
 /// What to send with a request about `lines` of `text` (the file at `path`).

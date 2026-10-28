@@ -281,7 +281,27 @@ fn terminal_dir(target: Option<(&Path, bool)>, root: &Path) -> PathBuf {
 /// `.command`, or anything executable).
 fn runs_when_opened(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    if matches!(ext.as_str(), "sh" | "command" | "tool" | "zsh" | "bash" | "app" | "pkg") {
+    // (On the Mac also what Terminal, Java, the Finder or Automator runs: a `.terminal` file
+    // holds a command, a `.fileloc` opens a program.)
+    if matches!(
+        ext.as_str(),
+        "sh" | "command"
+            | "tool"
+            | "zsh"
+            | "bash"
+            | "app"
+            | "pkg"
+            | "mpkg"
+            | "terminal"
+            | "jar"
+            | "fileloc"
+            | "inetloc"
+            | "webloc"
+            | "workflow"
+            | "prefpane"
+            | "scpt"
+            | "applescript"
+    ) {
         return true;
     }
     // Windows runs these when they're opened (scripts too: .js and .vbs by Windows Script Host).
@@ -305,6 +325,19 @@ fn runs_when_opened(path: &Path) -> bool {
                 | "reg"
                 | "hta"
                 | "cpl"
+                | "url"
+                | "appref-ms"
+                | "application"
+                | "msc"
+                | "settingcontent-ms"
+                | "chm"
+                | "scf"
+                | "library-ms"
+                | "wsh"
+                | "inf"
+                | "jar"
+                | "psm1"
+                | "vb"
         )
     {
         return true;

@@ -635,6 +635,9 @@ impl TerminalView {
     /// Types `command` into the shell and presses Return; in a shell still starting,
     /// once it has.
     pub fn run_command(&mut self, command: &str, cx: &mut Context<Self>) {
+        // (A control character would act as a key: a test's name could end the line early.)
+        let command: String = command.chars().filter(|c| !c.is_control()).collect();
+        let command = command.as_str();
         if self.settled {
             if self.running.is_none() {
                 self.start_run(Some(command));
@@ -740,7 +743,14 @@ impl TerminalView {
                 cx.emit(TerminalEvent::TitleChanged);
             }
             TermEvent::PtyWrite(text) => self.write(text.into_bytes()),
-            TermEvent::ClipboardStore(_, text) => crate::system_clipboard::write(cx, ClipboardItem::new_string(text)),
+            // A program set the clipboard (vim, tmux over ssh): said, as text you'd paste next
+            // could be anything it chose.
+            TermEvent::ClipboardStore(_, text) => {
+                let count = text.chars().count();
+                crate::system_clipboard::write(cx, ClipboardItem::new_string(text));
+                let what = if count == 1 { "1 character".to_string() } else { format!("{count} characters") };
+                cx.emit(TerminalEvent::Notice(format!("A program in the terminal copied {what} to the clipboard")));
+            }
             TermEvent::ClipboardLoad(_, format) => {
                 let text = crate::system_clipboard::read(cx).and_then(|item| item.text()).unwrap_or_default();
                 self.write(format(&text).into_bytes());
@@ -867,8 +877,11 @@ impl TerminalView {
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = crate::system_clipboard::read(cx).and_then(|item| item.text()) else { return };
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
-        // No escape characters: pasted text could otherwise end bracketed paste early and run commands.
-        let text = text.replace('\x1b', "").replace("\r\n", "\r").replace('\n', "\r");
+        // No escape characters: pasted text could otherwise end bracketed paste early and run
+        // commands. Nor other control characters (⌃U, ⌃C), which would act as keys: only
+        // tabs and line breaks.
+        let text: String = text.chars().filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r')).collect();
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bytes = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text };
         self.term.lock().scroll_display(Scroll::Bottom);
         self.write(bytes.into_bytes());
@@ -1117,12 +1130,16 @@ impl TerminalView {
         if self.running.is_some() || !ai.ready() {
             return false;
         }
-        let Some((erase, asked)) = self.line_typed().as_deref().and_then(crate::terminal_ai::asked_on_line) else {
+        let typed = self.line_typed();
+        let Some((erase, asked)) = typed.as_deref().and_then(crate::terminal_ai::asked_on_line) else {
             return false;
         };
         let words = crate::terminal_ai::terminal_words(&self.root);
-        let prompt = crate::terminal_ai::command_prompt(&asked, &words, &self.shell_folder());
+        let folder = self.shell_folder();
         let task = cx.spawn(async move |this, cx| {
+            let shown = crate::shell::path_text(&folder);
+            let names = cx.background_executor().spawn(async move { crate::terminal_ai::names_in(&folder) }).await;
+            let prompt = crate::terminal_ai::command_prompt(&asked, &words, &shown, &names);
             let mut events = crate::ai::stream(ai, prompt);
             let mut answer = String::new();
             let mut failed = None;
@@ -1141,6 +1158,11 @@ impl TerminalView {
                 match (failed, crate::terminal_ai::command_in(&answer)) {
                     (Some(error), _) => cx.emit(TerminalEvent::Notice(format!("Couldn't write the command: {error}"))),
                     (None, None) => cx.emit(TerminalEvent::Notice("AI gave no command for that.".into())),
+                    // The line changed meanwhile (a paste, a drop): what's erased would be
+                    // something else.
+                    (None, Some(_)) if this.line_typed() != typed => {
+                        cx.emit(TerminalEvent::Notice("The line changed: the command wasn't written.".into()))
+                    }
                     // What was asked goes, the command takes its place, for Return to run.
                     (None, Some(command)) => {
                         this.term.lock().scroll_display(Scroll::Bottom);
@@ -1170,7 +1192,12 @@ impl TerminalView {
             return;
         }
         let words = crate::terminal_ai::terminal_words(&self.root);
-        let prompt = crate::terminal_ai::explain_prompt(&ran.command, &ran.output, &words, &ran.folder);
+        let prompt = crate::terminal_ai::explain_prompt(
+            &ran.command,
+            &ran.output,
+            &words,
+            &crate::shell::path_text(&ran.folder),
+        );
         let task = cx.spawn(async move |this, cx| {
             let mut events = crate::ai::stream(ai, prompt);
             while let Some(event) = events.next().await {

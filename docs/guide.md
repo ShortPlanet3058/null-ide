@@ -295,6 +295,21 @@ or the Dock, it comes back to the last project. Sessions are small files in Null
 (`~/Library/Application Support/Null/sessions` on macOS, `%LOCALAPPDATA%\Null\sessions` on
 Windows, `~/.local/share/null/sessions` on Linux; `NULL_DATA_DIR` overrides it).
 
+## Folders you trust
+
+A folder can run its own code just by being opened: its Python environment's programs for
+Python's language server, its own TypeScript, a Rust project's build scripts. So a folder
+Null hasn't seen before opens in **Safe mode**: its language servers don't start, a new
+terminal doesn't activate its `.venv`, and its `.null/settings.json` only sets how text is
+edited (indentation, wrapping, formatting, hidden files), as `.vscode/settings.json` does.
+The status bar says "Safe mode"; **Trust Folder** there (or ⌘K "Trust This Folder") turns it
+all on, and it's remembered. The folders you'd opened before Null 0.2.2 are trusted already.
+⌘K "Stop Trusting This Folder" puts one back in Safe mode.
+
+Whatever the folder, its settings never choose your AI (where your code and key go), your
+shortcuts or updates, and git doesn't run commands a repository's own config names as Null
+reads it (`core.fsmonitor`; in Safe mode its filters too).
+
 ## Folders inside WSL (Windows)
 
 **Open WSL Folder…** (in ⌘K or the File menu) opens a folder inside WSL, starting from your
