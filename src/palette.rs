@@ -326,7 +326,7 @@ impl Quick {
     }
 }
 
-const THEMES: [ThemeName; 6] = ThemeName::ALL;
+const THEMES: [ThemeName; 7] = ThemeName::ALL;
 
 fn next_theme(current: ThemeName, step: isize) -> ThemeName {
     let i = THEMES.iter().position(|t| *t == current).unwrap_or(0) as isize;
@@ -347,9 +347,8 @@ fn quick_for(name: &str) -> Option<Quick> {
         "ToggleAutocomplete" => Quick::Suggestions,
         "ToggleFadeWhileTyping" => Quick::Fade,
         "ToggleAi" => Quick::Ai,
-        "UseNullTheme" | "UseAshTheme" | "UseMidnightTheme" | "UseMossTheme" | "UsePaperTheme" | "UseDuneTheme" => {
-            Quick::Theme
-        }
+        "UseNullTheme" | "UseAshTheme" | "UseMidnightTheme" | "UseMossTheme" | "UseContrastTheme" | "UsePaperTheme"
+        | "UseDuneTheme" => Quick::Theme,
         "IncreaseFontSize" | "DecreaseFontSize" => Quick::TextSize,
         "CompactLineSpacing" | "NormalLineSpacing" | "RelaxedLineSpacing" => Quick::LineSpacing,
         "OpenSettings" => Quick::AllSettings,

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Null's own theme is black all the way round: the tab bar, sidebar, title and status bars
+  are as black as the code, set apart by thin lines, so an OLED screen keeps those pixels off.
+- A new High Contrast theme: black, white text, comments you can read and edges that stand
+  out (⌘K, Settings, or the Theme menu).
 - A click on who last changed the line (at its end, with Show Who Changed the Line on)
   opens that commit.
 - Settings → AI with Ollama lists the models it has installed, first, to pick with a click.
