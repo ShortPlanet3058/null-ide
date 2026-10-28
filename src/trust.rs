@@ -49,9 +49,16 @@ pub fn start() {
     if file.exists() {
         return;
     }
-    let list: Vec<PathBuf> = crate::session::recent_projects().iter().map(|p| kept_form(p)).collect();
+    let list = seeded(crate::session::recent_projects(), crate::tools::home_dir().as_deref());
     save(&list);
     with(|trusted| *trusted = list);
+}
+
+/// The recent projects trusted the first time: not your home folder or a disk's root (a
+/// folder trusted is trusted with all that's in it: opened once, that would be everything).
+fn seeded(recent: Vec<PathBuf>, home: Option<&Path>) -> Vec<PathBuf> {
+    let home = home.map(kept_form);
+    recent.iter().map(|p| kept_form(p)).filter(|p| p.parent().is_some() && Some(p) != home.as_ref()).collect()
 }
 
 /// Whether `path` (a folder, or a file) is in a folder you trust. Null's own folder for
@@ -89,4 +96,19 @@ pub fn distrust(folder: &Path) {
             save(trusted);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_time_recent_projects_are_trusted_but_not_home() {
+        let home = crate::tools::test_dir("trust-home");
+        std::fs::create_dir_all(home.join("app")).unwrap();
+        let recent = vec![home.join("app"), home.clone(), PathBuf::from("/"), PathBuf::from("/ssh:box:/srv/app")];
+        let trusted = seeded(recent, Some(&home));
+        assert_eq!(trusted, [kept_form(&home.join("app")), PathBuf::from("/ssh:box:/srv/app")]);
+        std::fs::remove_dir_all(&home).ok();
+    }
 }
