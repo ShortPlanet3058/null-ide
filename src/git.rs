@@ -461,6 +461,23 @@ pub fn log(root: &Path, max: usize) -> Vec<LogCommit> {
         .collect()
 }
 
+/// One commit by its id, as the history lists it (None: not a commit here).
+pub fn log_commit(root: &Path, id: &str) -> Option<LogCommit> {
+    let format = "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%s%x1f%D";
+    let out = git(root, &["log", "-n1", format, id, "--"])?;
+    let fields: Vec<&str> = out.trim_end_matches('\n').split('\x1f').collect();
+    let [id, short, parents, author, time, subject, refs] = fields.as_slice() else { return None };
+    Some(LogCommit {
+        id: id.to_string(),
+        short: short.to_string(),
+        parents: parents.split_whitespace().map(str::to_string).collect(),
+        author: author.to_string(),
+        time: time.parse().unwrap_or(0),
+        subject: subject.to_string(),
+        refs: refs.split(", ").filter(|r| !r.is_empty()).map(str::to_string).collect(),
+    })
+}
+
 /// A commit's whole message.
 pub fn message_of(root: &Path, id: &str) -> String {
     git(root, &["log", "-n1", "--format=%B", id]).unwrap_or_default().trim_end().to_string()
@@ -1245,6 +1262,8 @@ fn explain_switch_error(error: &str) -> String {
 /// Who last changed a line, and when.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineBlame {
+    /// The commit that last changed it.
+    pub id: String,
     /// "You" for the person committing here.
     pub author: String,
     /// Seconds since 1970.
@@ -1274,6 +1293,7 @@ pub fn blame_line(path: &Path, text: &str, line: usize) -> Option<LineBlame> {
     let author = field("author ")?;
     let me = git(dir, &["config", "user.name"]).map(|n| n.trim().to_string());
     Some(LineBlame {
+        id: commit.to_string(),
         author: if me.as_deref() == Some(author.as_str()) { "You".into() } else { author },
         time: field("author-time ")?.parse().ok()?,
         summary: field("summary ").unwrap_or_default(),
@@ -2181,6 +2201,10 @@ mod tests {
         // A line typed above (not saved): the next line is still the committed "one".
         let blame = blame_line(&file, "new\none\ntwo\n", 1).unwrap();
         assert_eq!((blame.author.as_str(), blame.summary.as_str()), ("You", "First lines"));
+        // Its commit, as the history lists it (a click on the blame opens it).
+        let commit = log_commit(&repo, &blame.id).unwrap();
+        assert_eq!((commit.id.as_str(), commit.subject.as_str()), (blame.id.as_str(), "First lines"));
+        assert!(log_commit(&repo, "0123456789abcdef0123456789abcdef01234567").is_none());
         assert!(blame_line(&file, "new\none\ntwo\n", 0).is_none());
         assert!(blame_line(&repo.join("untracked.txt"), "x\n", 0).is_none());
         std::fs::remove_dir_all(&repo).ok();

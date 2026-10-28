@@ -1174,6 +1174,24 @@ impl Element for EditorElement {
                     at += item.title.len() + LENS_SEP.len();
                 }
             }
+            // Who last changed the caret's line, at its end: a click shows that commit.
+            if let (Some((line, blame)), Some(commit)) = (editor.line_blame(), editor.line_blame_commit())
+                && line == caret_line
+                && let Some((i, r)) = row_layouts.iter().enumerate().find(|(_, r)| {
+                    r.row.last && r.row.block.is_none() && r.row.line == line && r.shaped.text.ends_with(blame)
+                })
+            {
+                let at = r.shaped.text.len() - blame.len();
+                let top = row_top(visible.start + i);
+                let (x0, x1) = (r.shaped.x_for_index(at), r.shaped.x_for_index(r.shaped.text.len()));
+                lens_hits.push((
+                    Bounds::from_corners(
+                        point(origin.x + r.x + x0, top),
+                        point(origin.x + r.x + x1, top + line_height),
+                    ),
+                    crate::editor::lens::LensAction::Commit(commit.to_string()),
+                ));
+            }
             // The rows a range of lines takes, clipped to the screen.
             let rows_of = |lines: Range<usize>| {
                 let end =
