@@ -595,12 +595,16 @@ pub fn write(at: &RemotePath, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Writes a file whole or not at all: beside it first (with its permissions), then in its
-/// place; a link written through. In place when nothing can be made beside it.
+/// place; a link written through. In place only when nothing can be made beside it (a
+/// folder it can't write in): a full disk, or a read-only file, is a failed save, never a
+/// file half written over.
 pub fn write_whole(at: &RemotePath, bytes: &[u8]) -> io::Result<()> {
     let script = format!(
         "f={q}; g=$(readlink -f -- \"$f\" 2>/dev/null) && [ -n \"$g\" ] && f=$g; \
+         if [ -e \"$f\" ] && [ ! -w \"$f\" ]; then echo \"$f is read-only\" >&2; exit 1; fi; \
          t=\"${{f%/*}}/.${{f##*/}}.null-saving-$$\"; \
-         base64 -d > \"$t\" <<'NULL_END' || {{ rm -f -- \"$t\"; exit 75; }}\n{data}NULL_END\n\
+         ( : > \"$t\" ) 2>/dev/null || exit 75; \
+         base64 -d > \"$t\" <<'NULL_END' || {{ rm -f -- \"$t\"; exit 1; }}\n{data}NULL_END\n\
          if [ -e \"$f\" ]; then m=$(stat -c %a -- \"$f\" 2>/dev/null || stat -f %Lp -- \"$f\" 2>/dev/null) && chmod \"$m\" \"$t\"; fi; \
          mv -f -- \"$t\" \"$f\"",
         q = quote(&at.path),
@@ -810,6 +814,12 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("shown")).unwrap(), b"through");
         assert!(std::fs::symlink_metadata(dir.join("link")).unwrap().file_type().is_symlink());
         assert!(metadata(&at("shown")).is_ok());
+        // A read-only file isn't written over: the save fails, the file's as it was.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("shown"), std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(write_whole(&at("shown"), b"over").is_err());
+        assert_eq!(std::fs::read(dir.join("shown")).unwrap(), b"through");
+        std::fs::set_permissions(dir.join("shown"), std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::remove_dir_all(dir.join("a b")).unwrap();
         assert!(metadata(&at("a b")).is_err());
         // Every file, as the finder lists them (no repository here: all of them).

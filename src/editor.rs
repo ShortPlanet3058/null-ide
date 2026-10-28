@@ -1513,6 +1513,11 @@ impl Editor {
         cx.notify();
     }
 
+    /// The text's revision: it changes with every edit (to tell an answer about older text).
+    pub fn revision(&self) -> u64 {
+        self.buffer.revision()
+    }
+
     pub fn file_name(&self) -> String {
         self.path
             .as_deref()
@@ -1578,12 +1583,27 @@ impl Editor {
     }
 
     /// Call after every change to the text.
+    /// Every cursor kept inside the text: an edit made without moving them (a change put
+    /// back, a review's hunk undone at the end of the file) can leave one past its end.
+    fn cursors_inside_text(&mut self) {
+        let len = self.buffer.len_chars();
+        let inside = |s: &mut Selection| {
+            s.anchor = s.anchor.min(len);
+            s.head = s.head.min(len);
+        };
+        inside(&mut self.selection);
+        for cursor in &mut self.extra {
+            inside(&mut cursor.selection);
+        }
+    }
+
     fn text_changed(&mut self, cx: &mut Context<Self>) {
         // Running once per cursor: catch up once at the end.
         if let Some(batch) = &mut self.batch {
             batch.changed = true;
             return;
         }
+        self.cursors_inside_text();
         self.search_after_edit(cx);
         self.folds_after_edit(cx);
         self.ai_text_changed();
@@ -6622,6 +6642,26 @@ mod tests {
         cx.simulate_input("*");
         editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "* * b\n"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A change made under the cursors without moving them (a review's last hunk undone at
+    /// the end of the file) leaves none past the end: reading at the caret would panic.
+    #[gpui::test]
+    fn cursors_stay_inside_the_text(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("abc\ndef\n"), None, cx));
+        e.update_in(cx, |e, _, cx| {
+            e.selection = Selection { anchor: 2, head: 8 };
+            e.extra.push(cursors::Cursor::new(Selection::caret(7)));
+            e.buffer.replace(4..8, "");
+            e.text_changed(cx);
+            assert_eq!((e.selection.anchor, e.selection.head), (2, 4));
+            assert_eq!(e.extra[0].selection.head, 4);
+        });
     }
 
     /// Misspelled words are marked in prose and comments, never in code; ⌘. on one offers

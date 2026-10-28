@@ -628,11 +628,12 @@ fn list(lines: &[&str], start: usize, first: Marker) -> (Block, usize) {
         // The item goes on while lines are indented under it (or follow lazily, without a gap).
         while i < lines.len() {
             let line = lines[i];
-            let indent = line.len() - line.trim_start().len();
+            // (Spaces and tabs: a wide space starting a line of Japanese is text, not indent.)
+            let indent_of = |l: &str| l.len() - l.trim_start_matches([' ', '\t']).len();
+            let indent = indent_of(line);
             if line.trim().is_empty() {
-                let next_inside = lines
-                    .get(i + 1)
-                    .is_some_and(|n| !n.trim().is_empty() && n.len() - n.trim_start().len() >= marker.content);
+                let next_inside =
+                    lines.get(i + 1).is_some_and(|n| !n.trim().is_empty() && indent_of(n) >= marker.content);
                 if !next_inside {
                     break;
                 }
@@ -696,7 +697,9 @@ fn cells_text(line: &str) -> Vec<String> {
         match c {
             '\\' if chars.peek() == Some(&'|') => cells.last_mut().unwrap().push(chars.next().unwrap()),
             '`' => {
-                in_code = !in_code;
+                if in_code || chars.clone().any(|c| c == '`') {
+                    in_code = !in_code;
+                }
                 cells.last_mut().unwrap().push(c);
             }
             '|' if !in_code => cells.push(String::new()),
@@ -722,7 +725,9 @@ fn raw_cells(line: &str) -> Vec<String> {
                 cell.push(chars.next().unwrap());
             }
             '`' => {
-                in_code = !in_code;
+                if in_code || chars.clone().any(|c| c == '`') {
+                    in_code = !in_code;
+                }
                 cells.last_mut().unwrap().push(c);
             }
             '|' if !in_code => cells.push(String::new()),
@@ -784,15 +789,21 @@ fn is_row(line: &str) -> bool {
 }
 
 /// The pipes that split `line` into cells, as char columns (not escaped, not in code).
+/// Whether the backtick at `byte` starts code: only with another one after it to close it
+/// (a lone one, as in a table about the key, is a character).
+fn opens_code(line: &str, byte: usize) -> bool {
+    line[byte + 1..].contains('`')
+}
+
 fn pipes(line: &str) -> Vec<usize> {
     let mut found = Vec::new();
     let mut in_code = false;
     let mut escaped = false;
-    for (i, c) in line.chars().enumerate() {
+    for (i, (byte, c)) in line.char_indices().enumerate() {
         match c {
             _ if escaped => escaped = false,
             '\\' => escaped = true,
-            '`' => in_code = !in_code,
+            '`' if in_code || opens_code(line, byte) => in_code = !in_code,
             '|' if !in_code => found.push(i),
             _ => {}
         }
@@ -850,7 +861,7 @@ pub fn table_step(lines: &[&str], at: usize, column: usize, forward: bool) -> Op
         new = align_table(&grown);
     }
     let line = &new[row];
-    let after = pipes(line)[cell] + 1;
+    let after = *pipes(line).get(cell)? + 1;
     let text_at = line.chars().skip(after).position(|c| c != ' ').map_or(after + 1, |p| after + p);
     // An empty cell: just inside it.
     let caret = if line.chars().nth(text_at) == Some('|') { after + 1 } else { text_at };
@@ -2048,6 +2059,17 @@ mod tests {
         assert_eq!(table_step(&ruled, 2, 1, true).unwrap().lines, 0..3);
         // A heading underlined with `---` isn't a table.
         assert!(aligned_tables("a | b\n---\n").is_empty());
+        // A lone backtick (a table about the key) is a character, not code hiding the pipes.
+        let keys = ["| Key | Does |", "| - | - |", "| ` | console |"];
+        let step = table_step(&keys, 2, 2, true).unwrap();
+        assert_eq!(step.new[2], "| `   | console |");
+    }
+
+    #[test]
+    fn a_line_starting_with_a_wide_space_goes_on_a_list_item() {
+        // (U+3000, as a line of Japanese starts: text, not indentation.)
+        let blocks = parse("- item\n\u{3000}続き\n");
+        assert_eq!(blocks.len(), 1);
     }
 
     #[test]

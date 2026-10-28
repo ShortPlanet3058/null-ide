@@ -318,7 +318,11 @@ impl Editor {
 
     /// After deleting: keep the list in step, or close it once the word is gone.
     pub(super) fn completion_after_delete(&mut self, cx: &mut Context<Self>) {
-        let Some(menu) = &self.completion else { return };
+        // (No list yet: one asked for while typing isn't for what's left now.)
+        let Some(menu) = &self.completion else {
+            self.completion_task = None;
+            return;
+        };
         let word_start = menu.word_start;
         let caret = self.selection.head;
         // Close once the word is gone, unless the caret sits right after a `.` or `::`.
@@ -415,7 +419,8 @@ impl Editor {
     /// Shows `items` as the list for the word starting at `word_start`, keeping the selected
     /// suggestion when the list refreshes under it.
     fn show_suggestions(&mut self, items: Vec<CompletionItem>, word_start: usize, cx: &mut Context<Self>) {
-        if items.is_empty() {
+        // (The word was deleted meanwhile: the caret's before where it started.)
+        if items.is_empty() || self.selection.head < word_start || word_start > self.buffer.len_chars() {
             return self.close_completion(cx);
         }
         let selected_label = self

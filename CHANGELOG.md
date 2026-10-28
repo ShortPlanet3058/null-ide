@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Fixes from an outside audit:
+  - Markdown no longer crashes on a list line starting with a wide space (Japanese text),
+    or on ⇥ in a table row holding a lone backtick.
+  - The cursor can't end up past the end of the file (after a review's last change was
+    undone, or a late completion), which crashed Run Test at Cursor.
+  - ⌘I's adjust asks about the lines first changed again, not as many as the change made
+    (it reached the code below a change that had grown).
+  - A rename or quick fix from a language server isn't applied if the file was typed into
+    while it was worked out (its places had moved): Null says to try again.
+  - An AI task's change undone in review is undone on disk too; a file it added, undone
+    entirely, goes to the Trash.
+  - Delete Line on the last line of a Windows (CRLF) file takes its whole line break.
+  - Over SSH, a save that fails (full disk) never leaves the file half written, and a
+    read-only file isn't written over. In a WSL folder, renaming a file to another one's
+    name in other case no longer replaces it.
+  - Unsaved changes brought back after a crash remember that the file changed on disk
+    meanwhile, so saving still asks first.
+  - The crash log, trimmed past 1 MB, could crash Null again while writing it.
 - The same change elsewhere: a word typed over (a name renamed by hand) marks the other
   places in the file the old word stands; ⇥ from the word changes them one by one, Esc
   lets them be.
