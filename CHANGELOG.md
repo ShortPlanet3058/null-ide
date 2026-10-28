@@ -4,6 +4,9 @@
 
 - Null's own theme is black all the way round: the tab bar, sidebar, title and status bars
   are as black as the code, set apart by thin lines, so an OLED screen keeps those pixels off.
+- The terminal, with AI on: `# what you want` then Tab writes the command for it on the line
+  (not run); after a command that went wrong, "Explain what went wrong" in the corner says
+  why, with the command that puts it right to put on the line.
 - A new High Contrast theme: black, white text, comments you can read and edges that stand
   out (⌘K, Settings, or the Theme menu).
 - A click on who last changed the line (at its end, with Show Who Changed the Line on)
