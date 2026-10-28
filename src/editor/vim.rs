@@ -595,10 +595,29 @@ impl Editor {
         (self.buffer.line_len(line), column - shown)
     }
 
+    /// Before an edit: one wholly before where Insert began (the indent put right as `}`
+    /// is typed first on a line) moves that place with the text, so `.` types what was
+    /// typed, not from the wrong place.
+    pub(super) fn vim_before_edit(&mut self, range: &std::ops::Range<usize>, inserted: usize) {
+        if let Some(from) = &mut self.vim.insert_from
+            && range.start < *from
+            && range.end <= *from
+        {
+            *from = *from - range.len() + inserted;
+        }
+    }
+
     /// The last line with text (ropey counts an empty one after a final line break).
     fn vim_last_line(&self) -> usize {
         let lines = self.buffer.len_lines();
         if lines > 1 && self.buffer.line_to_char(lines - 1) == self.buffer.len_chars() { lines - 2 } else { lines - 1 }
+    }
+
+    /// The last line an operator doubled (`dd`, `cc`, `yy`) can reach: the caret's own when
+    /// it's on the empty one after a final line break (`o` on a last line without a break,
+    /// then Esc), so `dd` takes that line, not the one above it.
+    fn vim_last_line_from_caret(&self) -> usize {
+        self.vim_last_line().max(self.buffer.point(self.selection.head).0)
     }
 
     fn line_start(&self, line: usize) -> usize {
@@ -935,7 +954,7 @@ impl Editor {
                 && Operator::of(c) == Some(operator)
             {
                 let line = self.buffer.point(self.selection.head).0;
-                let to = (line + n - 1).min(self.vim_last_line());
+                let to = (line + n - 1).min(self.vim_last_line_from_caret());
                 let motion = Motion { to: self.line_start(to), linewise: true, inclusive: false };
                 self.vim_operate(operator, self.selection.head, motion, window, cx);
                 return true;
@@ -2309,6 +2328,40 @@ mod tests {
         // Typing letters with no meaning types nothing.
         cx.simulate_keystrokes("z");
         assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "let total = price(qty);\n  next line\n\nend\n");
+    }
+
+    /// `.` after typing a line that starts with `}` (outdented as it's typed): it types the
+    /// same again.
+    #[gpui::test]
+    fn dot_repeats_a_line_outdented_as_typed(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings { keymap: crate::keymap::Keymap::Vim, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Vim, cx);
+        });
+        let text = "fn f() {\n    if x {\n        a();\n    }\n}\n";
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(text), Some(PathBuf::from("x.rs")), cx));
+        e.update_in(cx, |e, window, _| {
+            window.focus(&e.focus_handle);
+            e.selection = Selection::caret(text.find("a();").unwrap());
+        });
+        cx.simulate_keystrokes("o } escape");
+        let once = e.read_with(cx, |e, _| e.buffer.to_string());
+        assert_eq!(once, "fn f() {\n    if x {\n        a();\n    }\n    }\n}\n");
+        cx.simulate_keystrokes(".");
+        let twice = e.read_with(cx, |e, _| e.buffer.to_string());
+        assert_eq!(twice.matches("    }\n").count(), 3, "{twice}");
+    }
+
+    /// `o` on a last line without a line break, then Esc: `dd` takes that new line, not the
+    /// one above it.
+    #[gpui::test]
+    fn dd_on_a_new_last_line_takes_it(cx: &mut TestAppContext) {
+        let (e, cx) = vim("hel|lo", cx);
+        cx.simulate_keystrokes("o escape d d");
+        // (Ending in a line break, as Vim writes a file.)
+        assert_eq!(e.read_with(cx, |e, _| e.buffer.to_string()), "hello\n");
     }
 
     #[gpui::test]

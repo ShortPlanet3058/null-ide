@@ -89,11 +89,16 @@ fn destination(host: &str) -> (&str, Option<&str>) {
 #[cfg(unix)]
 fn control_dir() -> Option<PathBuf> {
     // SAFETY: getuid can't fail and touches no memory.
-    let dir = PathBuf::from(format!("/tmp/null-ssh-{}", unsafe { libc::getuid() }));
-    if !dir.is_dir() {
-        std::fs::create_dir_all(&dir).ok()?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok()?;
+    let uid = unsafe { libc::getuid() };
+    let dir = PathBuf::from(format!("/tmp/null-ssh-{uid}"));
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    // (Made as its owner's from the start: no moment another could reach it.)
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).ok();
+    // Only one of ours, as made: in a /tmp others write to, one put there before by
+    // someone else (or a link to elsewhere) would hold the connection open to them.
+    let meta = std::fs::symlink_metadata(&dir).ok()?;
+    if !meta.is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
+        return None;
     }
     Some(dir)
 }
@@ -529,12 +534,14 @@ pub fn changed_since(host: &str, folders: &[String], stamp: &str) -> io::Result<
 
 /// Every file in `folder` on `host` (paths there), at most `limit`: git's list (what it
 /// tracks and what's new, not what it ignores) in a repository, else all of them but
-/// dependencies and build output.
+/// dependencies and build output. Names as they are (`café.rs`, not git's quoted
+/// `"caf\303\251.rs"`), in a folder whatever its name (`R&D`).
 pub fn list_files(host: &str, folder: &str, limit: usize) -> io::Result<Vec<String>> {
     let script = format!(
         "r={q}; cd -- \"$r\" || exit 1; \
          if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
-           git ls-files -co --exclude-standard 2>/dev/null | sed \"s|^|$PWD/|\"; \
+           git -c core.quotePath=false ls-files -co --exclude-standard 2>/dev/null \
+             | P=\"$PWD\" awk '{{ print ENVIRON[\"P\"] \"/\" $0 }}'; \
          else find \"$PWD\" \\( -name .git -o -name node_modules -o -name target -o -name .venv -o -name __pycache__ \\) -prune -o -type f -print; \
          fi | head -n {limit}",
         q = quote(folder)
@@ -784,6 +791,21 @@ mod tests {
         assert_eq!(meta.modified, SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(1_700_000_000)));
         assert!(meta_of(&["41ed", "4096", "1"]).unwrap().dir);
         assert!(!meta_of(&["81a4", "1", "1"]).unwrap().executable);
+    }
+
+    /// A repository's files, listed there: accented names as they are, in a folder named
+    /// with characters sed would have taken for its own.
+    #[test]
+    #[cfg(unix)]
+    fn a_server_s_repository_lists_its_files_as_named() {
+        let dir = std::env::temp_dir().join(format!("null-remote-git-{}", std::process::id())).join("R&D|x");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(std::process::Command::new("git").arg("init").arg("-q").current_dir(&dir).status().unwrap().success());
+        std::fs::write(dir.join("café.rs"), "").unwrap();
+        let files = list_files(TEST_HOST, &dir.to_string_lossy(), 100).unwrap();
+        assert_eq!(files, [format!("{}/café.rs", dir.display())]);
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 
     /// The whole way, with `sh` here for a server.

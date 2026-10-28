@@ -310,7 +310,8 @@ fn read(root: &Path, ask_github: bool) -> Read {
         .collect();
     Read {
         repository: true,
-        on_github: ask_github.then(|| git::remote_on_github(root)),
+        // (Not for a folder on a server: the GitHub tab runs `gh` and git on this computer.)
+        on_github: ask_github.then(|| !crate::remote::is_remote(root) && git::remote_on_github(root)),
         branch,
         ahead_behind: git::ahead_behind(root),
         files,

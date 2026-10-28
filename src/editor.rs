@@ -2546,6 +2546,7 @@ impl Editor {
         let linked = matches!(kind, EditKind::Typing | EditKind::Deleting).then(|| self.linked_tag(&range)).flatten();
         self.record_undo(kind);
         self.repeat_before_edit(&range, text, kind);
+        self.vim_before_edit(&range, text.chars().count());
         let mut end = self.buffer.replace(range.clone(), text);
         if let Some(linked) = linked {
             end = self.mirror_tag(linked, range.clone(), end - range.start, end);

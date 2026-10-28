@@ -68,6 +68,10 @@ A window can hold several folders, each a heading in the files with its own unde
 Explorer onto the files asks whether to add it or copy it in, and `null api web` opens them
 together. A heading's menu has **Remove Folder from Window** (nothing on disk changes).
 
+From a terminal, `null a.rs b.rs:42` opens each file (the first in front), in the folder
+you're in, or in their repository when that folder is your home folder, `/`, or above it.
+`null --help` lists the rest; `null -- -notes.md` opens a file whose name starts with `-`.
+
 Across them all: ⌘P lists every folder's files (`web/app/page.tsx`), project search searches
 them, ⌘T knows their symbols, and the files show git's marks. Each folder gets its own
 language servers. Git follows the file you're in: the Git panel shows that folder's
