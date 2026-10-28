@@ -860,11 +860,21 @@ impl Palette {
             }
             return;
         }
+        let typed = query.trim().to_lowercase();
+        // What's typed names a category ("git"): its commands before others whose name has
+        // the letters only strewn across it ("Go to Last Edit"), which then go below them.
+        let names_a_category = typed.len() >= 3
+            && !typed.contains(char::is_whitespace)
+            && Category::ALL.iter().any(|k| k.label().to_lowercase().starts_with(&typed));
+        let below = |highlights: &[usize]| {
+            let strewn = highlights.windows(2).any(|w| w[1] != w[0] + 1);
+            if names_a_category && strewn { 30 } else { 0 }
+        };
         // Quick settings and commands in one list, best match first.
         let mut found: Vec<(i32, Item, Vec<usize>)> = Quick::ALL
             .into_iter()
             .filter(listed)
-            .filter_map(|q| fuzzy::score(q.label(), query).map(|(s, h)| (s + 8, Item::Quick(q), h)))
+            .filter_map(|q| fuzzy::score(q.label(), query).map(|(s, h)| (s + 8 - below(&h), Item::Quick(q), h)))
             .collect();
         for (i, c) in self.commands.iter().enumerate() {
             // A command a quick setting stands in for: its own name finds that setting
@@ -890,14 +900,13 @@ impl Palette {
             let lower = if c.label.starts_with("Language: ") { 25 } else { 0 };
             let boost = recent.map_or(0, |r| 12 - r.min(12) as i32) - lower;
             if let Some((score, highlights)) = fuzzy::score(&c.label, query) {
-                found.push((score + boost + 5, Item::Command(i), highlights));
+                found.push((score + boost + 5 - below(&highlights), Item::Command(i), highlights));
                 continue;
             }
             // The category counts too, so "lines dup" finds "Duplicate Line", and "lines"
             // lists them all (with a space between, or the category's name alone: one word's
             // letters strewn across both would find most anything).
             let prefix = format!("{} ", c.category.label());
-            let typed = query.trim().to_lowercase();
             let names_category = typed.len() >= 3 && c.category.label().to_lowercase().starts_with(&typed);
             if (typed.contains(char::is_whitespace) || names_category)
                 && let Some((score, highlights)) = fuzzy::score(&format!("{prefix}{}", c.label), query)
@@ -2021,6 +2030,18 @@ mod tests {
                 action: Box::new(crate::workspace::UsePaperTheme),
                 keys: None,
             },
+            Command {
+                category: Category::Go,
+                label: "Go to Last Edit".into(),
+                action: Box::new(crate::workspace::CheckForUpdates),
+                keys: None,
+            },
+            Command {
+                category: Category::Git,
+                label: "Push".into(),
+                action: Box::new(crate::workspace::WhatsNew),
+                keys: None,
+            },
         ];
         let options = PaletteOptions {
             kind,
@@ -2095,6 +2116,9 @@ mod tests {
         // What a command is also called: splitting is moving a tab to a side.
         type_query(cx, &p, "split");
         assert_eq!(items(cx, &p), ["Move Tab to the Right Side"]);
+        // A category's name: its commands before a name with the letters strewn across it.
+        type_query(cx, &p, "git");
+        assert_eq!(items(cx, &p)[0], "Push");
     }
 
     #[gpui::test]

@@ -376,6 +376,10 @@ impl Editor {
         // 2. The AI, after a pause: the one chosen for suggestions (never a command line
         // tool: they take seconds to start, too slow for this).
         let Some(ai_settings) = ai_settings.for_suggestions() else { return };
+        // (Not a file that holds secrets: what's typed there isn't sent.)
+        if self.path.as_deref().is_some_and(crate::ai_context::holds_secrets) {
+            return;
+        }
         let use_fill = ai::fim_available(&ai_settings) && !fill_failed(&ai_settings);
         if mid_line && !use_fill {
             return;

@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- A click on who last changed the line (at its end, with Show Who Changed the Line on)
+  opens that commit.
+- Settings → AI with Ollama lists the models it has installed, first, to pick with a click.
+- Files that hold secrets (`.env`, private keys, `.npmrc`…) are never sent to AI: ⌘I says so
+  there, suggestions stay quiet, and Review and commit drafts leave them out.
+- Debugging: a variable or watch whose value changed since the last stop shows in amber.
+- Expand and Shrink Selection (⌥↑ ⌥↓) work on every cursor, each by its own syntax.
+- More from the outside audit:
+  - The commit message's body field takes several lines and keeps them (Undo Last Commit
+    gave back a body flattened onto one line).
+  - ⌘K: typing a group's name (`git`) lists its commands before others whose name only has
+    its letters strewn across it ("Go to Last Edit").
+  - SSH: a mistyped password is asked again, not tried three times over (a server can lock
+    you out for that); a new file on a server is made only if none has that name by then.
+  - An AI task's review takes in a file that grew past 1 MB or became ignored while it ran.
+  - The debugger ends a program it started before letting go of the adapter, and pressing
+    Stop while it read where the program stopped no longer leaves it "stopped" with nothing.
+  - Language servers, debuggers and AI tasks stopped are waited for (no leftover
+    processes); closing a window saves its session as it is and stops its servers.
+  - Notebooks: a Markdown cell ending in a line break shows no extra empty line.
+  - Unsaved work kept for after a crash: an older background write can't replace a newer
+    one, and the last run's backups are removed only once kept in this run's.
+  - Switching branch with changes that can't be put back on the other says they're set
+    aside (Bring Back Changes); Revert on a server keeps the file's history.
+  - Linux's install.sh writes the menu entry right for a home folder with a space or `&`.
+
 ## 0.2.1
 
 Null tells you what's new after it updates itself, picks what ⌘I changes from the code's

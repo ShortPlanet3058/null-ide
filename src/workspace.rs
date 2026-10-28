@@ -941,6 +941,8 @@ pub struct Workspace {
     debug_show_output: bool,
     /// The paused call's variables the code shows, with values worth showing.
     debug_locals: Vec<crate::debugger::Variable>,
+    /// The variables' values at the stop before (by name): one that's changed shows so.
+    debug_before: std::collections::HashMap<String, String>,
     /// Renames asked for and waiting their turn (see `queue_rename`), and whether one is
     /// under way.
     renames: std::collections::VecDeque<(PathBuf, PathBuf)>,
@@ -1277,6 +1279,7 @@ impl Workspace {
             debug_output_scroll: gpui::ScrollHandle::new(),
             debug_show_output: false,
             debug_locals: Vec::new(),
+            debug_before: std::collections::HashMap::new(),
             debug_watch: cx.new(|cx| crate::text_input::TextInput::new("Watch an expression", cx)),
             debug_console: cx.new(|cx| crate::text_input::TextInput::new("An expression, or an lldb command", cx)),
             terminal_rename: None,
@@ -2442,8 +2445,10 @@ impl Workspace {
             let diff = cx
                 .background_executor()
                 .spawn(async move {
+                    // (A file that holds secrets isn't sent: `.env`, a key.)
                     let changes: Vec<(String, Option<String>, Option<String>)> = files
                         .iter()
+                        .filter(|path| !crate::ai_context::holds_secrets(path))
                         .map(|path| {
                             let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
                             let name = path.strip_prefix(&root).unwrap_or(path).display().to_string();
@@ -3663,6 +3668,13 @@ impl Workspace {
                     this.confirm_unsaved(CloseAction::CloseTabs(vec![editor.clone()]), window, cx);
                 }
                 EditorEvent::RunCommand(command) => this.run_in_terminal(command.clone(), None, window, cx),
+                EditorEvent::ShowCommit(id) => {
+                    // (Shown as the history's are: in the repository the Git view shows.)
+                    match crate::git::log_commit(&this.git_root, id) {
+                        Some(commit) => this.show_commit(commit, window, cx),
+                        None => this.show_notice("That commit isn't in this repository's history.".into(), cx),
+                    }
+                }
                 EditorEvent::Reviewed => this.file_reviewed(editor, cx),
                 // (Only a pull request's page shows threads: it hears this itself.)
                 EditorEvent::ReplyAsked(_) => {}
@@ -3970,7 +3982,10 @@ impl Workspace {
         if let Some(run) = self.ai_task.take() {
             run.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                child.kill().ok();
+                std::thread::spawn(move || {
+                    child.kill().ok();
+                    child.wait().ok();
+                });
             }
         }
         // Another project's tests: looked for again, if they show.
@@ -4345,7 +4360,8 @@ impl Workspace {
             && self.waiting_for.is_none()
         {
             let root = self.roots.primary().to_path_buf();
-            crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
+            let turn = crate::session::backup_turn();
+            crate::session::save_backups_in_turn(&root, &Self::backups_of(self.unsaved_files(cx)), turn);
             self.keeping_unsaved = true;
             self.finish_close(action, window, cx);
             return true;
@@ -4434,7 +4450,8 @@ impl Workspace {
         if !matches!(action, CloseAction::CloseTabs(_)) {
             self.backup_task = None;
             if !std::mem::take(&mut self.keeping_unsaved) {
-                crate::session::save_backups(self.roots.primary(), &[]);
+                let turn = crate::session::backup_turn();
+                crate::session::save_backups_in_turn(self.roots.primary(), &[], turn);
             }
         }
         match action {
@@ -4449,7 +4466,13 @@ impl Workspace {
                 }
                 self.switch_project(path, window, cx);
             }
-            CloseAction::CloseWindow => window.remove_window(),
+            CloseAction::CloseWindow => {
+                // (Its session as it is now, not as the last save 800 ms ago had it; its
+                // language servers told to stop, not left running.)
+                self.save_session(cx);
+                self.lsp.update(cx, |lsp, _| lsp.shutdown());
+                window.remove_window();
+            }
             CloseAction::CloseTabs(editors) => {
                 for editor in editors {
                     if let Some(ix) = self.tabs.iter().position(|t| t.editor == editor) {
@@ -4512,8 +4535,9 @@ impl Workspace {
         }
         let root = self.roots.primary().to_path_buf();
         let unsaved = self.unsaved_files(cx);
+        let turn = crate::session::backup_turn();
         cx.background_executor()
-            .spawn(async move { crate::session::save_backups(&root, &Self::backups_of(unsaved)) })
+            .spawn(async move { crate::session::save_backups_in_turn(&root, &Self::backups_of(unsaved), turn) })
             .detach();
     }
 
@@ -4524,7 +4548,8 @@ impl Workspace {
             return;
         }
         let root = self.roots.primary().to_path_buf();
-        crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
+        let turn = crate::session::backup_turn();
+        crate::session::save_backups_in_turn(&root, &Self::backups_of(self.unsaved_files(cx)), turn);
     }
 
     /// ⌘⇧N: another window, on a folder chosen for it.
@@ -6304,7 +6329,11 @@ impl Workspace {
         if let Some(run) = &self.ai_task {
             run.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                child.kill().ok();
+                // (Waited for off the window's thread: a CLI can take a moment to end.)
+                std::thread::spawn(move || {
+                    child.kill().ok();
+                    child.wait().ok();
+                });
             }
         }
         cx.notify();
@@ -7842,8 +7871,10 @@ impl Workspace {
             let diff = cx
                 .background_executor()
                 .spawn(async move {
+                    // (A file that holds secrets isn't sent: `.env`, a key.)
                     let changes: Vec<(String, Option<String>, Option<String>)> = review_files
                         .iter()
+                        .filter(|path| !crate::ai_context::holds_secrets(path))
                         .map(|path| {
                             let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
                             let name = path.strip_prefix(&diff_root).unwrap_or(path).display().to_string();
@@ -8710,6 +8741,16 @@ impl Workspace {
                 }
             });
         }
+        // What the variables were at the last stop, to show which changed since; none once
+        // the run's over.
+        self.debug_before = match event {
+            // (Going on from a stop: its values, kept for the next.)
+            DebuggerEvent::Resumed if !self.debug_locals.is_empty() => {
+                self.debug_locals.iter().map(|v| (v.name.clone(), v.value.clone())).collect()
+            }
+            DebuggerEvent::Resumed | DebuggerEvent::Stopped(_) => std::mem::take(&mut self.debug_before),
+            _ => std::collections::HashMap::new(),
+        };
         // Unless the paused call's code is open, every variable with a value worth showing.
         self.debug_locals = match event {
             DebuggerEvent::Stopped(stop) => crate::debugger::panel_variables(None, &stop.variables),
@@ -8890,7 +8931,20 @@ impl Workspace {
                         .whitespace_nowrap()
                         .child(marker)
                         .child(div().flex_none().text_color(theme.foreground).child(row.variable.name.clone()))
-                        .child(div().pl(px(4.)).min_w_0().truncate().text_color(theme.muted).child(value))
+                        // (Changed since the last stop: in the caret's colour.)
+                        .child({
+                            let changed = row.depth == 0
+                                && self
+                                    .debug_before
+                                    .get(&row.variable.name)
+                                    .is_some_and(|was| *was != row.variable.value);
+                            div()
+                                .pl(px(4.))
+                                .min_w_0()
+                                .truncate()
+                                .text_color(if changed { theme.caret } else { theme.muted })
+                                .child(value)
+                        })
                         .when(reference > 0, |d| {
                             d.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 let path = path.clone();
@@ -8921,7 +8975,11 @@ impl Workspace {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_color(if failed { theme.faint } else { theme.muted })
+                                    .text_color(match (failed, watch.changed) {
+                                        (true, _) => theme.faint,
+                                        (false, true) => theme.caret,
+                                        (false, false) => theme.muted,
+                                    })
                                     .child(value),
                             )
                             .child(
