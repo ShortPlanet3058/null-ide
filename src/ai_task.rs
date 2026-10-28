@@ -91,6 +91,27 @@ impl Snapshot {
             });
         }
         for (path, before) in &self.files {
+            // Copied before, out of the walk now but still there: grown past the size copied,
+            // or ignored since (the task edited .gitignore). Changed all the same, its old text
+            // known: reviewed and undone like the rest.
+            if !now.contains_key(path)
+                && path.exists()
+                && let Ok(after) = std::fs::read_to_string(path)
+                && after != *before
+                && !after.contains('\0')
+            {
+                let (added, removed) = line_counts(before, &after);
+                changes.push(FileChange {
+                    path: path.clone(),
+                    kind: ChangeKind::Changed,
+                    added,
+                    removed,
+                    before: before.clone(),
+                    after,
+                    yours_too: false,
+                });
+                continue;
+            }
             // Gone from the walk and from the disk (not merely ignored now).
             if !now.contains_key(path) && !path.exists() {
                 let removed = before.lines().count();
@@ -160,6 +181,8 @@ mod tests {
         std::fs::write(root.join("src/a.rs"), "one\n2\nthree\n").unwrap();
         std::fs::write(root.join("src/new.rs"), "fresh\n").unwrap();
         std::fs::remove_file(root.join("gone.txt")).unwrap();
+        // Grown past what's copied: still a change, reviewed and undone.
+        std::fs::write(root.join("src/b.rs"), format!("{}\n", "x".repeat(1_100_000))).unwrap();
         let changes = snapshot.changes(&root);
         let summary: Vec<_> = changes
             .iter()
@@ -174,6 +197,7 @@ mod tests {
             vec![
                 ("gone.txt".into(), ChangeKind::Deleted, 0, 1),
                 ("src/a.rs".into(), ChangeKind::Changed, 2, 1),
+                ("src/b.rs".into(), ChangeKind::Changed, 1, 1),
                 ("src/new.rs".into(), ChangeKind::Added, 1, 0),
             ]
         );
@@ -181,6 +205,7 @@ mod tests {
             undo(change).unwrap();
         }
         assert_eq!(std::fs::read_to_string(root.join("src/a.rs")).unwrap(), "one\ntwo\n");
+        assert_eq!(std::fs::read_to_string(root.join("src/b.rs")).unwrap(), "keep\n");
         assert!(root.join("gone.txt").exists());
         std::fs::remove_dir_all(&root).ok();
     }

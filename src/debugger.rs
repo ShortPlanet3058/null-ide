@@ -829,6 +829,8 @@ impl Debugger {
     pub fn resume(&mut self, command: &str, cx: &mut Context<Self>) {
         let (Some(adapter), Some(thread)) = (&self.adapter, self.thread()) else { return };
         drop(adapter.request(command, json!({ "threadId": thread })));
+        // (What was being read of the last stop: not shown over the running program.)
+        self.stop_task = None;
         self.state = DebugState::Running;
         cx.emit(DebuggerEvent::Resumed);
         cx.notify();
@@ -843,8 +845,17 @@ impl Debugger {
 
     /// Ends the session, and the program with it.
     pub fn stop(&mut self, cx: &mut Context<Self>) {
-        if let Some(adapter) = &self.adapter {
-            drop(adapter.request("disconnect", json!({ "terminateDebuggee": true })));
+        // Asked to end the program, then given a moment to (a second at most) before the
+        // adapter's stopped: killed at once, it couldn't end the program it started.
+        if let Some(adapter) = self.adapter.take() {
+            let answer = adapter.request("disconnect", json!({ "terminateDebuggee": true }));
+            let timer = cx.background_executor().timer(std::time::Duration::from_secs(1));
+            cx.background_executor()
+                .spawn(async move {
+                    futures::future::select(Box::pin(answer), timer).await;
+                    drop(adapter);
+                })
+                .detach();
         }
         self.ended(cx);
     }
@@ -860,6 +871,9 @@ impl Debugger {
         }
         self.adapter = None;
         self.state = DebugState::Idle;
+        // (Work for a stop still under way would mark it stopped again, with nothing to debug.)
+        self.stop_task = None;
+        self.watch_task = None;
         cx.emit(DebuggerEvent::Ended);
         cx.notify();
     }

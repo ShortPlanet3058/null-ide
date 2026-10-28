@@ -78,7 +78,10 @@ pub fn to_cells_text(json: &str) -> Option<String> {
             }
             other => {
                 out.push_str(&format!("{comment} %% [{other}]\n"));
+                // (A last line break isn't a last empty line: no lone comment mark after it.)
                 let lines: Vec<String> = source
+                    .strip_suffix('\n')
+                    .unwrap_or(&source)
                     .split('\n')
                     .map(|l| if l.is_empty() { comment.to_string() } else { format!("{comment} {l}") })
                     .collect();
@@ -186,7 +189,9 @@ pub fn with_cells(json: &str, text: &str) -> Option<String> {
     let trimmed = |cells: &[Cell]| -> Vec<Cell> {
         cells.iter().map(|(k, t)| (k.clone(), t.trim_end_matches('\n').to_string())).collect()
     };
-    if old_cells == trimmed(&new) {
+    // (Compared as the old ones are, a cell's last line break left out.)
+    let new = trimmed(&new);
+    if old_cells == new {
         return Some(json.to_string());
     }
     // Which old cell each new one is: the same ones in order (the longest run of them),
@@ -584,6 +589,12 @@ mod tests {
         assert_eq!(language(NOTEBOOK).as_deref(), Some("Python"));
         // Nothing changed: the notebook as it was, to the byte.
         assert_eq!(with_cells(NOTEBOOK, &text).unwrap(), NOTEBOOK);
+        // A Markdown cell whose last line ends in a line break: no lone `#` line after it,
+        // and the notebook written back as it was.
+        let ending = r##"{"cells":[{"cell_type":"markdown","metadata":{},"source":["# Heading\n","Line 2\n"]}],"metadata":{"language_info":{"name":"python"}},"nbformat":4,"nbformat_minor":5}"##;
+        let shown = to_cells_text(ending).unwrap();
+        assert_eq!(shown, "# %% [markdown]\n# # Heading\n# Line 2\n");
+        assert_eq!(with_cells(ending, &shown).unwrap(), ending);
         let cells = |json: &str| -> Vec<Value> {
             serde_json::from_str::<Value>(json).unwrap()["cells"].as_array().unwrap().clone()
         };

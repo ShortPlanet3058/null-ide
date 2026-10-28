@@ -27,9 +27,15 @@ pub fn create_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
     if let Some(parent) = path.parent() {
         crate::project_fs::create_dir_all(parent).map_err(|e| format!("Couldn't create the folder: {e}"))?;
     }
-    if crate::remote::is_remote(&path) {
-        crate::project_fs::write(&path, b"").map_err(|e| format!("Couldn't create the file: {e}"))?;
-        return Ok(path);
+    if let Some(at) = crate::remote::of(&path) {
+        return match crate::remote::create_new(&at) {
+            Ok(()) => {
+                crate::project_fs::forget(&path);
+                Ok(path)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(format!("{} already exists", name.trim())),
+            Err(e) => Err(format!("Couldn't create the file: {e}")),
+        };
     }
     std::fs::OpenOptions::new()
         .write(true)

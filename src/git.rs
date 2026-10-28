@@ -690,8 +690,10 @@ pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String
         return Ok(());
     }
     // What's thrown away is kept in the file's history first (git writes it, not Null).
-    // (Not a server's: its history isn't kept here.)
-    if !crate::remote::is_remote(path) && path.is_file() {
+    // (A server's: from what Null last read of it, as its saves are kept.)
+    if crate::remote::is_remote(path) {
+        crate::local_history::keep_before_writing(path, &[]);
+    } else if path.is_file() {
         let real = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         crate::local_history::keep_before_writing(&real, &[]);
     }
@@ -830,7 +832,14 @@ pub fn switch_carrying_changes(root: &Path, branch: &Branch) -> Result<Vec<PathB
         Err(error) => {
             let conflicted: Vec<PathBuf> =
                 status(root).into_iter().filter(|(_, s)| *s == FileStatus::Conflicted).map(|(p, _)| p).collect();
-            if conflicted.is_empty() { Err(error) } else { Ok(conflicted) }
+            if !conflicted.is_empty() {
+                return Ok(conflicted);
+            }
+            // (Not lost: still set aside, where git's message alone wouldn't say.)
+            Err(format!(
+                "On {} now, but your changes couldn't be put back here: they're set aside (Bring Back Changes in ⌘K returns them). {error}",
+                branch.name
+            ))
         }
     }
 }

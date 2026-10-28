@@ -3970,7 +3970,10 @@ impl Workspace {
         if let Some(run) = self.ai_task.take() {
             run.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                child.kill().ok();
+                std::thread::spawn(move || {
+                    child.kill().ok();
+                    child.wait().ok();
+                });
             }
         }
         // Another project's tests: looked for again, if they show.
@@ -4345,7 +4348,8 @@ impl Workspace {
             && self.waiting_for.is_none()
         {
             let root = self.roots.primary().to_path_buf();
-            crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
+            let turn = crate::session::backup_turn();
+            crate::session::save_backups_in_turn(&root, &Self::backups_of(self.unsaved_files(cx)), turn);
             self.keeping_unsaved = true;
             self.finish_close(action, window, cx);
             return true;
@@ -4434,7 +4438,8 @@ impl Workspace {
         if !matches!(action, CloseAction::CloseTabs(_)) {
             self.backup_task = None;
             if !std::mem::take(&mut self.keeping_unsaved) {
-                crate::session::save_backups(self.roots.primary(), &[]);
+                let turn = crate::session::backup_turn();
+                crate::session::save_backups_in_turn(self.roots.primary(), &[], turn);
             }
         }
         match action {
@@ -4449,7 +4454,13 @@ impl Workspace {
                 }
                 self.switch_project(path, window, cx);
             }
-            CloseAction::CloseWindow => window.remove_window(),
+            CloseAction::CloseWindow => {
+                // (Its session as it is now, not as the last save 800 ms ago had it; its
+                // language servers told to stop, not left running.)
+                self.save_session(cx);
+                self.lsp.update(cx, |lsp, _| lsp.shutdown());
+                window.remove_window();
+            }
             CloseAction::CloseTabs(editors) => {
                 for editor in editors {
                     if let Some(ix) = self.tabs.iter().position(|t| t.editor == editor) {
@@ -4512,8 +4523,9 @@ impl Workspace {
         }
         let root = self.roots.primary().to_path_buf();
         let unsaved = self.unsaved_files(cx);
+        let turn = crate::session::backup_turn();
         cx.background_executor()
-            .spawn(async move { crate::session::save_backups(&root, &Self::backups_of(unsaved)) })
+            .spawn(async move { crate::session::save_backups_in_turn(&root, &Self::backups_of(unsaved), turn) })
             .detach();
     }
 
@@ -4524,7 +4536,8 @@ impl Workspace {
             return;
         }
         let root = self.roots.primary().to_path_buf();
-        crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
+        let turn = crate::session::backup_turn();
+        crate::session::save_backups_in_turn(&root, &Self::backups_of(self.unsaved_files(cx)), turn);
     }
 
     /// ⌘⇧N: another window, on a folder chosen for it.
@@ -6304,7 +6317,11 @@ impl Workspace {
         if let Some(run) = &self.ai_task {
             run.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                child.kill().ok();
+                // (Waited for off the window's thread: a CLI can take a moment to end.)
+                std::thread::spawn(move || {
+                    child.kill().ok();
+                    child.wait().ok();
+                });
             }
         }
         cx.notify();

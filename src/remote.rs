@@ -601,6 +601,21 @@ pub fn write(at: &RemotePath, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// A new empty file, only if nothing has that name there yet (the shell's noclobber: made
+/// there and then, not after a look that's out of date by then).
+pub fn create_new(at: &RemotePath) -> io::Result<()> {
+    let output = run(&at.host, &format!("set -C; : > {}", quote(&at.path)))?;
+    match output.status {
+        0 => Ok(()),
+        _ if exists_there(at) => Err(io::Error::new(io::ErrorKind::AlreadyExists, "it already exists")),
+        _ => Err(output.error()),
+    }
+}
+
+fn exists_there(at: &RemotePath) -> bool {
+    run(&at.host, &format!("[ -e {} ] || [ -L {} ]", quote(&at.path), quote(&at.path))).is_ok_and(|o| o.status == 0)
+}
+
 /// Writes a file whole or not at all: beside it first (with its permissions), then in its
 /// place; a link written through. In place only when nothing can be made beside it (a
 /// folder it can't write in): a full disk, or a read-only file, is a failed save, never a
@@ -828,6 +843,11 @@ mod tests {
         assert_eq!(metadata(&at("a b/c/it's.bin")).unwrap().len, 5000);
         assert_eq!(read(&at("missing")).unwrap_err().kind(), io::ErrorKind::NotFound);
         rename(&at(".hidden"), &at("shown")).unwrap();
+        // Made only if nothing's there by that name: the file there is left as it is.
+        assert_eq!(create_new(&at("shown")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(create_new(&at("fresh")).is_ok());
+        assert_eq!(read(&at("fresh")).unwrap(), b"");
+        std::fs::remove_file(dir.join("fresh")).unwrap();
         // A save: whole, its permissions kept, through a link.
         write_whole(&at("shown"), b"saved").unwrap();
         assert_eq!(read(&at("shown")).unwrap(), b"saved");
