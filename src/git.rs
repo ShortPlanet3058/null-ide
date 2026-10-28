@@ -21,6 +21,10 @@ pub fn not_a_repository() -> &'static str {
     }
 }
 
+/// Given to every git Null runs: a repository's own config can name a command for git to
+/// run on `status` (core.fsmonitor), so opening a folder someone sent would run it.
+pub const SAFE: [&str; 2] = ["-c", "core.fsmonitor=false"];
+
 /// git, run in `dir`. Paths given to it are names, never patterns: discarding `app/[id].tsx`
 /// mustn't touch `app/d.tsx`.
 fn command(dir: &Path) -> Command {
@@ -31,7 +35,7 @@ fn command(dir: &Path) -> Command {
             &wsl.distro,
             Some(&wsl.linux),
             "env",
-            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git"],
+            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git", SAFE[0], SAFE[1]],
         );
     }
     // A folder on a server: its git, run there, the same way.
@@ -40,7 +44,7 @@ fn command(dir: &Path) -> Command {
             &remote.host,
             Some(&remote.path),
             "env",
-            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git"],
+            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git", SAFE[0], SAFE[1]],
         );
     }
     let mut command = crate::tools::command("git");
@@ -114,7 +118,7 @@ fn output_given(
         script.push_str(&format!(" {key}={}", crate::remote::quote(value)));
     }
     script.push_str(" git");
-    for arg in args {
+    for arg in SAFE.iter().chain(args) {
         script.push(' ');
         script.push_str(&crate::remote::quote(arg));
     }
@@ -1657,6 +1661,20 @@ mod tests {
         assert!(!repo.join("b.txt").exists());
         drop_set_aside(&repo, 0, &sets[0].id).unwrap();
         assert!(set_aside_list(&repo).is_empty());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A repository's config naming a command for git to run doesn't get it run by Null
+    /// looking at the repository.
+    #[test]
+    #[cfg(unix)]
+    fn a_repository_s_config_runs_nothing() {
+        let Some(repo) = scratch_repo("git-fsmonitor") else { return };
+        let ran = repo.join("ran");
+        git(&repo, &["config", "core.fsmonitor", &format!("touch '{}'; false", ran.display())]).unwrap();
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        assert_eq!(status(&repo).len(), 1);
+        assert!(!ran.exists(), "core.fsmonitor ran");
         std::fs::remove_dir_all(&repo).ok();
     }
 
