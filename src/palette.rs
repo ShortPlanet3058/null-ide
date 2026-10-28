@@ -514,7 +514,11 @@ impl Palette {
             PaletteKind::Task => kind.placeholder().to_string(),
             _ => options.title.clone().unwrap_or_else(|| kind.placeholder().to_string()),
         };
-        let input = cx.new(|cx| TextInput::new(placeholder, cx));
+        // A task can take several lines (⇧↵).
+        let input = cx.new(|cx| {
+            let input = TextInput::new(placeholder, cx);
+            if kind == PaletteKind::Task { input.multiline() } else { input }
+        });
         let subscription = cx.subscribe(&input, |this, _, TextInputEvent::Changed, cx| this.update_rows(cx));
         // The project's files as last listed, at once; listed again meanwhile (on a big
         // project that took 1.4 s), and the rows updated if they've changed.
@@ -1509,7 +1513,7 @@ impl Palette {
                 "↵ copy"
             }
             PaletteKind::Line | PaletteKind::Locations => "↵ go",
-            PaletteKind::Task => "↵ start",
+            PaletteKind::Task => "↵ start · ⇧↵ new line",
             PaletteKind::Path(_) => "↵ choose",
             PaletteKind::Server => "↵ connect",
             PaletteKind::Ex => "↵ run",
@@ -1870,7 +1874,9 @@ impl Render for Palette {
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    // (A task's lines: the hint stays by the first.)
+                    .when(self.kind == PaletteKind::Task, |d| d.items_start())
+                    .when(self.kind != PaletteKind::Task, |d| d.items_center())
                     .gap(px(12.))
                     .px(px(20.))
                     .py(px(14.))

@@ -75,6 +75,23 @@ pub fn home_dir() -> Option<PathBuf> {
     var("HOME").or_else(|| if cfg!(windows) { var("USERPROFILE") } else { None })
 }
 
+/// Null's data folder (see `data_dir`) made, and kept to its owner (0700): unsaved work
+/// backed up, sessions, file history and notes are in it, and some folders' umask lets
+/// others read what's written (a home folder open to them, on older Linux).
+pub fn keep_data_private() {
+    let Some(dir) = data_dir() else { return };
+    std::fs::create_dir_all(&dir).ok();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&dir)
+            && meta.permissions().mode() & 0o077 != 0
+        {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok();
+        }
+    }
+}
+
 /// Where Null keeps what it installs itself (language servers), never on the system:
 /// `~/Library/Application Support/Null` on macOS, `$XDG_DATA_HOME/null` (or
 /// `~/.local/share/null`) on Linux, `%LOCALAPPDATA%\Null` on Windows.
@@ -170,4 +187,17 @@ pub fn find(name: &str) -> Option<PathBuf> {
         .into_iter()
         .flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>())
         .find(|p| p.is_file())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_data_folder_is_its_owner_s() {
+        use std::os::unix::fs::PermissionsExt;
+        keep_data_private();
+        let mode = std::fs::metadata(data_dir().unwrap()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0);
+    }
 }

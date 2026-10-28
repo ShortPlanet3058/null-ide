@@ -120,6 +120,11 @@ fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// Whether a Null on this computer checked for updates before (one that ran here).
+pub fn checked_before() -> bool {
+    file().is_some_and(|f| f.exists())
+}
+
 /// Whether it's time to ask again.
 pub fn due() -> bool {
     now().saturating_sub(kept().checked) >= EVERY_SECS

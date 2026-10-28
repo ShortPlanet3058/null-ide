@@ -165,6 +165,11 @@ impl Editor {
         }
     }
 
+    /// The version of the text its language server was last told of.
+    pub fn lsp_version(&self) -> i32 {
+        self.lsp_version
+    }
+
     pub(super) fn sync_lsp(&mut self, cx: &mut Context<Self>) {
         if self.lsp_follower {
             return;

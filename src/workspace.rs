@@ -210,6 +210,8 @@ actions!(
         ExplainTestFailure,
         /// Asks now whether a newer Null is out.
         CheckForUpdates,
+        /// What changed in this version (since the one before, after an update).
+        WhatsNew,
         /// The newer Null out: downloaded, checked and installed; once it's ready, Null
         /// restarts with it.
         UpdateNull,
@@ -997,9 +999,13 @@ pub struct Workspace {
     /// What ssh asks, asked here (see `askpass`): the one shown, with whoever waits for its
     /// answer (the same question asked again meanwhile, all of them), then those after it.
     ssh_prompt: Option<(Entity<crate::ssh_prompt::SshPrompt>, Subscription, Vec<SshAnswer>)>,
+    /// Whether to move what's picked in the files to the Trash.
+    trash_prompt: Option<(Entity<crate::trash_prompt::TrashPrompt>, Subscription)>,
     ssh_questions: std::collections::VecDeque<crate::askpass::Ask>,
     /// A short message at the bottom of the window, and when it appeared.
     notice: Option<(String, Instant)>,
+    /// What a click on the notice does, if anything.
+    notice_click: Option<Box<dyn gpui::Action>>,
     /// The notices shown lately, newest last (Recent Notices lists them).
     past_notices: Vec<(String, std::time::SystemTime)>,
     notice_task: Option<Task<()>>,
@@ -1065,6 +1071,9 @@ impl Workspace {
                 FileTreeEvent::Renamed { from, to } => this.paths_renamed(from, to, cx),
                 FileTreeEvent::RenameRequested { from, to } => this.queue_rename(from.clone(), to.clone(), cx),
                 FileTreeEvent::Trashed(path) => this.path_trashed(path, window, cx),
+                FileTreeEvent::AskToTrash { question, detail } => {
+                    this.ask_to_trash(question.clone(), detail.clone(), window, cx)
+                }
                 FileTreeEvent::OpenTerminal(dir) => this.open_terminal_in(dir.clone(), window, cx),
                 FileTreeEvent::FindInFolder(dir) => this.find_in_folder(dir, window, cx),
                 // Two files picked in the tree: the first opened, compared with the second.
@@ -1292,11 +1301,13 @@ impl Workspace {
             ignore_rules,
             key_prompt: None,
             ssh_prompt: None,
+            trash_prompt: None,
             ssh_questions: std::collections::VecDeque::new(),
             notice: None,
             past_notices: Vec::new(),
             notice_on_return: None,
             notice_task: None,
+            notice_click: None,
             asked_suggestions: false,
             focus_before_palette: None,
             _subscriptions: subscriptions,
@@ -3175,7 +3186,15 @@ impl Workspace {
         // gigabyte would hold the window still for seconds).
         // (One on a server too: reading it waits on the network.)
         let remote = crate::remote::is_remote(&path);
-        let size = if remote { 0 } else { std::fs::metadata(&path).map_or(0, |m| m.len()) };
+        let meta = if remote { None } else { std::fs::metadata(&path).ok() };
+        // A pipe, socket or device isn't a file to read: reading a pipe waits for whoever
+        // writes to it (the window would hang on it), a device never ends.
+        if meta.as_ref().is_some_and(|m| !m.is_file() && !m.is_dir()) {
+            let name =
+                path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+            return self.show_notice(format!("{name} isn't a file Null can open (a pipe, socket or device)."), cx);
+        }
+        let size = meta.map_or(0, |m| m.len());
         let editor = if size > READ_IN_BACKGROUND_FROM || remote {
             let editor = cx.new(|cx| Editor::stand_in(path.clone(), size, cx));
             self.read_in_background(editor.clone(), path, window, cx);
@@ -3657,9 +3676,14 @@ impl Workspace {
                 EditorEvent::Rename { position, new_name } => {
                     let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
                     let request = this.lsp.read(cx).rename(&path, *position, new_name.clone());
+                    let (editor, asked_at) = (editor.clone(), editor.read(cx).revision());
                     cx.spawn_in(window, async move |this, cx| {
                         let result = request.await;
                         this.update_in(cx, |this, _, cx| match result {
+                            // (Typed into meanwhile: its places have moved.)
+                            Ok(_) if editor.read(cx).revision() != asked_at => {
+                                this.show_notice("The file changed while renaming. Rename again.".into(), cx)
+                            }
                             Ok(edit) => this.apply_workspace_edit(edit, cx),
                             Err(message) => this.show_notice(message, cx),
                         })
@@ -3937,6 +3961,18 @@ impl Workspace {
         });
         self.recent_files.clear();
         self.recently_closed.clear();
+        // Its settings (.null, .vscode), its terminals (a shell in the last project would
+        // run this one's tasks there), and nothing of the last one's still running.
+        crate::settings::use_project(&path, cx);
+        self.terminals.clear();
+        self.active_terminal = 0;
+        self.terminal_open = Transition::new(false);
+        if let Some(run) = self.ai_task.take() {
+            run.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                child.kill().ok();
+            }
+        }
         // Another project's tests: looked for again, if they show.
         self.tests = None;
         self.tests_task = None;
@@ -3946,7 +3982,7 @@ impl Workspace {
         self.debugged_test = None;
         self.debug_program = None;
         self.debug_builds += 1;
-        if self.debugger.read(cx).state == crate::debugger::DebugState::Building {
+        if self.debugger.read(cx).state != crate::debugger::DebugState::Idle {
             self.debugger.update(cx, |d, cx| d.stop(cx));
         }
         self.test_status.clear();
@@ -4258,19 +4294,18 @@ impl Workspace {
     fn confirm_unsaved(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // A command still running in a terminal (a build, a server) stops with the window:
         // asked about first.
-        if matches!(action, CloseAction::Quit | CloseAction::CloseWindow)
+        // (Another project in the window too: its terminals go with this one.)
+        if matches!(action, CloseAction::Quit | CloseAction::CloseWindow | CloseAction::SwitchProject(_))
             && !std::mem::take(&mut self.stopping_commands)
             && let Some(message) = self.commands_running(cx)
         {
-            let leave = if matches!(action, CloseAction::Quit) { "Quit" } else { "Close" };
-            let answer = crate::modal::ask(
-                window,
-                PromptLevel::Warning,
-                &message,
-                Some(if matches!(action, CloseAction::Quit) { "Quitting stops it." } else { "Closing stops it." }),
-                &[leave, "Cancel"],
-                cx,
-            );
+            let (leave, detail) = match action {
+                CloseAction::Quit => ("Quit", "Quitting stops it."),
+                CloseAction::SwitchProject(_) => ("Open", "Opening the other project stops it."),
+                _ => ("Close", "Closing stops it."),
+            };
+            let answer =
+                crate::modal::ask(window, PromptLevel::Warning, &message, Some(detail), &[leave, "Cancel"], cx);
             cx.spawn_in(window, async move |this, cx| {
                 let Ok(choice) = answer.await else { return };
                 this.update_in(cx, |this, window, cx| {
@@ -4444,23 +4479,27 @@ impl Workspace {
     }
 
     /// The unsaved files: path (None for a new one) and text, a file open twice once.
-    fn unsaved_files(&self, cx: &App) -> Vec<(Option<PathBuf>, String)> {
-        let mut unsaved: Vec<(Option<PathBuf>, String)> = Vec::new();
+    /// The unsaved files: path, text, and whether the file changed on disk under the edits.
+    fn unsaved_files(&self, cx: &App) -> Vec<(Option<PathBuf>, String, bool)> {
+        let mut unsaved: Vec<(Option<PathBuf>, String, bool)> = Vec::new();
         for tab in &self.tabs {
             let editor = tab.editor.read(cx);
             let path = editor.path().map(Path::to_path_buf);
-            if editor.buffer.is_dirty() && (path.is_none() || !unsaved.iter().any(|(p, _)| *p == path)) {
-                unsaved.push((path, editor.buffer.to_string()));
+            if editor.buffer.is_dirty() && (path.is_none() || !unsaved.iter().any(|(p, _, _)| *p == path)) {
+                unsaved.push((path, editor.buffer.to_string(), editor.disk_changed));
             }
         }
         unsaved
     }
 
-    fn backups_of(unsaved: Vec<(Option<PathBuf>, String)>) -> Vec<crate::session::Backup> {
+    fn backups_of(unsaved: Vec<(Option<PathBuf>, String, bool)>) -> Vec<crate::session::Backup> {
         unsaved
             .into_iter()
-            .map(|(path, text)| {
-                let disk = path.as_deref().and_then(crate::session::disk_fingerprint);
+            .map(|(path, text, changed_on_disk)| {
+                // Changed on disk under the edits: no fingerprint, so the file reads as
+                // changed when they're brought back, and saving asks first (the disk as it
+                // is now would make that change look like the one the edits started from).
+                let disk = path.as_deref().filter(|_| !changed_on_disk).and_then(crate::session::disk_fingerprint);
                 crate::session::Backup { path, text, disk }
             })
             .collect()
@@ -5423,6 +5462,7 @@ impl Workspace {
             (App, "Edit Settings as JSON".into(), Box::new(OpenSettingsFile)),
             (App, "About Null".into(), Box::new(AboutNull)),
             (App, "Check for Updates".into(), Box::new(CheckForUpdates)),
+            (App, "What's New".into(), Box::new(WhatsNew)),
             (App, "Update Null".into(), Box::new(UpdateNull)),
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
@@ -5567,8 +5607,7 @@ impl Workspace {
             ]);
         }
         // With AI switched off, nothing about it shows up.
-        // (The Mac's spell checker: none elsewhere yet.)
-        if crate::spell::AVAILABLE {
+        if crate::spell::available() {
             let label = toggle(settings.spell_check, "Hide Spelling Mistakes", "Show Spelling Mistakes");
             commands.push((View, label, Box::new(ToggleSpellCheck)));
         }
@@ -6354,7 +6393,22 @@ impl Workspace {
     fn file_reviewed(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
         let Some(path) = editor.read(cx).path().map(Path::to_path_buf) else { return };
         if let Some(AiTaskRun { state: TaskState::Review(changes), .. }) = &mut self.ai_task {
-            changes.retain(|c| c.path != path);
+            // What was decided goes to disk, as Undo All's does: the task's file is there as
+            // it left it until then. A file it added, every line of it undone, goes to the
+            // Trash, as Undo All sends it.
+            if let Some(change) = changes.iter().find(|c| c.path == path) {
+                let (text, dirty) = (editor.read(cx).buffer.to_string(), editor.read(cx).buffer.is_dirty());
+                if change.kind == crate::ai_task::ChangeKind::Added && text.is_empty() {
+                    if let Err(error) = crate::ai_task::undo(change) {
+                        self.show_notice(format!("Couldn't move {} to the Trash: {error}", path.display()), cx);
+                    }
+                } else if dirty && text != change.after {
+                    editor.update(cx, |editor, cx| editor.save_to_disk(cx));
+                }
+            }
+            if let Some(AiTaskRun { state: TaskState::Review(changes), .. }) = &mut self.ai_task {
+                changes.retain(|c| c.path != path);
+            }
         }
         self.end_task_if_reviewed(cx);
     }
@@ -7931,6 +7985,12 @@ impl Workspace {
     /// When asked to be told of new versions: what the last check found, and a new check
     /// a few seconds after launch if the last is a day old (once a run, whatever the windows).
     fn check_for_updates_soon(&mut self, cx: &mut Context<Self>) {
+        // Just updated: said once, and a click shows what changed.
+        if crate::whats_new::to_tell().is_some() {
+            let message = format!("Null {} is installed: click to see what's new.", crate::updates::current());
+            self.show_notice(message, cx);
+            self.notice_click = Some(Box::new(WhatsNew));
+        }
         // (An update that couldn't be put in place at the last quit: said, and Update again.)
         if let Some(version) = crate::updates::not_installed() {
             self.show_notice(
@@ -7954,6 +8014,30 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// What's New: the changes since the version before (this one's, if it's not known),
+    /// read in the preview of a Markdown file of Null's own, which can't be changed.
+    fn whats_new(&mut self, _: &WhatsNew, window: &mut Window, cx: &mut Context<Self>) {
+        let since = crate::whats_new::since().flatten();
+        let Some(path) = crate::tools::data_dir().map(|d| d.join("What's New.md")) else { return };
+        let written = path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| std::fs::write(&path, crate::whats_new::text(since.as_deref())));
+        if let Err(error) = written {
+            return self.show_notice(format!("What's New couldn't be shown: {error}"), cx);
+        }
+        self.open_file(path.clone(), window, cx);
+        if let Some(editor) = self.active_editor().filter(|e| e.read(cx).path() == Some(path.as_path())) {
+            editor.update(cx, |editor, cx| {
+                editor.read_only = true;
+                if !editor.reading {
+                    editor.toggle_markdown_preview(&crate::editor::ToggleMarkdownPreview, window, cx);
+                }
+            });
+        }
     }
 
     /// Check for Updates: asked now, and said.
@@ -8068,6 +8152,28 @@ impl Workspace {
         self.show_notice(format!("{tool} is too slow for suggestions as you type: choose where they come from."), cx);
     }
 
+    /// Whether to move what's picked in the files to the Trash, asked in the window.
+    fn ask_to_trash(&mut self, question: String, detail: String, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.new(|cx| crate::trash_prompt::TrashPrompt::new(question, detail, cx));
+        let subscription = cx.subscribe_in(&prompt, window, |this, _, event, window, cx| {
+            let crate::trash_prompt::TrashPromptEvent::Answered { trash, dont_ask } = *event;
+            this.answer_trash(trash, dont_ask, window, cx);
+        });
+        window.focus(&prompt.focus_handle(cx));
+        self.trash_prompt = Some((prompt, subscription));
+        cx.notify();
+    }
+
+    fn answer_trash(&mut self, trash: bool, dont_ask: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.trash_prompt = None;
+        if dont_ask {
+            crate::settings::update(cx, |s| s.confirm_trash = false);
+            self.show_notice("Not asked again: Settings → Window brings the question back.".into(), cx);
+        }
+        self.tree.update(cx, |tree, cx| tree.trash_asked(trash, window, cx));
+        cx.notify();
+    }
+
     /// What ssh asks, asked in this window: now, or after the question already shown (the
     /// same question again waits for the same answer).
     pub fn ask_for_ssh(&mut self, ask: crate::askpass::Ask, window: &mut Window, cx: &mut Context<Self>) {
@@ -8141,10 +8247,12 @@ impl Workspace {
         // (A longer one, as why a server can't be reached and what to do, stays to be read.)
         let shown_for = Duration::from_secs((4 + message.chars().count() as u64 / 25).min(10));
         self.notice = Some((message, Instant::now()));
+        self.notice_click = None;
         self.notice_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(shown_for).await;
             this.update(cx, |this, cx| {
                 this.notice = None;
+                this.notice_click = None;
                 cx.notify();
             })
             .ok();
@@ -9739,6 +9847,8 @@ impl Workspace {
     /// its command, which may send more edits.
     fn run_fix(&mut self, path: PathBuf, fix: lsp_types::CodeActionOrCommand, cx: &mut Context<Self>) {
         let lsp = self.lsp.clone();
+        let editor = self.tabs.iter().map(|t| t.editor.clone()).find(|e| e.read(cx).path() == Some(path.as_path()));
+        let asked_at = editor.as_ref().map(|e| e.read(cx).revision());
         cx.spawn(async move |this, cx| {
             let (edit, command) = match fix {
                 lsp_types::CodeActionOrCommand::Command(command) => (None, Some(command)),
@@ -9763,6 +9873,11 @@ impl Workspace {
                 }
             };
             let Ok(request) = this.update(cx, |this, cx| {
+                // (Typed into while the fix was worked out: its places have moved.)
+                if editor.as_ref().map(|e| e.read(cx).revision()) != asked_at {
+                    this.show_notice("The file changed meanwhile. Try the fix again.".into(), cx);
+                    return None;
+                }
                 if let Some(edit) = edit {
                     this.apply_fix_edit(edit, cx);
                 }
@@ -9780,6 +9895,9 @@ impl Workspace {
 
     /// A fix's edits: quiet when they stay in the open file.
     fn apply_fix_edit(&mut self, edit: lsp_types::WorkspaceEdit, cx: &mut Context<Self>) {
+        if let Some(message) = self.stale_edit(&edit, cx) {
+            return self.show_notice(message, cx);
+        }
         let (_, files, failed) = self.apply_edit_to_files(edit, cx);
         if !failed.is_empty() {
             self.show_notice(format!("Couldn't write {}.", failed.join(", ")), cx);
@@ -9788,7 +9906,26 @@ impl Workspace {
         }
     }
 
+    /// An edit a server made for an older version of an open file (it was typed into
+    /// meanwhile): not applied, its places have moved. Said why.
+    fn stale_edit(&self, edit: &lsp_types::WorkspaceEdit, cx: &App) -> Option<String> {
+        let stale: Vec<String> = crate::lsp::edit_versions(edit)
+            .into_iter()
+            .filter_map(|(path, version)| {
+                // (A file open twice: the tab the server hears from is the one that counts.)
+                let open: Vec<_> =
+                    self.tabs.iter().map(|t| t.editor.read(cx)).filter(|e| e.path() == Some(path.as_path())).collect();
+                let current = open.is_empty() || open.iter().any(|e| e.lsp_version() == version);
+                (!current).then(|| open[0].file_name())
+            })
+            .collect();
+        (!stale.is_empty()).then(|| format!("{} changed meanwhile: nothing was changed. Try again.", stale.join(", ")))
+    }
+
     fn apply_workspace_edit(&mut self, edit: lsp_types::WorkspaceEdit, cx: &mut Context<Self>) {
+        if let Some(message) = self.stale_edit(&edit, cx) {
+            return self.show_notice(message, cx);
+        }
         let (places, files, failed) = self.apply_edit_to_files(edit, cx);
         let message = match (places, failed.is_empty()) {
             (0, _) => "Nothing to rename.".to_string(),
@@ -10525,6 +10662,23 @@ impl Workspace {
                 tree.rename(&crate::file_tree::Rename, window, cx);
             } else {
                 tree.trash(&crate::file_tree::Trash, window, cx);
+            }
+        });
+    }
+
+    /// New File / New Folder in Project from ⌘K (the keys elsewhere than in the files, which
+    /// handle their own): the files shown, the field beside the open file, else at the top.
+    fn new_in_project(&mut self, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let at = self.active_path(cx).filter(|p| self.roots.contains(p));
+        self.show_files(&ShowFiles, window, cx);
+        self.tree.update(cx, |tree, cx| {
+            if let Some(path) = at {
+                tree.set_active(Some(path), cx);
+            }
+            if folder {
+                tree.new_folder(&crate::file_tree::NewFolder, window, cx);
+            } else {
+                tree.new_file(&crate::file_tree::NewFile, window, cx);
             }
         });
     }
@@ -11647,6 +11801,8 @@ impl Render for Workspace {
         let overlay: Option<AnyElement> = if let Some((prompt, ..)) = &self.ssh_prompt {
             // (What ssh asks waits on nothing else: a connection hangs on it.)
             Some(prompt.clone().into_any_element())
+        } else if let Some((prompt, _)) = &self.trash_prompt {
+            Some(prompt.clone().into_any_element())
         } else if let Some((palette, _)) = &self.palette {
             Some(palette.clone().into_any_element())
         } else if let Some((panel, _)) = &self.settings_panel {
@@ -12409,6 +12565,13 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_notes))
             .on_action(cx.listener(Self::explain_test_failure))
             .on_action(cx.listener(Self::check_for_updates))
+            .on_action(
+                cx.listener(|this, _: &crate::file_tree::NewFile, window, cx| this.new_in_project(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::file_tree::NewFolder, window, cx| this.new_in_project(true, window, cx)),
+            )
+            .on_action(cx.listener(Self::whats_new))
             .on_action(cx.listener(Self::update_null))
             .on_action(cx.listener(Self::open_wsl_folder))
             .on_action(cx.listener(Self::open_ssh_folder))
@@ -12543,6 +12706,10 @@ impl Render for Workspace {
                                 if this.ssh_prompt.is_some() {
                                     return this.answer_ssh(None, window, cx);
                                 }
+                                // (Nor the Trash's: nothing moved.)
+                                if this.trash_prompt.is_some() {
+                                    return this.answer_trash(false, false, window, cx);
+                                }
                                 this.close_palette(window, cx);
                             }),
                         )
@@ -12553,8 +12720,14 @@ impl Render for Workspace {
                 div().absolute().top_0().left_0().size_full().occlude().child(welcome).into_any_element()
             }))
             .children(self.notice.as_ref().map(|(message, _)| {
+                let click = self.notice_click.as_ref().map(|a| a.boxed_clone());
                 div().absolute().bottom(px(44.)).left_0().w_full().flex().justify_center().child(
                     div()
+                        .id("notice")
+                        .when_some(click, |d, action| {
+                            d.cursor_pointer()
+                                .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+                        })
                         .max_w(px(560.))
                         .px(px(14.))
                         .py(px(8.))
@@ -12896,6 +13069,151 @@ mod tests {
         cx.run_until_parked();
         let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
         cx.update(|window, cx| assert!(editor.focus_handle(cx).is_focused(window), "the keys stayed in the list"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// New File in Project from ⌘K, the keys in the code: the name asked in the files, the
+    /// file made beside the open one.
+    #[gpui::test]
+    fn new_file_in_project_from_the_commands(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("new-in-project");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/a.txt"), "a\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("sub/a.txt"), window, cx));
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        editor.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            window.dispatch_action(Box::new(crate::file_tree::NewFile), cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_input("b.txt");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(dir.join("sub/b.txt").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Another project opened in the window (Open Recent): its own settings at once, not
+    /// the last one's until the window's next activated.
+    #[gpui::test]
+    fn switching_project_takes_its_settings(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("switch-settings");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (ours, other) = (dir.join("ours"), dir.join("other"));
+        std::fs::create_dir_all(&other).unwrap();
+        let file = crate::settings::project_file(&ours);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{ \"indent_size\": 3 }\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings { indent_size: 4, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = other.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        assert_eq!(cx.update(|_, cx| cx.global::<Settings>().indent_size), 4);
+        workspace.update_in(cx, |w, window, cx| w.switch_project(ours.clone(), window, cx));
+        assert_eq!(cx.update(|_, cx| cx.global::<Settings>().indent_size), 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A named pipe isn't opened (reading it would wait for a writer: the window hung).
+    #[gpui::test]
+    #[cfg(unix)]
+    fn a_pipe_is_not_opened(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("pipe-open");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipe = dir.join("pipe");
+        assert!(std::process::Command::new("mkfifo").arg(&pipe).status().unwrap().success());
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(pipe.clone(), window, cx);
+            assert!(w.tabs.iter().all(|t| t.editor.read(cx).path() != Some(pipe.as_path())));
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A backup of a file changed on disk under its edits keeps no fingerprint: brought back
+    /// after a crash, the file still reads as changed (the disk as it is then isn't the
+    /// version the edits started from).
+    #[test]
+    fn a_backup_remembers_a_file_changed_on_disk() {
+        let dir = crate::tools::test_dir("backup-changed");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "theirs\n").unwrap();
+        let backups = Workspace::backups_of(vec![
+            (Some(file.clone()), "mine\n".into(), true),
+            (Some(file.clone()), "mine\n".into(), false),
+        ]);
+        assert_eq!(backups[0].disk, None);
+        assert_eq!(backups[1].disk, crate::session::disk_fingerprint(&file));
+    }
+
+    /// An AI task's change undone hunk by hunk: once the file's reviewed, the disk has
+    /// what was decided, not what the task wrote (Undo All writes it, so must this).
+    #[gpui::test]
+    fn a_task_s_change_undone_in_review_is_undone_on_disk(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("task-review-undo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\nTWO\nthree\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.ai_task = Some(AiTaskRun {
+                title: "shout".into(),
+                state: TaskState::Review(vec![crate::ai_task::FileChange {
+                    path: file.clone(),
+                    kind: crate::ai_task::ChangeKind::Changed,
+                    added: 1,
+                    removed: 1,
+                    before: "one\ntwo\nthree\n".into(),
+                    after: "one\nTWO\nthree\n".into(),
+                    yours_too: false,
+                }]),
+                child: Default::default(),
+                stop: Default::default(),
+                yours: HashSet::new(),
+                _task: None,
+            });
+            w.open_file(file.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        editor.update_in(cx, |e, window, cx| {
+            e.start_review("one\ntwo\nthree\n".into(), cx);
+            e.set_caret_point((1, 0), cx);
+            window.focus(&e.focus_handle(cx));
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\ntwo\nthree\n");
+        assert!(workspace.read_with(cx, |w, _| w.ai_task.is_none()), "every change reviewed");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -16084,9 +16402,10 @@ esac
         workspace.update_in(cx, |w, window, cx| window.focus(&w.focus_handle(cx)));
         cx.dispatch_action(TrashFile);
         cx.run_until_parked();
-        assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Cancel");
+        workspace.update(cx, |w, _| assert!(w.trash_prompt.is_some(), "asked in the window"));
+        cx.simulate_keystrokes("escape");
         cx.run_until_parked();
+        workspace.update(cx, |w, _| assert!(w.trash_prompt.is_none()));
         assert!(renamed.exists());
         std::fs::remove_dir_all(&dir).ok();
     }

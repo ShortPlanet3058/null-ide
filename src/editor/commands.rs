@@ -232,9 +232,12 @@ impl Editor {
         let lines = self.selected_lines();
         let (line, column) = self.caret_point();
         let mut range = self.lines_char_range(&lines);
-        // On the last line, take the line break before it instead.
+        // On the last line, take the line break before it instead (all of a \r\n).
         if lines.end >= self.buffer.len_lines() && range.start > 0 {
             range.start -= 1;
+            if range.start > 0 && self.buffer.char_at(range.start - 1) == Some('\r') {
+                range.start -= 1;
+            }
         }
         self.record_undo(EditKind::Other);
         self.buffer.replace(range, "");
@@ -1078,6 +1081,11 @@ mod editor_tests {
         select(cx, &e, 6, 6);
         e.update(cx, |e, cx| e.move_lines(true, cx));
         assert_eq!(text(cx, &e), "b\na\nc\n");
+        // The last line of a Windows file: its whole \r\n goes with it, no stray \r.
+        let e = editor(cx, "one\r\ntwo", "x.txt");
+        select(cx, &e, 6, 6);
+        e.update(cx, |e, cx| e.delete_lines(cx));
+        assert_eq!(text(cx, &e), "one");
     }
 
     #[gpui::test]

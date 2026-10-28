@@ -178,6 +178,12 @@ pub enum FileTreeEvent {
         to: PathBuf,
     },
     Trashed(PathBuf),
+    /// Whether to move what's picked to the Trash: asked in the window (see
+    /// `trash_prompt`), then [`FileTree::trash_asked`].
+    AskToTrash {
+        question: String,
+        detail: String,
+    },
     /// A new terminal, started in this folder.
     OpenTerminal(PathBuf),
     /// Find in Folder…: project search, in this folder only.
@@ -445,6 +451,8 @@ pub struct FileTree {
     selected: Option<PathBuf>,
     /// Picked along with it: ⌘-click adds one, ⇧-click the ones in between.
     also: Vec<PathBuf>,
+    /// Waiting for the question about moving them to the Trash.
+    to_trash: Vec<Entry>,
     edit: Option<Edit>,
     menu: Option<Menu>,
     scroll: UniformListScrollHandle,
@@ -483,6 +491,7 @@ impl FileTree {
             active: None,
             selected: None,
             also: Vec::new(),
+            to_trash: Vec::new(),
             edit: None,
             menu: None,
             ask_before_renaming: false,
@@ -1284,7 +1293,8 @@ impl FileTree {
         };
         match result {
             Ok((from, path)) => {
-                let is_file = path.is_file();
+                // (On a server too: asked there.)
+                let is_file = crate::project_fs::is_file(&path);
                 self.edit = None;
                 self.children.clear();
                 self.expand_to(&path);
@@ -1348,7 +1358,7 @@ impl FileTree {
     fn paste_files(&mut self, _: &PasteFiles, _: &mut Window, cx: &mut Context<Self>) {
         let Some(FileClipboard { paths, cut }) = cx.try_global::<FileClipboard>().cloned() else { return };
         let dir = self.dir_for(self.selected_entry().as_ref());
-        let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.exists()).collect();
+        let paths: Vec<PathBuf> = paths.into_iter().filter(|p| crate::project_fs::exists(p)).collect();
         if paths.is_empty() {
             cx.remove_global::<FileClipboard>();
             return cx.emit(FileTreeEvent::Notice("What was copied isn't there any more".into()));
@@ -1479,85 +1489,79 @@ impl FileTree {
 
     pub fn trash(&mut self, _: &Trash, window: &mut Window, cx: &mut Context<Self>) {
         // (A folder of the window's isn't trashed from its heading.)
-        let picked: Vec<Entry> = self.picked().into_iter().filter(|e| !self.is_root(&e.path)).collect();
-        if picked.len() > 1 {
-            return self.trash_picked(picked, window, cx);
+        let mut picked: Vec<Entry> = self.picked().into_iter().filter(|e| !self.is_root(&e.path)).collect();
+        if picked.len() <= 1 {
+            picked = self.selected_entry().filter(|e| !self.is_root(&e.path)).into_iter().collect();
         }
-        let Some(entry) = self.selected_entry().filter(|e| !self.is_root(&e.path)) else { return };
-        let what = if entry.is_dir { "folder" } else { "file" };
-        let answer = crate::modal::ask(
-            window,
-            gpui::PromptLevel::Warning,
-            &format!("Move the {what} “{}” to the {}?", entry.name, fs_ops::TRASH),
-            Some(&format!("You can restore it from the {}.", fs_ops::TRASH)),
-            &[fs_ops::MOVE_TO_TRASH, "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await != Ok(0) {
-                return;
-            }
-            this.update_in(cx, |this, window, cx| this.trash_now(&entry, window, cx)).ok();
-        })
-        .detach();
+        let (question, detail) = match picked.as_slice() {
+            [] => return,
+            [entry] => (
+                format!(
+                    "Move the {} “{}” to the {}?",
+                    if entry.is_dir { "folder" } else { "file" },
+                    entry.name,
+                    fs_ops::TRASH
+                ),
+                format!("You can restore it from the {}.", fs_ops::TRASH),
+            ),
+            several => (
+                format!("Move these {} items to the {}?", several.len(), fs_ops::TRASH),
+                format!("You can restore them from the {}.", fs_ops::TRASH),
+            ),
+        };
+        self.to_trash = picked;
+        if cx.global::<crate::settings::Settings>().confirm_trash {
+            cx.emit(FileTreeEvent::AskToTrash { question, detail });
+        } else {
+            self.trash_asked(true, window, cx);
+        }
     }
 
-    /// Several picked: one question for them all, then each to the Trash.
-    fn trash_picked(&mut self, picked: Vec<Entry>, window: &mut Window, cx: &mut Context<Self>) {
-        let answer = crate::modal::ask(
-            window,
-            gpui::PromptLevel::Warning,
-            &format!("Move these {} items to the {}?", picked.len(), fs_ops::TRASH),
-            Some(&format!("You can restore them from the {}.", fs_ops::TRASH)),
-            &[fs_ops::MOVE_TO_TRASH, "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await != Ok(0) {
-                return;
+    /// The question about the Trash answered: what was picked moved there, or left.
+    pub fn trash_asked(&mut self, trash: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = std::mem::take(&mut self.to_trash);
+        if !trash || picked.is_empty() {
+            return window.focus(&self.focus_handle);
+        }
+        if let [entry] = picked.as_slice() {
+            return self.trash_now(entry, window, cx);
+        }
+        let first = self.rows.iter().position(|r| matches!(&r.kind, RowKind::Entry(e) if e.path == picked[0].path));
+        let mut moved = 0;
+        let mut problems = Vec::new();
+        for entry in &picked {
+            match fs_ops::move_to_trash(&entry.path) {
+                Ok(()) => {
+                    moved += 1;
+                    if let Some(parent) = entry.path.parent() {
+                        self.children.remove(parent);
+                    }
+                    cx.emit(FileTreeEvent::Trashed(entry.path.clone()));
+                }
+                Err(message) => problems.push(message),
             }
-            this.update_in(cx, |this, window, cx| {
-                let first =
-                    this.rows.iter().position(|r| matches!(&r.kind, RowKind::Entry(e) if e.path == picked[0].path));
-                let mut moved = 0;
-                let mut problems = Vec::new();
-                for entry in &picked {
-                    match fs_ops::move_to_trash(&entry.path) {
-                        Ok(()) => {
-                            moved += 1;
-                            if let Some(parent) = entry.path.parent() {
-                                this.children.remove(parent);
-                            }
-                            cx.emit(FileTreeEvent::Trashed(entry.path.clone()));
-                        }
-                        Err(message) => problems.push(message),
-                    }
-                }
-                this.also.clear();
-                this.rebuild();
-                let next = first.unwrap_or(0).min(this.rows.len().saturating_sub(1));
-                this.selected = this.entry_at(next).map(|e| e.path.clone());
-                window.focus(&this.focus_handle);
-                // One line says it all (a second would replace the first).
-                let mut notice = match moved {
-                    0 => String::new(),
-                    1 => format!("Moved 1 item to the {}", fs_ops::TRASH),
-                    n => format!("Moved {n} items to the {}", fs_ops::TRASH),
-                };
-                if !problems.is_empty() {
-                    if !notice.is_empty() {
-                        notice.push_str(" · ");
-                    }
-                    notice.push_str(&problems.join("; "));
-                } else if !notice.is_empty() {
-                    notice.push('.');
-                }
-                cx.emit(FileTreeEvent::Notice(notice));
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        }
+        self.also.clear();
+        self.rebuild();
+        let next = first.unwrap_or(0).min(self.rows.len().saturating_sub(1));
+        self.selected = self.entry_at(next).map(|e| e.path.clone());
+        window.focus(&self.focus_handle);
+        // One line says it all (a second would replace the first).
+        let mut notice = match moved {
+            0 => String::new(),
+            1 => format!("Moved 1 item to the {}", fs_ops::TRASH),
+            n => format!("Moved {n} items to the {}", fs_ops::TRASH),
+        };
+        if !problems.is_empty() {
+            if !notice.is_empty() {
+                notice.push_str(" · ");
+            }
+            notice.push_str(&problems.join("; "));
+        } else if !notice.is_empty() {
+            notice.push('.');
+        }
+        cx.emit(FileTreeEvent::Notice(notice));
+        cx.notify();
     }
 
     fn trash_now(&mut self, entry: &Entry, window: &mut Window, cx: &mut Context<Self>) {
@@ -2420,12 +2424,26 @@ mod tests {
             assert_eq!(names(t), ["a.txt"]);
             t.click(ix(t, "c.txt"), 1, shift, window, cx);
             assert_eq!(names(t), ["a.txt", "b.txt", "c.txt"]);
+            // Asked first (in the window): nothing moves until it's answered.
             t.trash(&Trash, window, cx);
+            assert_eq!(t.to_trash.len(), 3);
+            assert!(dir.join("a.txt").exists());
+            t.trash_asked(true, window, cx);
         });
-        cx.simulate_prompt_answer(fs_ops::MOVE_TO_TRASH);
         cx.run_until_parked();
         assert!(!dir.join("a.txt").exists() && !dir.join("b.txt").exists() && !dir.join("c.txt").exists());
         assert!(dir.join("d.txt").exists());
+        // Not asked any more: straight to the Trash.
+        cx.update(|_, cx| cx.update_global::<crate::settings::Settings, _>(|s, _| s.confirm_trash = false));
+        tree.update_in(cx, |t, window, cx| {
+            t.children.clear();
+            t.rebuild();
+            t.selected = Some(dir.join("d.txt"));
+            t.also.clear();
+            t.trash(&Trash, window, cx);
+        });
+        assert!(!dir.join("d.txt").exists());
+        std::fs::write(dir.join("d.txt"), "d").unwrap();
         // Several dragged onto a folder: all of them move there.
         std::fs::create_dir_all(dir.join("dest")).unwrap();
         std::fs::write(dir.join("e.txt"), "e").unwrap();

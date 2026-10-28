@@ -1,3 +1,4 @@
+mod ai_scope;
 mod assist;
 pub use assist::Thread;
 mod bookmarks;
@@ -27,6 +28,7 @@ mod notes;
 mod numbers;
 mod refactor;
 mod reindent;
+mod repeat_edit;
 mod review;
 mod rewrap;
 mod signature;
@@ -234,6 +236,7 @@ pub fn bind_refactor_keys(cx: &mut App) {
     fold::bind_keys(cx);
     fixes::bind_keys(cx);
     conflicts::bind_keys(cx);
+    repeat_edit::bind_keys(cx);
     breakpoints::bind_keys(cx);
     bookmarks::bind_keys(cx);
     notes::bind_keys(cx);
@@ -640,6 +643,12 @@ pub struct Editor {
     batch: Option<cursors::Batch>,
     /// Vim's mode and what's pending, when its keys are in use.
     vim: vim::Vim,
+    /// A word typed over, and the other places the old one stands (see `repeat_edit`).
+    repeat: Option<repeat_edit::Repeat>,
+    /// The edit under way is in that word.
+    repeat_follows: bool,
+    /// The edit under way is the change made at one of those places.
+    repeating: bool,
     _vim_keys: Subscription,
     /// The word ⌘D picked from a bare caret: its occurrences must be whole words too.
     word_pick: Option<Range<usize>>,
@@ -1005,6 +1014,9 @@ impl Editor {
             extra: Vec::new(),
             batch: None,
             vim: vim::Vim::default(),
+            repeat: None,
+            repeat_follows: false,
+            repeating: false,
             _vim_keys: vim::listen(cx),
             word_pick: None,
             occurrence_whole_word: false,
@@ -1501,6 +1513,11 @@ impl Editor {
         cx.notify();
     }
 
+    /// The text's revision: it changes with every edit (to tell an answer about older text).
+    pub fn revision(&self) -> u64 {
+        self.buffer.revision()
+    }
+
     pub fn file_name(&self) -> String {
         self.path
             .as_deref()
@@ -1566,15 +1583,31 @@ impl Editor {
     }
 
     /// Call after every change to the text.
+    /// Every cursor kept inside the text: an edit made without moving them (a change put
+    /// back, a review's hunk undone at the end of the file) can leave one past its end.
+    fn cursors_inside_text(&mut self) {
+        let len = self.buffer.len_chars();
+        let inside = |s: &mut Selection| {
+            s.anchor = s.anchor.min(len);
+            s.head = s.head.min(len);
+        };
+        inside(&mut self.selection);
+        for cursor in &mut self.extra {
+            inside(&mut cursor.selection);
+        }
+    }
+
     fn text_changed(&mut self, cx: &mut Context<Self>) {
         // Running once per cursor: catch up once at the end.
         if let Some(batch) = &mut self.batch {
             batch.changed = true;
             return;
         }
+        self.cursors_inside_text();
         self.search_after_edit(cx);
         self.folds_after_edit(cx);
         self.ai_text_changed();
+        self.repeat_after_edit();
         self.sync_lsp(cx);
         self.text_changed_for_git(cx);
         self.hints_after_edit();
@@ -2512,6 +2545,8 @@ impl Editor {
         // Typing in a tag's name types in its pair's too.
         let linked = matches!(kind, EditKind::Typing | EditKind::Deleting).then(|| self.linked_tag(&range)).flatten();
         self.record_undo(kind);
+        self.repeat_before_edit(&range, text, kind);
+        self.vim_before_edit(&range, text.chars().count());
         let mut end = self.buffer.replace(range.clone(), text);
         if let Some(linked) = linked {
             end = self.mirror_tag(linked, range.clone(), end - range.start, end);
@@ -2525,6 +2560,7 @@ impl Editor {
         self.marked = None;
         self.goal_column = None;
         self.text_changed(cx);
+        self.repeat_shown_when_settled(cx);
         cx.emit(EditorEvent::Edited);
         self.touch(cx);
     }
@@ -4733,6 +4769,7 @@ impl Render for Editor {
             key_context.add("in_snippet");
         }
         self.ai_key_context(&mut key_context);
+        self.repeat_key_context(&mut key_context);
         let text = div()
             .key_context(key_context)
             .track_focus(&self.focus_handle)
@@ -4884,6 +4921,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::open_line))
             .on_action(cx.listener(Self::next_change))
             .on_action(cx.listener(Self::next_conflict))
+            .on_action(cx.listener(Self::repeat_edit))
+            .on_action(cx.listener(Self::forget_repeat))
             .on_action(cx.listener(Self::previous_conflict))
             .on_action(cx.listener(Self::previous_change))
             .on_action(cx.listener(Self::reverse_lines))
@@ -6604,6 +6643,26 @@ mod tests {
         cx.simulate_input("*");
         editor.read_with(cx, |e, _| assert_eq!(e.buffer.to_string(), "* * b\n"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A change made under the cursors without moving them (a review's last hunk undone at
+    /// the end of the file) leaves none past the end: reading at the caret would panic.
+    #[gpui::test]
+    fn cursors_stay_inside_the_text(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text("abc\ndef\n"), None, cx));
+        e.update_in(cx, |e, _, cx| {
+            e.selection = Selection { anchor: 2, head: 8 };
+            e.extra.push(cursors::Cursor::new(Selection::caret(7)));
+            e.buffer.replace(4..8, "");
+            e.text_changed(cx);
+            assert_eq!((e.selection.anchor, e.selection.head), (2, 4));
+            assert_eq!(e.extra[0].selection.head, 4);
+        });
     }
 
     /// Misspelled words are marked in prose and comments, never in code; ⌘. on one offers

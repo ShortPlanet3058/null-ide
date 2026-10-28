@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.2.1
+
+Null tells you what's new after it updates itself, picks what ⌘I changes from the code's
+structure, takes several lines in its AI fields, helps with merge conflicts, checks
+spelling on Windows and Linux too, and fixes what an outside audit found.
+
+- What's new: after an update, a notice says which version is installed, and a click on it
+  shows the changes since the version before (What's New in ⌘K, any time).
+- ⌘I without a selection changes the function, class, CSS rule or HTML element the cursor is
+  in, in every language with one (it was only Rust's; elsewhere the lines up to a blank one,
+  so a whole HTML page), and never more than 40 lines: in a bigger one, the part the cursor
+  is in.
+- AI fields take several lines: ⇧↵ starts one in ⌘I, a follow-up question and an AI task
+  (⌥⌘I), and pasted text keeps its lines; the field grows up to 8 rows, then scrolls.
+- Merge conflicts: ✦ Resolve with AI (⌘. in a conflict, with AI on) writes one version
+  keeping what each side changed, shown as a change to keep (⇥) or undo (Esc).
+- The same change elsewhere: a word typed over (a name renamed by hand) marks the other
+  places in the file the old word stands; ⇥ from the word changes them one by one, Esc
+  lets them be.
+- Spelling on Windows and Linux: Windows' own speller, and on Linux the Hunspell
+  dictionaries installed, in your language and English, each line in the one it reads best
+  in (it was the Mac's only).
+- Moving files to the Trash asks in the window, with "Don't ask again" (space ticks it);
+  Settings → Window → Ask before moving to the Trash brings the question back.
+- Fixes from an outside audit:
+  - Markdown no longer crashes on a list line starting with a wide space (Japanese text),
+    or on ⇥ in a table row holding a lone backtick.
+  - The cursor can't end up past the end of the file (after a review's last change was
+    undone, or a late completion), which crashed Run Test at Cursor.
+  - ⌘I's adjust asks about the lines first changed again, not as many as the change made
+    (it reached the code below a change that had grown).
+  - A rename or quick fix from a language server isn't applied if the file was typed into
+    while it was worked out (its places had moved): Null says to try again.
+  - An AI task's change undone in review is undone on disk too; a file it added, undone
+    entirely, goes to the Trash.
+  - Delete Line on the last line of a Windows (CRLF) file takes its whole line break.
+  - Over SSH, a save that fails (full disk) never leaves the file half written, and a
+    read-only file isn't written over. In a WSL folder, renaming a file to another one's
+    name in other case no longer replaces it.
+  - Unsaved changes brought back after a crash remember that the file changed on disk
+    meanwhile, so saving still asks first.
+  - The crash log, trimmed past 1 MB, could crash Null again while writing it.
+  - New File and New Folder in Project from ⌘K open the name field in the files (they did
+    nothing); a named pipe, socket or device isn't opened (a pipe hung the window).
+  - Opening another project in the window (Open Recent) takes its settings at once, closes
+    the last one's terminals (asking first if a command runs there), and stops what ran
+    for it (the debugger, an AI task).
+  - Command line: every file opens (`null a.rs b.rs`), options anywhere (`null a.rs
+    --wait`), `--` before a file named with a `-`, and an unknown option is said instead
+    of opened as a file. A file asked from your home folder or `/` opens its repository,
+    not the whole folder. On Linux, a display that's gone (a stale DISPLAY) is said in the
+    terminal instead of crashing.
+  - Folders on servers: accented file names (`café.rs`) open from ⌘P and search, a folder
+    named with `&` lists its files, a new file opens once made, pasting copied files works,
+    ⌘⇧B finds the project's tasks, and the GitHub tab (which runs here) isn't offered.
+    Merge conflicts on servers and in WSL can be finished from Null.
+  - Vim: `.` after a line started with `}` types it again (it typed from the wrong place),
+    and `dd` on a new empty last line takes that line, not the one above.
+  - Null's data folder (backups of unsaved work, sessions, history) is its owner's only;
+    the SSH connection folder in /tmp is used only if it's yours; a lock file no longer
+    piles up each time Null runs; settings that can't be read no longer bring the welcome
+    back at every start.
+
 ## 0.2.0
 
 Null updates itself, opens folders inside WSL and on servers over SSH, installs language

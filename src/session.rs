@@ -190,13 +190,35 @@ fn lock_file(pid: u32) -> Option<PathBuf> {
 /// another Null tells it's still running by that, not by its number, which a process
 /// started since may have been given.
 fn hold_own_lock() {
-    static HELD: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
     HELD.get_or_init(|| {
         let path = lock_file(std::process::id())?;
-        std::fs::create_dir_all(path.parent()?).ok()?;
+        let dir = path.parent()?;
+        std::fs::create_dir_all(dir).ok()?;
         let file = std::fs::File::create(&path).ok()?;
-        file.try_lock().is_ok().then_some(file)
+        let held = file.try_lock().is_ok().then_some(file);
+        // The locks of Nulls gone (one each time Null ran) taken away: looking is enough.
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let pid =
+                name.to_str().and_then(|n| n.strip_prefix("running.")?.strip_suffix(".lock")?.parse::<u32>().ok());
+            if let Some(pid) = pid.filter(|&p| p != std::process::id()) {
+                running(pid);
+            }
+        }
+        held
     });
+}
+
+/// This Null's lock, while it runs.
+static HELD: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
+
+/// Null quitting: its lock goes (nothing of it to keep for another).
+pub fn release_own_lock() {
+    if let Some(Some(_)) = HELD.get()
+        && let Some(path) = lock_file(std::process::id())
+    {
+        std::fs::remove_file(path).ok();
+    }
 }
 
 /// Whether process `pid` is a Null still running.

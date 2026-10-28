@@ -1154,7 +1154,8 @@ pub enum Decision {
 }
 
 pub fn decide(root: &Path, path: &Path, decision: Decision) -> Result<(), String> {
-    let name = path.to_string_lossy().into_owned();
+    // (As git there names it: a server's, or WSL's Linux path.)
+    let name = given_path(root, path);
     match decision {
         Decision::Keep => run(root, &["add", "--", &name]),
         Decision::Delete => run(root, &["rm", "-q", "--", &name]),
@@ -1196,7 +1197,7 @@ pub fn finish_joining(root: &Path, kind: Joining) -> Result<Vec<PathBuf>, String
         n => return Err(format!("{n} files still have conflicts.")),
     }
     if !conflicted.is_empty() {
-        let names: Vec<String> = conflicted.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let names: Vec<String> = conflicted.iter().map(|p| given_path(root, p)).collect();
         let mut args = vec!["add", "--"];
         args.extend(names.iter().map(String::as_str));
         run(root, &args)?;

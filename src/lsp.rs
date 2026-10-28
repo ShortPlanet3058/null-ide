@@ -507,6 +507,23 @@ fn percent_decoded(text: &str) -> String {
 
 /// A server's edit, file by file: its `changes` and its `documentChanges` (the text edits
 /// of those; making, renaming or deleting files aren't text edits).
+/// The files an edit was made for a given version of (the server says so with
+/// `documentChanges`), with that version.
+pub fn edit_versions(edit: &lsp_types::WorkspaceEdit) -> Vec<(PathBuf, i32)> {
+    let edits: Vec<&lsp_types::TextDocumentEdit> = match &edit.document_changes {
+        Some(lsp_types::DocumentChanges::Edits(edits)) => edits.iter().collect(),
+        Some(lsp_types::DocumentChanges::Operations(operations)) => operations
+            .iter()
+            .filter_map(|op| match op {
+                lsp_types::DocumentChangeOperation::Edit(edit) => Some(edit),
+                lsp_types::DocumentChangeOperation::Op(_) => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    edits.iter().filter_map(|e| Some((path_for(&e.text_document.uri)?, e.text_document.version?))).collect()
+}
+
 pub fn edits_by_file(edit: lsp_types::WorkspaceEdit) -> Vec<(PathBuf, Vec<lsp_types::TextEdit>)> {
     let mut by_file: Vec<(PathBuf, Vec<lsp_types::TextEdit>)> = Vec::new();
     let mut add = |uri: &lsp_types::Uri, edits: Vec<lsp_types::TextEdit>| {
@@ -547,6 +564,19 @@ pub fn edits_by_file(edit: lsp_types::WorkspaceEdit) -> Vec<(PathBuf, Vec<lsp_ty
 #[cfg(test)]
 mod wsl_tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn an_edit_says_which_version_of_each_file_it_was_made_for() {
+        let edit: lsp_types::WorkspaceEdit = serde_json::from_value(serde_json::json!({
+            "documentChanges": [
+                { "textDocument": { "uri": "file:///p/a.rs", "version": 7 }, "edits": [] },
+                { "textDocument": { "uri": "file:///p/b.rs", "version": null }, "edits": [] }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(edit_versions(&edit), [(PathBuf::from("/p/a.rs"), 7)]);
+    }
 
     #[test]
     fn a_server_over_ssh_reads_its_own_addresses_and_null_gets_its() {

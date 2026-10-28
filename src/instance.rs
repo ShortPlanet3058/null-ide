@@ -19,6 +19,9 @@ pub struct Request {
     pub others: Vec<PathBuf>,
     pub file: Option<PathBuf>,
     pub place: Option<(u32, u32)>,
+    /// More files after it (`null a.rs b.rs`), each at its place.
+    #[serde(default)]
+    pub more: Vec<(PathBuf, Option<(u32, u32)>)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -215,6 +218,7 @@ mod tests {
             others: Vec::new(),
             file: Some(PathBuf::from("/p/a.rs")),
             place: Some((4, 2)),
+            more: vec![(PathBuf::from("/p/b.rs"), None)],
         };
         assert!(send(port, "wrong", &request).is_none());
         assert!(send(port, "s3cret", &request).is_some());

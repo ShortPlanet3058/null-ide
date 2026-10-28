@@ -1,6 +1,6 @@
 [package]
 name = "null-ide"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license-file = "LICENSE"
 description = "A calm, fast code editor where nothing gets in your way."
@@ -97,10 +97,14 @@ libc = "0.2"
 # (Already there, under keyring: to make the desktop's keyring when it has none.)
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 secret-service = { version = "5", features = ["crypto-rust"] }
+# Linux's Hunspell dictionaries read for spelling (spell.rs), in Rust.
+spellbook = "0.4.2"
 
 [target.'cfg(windows)'.dependencies]
 # The window's handle, to keep it from taking input while a dialog is over it (modal.rs).
 raw-window-handle = "0.6"
+# Windows' own spell checker (spell.rs). Already in the build, with gpui.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Com"] }
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

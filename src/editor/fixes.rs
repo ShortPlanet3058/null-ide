@@ -174,6 +174,10 @@ impl Editor {
     pub(super) fn accept_fix(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut menu) = self.fix_menu.take() else { return };
         if let Some(conflict) = menu.conflict {
+            // (After the three choices: AI's.)
+            if ix == 3 {
+                return self.resolve_with_ai(conflict, window, cx);
+            }
             return self.resolve_conflict(conflict, ix, cx);
         }
         if let Some(word) = menu.spelling.clone() {

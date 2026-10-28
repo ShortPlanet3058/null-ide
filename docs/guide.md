@@ -68,6 +68,10 @@ A window can hold several folders, each a heading in the files with its own unde
 Explorer onto the files asks whether to add it or copy it in, and `null api web` opens them
 together. A heading's menu has **Remove Folder from Window** (nothing on disk changes).
 
+From a terminal, `null a.rs b.rs:42` opens each file (the first in front), in the folder
+you're in, or in their repository when that folder is your home folder, `/`, or above it.
+`null --help` lists the rest; `null -- -notes.md` opens a file whose name starts with `-`.
+
 Across them all: ⌘P lists every folder's files (`web/app/page.tsx`), project search searches
 them, ⌘T knows their symbols, and the files show git's marks. Each folder gets its own
 language servers. Git follows the file you're in: the Git panel shows that folder's
@@ -108,6 +112,11 @@ makes both jump instead.
 - Files no language server knows (YAML, shell, a language not installed yet) still get
   suggestions: the file's own words, nearest first. In Markdown and text, only on ⌃Space.
   A path being written (`./`, `src/`, `img/`) lists what's in that folder.
+- **The same change elsewhere**: type over a word (rename `count` to `total` by hand, or
+  paste a word over it) and once you stop, the other places in the file the old word stands
+  get a faint dot beside their line, and the line a faint "⇥ same change in 3 more places".
+  ⇥ from the word changes the next one (each its own undo), and the next; Esc lets them be,
+  and any other edit forgets them. (⌘R renames by meaning, with a language server.)
 - **Bookmarks**: ⌘F2 marks the caret's line (its number turns amber), F3 and ⇧F3 go round
   them (Ctrl+Alt+L and Ctrl+Alt+J off the Mac), and **Bookmarks…** (⌘K) lists them in every open file. They move with the code and
   are kept with the project.
@@ -134,9 +143,12 @@ makes both jump instead.
   its `//`, `>` or list indent. The ⌃ keys of macOS text fields work too: ⌃A ⌃E, ⌃K and
   ⌃Y, ⌃T, ⌃O, ⌃L to center the caret's line, and ⌘J to bring the selection back into view;
   ⌃⌥← → go by the parts of a name (`parse` `Http` `Request`), ⌃⌥⇧ selecting, ⌃⌥⌫ and ⌃⌥⌦ deleting.
-- Misspelled words in Markdown, text and comments get a faint wavy line, checked (on the Mac, for now) by the
-  Mac's own speller in the languages set in System Settings (each line in the one it reads
-  best in, so French and English mix); code is never marked. **⌘.** on one offers corrections.
+- Misspelled words in Markdown, text and comments get a faint wavy line, checked by the
+  system's own speller: the Mac's (the languages set in System Settings), Windows' (your
+  language and English, when Windows has them), and on Linux the Hunspell dictionaries
+  installed (`hunspell-fr`, `hunspell-en-us`…; your language and English). Each line is
+  checked in the one it reads best in, so French and English mix; code is never marked.
+  **⌘.** on one offers corrections, or learns the word (on Linux, in Null's `words.txt`).
 - Colours written in CSS, HTML, scripts and theme files (`#f80`, `rgb()`, `hsl()`) show a
   small square of themselves just before; on the Mac, a click on it opens its colour panel, and the
   colour picked there is written back the way the first was (one undo takes it back).
@@ -182,7 +194,8 @@ makes both jump instead.
   red, its folders a red dot. **Find in Folder…** searches one folder from its menu.
   ⌘-click picks several files (⇧-click, all those between): their menu moves them to the
   Trash with one question, copies their paths, or compares two files; dragged, they all move
-  (onto Markdown, a link each).
+  (onto Markdown, a link each). The question before the Trash has "Don't ask again" (space
+  ticks it); Settings → Window → Ask before moving to the Trash brings it back.
   Folders that each hold only the next open together, as one row (`src / main / java`):
   new files, drops and renames there go to the last of them.
 - Selected text drags to where it's dropped (⌥ copies it); a file dragged from the files
@@ -244,7 +257,9 @@ numbers can show everywhere, only in code, or nowhere.
   commit's version compared with the file now; in every comparison, the words that changed
   in a line stand out. **Open Line on the Web** shows it on GitHub, GitLab or Bitbucket. Compare with Saved, the Clipboard, or another
   File, each difference kept or taken back.
-- Merge conflicts: each side tinted, **⌘.** keeps one or both, **⌥F8** to the next.
+- Merge conflicts: each side tinted, **⌘.** keeps one or both, **⌥F8** to the next. With AI
+  on, **✦ Resolve with AI** in the same list writes one version keeping what each side
+  changed, shown as a change: ⇥ keeps it, Esc undoes it.
 
 ## Running, testing, debugging
 
@@ -340,6 +355,9 @@ restarted, it's installed the next time Null quits.
 The Windows zip, a build from source, or a folder Null can't write to: "Null 0.2.0 is out"
 opens null-ide.com instead.
 
+After an update, a notice says which version is installed; a click on it shows what changed
+since the version you had. "What's New" in ⌘K shows it again.
+
 ## Code intelligence
 
 Completions, errors, info on hover and go to definition come from language servers. Null
@@ -397,9 +415,15 @@ beside the file.
 AI is a tool: it shows up only when you call it, right in the code, and a switch (⌘K or
 Settings) turns it off entirely.
 
-- **⌘I** opens a one-line field between your lines. Describe a small change (or press Enter
+- **⌘I** opens a field between your lines. Describe a small change (or press Enter
   on an error to fix it): it's written into the file as a diff, with removed lines struck
-  through and new ones tinted. ⇥ keeps it, Esc undoes it, ⌘I adjusts it.
+  through and new ones tinted. ⇥ keeps it, Esc undoes it, ⌘I adjusts it. ⇧↵ starts another
+  line in the field (pasted text keeps its lines); so do a follow-up question's field and an
+  AI task's (⌥⌘I).
+- **What ⌘I changes** is tinted while the field is open: the lines selected, else the
+  function, class, CSS rule or HTML element the cursor is in (with its doc comments and
+  attributes), else the paragraph around it. Without a selection it's never more than 40
+  lines: in a bigger one, it's the part the cursor is in (an `if`, a `<section>`), or its line.
 - **Questions** (typed in ⌘I, or “Ask About This File” in ⌘K) get a short note under the code
   they're about. Esc closes it.
 - **⌘I writes in place**: the new code appears line by line as it's written, over the

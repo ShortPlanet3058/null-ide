@@ -23,7 +23,7 @@ fn task(command: impl Into<String>, source: &'static str) -> ProjectTask {
 /// first, then build tools. `file`: the file being worked on, for tasks that name it.
 pub fn find(root: &Path, file: Option<&Path>, yours: &std::collections::BTreeMap<String, String>) -> Vec<ProjectTask> {
     let mut found = Vec::new();
-    if let Ok(text) = std::fs::read_to_string(root.join(".vscode/tasks.json")) {
+    if let Ok(text) = crate::project_fs::read_to_string(&root.join(".vscode/tasks.json")) {
         found.extend(vscode_tasks(&text, root, file));
     }
     for (label, command) in yours {
@@ -31,30 +31,30 @@ pub fn find(root: &Path, file: Option<&Path>, yours: &std::collections::BTreeMap
             found.push(ProjectTask { label: label.clone(), command: command.clone(), source: "your tasks" });
         }
     }
-    if root.join("Cargo.toml").is_file() {
+    if crate::project_fs::is_file(&root.join("Cargo.toml")) {
         for command in ["cargo run", "cargo build", "cargo test", "cargo check", "cargo clippy"] {
             found.push(task(command, "Cargo"));
         }
     }
-    if let Ok(text) = std::fs::read_to_string(root.join("package.json")) {
+    if let Ok(text) = crate::project_fs::read_to_string(&root.join("package.json")) {
         let runner = package_runner(root);
         for name in package_scripts(&text) {
             found.push(task(format!("{runner} run {name}"), "package.json"));
         }
     }
-    if root.join("go.mod").is_file() {
+    if crate::project_fs::is_file(&root.join("go.mod")) {
         for command in ["go run .", "go build ./...", "go test ./..."] {
             found.push(task(command, "Go"));
         }
     }
     for file in ["Makefile", "makefile", "GNUmakefile"] {
-        if let Ok(text) = std::fs::read_to_string(root.join(file)) {
+        if let Ok(text) = crate::project_fs::read_to_string(&root.join(file)) {
             found.extend(make_targets(&text).into_iter().map(|t| task(format!("make {t}"), "Makefile")));
             break;
         }
     }
     for file in ["justfile", "Justfile", ".justfile"] {
-        if let Ok(text) = std::fs::read_to_string(root.join(file)) {
+        if let Ok(text) = crate::project_fs::read_to_string(&root.join(file)) {
             found.extend(make_targets(&text).into_iter().map(|t| task(format!("just {t}"), "justfile")));
             break;
         }
@@ -235,11 +235,12 @@ fn vscode_tasks(text: &str, root: &Path, file: Option<&Path>) -> Vec<ProjectTask
 
 /// The package manager a JavaScript project uses, by its lockfile.
 fn package_runner(root: &Path) -> &'static str {
-    if root.join("pnpm-lock.yaml").is_file() {
+    if crate::project_fs::is_file(&root.join("pnpm-lock.yaml")) {
         "pnpm"
-    } else if root.join("yarn.lock").is_file() {
+    } else if crate::project_fs::is_file(&root.join("yarn.lock")) {
         "yarn"
-    } else if root.join("bun.lockb").is_file() || root.join("bun.lock").is_file() {
+    } else if crate::project_fs::is_file(&root.join("bun.lockb")) || crate::project_fs::is_file(&root.join("bun.lock"))
+    {
         "bun"
     } else {
         "npm"

@@ -670,6 +670,12 @@ impl SettingsPanel {
                 &theme,
             ),
             Self::row(
+                "Ask before moving to the Trash",
+                Some("Off once “Don't ask again” is ticked in the question; the Trash still keeps them"),
+                Self::toggle("confirm-trash", s.confirm_trash, &theme, cx, |s| s.confirm_trash = !s.confirm_trash),
+                &theme,
+            ),
+            Self::row(
                 "Show the sidebar",
                 Some(&keys_line("Shown and hidden with", &[&crate::workspace::ToggleSidebar], cx)),
                 Self::toggle("sidebar", s.sidebar_visible, &theme, cx, |s| s.sidebar_visible = !s.sidebar_visible),
@@ -827,8 +833,8 @@ impl SettingsPanel {
                 &theme,
             ),
         ];
-        // (The spell checker is the Mac's own: none to offer elsewhere yet.)
-        if crate::spell::AVAILABLE {
+        // (On Linux, only with dictionaries to read.)
+        if crate::spell::available() {
             rows.extend([
                 Self::row(
                     "Spelling",

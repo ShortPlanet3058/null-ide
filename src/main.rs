@@ -92,11 +92,13 @@ mod text_input;
 mod theme;
 mod tools;
 mod trace;
+mod trash_prompt;
 mod ui;
 mod updates;
 mod user_keys;
 mod vscode_import;
 mod welcome;
+mod whats_new;
 mod window_frame;
 mod word_blocks;
 mod workspace;
@@ -119,6 +121,8 @@ struct Opening {
     others: Vec<PathBuf>,
     file: Option<PathBuf>,
     place: Option<(u32, u32)>,
+    /// More files after it (`null a.rs b.rs`), each at its place.
+    more: Vec<(PathBuf, Option<(u32, u32)>)>,
     wait: bool,
 }
 
@@ -141,53 +145,131 @@ fn split_place(arg: &str) -> (&str, Option<(u32, u32)>) {
     }
 }
 
-fn resolve_args() -> Opening {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let wait = args.first().is_some_and(|a| a == "--wait");
-    if wait {
-        args.remove(0);
-    }
-    // Several folders (`null api web`): one window with them all.
-    if !wait && args.len() > 1 {
-        let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
-        let folders: Vec<PathBuf> = args.iter().map(|a| absolute(&cwd.join(a))).collect();
-        if folders.iter().all(|f| f.is_dir()) {
-            let mut folders = folders.into_iter();
-            let root = folders.next().unwrap_or(cwd);
-            return Opening { root, others: folders.collect(), file: None, place: None, wait: false };
-        }
-    }
-    let (root, file) = resolve_path(args.first().cloned());
-    // A file named with its place (`a.rs:42`) when there's no file by that whole name.
-    let (file, place) = match file {
-        Some(file) if !file.exists() => {
-            let name = file.to_string_lossy().into_owned();
-            match split_place(&name) {
-                (path, Some(place)) if std::path::Path::new(path).is_file() => (Some(PathBuf::from(path)), Some(place)),
-                _ => (Some(file), None),
-            }
-        }
-        file => (file, None),
-    };
-    // `--wait` is for a file (git's message); its project, the repository it's in (or its
-    // folder): not where the one asking happens to be (an app's is `/`).
-    let wait = wait && file.is_some();
-    let root = match (&file, wait) {
-        (Some(file), true) => repository_of(file),
-        _ => root,
-    };
-    Opening { root, others: Vec::new(), file, place, wait }
+/// What `null` was asked, its options anywhere before a `--`: `--wait`, and the paths.
+#[derive(Debug, Default, PartialEq)]
+struct Asked {
+    wait: bool,
+    help: bool,
+    version: bool,
+    paths: Vec<String>,
 }
 
-/// The repository `file` is in (the folder holding `.git`), else its own folder.
-fn repository_of(file: &std::path::Path) -> PathBuf {
+/// The arguments read (Err: an option Null doesn't have, said as the terminal shows it).
+/// After `--`, everything is a path (a file named `-x`).
+fn parse_args(args: &[String]) -> Result<Asked, String> {
+    let mut asked = Asked::default();
+    let mut options = true;
+    for arg in args {
+        match arg.as_str() {
+            "--" if options => options = false,
+            "--wait" | "-w" if options => asked.wait = true,
+            "--help" | "-h" if options => asked.help = true,
+            "--version" | "-V" if options => asked.version = true,
+            // (What the Mac's Finder once passed: not an option of ours.)
+            other if options && other.starts_with("-psn_") => {}
+            other if options && other.starts_with('-') && other.len() > 1 => {
+                return Err(format!(
+                    "null: unknown option {other} (null --help lists them; -- before a file named so)"
+                ));
+            }
+            path => asked.paths.push(path.to_string()),
+        }
+    }
+    Ok(asked)
+}
+
+/// `path` with the place written after its name (`a.rs:42`) when there's no file by that
+/// whole name.
+fn with_place(path: PathBuf) -> (PathBuf, Option<(u32, u32)>) {
+    if path.exists() {
+        return (path, None);
+    }
+    let name = path.to_string_lossy().into_owned();
+    match split_place(&name) {
+        (file, Some(place)) if Path::new(file).is_file() => (PathBuf::from(file), Some(place)),
+        _ => (path, None),
+    }
+}
+
+fn resolve_args() -> Opening {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // (An unknown option was said and Null didn't start: see `answered_in_the_terminal`.)
+    let Asked { wait, paths, .. } = parse_args(&args).unwrap_or_default();
+    // `--wait` is for a file (git's message); its project, the repository it's in (or its
+    // folder): not where the one asking happens to be (an app's is `/`).
+    if wait {
+        let (root, file) = resolve_path(paths.first().cloned());
+        let (file, place) = match file.map(with_place) {
+            Some((file, place)) => (Some(file), place),
+            None => (None, None),
+        };
+        let root = file.as_deref().map_or(root, repository_of);
+        let wait = file.is_some();
+        return Opening { root, others: Vec::new(), file, place, more: Vec::new(), wait };
+    }
+    if paths.len() <= 1 {
+        let (root, file) = resolve_path(paths.first().cloned());
+        let (file, place) = match file.map(with_place) {
+            Some((file, place)) => (Some(file), place),
+            None => (None, None),
+        };
+        return Opening { root, others: Vec::new(), file, place, more: Vec::new(), wait: false };
+    }
+    // Several (`null api web`, `null a.rs b.rs`, `null . a.rs`): the folders in one window,
+    // the files opened in it; with no folder, the first file's project.
+    let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
+    let (mut folders, mut files) = (Vec::new(), Vec::new());
+    for arg in &paths {
+        match server_folder(arg) {
+            Some(server) => folders.push(server),
+            None => {
+                let path = absolute(&cwd.join(arg));
+                if path.is_dir() { folders.push(path) } else { files.push(with_place(path)) }
+            }
+        }
+    }
+    let mut files = files.into_iter();
+    let first = files.next();
+    let root = match (folders.first(), &first) {
+        (Some(folder), _) => folder.clone(),
+        (None, Some((file, _))) => root_for_file(&cwd, file),
+        (None, None) => cwd,
+    };
+    let others = folders.into_iter().skip(1).collect();
+    let (file, place) = match first {
+        Some((file, place)) => (Some(file), place),
+        None => (None, None),
+    };
+    Opening { root, others, file, place, more: files.collect(), wait: false }
+}
+
+/// The project for `file` given from a terminal in `cwd`: that folder, when the file's in
+/// it, unless it's too wide to be one (the home folder, the disk) or above the repository
+/// the file's in (`~/code` for `~/code/app/src/a.rs`): then that repository (or, with
+/// none, the file's own folder).
+fn root_for_file(cwd: &Path, file: &Path) -> PathBuf {
+    let home = crate::tools::home_dir().map(|h| absolute(&h));
+    let too_wide = cwd.parent().is_none() || Some(cwd) == home.as_deref();
+    let repository = repository_holding(file);
+    let above_it = repository.as_ref().is_some_and(|r| r != cwd && r.starts_with(cwd));
+    if file.starts_with(cwd) && !too_wide && !above_it {
+        return cwd.to_path_buf();
+    }
+    repository.unwrap_or_else(|| file.parent().map_or_else(|| cwd.to_path_buf(), Path::to_path_buf))
+}
+
+/// The repository `file` is in (the folder holding `.git`), if any.
+fn repository_holding(file: &Path) -> Option<PathBuf> {
     let folder = file.parent().unwrap_or(file);
     folder
         .ancestors()
         .find(|dir| dir.join(".git").exists())
-        .map(|dir| if dir.ends_with(".git") { dir.parent().unwrap_or(dir) } else { dir })
-        .unwrap_or(folder)
-        .to_path_buf()
+        .map(|dir| if dir.ends_with(".git") { dir.parent().unwrap_or(dir) } else { dir }.to_path_buf())
+}
+
+/// The repository `file` is in (the folder holding `.git`), else its own folder.
+fn repository_of(file: &std::path::Path) -> PathBuf {
+    repository_holding(file).unwrap_or_else(|| file.parent().unwrap_or(file).to_path_buf())
 }
 
 /// `null` opens the current folder, `null <folder>` opens that folder, and
@@ -230,8 +312,7 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
     if path.is_dir() {
         return (path, None);
     }
-    let root = if path.starts_with(&cwd) { cwd } else { path.parent().map(PathBuf::from).unwrap_or(cwd) };
-    (root, Some(path))
+    (root_for_file(&cwd, &path), Some(path))
 }
 
 /// A folder on a server, as `null` is given it: `ssh://[user@]host[:port]/path` (a path
@@ -313,18 +394,29 @@ const HELP: &str = "Null, a calm, fast code editor.
   null                  the last project (from a terminal: the folder you're in)
   null PATH             a folder as the project, or a file in it
   null FILE:LINE[:COL]  a file at a line (and column)
-  null A B ...          several folders in one window
-  null --wait FILE      returns once the file's tab is closed (git's editor)
-  null --version        Null's version
+  null A B ...          several folders in one window, files opened in it
+  null --wait FILE      returns once the file's tab is closed (git's editor; -w)
+  null --version        Null's version (-V)
+  null --help           this (-h)
+  null -- -FILE         a file whose name starts with -
 ";
 
 /// `--version` and `--help`, answered in the terminal (Null not started); and on Linux, no
 /// display to open a window on said, not waited on forever.
 fn answered_in_the_terminal() -> bool {
     let first = std::env::args().nth(1);
+    let asked = match parse_args(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        Ok(asked) => asked,
+        // (An uninstaller's own, first: below.)
+        Err(_) if first.as_deref() == Some("--forget-keys") => Asked::default(),
+        Err(unknown) => {
+            eprintln!("{unknown}");
+            std::process::exit(2);
+        }
+    };
     let answer = match first.as_deref() {
-        Some("--version" | "-V") => format!("Null {}", env!("CARGO_PKG_VERSION")),
-        Some("--help" | "-h") => HELP.trim_end().to_string(),
+        _ if asked.version => format!("Null {}", env!("CARGO_PKG_VERSION")),
+        _ if asked.help => HELP.trim_end().to_string(),
         // (For the uninstallers, when asked to delete everything: not in --help.)
         Some("--forget-keys") => match ai::forget_api_keys() {
             1 => "Deleted 1 saved API key.".to_string(),
@@ -336,6 +428,13 @@ fn answered_in_the_terminal() -> bool {
                 && std::env::var_os("WAYLAND_DISPLAY").is_none_or(|d| d.is_empty())
             {
                 eprintln!("Null needs a graphical session: neither DISPLAY nor WAYLAND_DISPLAY is set.");
+                std::process::exit(1);
+            }
+            // Set, but to a display that's gone (an ssh session's DISPLAY=:99, a desktop
+            // restarted): said, not a crash in GPUI (which would also leave a crash log).
+            #[cfg(all(unix, not(target_os = "macos")))]
+            if let Some(missing) = display_missing() {
+                eprintln!("Null needs a graphical session: {missing}.");
                 std::process::exit(1);
             }
             return false;
@@ -382,6 +481,30 @@ fn answered_in_the_terminal() -> bool {
     true
 }
 
+/// The display named isn't there: neither Wayland's socket nor (for a local X display,
+/// `:0`) X's. A display elsewhere (`localhost:10.0`, ssh -X) is left to try.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn display_missing() -> Option<String> {
+    let set = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let wayland = set("WAYLAND_DISPLAY").map(|name| {
+        let runtime = set("XDG_RUNTIME_DIR").unwrap_or_default();
+        let socket = if name.starts_with('/') { PathBuf::from(&name) } else { Path::new(&runtime).join(&name) };
+        (name, socket.exists())
+    });
+    let x = set("DISPLAY").map(|name| {
+        let number = name.strip_prefix(':').map(|n| n.split('.').next().unwrap_or(n).to_string());
+        let there = number.is_none_or(|n| Path::new(&format!("/tmp/.X11-unix/X{n}")).exists());
+        (name, there)
+    });
+    match (wayland, x) {
+        (Some((_, true)), _) | (_, Some((_, true))) => None,
+        (Some((w, _)), Some((d, _))) => Some(format!("no display at WAYLAND_DISPLAY={w} or DISPLAY={d}")),
+        (Some((w, _)), None) => Some(format!("no display at WAYLAND_DISPLAY={w}")),
+        (None, Some((d, _))) => Some(format!("no display at DISPLAY={d}")),
+        (None, None) => None,
+    }
+}
+
 fn main() {
     // Started by ssh to ask something (see `askpass`): asked in the window of the Null that
     // started that ssh, answered, done.
@@ -400,6 +523,7 @@ fn main() {
     }
     trace::start();
     trace::mark("main");
+    tools::keep_data_private();
     crash::record();
     // The colouring rules of the usual languages, made ready meanwhile (each took 25 ms of
     // opening its first file).
@@ -413,7 +537,7 @@ fn main() {
     // Started by the Mac with nothing to open (the Dock, the Finder, or `null a b` through
     // `open -a`, whose paths come a moment later as "open these").
     let by_the_system = cfg!(target_os = "macos") && std::env::args().len() <= 1;
-    let Opening { mut root, mut others, file, place, wait } = resolve_args();
+    let Opening { mut root, mut others, file, place, more, wait } = resolve_args();
     // Restarted after an update: its windows again (the first one here, the rest once it's open).
     let mut reopen = if std::env::args().len() <= 1 { updates::windows_to_reopen() } else { Vec::new() };
     if !reopen.is_empty() {
@@ -423,7 +547,8 @@ fn main() {
     }
     trace::mark("what to open worked out");
     // Off the Mac: a Null already running opens it instead (a waiting one is its own).
-    let request = instance::Request { root: root.clone(), others: others.clone(), file: file.clone(), place };
+    let request =
+        instance::Request { root: root.clone(), others: others.clone(), file: file.clone(), place, more: more.clone() };
     // A server's folder (`null ssh://box/app`): Null's own empty folder first, the server's
     // once it's reached (the window doesn't wait on it, and ssh may ask for a password).
     let (root, server) = match remote::is_remote(&root).then(session::scratch_folder).flatten() {
@@ -458,7 +583,7 @@ fn main() {
                     let mut folders = paths.into_iter();
                     let root = folders.next().unwrap_or_default();
                     cx.update(|cx| {
-                        open_project_window_now(root.clone(), None, None, cx);
+                        open_project_window_now(root.clone(), None, None, Vec::new(), cx);
                         add_folders(&root, folders.collect(), cx);
                     })
                     .ok();
@@ -476,7 +601,7 @@ fn main() {
                         } else {
                             (first.parent().map(PathBuf::from).unwrap_or_default(), Some(first))
                         };
-                        open_project_window_now(root.clone(), file, None, cx);
+                        open_project_window_now(root.clone(), file, None, Vec::new(), cx);
                         let rest: Vec<PathBuf> = paths.collect();
                         if !rest.is_empty()
                             && let Some(handle) = window_on(&root, None, cx)
@@ -527,11 +652,11 @@ fn main() {
                             && let Some(file) = &request.file
                             && let Some(handle) = window_holding(file, cx)
                         {
-                            let (file, place) = (file.clone(), request.place);
+                            let (file, place, more) = (file.clone(), request.place, request.more.clone());
                             handle
                                 .update(cx, |workspace, window, cx| {
                                     window.activate_window();
-                                    open_at(workspace, file, place, window, cx);
+                                    open_files(workspace, Some(file), place, more, window, cx);
                                 })
                                 .ok();
                             return;
@@ -550,7 +675,7 @@ fn main() {
                             return;
                         }
                         let root = request.root.clone();
-                        open_project_window_now(request.root, request.file, request.place, cx);
+                        open_project_window_now(request.root, request.file, request.place, request.more, cx);
                         add_folders(&root, request.others, cx);
                     })
                     .ok();
@@ -589,6 +714,7 @@ fn main() {
                     .collect(),
             );
             updates::install_on_quit();
+            session::release_own_lock();
             async {}
         })
         .detach();
@@ -612,7 +738,7 @@ fn main() {
                 cx.background_executor().timer(std::time::Duration::from_millis(350)).await;
                 cx.update(|cx| {
                     if !handed_paths.load(std::sync::atomic::Ordering::SeqCst) && cx.windows().is_empty() {
-                        open_project_window_now(root.clone(), file, place, cx);
+                        open_project_window_now(root.clone(), file, place, more.clone(), cx);
                         reopen_server_project(&root, server.clone(), cx);
                     }
                 })
@@ -623,7 +749,7 @@ fn main() {
             // (Already here: the paths open the window.)
         } else {
             let first = root.clone();
-            open_project_window_now(root, file, place, cx);
+            open_project_window_now(root, file, place, more, cx);
             add_folders(&first, others, cx);
             reopen_server_project(&first, server, cx);
         }
@@ -635,7 +761,7 @@ fn main() {
                 Some(scratch) => (scratch, Some(first)),
                 None => (first, None),
             };
-            open_project_window_now(opened.clone(), None, None, cx);
+            open_project_window_now(opened.clone(), None, None, Vec::new(), cx);
             add_folders(&opened, folders.collect(), cx);
             reopen_server_project(&opened, server, cx);
         }
@@ -643,6 +769,7 @@ fn main() {
         // The spell checker started once the window's up, then what's shown checked.
         cx.spawn(async move |cx| {
             cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            cx.background_executor().spawn(async { spell::load() }).await;
             cx.update(|cx| {
                 let _step = trace::step(|| "spell checker started".into());
                 spell::warm();
@@ -719,7 +846,7 @@ fn window_holding(file: &std::path::Path, cx: &gpui::App) -> Option<gpui::Window
 pub(crate) fn open_project_window(root: PathBuf, file: Option<PathBuf>, cx: &mut gpui::App) {
     // Once the window asking (if any) is done updating: until then it can't be read, so
     // its own project wouldn't be found open.
-    cx.defer(move |cx| open_project_window_now(root, file, None, cx));
+    cx.defer(move |cx| open_project_window_now(root, file, None, Vec::new(), cx));
 }
 
 /// `file` opened in `workspace`, at `place` (line and column, from 1) when given.
@@ -736,6 +863,27 @@ fn open_at(
             workspace.go_to(file, lsp_types::Range::new(at, at), window, cx);
         }
         None => workspace.open_file(file, window, cx),
+    }
+}
+
+/// The files asked for opened in `workspace`, in order, the first in front.
+fn open_files(
+    workspace: &mut Workspace,
+    file: Option<PathBuf>,
+    place: Option<(u32, u32)>,
+    more: Vec<(PathBuf, Option<(u32, u32)>)>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<Workspace>,
+) {
+    let Some(file) = file else { return };
+    let again = (!more.is_empty()).then(|| file.clone());
+    open_at(workspace, file, place, window, cx);
+    for (other, place) in more {
+        open_at(workspace, other, place, window, cx);
+    }
+    // (Back to the first: open, it's only shown.)
+    if let Some(first) = again {
+        workspace.open_file(first, window, cx);
     }
 }
 
@@ -790,14 +938,18 @@ fn reopen_server_project(root: &std::path::Path, server: Option<PathBuf>, cx: &m
     handle.update(cx, |workspace, window, cx| workspace.reopen_server_project(server, window, cx)).ok();
 }
 
-fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(u32, u32)>, cx: &mut gpui::App) {
+fn open_project_window_now(
+    root: PathBuf,
+    file: Option<PathBuf>,
+    place: Option<(u32, u32)>,
+    more: Vec<(PathBuf, Option<(u32, u32)>)>,
+    cx: &mut gpui::App,
+) {
     if let Some(handle) = window_on(&root, None, cx) {
         handle
             .update(cx, |workspace, window, cx| {
                 window.activate_window();
-                if let Some(file) = file {
-                    open_at(workspace, file, place, window, cx);
-                }
+                open_files(workspace, file, place, more, window, cx);
             })
             .ok();
         return;
@@ -830,10 +982,10 @@ fn open_project_window_now(root: PathBuf, file: Option<PathBuf>, place: Option<(
                 handle
                     .update(cx, |workspace, window, cx| {
                         workspace.restore_session(session, window, cx);
-                        if let Some(file) = file {
-                            open_at(workspace, file, place, window, cx);
-                        }
-                        if !cx.global::<settings::Settings>().welcomed {
+                        open_files(workspace, file, place, more, window, cx);
+                        // (Settings that can't be read are yours, not none: no welcome over
+                        // them each time, its choices couldn't be saved; the notice says why.)
+                        if !cx.global::<settings::Settings>().welcomed && settings::Settings::unreadable().is_none() {
                             workspace.show_welcome(window, cx);
                         }
                     })
@@ -905,6 +1057,40 @@ mod url_tests {
         assert_eq!(repository_of(&alone.join("x.txt")), alone);
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&alone).ok();
+    }
+
+    #[test]
+    fn options_anywhere_and_unknown_ones_refused() {
+        let args = |list: &[&str]| parse_args(&list.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        let asked = args(&["a.rs", "--wait"]).unwrap();
+        assert!(asked.wait);
+        assert_eq!(asked.paths, ["a.rs"]);
+        assert!(args(&["a.rs", "-h"]).unwrap().help);
+        assert!(args(&["--frobnicate"]).unwrap_err().contains("--frobnicate"));
+        // After `--`, a file named like an option.
+        assert_eq!(args(&["--", "-notes.md", "--wait"]).unwrap().paths, ["-notes.md", "--wait"]);
+        assert_eq!(args(&["-"]).unwrap().paths, ["-"]);
+    }
+
+    /// A file given from a terminal in a folder: that folder as the project, unless it's too
+    /// wide (the home folder, `/`) or above the file's repository.
+    #[test]
+    fn a_file_s_project_from_where_it_was_asked() {
+        let dir = absolute(&crate::tools::test_dir("file-root"));
+        let repo = dir.join("code/app");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("plain/src")).unwrap();
+        let file = repo.join("src/main.rs");
+        assert_eq!(root_for_file(&repo, &file), repo);
+        assert_eq!(root_for_file(&repo.join("src"), &file), repo.join("src"));
+        assert_eq!(root_for_file(&dir.join("code"), &file), repo, "above the repository");
+        assert_eq!(root_for_file(Path::new("/"), &file), repo, "the whole disk");
+        // No repository: the folder asked from, or the file's own when it's elsewhere.
+        let plain = dir.join("plain/src/a.rs");
+        assert_eq!(root_for_file(&dir.join("plain"), &plain), dir.join("plain"));
+        assert_eq!(root_for_file(&repo, &plain), dir.join("plain/src"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
