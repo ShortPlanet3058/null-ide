@@ -20,6 +20,26 @@
   - Unsaved changes brought back after a crash remember that the file changed on disk
     meanwhile, so saving still asks first.
   - The crash log, trimmed past 1 MB, could crash Null again while writing it.
+  - New File and New Folder in Project from ⌘K open the name field in the files (they did
+    nothing); a named pipe, socket or device isn't opened (a pipe hung the window).
+  - Opening another project in the window (Open Recent) takes its settings at once, closes
+    the last one's terminals (asking first if a command runs there), and stops what ran
+    for it (the debugger, an AI task).
+  - Command line: every file opens (`null a.rs b.rs`), options anywhere (`null a.rs
+    --wait`), `--` before a file named with a `-`, and an unknown option is said instead
+    of opened as a file. A file asked from your home folder or `/` opens its repository,
+    not the whole folder. On Linux, a display that's gone (a stale DISPLAY) is said in the
+    terminal instead of crashing.
+  - Folders on servers: accented file names (`café.rs`) open from ⌘P and search, a folder
+    named with `&` lists its files, a new file opens once made, pasting copied files works,
+    ⌘⇧B finds the project's tasks, and the GitHub tab (which runs here) isn't offered.
+    Merge conflicts on servers and in WSL can be finished from Null.
+  - Vim: `.` after a line started with `}` types it again (it typed from the wrong place),
+    and `dd` on a new empty last line takes that line, not the one above.
+  - Null's data folder (backups of unsaved work, sessions, history) is its owner's only;
+    the SSH connection folder in /tmp is used only if it's yours; a lock file no longer
+    piles up each time Null runs; settings that can't be read no longer bring the welcome
+    back at every start.
 - The same change elsewhere: a word typed over (a name renamed by hand) marks the other
   places in the file the old word stands; ⇥ from the word changes them one by one, Esc
   lets them be.

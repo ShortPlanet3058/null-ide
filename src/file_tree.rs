@@ -1293,7 +1293,8 @@ impl FileTree {
         };
         match result {
             Ok((from, path)) => {
-                let is_file = path.is_file();
+                // (On a server too: asked there.)
+                let is_file = crate::project_fs::is_file(&path);
                 self.edit = None;
                 self.children.clear();
                 self.expand_to(&path);
@@ -1357,7 +1358,7 @@ impl FileTree {
     fn paste_files(&mut self, _: &PasteFiles, _: &mut Window, cx: &mut Context<Self>) {
         let Some(FileClipboard { paths, cut }) = cx.try_global::<FileClipboard>().cloned() else { return };
         let dir = self.dir_for(self.selected_entry().as_ref());
-        let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.exists()).collect();
+        let paths: Vec<PathBuf> = paths.into_iter().filter(|p| crate::project_fs::exists(p)).collect();
         if paths.is_empty() {
             cx.remove_global::<FileClipboard>();
             return cx.emit(FileTreeEvent::Notice("What was copied isn't there any more".into()));

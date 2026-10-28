@@ -3186,7 +3186,15 @@ impl Workspace {
         // gigabyte would hold the window still for seconds).
         // (One on a server too: reading it waits on the network.)
         let remote = crate::remote::is_remote(&path);
-        let size = if remote { 0 } else { std::fs::metadata(&path).map_or(0, |m| m.len()) };
+        let meta = if remote { None } else { std::fs::metadata(&path).ok() };
+        // A pipe, socket or device isn't a file to read: reading a pipe waits for whoever
+        // writes to it (the window would hang on it), a device never ends.
+        if meta.as_ref().is_some_and(|m| !m.is_file() && !m.is_dir()) {
+            let name =
+                path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+            return self.show_notice(format!("{name} isn't a file Null can open (a pipe, socket or device)."), cx);
+        }
+        let size = meta.map_or(0, |m| m.len());
         let editor = if size > READ_IN_BACKGROUND_FROM || remote {
             let editor = cx.new(|cx| Editor::stand_in(path.clone(), size, cx));
             self.read_in_background(editor.clone(), path, window, cx);
@@ -3953,6 +3961,18 @@ impl Workspace {
         });
         self.recent_files.clear();
         self.recently_closed.clear();
+        // Its settings (.null, .vscode), its terminals (a shell in the last project would
+        // run this one's tasks there), and nothing of the last one's still running.
+        crate::settings::use_project(&path, cx);
+        self.terminals.clear();
+        self.active_terminal = 0;
+        self.terminal_open = Transition::new(false);
+        if let Some(run) = self.ai_task.take() {
+            run.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                child.kill().ok();
+            }
+        }
         // Another project's tests: looked for again, if they show.
         self.tests = None;
         self.tests_task = None;
@@ -3962,7 +3982,7 @@ impl Workspace {
         self.debugged_test = None;
         self.debug_program = None;
         self.debug_builds += 1;
-        if self.debugger.read(cx).state == crate::debugger::DebugState::Building {
+        if self.debugger.read(cx).state != crate::debugger::DebugState::Idle {
             self.debugger.update(cx, |d, cx| d.stop(cx));
         }
         self.test_status.clear();
@@ -4274,19 +4294,18 @@ impl Workspace {
     fn confirm_unsaved(&mut self, action: CloseAction, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // A command still running in a terminal (a build, a server) stops with the window:
         // asked about first.
-        if matches!(action, CloseAction::Quit | CloseAction::CloseWindow)
+        // (Another project in the window too: its terminals go with this one.)
+        if matches!(action, CloseAction::Quit | CloseAction::CloseWindow | CloseAction::SwitchProject(_))
             && !std::mem::take(&mut self.stopping_commands)
             && let Some(message) = self.commands_running(cx)
         {
-            let leave = if matches!(action, CloseAction::Quit) { "Quit" } else { "Close" };
-            let answer = crate::modal::ask(
-                window,
-                PromptLevel::Warning,
-                &message,
-                Some(if matches!(action, CloseAction::Quit) { "Quitting stops it." } else { "Closing stops it." }),
-                &[leave, "Cancel"],
-                cx,
-            );
+            let (leave, detail) = match action {
+                CloseAction::Quit => ("Quit", "Quitting stops it."),
+                CloseAction::SwitchProject(_) => ("Open", "Opening the other project stops it."),
+                _ => ("Close", "Closing stops it."),
+            };
+            let answer =
+                crate::modal::ask(window, PromptLevel::Warning, &message, Some(detail), &[leave, "Cancel"], cx);
             cx.spawn_in(window, async move |this, cx| {
                 let Ok(choice) = answer.await else { return };
                 this.update_in(cx, |this, window, cx| {
@@ -10647,6 +10666,23 @@ impl Workspace {
         });
     }
 
+    /// New File / New Folder in Project from ⌘K (the keys elsewhere than in the files, which
+    /// handle their own): the files shown, the field beside the open file, else at the top.
+    fn new_in_project(&mut self, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let at = self.active_path(cx).filter(|p| self.roots.contains(p));
+        self.show_files(&ShowFiles, window, cx);
+        self.tree.update(cx, |tree, cx| {
+            if let Some(path) = at {
+                tree.set_active(Some(path), cx);
+            }
+            if folder {
+                tree.new_folder(&crate::file_tree::NewFolder, window, cx);
+            } else {
+                tree.new_file(&crate::file_tree::NewFile, window, cx);
+            }
+        });
+    }
+
     /// The open file's path, for the commands about it.
     fn active_path(&self, cx: &App) -> Option<PathBuf> {
         self.active_editor()?.read(cx).path().map(Path::to_path_buf)
@@ -12529,6 +12565,12 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_notes))
             .on_action(cx.listener(Self::explain_test_failure))
             .on_action(cx.listener(Self::check_for_updates))
+            .on_action(
+                cx.listener(|this, _: &crate::file_tree::NewFile, window, cx| this.new_in_project(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::file_tree::NewFolder, window, cx| this.new_in_project(true, window, cx)),
+            )
             .on_action(cx.listener(Self::whats_new))
             .on_action(cx.listener(Self::update_null))
             .on_action(cx.listener(Self::open_wsl_folder))
@@ -13027,6 +13069,84 @@ mod tests {
         cx.run_until_parked();
         let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
         cx.update(|window, cx| assert!(editor.focus_handle(cx).is_focused(window), "the keys stayed in the list"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// New File in Project from ⌘K, the keys in the code: the name asked in the files, the
+    /// file made beside the open one.
+    #[gpui::test]
+    fn new_file_in_project_from_the_commands(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("new-in-project");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/a.txt"), "a\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| w.open_file(dir.join("sub/a.txt"), window, cx));
+        cx.run_until_parked();
+        let editor = workspace.read_with(cx, |w, _| w.active_editor().cloned().unwrap());
+        editor.update_in(cx, |e, window, cx| {
+            window.focus(&e.focus_handle(cx));
+            window.dispatch_action(Box::new(crate::file_tree::NewFile), cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_input("b.txt");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(dir.join("sub/b.txt").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Another project opened in the window (Open Recent): its own settings at once, not
+    /// the last one's until the window's next activated.
+    #[gpui::test]
+    fn switching_project_takes_its_settings(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("switch-settings");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (ours, other) = (dir.join("ours"), dir.join("other"));
+        std::fs::create_dir_all(&other).unwrap();
+        let file = crate::settings::project_file(&ours);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{ \"indent_size\": 3 }\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(Settings { indent_size: 4, ..Settings::default() });
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = other.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        assert_eq!(cx.update(|_, cx| cx.global::<Settings>().indent_size), 4);
+        workspace.update_in(cx, |w, window, cx| w.switch_project(ours.clone(), window, cx));
+        assert_eq!(cx.update(|_, cx| cx.global::<Settings>().indent_size), 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A named pipe isn't opened (reading it would wait for a writer: the window hung).
+    #[gpui::test]
+    #[cfg(unix)]
+    fn a_pipe_is_not_opened(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("pipe-open");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipe = dir.join("pipe");
+        assert!(std::process::Command::new("mkfifo").arg(&pipe).status().unwrap().success());
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(pipe.clone(), window, cx);
+            assert!(w.tabs.iter().all(|t| t.editor.read(cx).path() != Some(pipe.as_path())));
+        });
         std::fs::remove_dir_all(&dir).ok();
     }
 
