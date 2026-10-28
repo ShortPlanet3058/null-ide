@@ -1076,8 +1076,9 @@ impl Palette {
                 };
                 // Gone since the files were listed (renamed, deleted, another branch): not
                 // opened as a new empty file; the list without it.
+                // (On a server: asked there; the Mac's disk would never have it.)
                 if let Item::File(i) = item
-                    && !path.exists()
+                    && !crate::project_fs::exists(&path)
                 {
                     self.files.remove(i);
                     return self.update_rows(cx);
