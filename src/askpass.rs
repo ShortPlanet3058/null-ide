@@ -6,7 +6,7 @@
 //! connection, so each program it starts would ask again.
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -22,6 +22,10 @@ struct Question {
     /// by Null's window's own thread, which can't show a question while it waits for ssh.
     #[serde(default)]
     known_only: bool,
+    /// The ssh asking (its process; 0 where that isn't known): asking the same again means
+    /// the answer it was given didn't do.
+    #[serde(default)]
+    asker: u32,
 }
 
 /// Set on an ssh whose questions are answered only from this run's answers.
@@ -44,6 +48,10 @@ static ASKS: Mutex<Option<futures::channel::mpsc::UnboundedSender<Ask>>> = Mutex
 /// What the person answered this run, by question (a password asked again by the next
 /// connection is answered at once).
 static ANSWERED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Who asked what this run (an ssh's process, the question): the same ssh asking the same
+/// again was given a wrong answer.
+static ASKED: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
 
 /// The port and secret of this Null's listener, started the first time it's needed.
 fn listener() -> Option<&'static (u16, String)> {
@@ -85,7 +93,8 @@ fn secret() -> String {
 /// One question from Null's askpass, answered (by the window, or from this run's answers).
 fn answer(stream: TcpStream, expected: &str) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let mut reader = BufReader::new(&stream);
+    // (A question is a line, and short: no more is read.)
+    let mut reader = BufReader::new(&stream).take(64 * 1024);
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() {
         return;
@@ -93,6 +102,17 @@ fn answer(stream: TcpStream, expected: &str) {
     let Ok(question) = serde_json::from_str::<Question>(&line) else { return };
     if question.secret != expected {
         return;
+    }
+    // Asked again by the same ssh: the answer kept was wrong (a typo). Not given again (three
+    // tries at once, a server shutting the door): asked in the window.
+    if question.asker != 0 {
+        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        let again = (question.asker, question.prompt.clone());
+        if asked.contains(&again) {
+            ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| *p != question.prompt);
+        } else {
+            asked.push(again);
+        }
     }
     let answer = known(&question.prompt).or_else(|| (!question.known_only).then(|| ask(&question.prompt)).flatten());
     if let Some(answer) = &answer
@@ -174,7 +194,12 @@ pub fn answered_for_ssh() -> Option<i32> {
     let (port, secret) = address.split_once(' ')?;
     let port: u16 = port.parse().ok()?;
     let known_only = std::env::var_os(KNOWN_ONLY).is_some();
-    Some(match ask_running(port, secret, &prompt, known_only) {
+    // (The ssh that started this one: on Windows not known, 0.)
+    #[cfg(unix)]
+    let asker = std::os::unix::process::parent_id();
+    #[cfg(not(unix))]
+    let asker = 0;
+    Some(match ask_running(port, secret, &prompt, known_only, asker) {
         Some(answer) => {
             let mut out = std::io::stdout();
             let _ = writeln!(out, "{answer}");
@@ -186,10 +211,11 @@ pub fn answered_for_ssh() -> Option<i32> {
 }
 
 /// `prompt` asked of the Null listening on `port`, with its secret.
-fn ask_running(port: u16, secret: &str, prompt: &str, known_only: bool) -> Option<String> {
+fn ask_running(port: u16, secret: &str, prompt: &str, known_only: bool, asker: u32) -> Option<String> {
     let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).ok()?;
     let question =
-        serde_json::to_string(&Question { secret: secret.to_string(), prompt: prompt.to_string(), known_only }).ok()?;
+        serde_json::to_string(&Question { secret: secret.to_string(), prompt: prompt.to_string(), known_only, asker })
+            .ok()?;
     stream.write_all(format!("{question}\n").as_bytes()).ok()?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).ok()?;
@@ -207,18 +233,23 @@ mod tests {
         use futures::StreamExt;
         let mut questions = questions();
         let (port, secret) = listener().unwrap().clone();
+        let password = "me@box's password: ";
         let window = std::thread::spawn(move || {
-            let ask = futures::executor::block_on(questions.next()).unwrap();
-            assert_eq!(ask.prompt, "me@box's password: ");
-            ask.answer.send(Some("typed".into())).unwrap();
+            for typed in ["typo", "right"] {
+                let ask = futures::executor::block_on(questions.next()).unwrap();
+                assert_eq!(ask.prompt, "me@box's password: ");
+                ask.answer.send(Some(typed.into())).unwrap();
+            }
         });
-        assert_eq!(ask_running(port, &secret, "me@box's password: ", false).as_deref(), Some("typed"));
+        assert_eq!(ask_running(port, &secret, password, false, 101).as_deref(), Some("typo"));
+        // (Kept for this run: another ssh is answered at once, no window asked.)
+        assert_eq!(ask_running(port, &secret, password, false, 102).as_deref(), Some("typo"));
+        // That ssh asking again: the answer didn't do. Asked in the window, not given again.
+        assert_eq!(ask_running(port, &secret, password, false, 102).as_deref(), Some("right"));
         window.join().unwrap();
-        // (Kept for this run: no window asked.)
-        assert_eq!(ask_running(port, &secret, "me@box's password: ", false).as_deref(), Some("typed"));
-        assert_eq!(ask_running(port, "wrong", "me@box's password: ", false), None);
+        assert_eq!(ask_running(port, "wrong", password, false, 103), None);
         // (Answers only from this run's: one never given isn't asked in the window.)
-        assert_eq!(ask_running(port, &secret, "other@box's password: ", true), None);
+        assert_eq!(ask_running(port, &secret, "other@box's password: ", true, 104), None);
         forget();
     }
 

@@ -321,7 +321,8 @@ fn read(root: &Path, ask_github: bool) -> Read {
 impl GitView {
     pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
         let summary = cx.new(|cx| TextInput::new("Commit message", cx));
-        let body = cx.new(|cx| TextInput::new("Body: what and why (optional)", cx));
+        // (Several lines, as git keeps them: trailers like Co-authored-by each on its own.)
+        let body = cx.new(|cx| TextInput::new("Body: what and why (optional)", cx).multiline());
         let filter = cx.new(|cx| TextInput::new("Filter: message, author, id", cx));
         let branch_name = cx.new(|cx| TextInput::new("New branch…", cx));
         let rename_input = cx.new(|cx| TextInput::new("New name", cx));
@@ -545,7 +546,7 @@ impl GitView {
     pub fn set_message(&mut self, message: &str, cx: &mut Context<Self>) {
         let (summary, body) = message.split_once('\n').unwrap_or((message, ""));
         self.summary.update(cx, |input, cx| input.set_text(summary.trim(), cx));
-        self.body.update(cx, |input, cx| input.set_text(&body.split_whitespace().collect::<Vec<_>>().join(" "), cx));
+        self.body.update(cx, |input, cx| input.set_text(body.trim(), cx));
     }
 
     fn kept_count(&self) -> usize {
