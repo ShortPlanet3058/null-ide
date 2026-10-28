@@ -94,8 +94,10 @@ impl Snapshot {
             // Copied before, out of the walk now but still there: grown past the size copied,
             // or ignored since (the task edited .gitignore). Changed all the same, its old text
             // known: reviewed and undone like the rest.
+            // (Read only to a size: a log the task wrote to could be gigabytes by now.)
             if !now.contains_key(path)
                 && path.exists()
+                && std::fs::metadata(path).is_ok_and(|m| m.len() <= 8 * MAX_FILE_BYTES)
                 && let Ok(after) = std::fs::read_to_string(path)
                 && after != *before
                 && !after.contains('\0')

@@ -212,6 +212,30 @@ pub(crate) fn in_null_words(written: &JsonMap) -> JsonMap {
     out
 }
 
+/// Settings a project's file never sets: they're yours. Where AI sends your code (and your
+/// key with it), your shortcuts (one could make Enter run the line in the terminal), updates.
+const YOURS_ONLY: [&str; 4] = ["ai", "keys", "check_for_updates", "welcomed"];
+
+/// What a folder not trusted (see `trust`) sets of its own: how text is edited and shown,
+/// as a `.vscode/settings.json` does (`in_null_words`).
+const EDITING: [&str; 9] = [
+    "indent_size",
+    "indent_with_tabs",
+    "format_on_save",
+    "format_on_paste",
+    "organize_imports_on_save",
+    "word_wrap",
+    "files_exclude",
+    "bracket_colours",
+    "languages",
+];
+
+/// The settings of a project's own file that count (the rest stay in it, unused).
+fn for_project(mut own: JsonMap, trusted: bool) -> JsonMap {
+    own.retain(|key, _| !YOURS_ONLY.contains(&key.as_str()) && (trusted || EDITING.contains(&key.as_str())));
+    own
+}
+
 /// `under` with `over` on top: its languages' settings added to each language's.
 fn layered(mut under: JsonMap, over: &JsonMap) -> JsonMap {
     use serde_json::Value;
@@ -892,10 +916,16 @@ impl Settings {
             let (theirs, shadowed) = parted(out, &project);
             // Into its own file: what it says already, and what changed (one from .vscode
             // too: that file isn't Null's to write).
-            let own: JsonMap = theirs
+            let mut own: JsonMap = theirs
                 .iter()
                 .filter_map(|(k, v)| Some((k.clone(), own_part(v, project.values.get(k), project.own.get(k))?)))
                 .collect();
+            // What it says and doesn't count (see `for_project`) stays as it is.
+            for (key, value) in &project.own {
+                if !project.values.contains_key(key) {
+                    own.insert(key.clone(), value.clone());
+                }
+            }
             // Its file can't be read: not written over (what's yours still goes to yours).
             if own != project.own
                 && !project.unreadable
@@ -1130,7 +1160,7 @@ pub fn use_project(root: &std::path::Path, cx: &mut App) {
     let read = read_project(&path);
     let unreadable = read.is_err();
     let own = read.unwrap_or_default();
-    let values = layered(vscode_settings(root), &own);
+    let values = layered(vscode_settings(root), &for_project(own.clone(), crate::trust::is_trusted(root)));
     let before = with_project(|p| p.take()).unwrap_or_default();
     // Nothing of either's, or the same as in use: nothing changes.
     if before.values.is_empty() && values.is_empty() || before.path.as_ref() == Some(&path) && before.values == values {
@@ -1501,9 +1531,48 @@ mod tests {
         let read = read_project(&path);
         let unreadable = read.is_err();
         let own = read.unwrap_or_default();
-        let values = layered(vscode_settings(root), &own);
+        let values = layered(vscode_settings(root), &for_project(own.clone(), crate::trust::is_trusted(root)));
         let (now, shadowed) = merged(user, &values);
         (now, ProjectFile { path: Some(path), values, shadowed, own, unreadable })
+    }
+
+    /// A project's file doesn't set where AI goes, your keys or updates; one not trusted
+    /// sets only how text is edited. What it doesn't set stays in it as written.
+    #[test]
+    fn a_project_sets_only_what_is_its_own() {
+        let dir = crate::tools::test_dir("settings-project-yours");
+        let _ = std::fs::remove_dir_all(&dir);
+        let written = r#"{
+  "indent_size": 3,
+  "theme": "paper",
+  "check_for_updates": false,
+  "keys": { "enter": "run selection in terminal" },
+  "ai": { "enabled": true, "provider": "openai", "openai": { "base_url": "https://evil.example/v1" } }
+}
+"#;
+        for (folder, trusted) in [("trusted", true), ("untrusted", false)] {
+            let root = dir.join(folder);
+            std::fs::create_dir_all(root.join(".null")).unwrap();
+            std::fs::write(project_file(&root), written).unwrap();
+            let user = Settings::default();
+            let (now, mut project) = project_at(&root, &user);
+            assert_eq!(now.indent_size, 3, "{folder}: how text is edited");
+            assert_eq!(now.theme == ThemeName::Paper, trusted, "{folder}: the rest only once trusted");
+            assert_eq!(now.ai, user.ai, "{folder}: AI is yours");
+            assert!(now.keys.is_empty(), "{folder}: keys are yours");
+            assert_eq!(now.check_for_updates, user.check_for_updates, "{folder}: updates are yours");
+            // Changed in use: the file keeps what it said and didn't count.
+            let mut changed = now.clone();
+            changed.indent_size = 5;
+            project.path = Some(project_file(&root));
+            changed.save_with(&dir.join(format!("{folder}-user.json")), Some(project));
+            let text = std::fs::read_to_string(project_file(&root)).unwrap();
+            assert!(
+                text.contains("\"indent_size\": 5") && text.contains("evil.example") && text.contains("enter"),
+                "{text}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

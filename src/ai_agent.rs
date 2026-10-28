@@ -72,6 +72,27 @@ fn inside(root: &Path, path: &str) -> Option<PathBuf> {
     dunce::canonicalize(existing).ok()?.starts_with(&real_root).then_some(path)
 }
 
+/// What a task never writes: what runs on its own or holds what's yours (git's config and
+/// hooks, Null's and Claude Code's settings, cargo's config, an environment's programs).
+/// The review lists what a task changed, and these are left out of it.
+const NOT_WRITTEN: [&str; 7] = [".git", ".null", ".claude", ".cargo", ".venv", "venv", "node_modules"];
+
+fn writable(root: &Path, path: &Path) -> Result<(), String> {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    if let Some(part) = relative.components().find(|c| NOT_WRITTEN.iter().any(|n| c.as_os_str() == *n)) {
+        return Err(format!("Null doesn't let a task change what's in {}.", part.as_os_str().to_string_lossy()));
+    }
+    Ok(())
+}
+
+/// A file that may hold secrets (`ai_context::holds_secrets`): never read for AI.
+fn kept_from_ai(path: &Path) -> Result<(), String> {
+    if crate::ai_context::holds_secrets(path) {
+        return Err("Null keeps that file away from AI: it may hold secrets.".into());
+    }
+    Ok(())
+}
+
 fn cut(mut text: String) -> String {
     if text.len() > MAX_RESULT {
         let mut end = MAX_RESULT;
@@ -104,6 +125,7 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
         }
         "read_file" => {
             let path = target("path")?;
+            kept_from_ai(&path)?;
             on_event(TaskEvent::File(arg("path")));
             std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read it: {e}"))
         }
@@ -111,7 +133,7 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
             let regex = regex::Regex::new(&arg("pattern")).map_err(|e| format!("Not a valid pattern: {e}"))?;
             let mut found = Vec::new();
             for entry in ignore::WalkBuilder::new(root).build().filter_map(Result::ok) {
-                if !entry.file_type().is_some_and(|t| t.is_file()) {
+                if !entry.file_type().is_some_and(|t| t.is_file()) || crate::ai_context::holds_secrets(entry.path()) {
                     continue;
                 }
                 let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
@@ -127,6 +149,8 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
         }
         "edit_file" => {
             let path = target("path")?;
+            kept_from_ai(&path)?;
+            writable(root, &path)?;
             let text = std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read it: {e}"))?;
             let (old, new) = (arg("old_text"), arg("new_text"));
             // Where it is: in the file, or in the file as it was read (hidden text left out).
@@ -145,6 +169,8 @@ pub fn run_tool(root: &Path, name: &str, input: &Value, on_event: &mut dyn FnMut
         }
         "write_file" => {
             let path = target("path")?;
+            kept_from_ai(&path)?;
+            writable(root, &path)?;
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             }
@@ -581,6 +607,15 @@ mod tests {
             assert!(!elsewhere.join("x.rs").exists());
         }
         std::fs::remove_dir_all(&elsewhere).ok();
+        // Never what may hold secrets, nor into what runs on its own.
+        std::fs::write(root.join(".env"), "TOKEN=fn t\n").unwrap();
+        assert!(run("read_file", json!({ "path": ".env" }), &mut on_event).contains("secrets"));
+        assert!(!run("search", json!({ "pattern": "TOKEN" }), &mut on_event).contains(".env"));
+        for path in [".git/hooks/pre-commit", ".null/settings.json", ".venv/bin/python", "node_modules/x/index.js"] {
+            assert!(run("write_file", json!({ "path": path, "content": "x" }), &mut on_event).contains("doesn't let"));
+            assert!(!root.join(path).exists(), "{path}");
+        }
+        std::fs::remove_file(root.join(".env")).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("src/a.rs")).unwrap(), "fn sum() {}\nfn other() {}\n");
         assert_eq!(seen, vec!["src/a.rs".to_string(), "src/new/b.rs".to_string()]);
         // Text hidden from people (tag characters) isn't read out to the model.

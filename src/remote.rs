@@ -143,18 +143,18 @@ pub fn command(host: &str, folder: Option<&str>, program: &str, args: &[&str]) -
         line.push_str(&quote(arg));
     }
     let mut command = ssh(host);
-    asking(&mut command);
+    asking(&mut command, host);
     command.args(["-T", "--", destination(host).0, &line]);
     command
 }
 
 /// What ssh asks (a password, a passphrase, whether to trust a server), asked in Null's
 /// window (see `askpass`); where it can't be, nothing asked: it fails at once instead.
-fn asking(command: &mut std::process::Command) {
+fn asking(command: &mut std::process::Command, host: &str) {
     // (From the window's own thread: what was answered already, nothing asked: the window
     // couldn't show the question while it waits.)
     let environment =
-        if on_main_thread() { crate::askpass::environment_known_only() } else { crate::askpass::environment() };
+        if on_main_thread() { crate::askpass::environment_known_only(host) } else { crate::askpass::environment(host) };
     match environment {
         Some(environment) => {
             command.envs(environment);
@@ -174,7 +174,7 @@ pub fn terminal(host: &str, folder: &str) -> (PathBuf, Vec<String>, Vec<(&'stati
     let mut args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     args.extend(["-t".into(), "--".into(), destination(host).0.into()]);
     args.push(format!("cd {} 2>/dev/null; exec \"${{SHELL:-sh}}\" -l", quote(folder)));
-    (program, args, crate::askpass::environment().unwrap_or_default())
+    (program, args, crate::askpass::environment(host).unwrap_or_default())
 }
 
 /// What a script on a server printed, and how it ended.
@@ -231,14 +231,14 @@ impl Session {
             std::process::Command::new("sh")
         } else {
             let mut command = ssh(host);
-            asking(&mut command);
+            asking(&mut command, host);
             command.args(["-T", "--", destination(host).0, "sh"]);
             command
         };
         #[cfg(not(test))]
         let mut command = {
             let mut command = ssh(host);
-            asking(&mut command);
+            asking(&mut command, host);
             command.args(["-T", "--", destination(host).0, "sh"]);
             command
         };
@@ -318,10 +318,19 @@ impl Session {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the server's answer couldn't be read"))
         };
         let (status, out, err) = (number()?, number()?, number()?);
-        let mut stdout = vec![0; out.max(0) as usize];
-        self.output.read_exact(&mut stdout)?;
-        let mut stderr = vec![0; err.max(0) as usize];
-        self.output.read_exact(&mut stderr)?;
+        // (Read as it comes, not made room for first: a server saying a size it never sends
+        // would have Null ask for all the memory there is.)
+        let mut exactly = |size: i64| -> io::Result<Vec<u8>> {
+            let size = size.max(0) as u64;
+            let mut bytes = Vec::new();
+            (&mut self.output).take(size).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 != size {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the server's answer stopped short"));
+            }
+            Ok(bytes)
+        };
+        let stdout = exactly(out)?;
+        let stderr = exactly(err)?;
         Ok(Output { status: status as i32, stdout, stderr })
     }
 }
