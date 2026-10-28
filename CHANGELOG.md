@@ -52,7 +52,8 @@ spelling on Windows and Linux too, and fixes what an outside audit found.
     of opened as a file. A file asked from your home folder or `/` opens its repository,
     not the whole folder. On Linux, a display that's gone (a stale DISPLAY) is said in the
     terminal instead of crashing.
-  - Folders on servers: accented file names (`café.rs`) open from ⌘P and search, a folder
+  - Folders on servers: ⌘P opens the file picked (it looked for it on this computer and
+    took it off the list instead), accented file names (`café.rs`) open from ⌘P and search, a folder
     named with `&` lists its files, a new file opens once made, pasting copied files works,
     ⌘⇧B finds the project's tasks, and the GitHub tab (which runs here) isn't offered.
     Merge conflicts on servers and in WSL can be finished from Null.

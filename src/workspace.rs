@@ -7988,8 +7988,7 @@ impl Workspace {
         // Just updated: said once, and a click shows what changed.
         if crate::whats_new::to_tell().is_some() {
             let message = format!("Null {} is installed: click to see what's new.", crate::updates::current());
-            self.show_notice(message, cx);
-            self.notice_click = Some(Box::new(WhatsNew));
+            self.show_notice_to_click(message, Box::new(WhatsNew), cx);
         }
         // (An update that couldn't be put in place at the last quit: said, and Update again.)
         if let Some(version) = crate::updates::not_installed() {
@@ -8239,13 +8238,23 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A notice a click on acts on (`action`): shown longer, to have the time to.
+    fn show_notice_to_click(&mut self, message: String, action: Box<dyn gpui::Action>, cx: &mut Context<Self>) {
+        self.show_notice_for(message, Duration::from_secs(12), cx);
+        self.notice_click = Some(action);
+    }
+
     fn show_notice(&mut self, message: String, cx: &mut Context<Self>) {
+        // (A longer one, as why a server can't be reached and what to do, stays to be read.)
+        let shown_for = Duration::from_secs((4 + message.chars().count() as u64 / 25).min(10));
+        self.show_notice_for(message, shown_for, cx);
+    }
+
+    fn show_notice_for(&mut self, message: String, shown_for: Duration, cx: &mut Context<Self>) {
         if self.past_notices.len() == 30 {
             self.past_notices.remove(0);
         }
         self.past_notices.push((message.clone(), std::time::SystemTime::now()));
-        // (A longer one, as why a server can't be reached and what to do, stays to be read.)
-        let shown_for = Duration::from_secs((4 + message.chars().count() as u64 / 25).min(10));
         self.notice = Some((message, Instant::now()));
         self.notice_click = None;
         self.notice_task = Some(cx.spawn(async move |this, cx| {
