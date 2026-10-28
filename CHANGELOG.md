@@ -1,7 +1,29 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
+Null tells you what's new after it updates itself, picks what ⌘I changes from the code's
+structure, takes several lines in its AI fields, helps with merge conflicts, checks
+spelling on Windows and Linux too, and fixes what an outside audit found.
+
+- What's new: after an update, a notice says which version is installed, and a click on it
+  shows the changes since the version before (What's New in ⌘K, any time).
+- ⌘I without a selection changes the function, class, CSS rule or HTML element the cursor is
+  in, in every language with one (it was only Rust's; elsewhere the lines up to a blank one,
+  so a whole HTML page), and never more than 40 lines: in a bigger one, the part the cursor
+  is in.
+- AI fields take several lines: ⇧↵ starts one in ⌘I, a follow-up question and an AI task
+  (⌥⌘I), and pasted text keeps its lines; the field grows up to 8 rows, then scrolls.
+- Merge conflicts: ✦ Resolve with AI (⌘. in a conflict, with AI on) writes one version
+  keeping what each side changed, shown as a change to keep (⇥) or undo (Esc).
+- The same change elsewhere: a word typed over (a name renamed by hand) marks the other
+  places in the file the old word stands; ⇥ from the word changes them one by one, Esc
+  lets them be.
+- Spelling on Windows and Linux: Windows' own speller, and on Linux the Hunspell
+  dictionaries installed, in your language and English, each line in the one it reads best
+  in (it was the Mac's only).
+- Moving files to the Trash asks in the window, with "Don't ask again" (space ticks it);
+  Settings → Window → Ask before moving to the Trash brings the question back.
 - Fixes from an outside audit:
   - Markdown no longer crashes on a list line starting with a wide space (Japanese text),
     or on ⇥ in a table row holding a lone backtick.
@@ -40,24 +62,6 @@
     the SSH connection folder in /tmp is used only if it's yours; a lock file no longer
     piles up each time Null runs; settings that can't be read no longer bring the welcome
     back at every start.
-- The same change elsewhere: a word typed over (a name renamed by hand) marks the other
-  places in the file the old word stands; ⇥ from the word changes them one by one, Esc
-  lets them be.
-- Spelling on Windows and Linux: Windows' own speller, and on Linux the Hunspell
-  dictionaries installed, in your language and English, each line in the one it reads best
-  in (it was the Mac's only).
-- Merge conflicts: ✦ Resolve with AI (⌘. in a conflict, with AI on) writes one version
-  keeping what each side changed, shown as a change to keep (⇥) or undo (Esc).
-- What's new: after an update, a notice says which version is installed, and a click on it
-  shows the changes since the version before (What's New in ⌘K, any time).
-- AI fields take several lines: ⇧↵ starts one in ⌘I, a follow-up question and an AI task
-  (⌥⌘I), and pasted text keeps its lines; the field grows up to 8 rows, then scrolls.
-- ⌘I without a selection changes the function, class, CSS rule or HTML element the cursor is
-  in, in every language with one (it was only Rust's; elsewhere the lines up to a blank one,
-  so a whole HTML page), and never more than 40 lines: in a bigger one, the part the cursor
-  is in.
-- Moving files to the Trash asks in the window, with "Don't ask again" (space ticks it);
-  Settings → Window → Ask before moving to the Trash brings the question back.
 
 ## 0.2.0
 
