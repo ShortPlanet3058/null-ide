@@ -209,6 +209,8 @@ actions!(
         ShowNotes,
         /// The failed test at the cursor (or the first one that failed) explained by AI.
         ExplainTestFailure,
+        /// Why the terminal's last command went wrong, from AI.
+        ExplainTerminalError,
         /// Asks now whether a newer Null is out.
         CheckForUpdates,
         /// What changed in this version (since the one before, after an update).
@@ -5663,6 +5665,9 @@ impl Workspace {
             if self.test_status.values().any(|s| *s == TestStatus::Failed) {
                 commands.push((Ai, "Explain Test Failure".into(), Box::new(ExplainTestFailure)));
             }
+            if self.terminal().is_some_and(|t| t.read(cx).went_wrong()) {
+                commands.push((Ai, "Explain What Went Wrong in the Terminal".into(), Box::new(ExplainTerminalError)));
+            }
             commands.push((Ai, "AI Usage".into(), Box::new(ShowAiUsage)));
             if self.active.is_some() {
                 commands.push((Ai, "Edit with AI…".into(), Box::new(crate::editor::InlineAssist)));
@@ -7965,6 +7970,16 @@ impl Workspace {
 
     /// The failed test at the cursor, else the first that failed: opened, and explained by AI
     /// in a note under it, from what its run said.
+    fn explain_terminal_error(&mut self, _: &ExplainTerminalError, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal().cloned() else { return };
+        if !self.terminal_open.on {
+            self.terminal_open.set(true, TERMINAL_SLIDE, TERMINAL_SLIDE);
+        }
+        window.focus(&terminal.focus_handle(cx));
+        terminal.update(cx, |terminal, cx| terminal.explain(cx));
+        cx.notify();
+    }
+
     fn explain_test_failure(&mut self, _: &ExplainTestFailure, window: &mut Window, cx: &mut Context<Self>) {
         let failed: Vec<(PathBuf, String, usize)> = self
             .tests
@@ -9349,6 +9364,7 @@ impl Workspace {
         });
         let subscription = cx.subscribe_in(&terminal, window, |this, terminal, event, window, cx| match event {
             TerminalEvent::TitleChanged => cx.notify(),
+            TerminalEvent::Notice(message) => this.show_notice(message.clone(), cx),
             TerminalEvent::Menu(position) => {
                 let items = terminal_menu_items(terminal.read(cx).has_selection());
                 this.text_menu =
@@ -12634,6 +12650,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_ai_usage))
             .on_action(cx.listener(Self::show_notes))
             .on_action(cx.listener(Self::explain_test_failure))
+            .on_action(cx.listener(Self::explain_terminal_error))
             .on_action(cx.listener(Self::check_for_updates))
             .on_action(
                 cx.listener(|this, _: &crate::file_tree::NewFile, window, cx| this.new_in_project(false, window, cx)),

@@ -1,7 +1,7 @@
 //! The built-in terminal: a real shell in a PTY, emulated by `alacritty_terminal`
 //! and drawn with GPUI.
 
-use crate::fonts::Fonts;
+use crate::fonts::{CodeFont, Fonts};
 use crate::theme::Theme;
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -170,6 +170,16 @@ pub enum TerminalEvent {
     /// A right-click (not taken by a program that reads the mouse), at this place in the
     /// window: the workspace shows what can be done.
     Menu(Point<Pixels>),
+    /// Something to say in the status bar (AI couldn't write a command).
+    Notice(String),
+}
+
+/// AI at work in the terminal, as asked (see `terminal_ai`).
+enum TerminalAi {
+    /// Writing the command for the `# …` on the line.
+    Writing { _task: Task<()> },
+    /// Telling what went wrong with `command`: the answer so far.
+    Explaining { command: String, answer: String, done: bool, scroll: gpui::ScrollHandle, _task: Task<()> },
 }
 
 /// A command that finished in the shell.
@@ -400,6 +410,9 @@ pub struct TerminalView {
     root: PathBuf,
     link: Option<HoveredLink>,
     find: Option<TerminalFind>,
+    ai: Option<TerminalAi>,
+    /// The last command, when what it printed says it went wrong: AI can say why.
+    went_wrong: Option<Ran>,
     _events: Task<()>,
     _watching: Option<Task<()>>,
 }
@@ -605,6 +618,8 @@ impl TerminalView {
             root: cwd.clone(),
             link: None,
             find: None,
+            ai: None,
+            went_wrong: None,
             commands: Vec::new(),
             running_group: None,
             shell_pid: pid,
@@ -793,6 +808,22 @@ impl TerminalView {
         if !self.focus_handle.is_focused(window) {
             return;
         }
+        // AI writing the line: a key stops it (Escape does only that), as does the card's
+        // Escape close it.
+        if self.ai.is_some() && (event.keystroke.key == "escape" || matches!(self.ai, Some(TerminalAi::Writing { .. })))
+        {
+            self.ai = None;
+            cx.notify();
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                return;
+            }
+        }
+        // Tab on `# what you want`: AI writes the command for it.
+        if event.keystroke.key == "tab" && event.keystroke.modifiers == Modifiers::default() && self.write_asked(cx) {
+            cx.stop_propagation();
+            return;
+        }
         // Text (a letter, what AltGr or ⌥ types, a dead key's accent): the system composes
         // it and hands it over as text (see the input handler below), so `~` then `a` is
         // `ã`, and AZERTY's AltGr+8 is `\`.
@@ -816,6 +847,10 @@ impl TerminalView {
 
     /// Text typed (as the system composed it), to the shell.
     fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // (Typing while AI writes the line: the line is the person's again.)
+        if matches!(self.ai, Some(TerminalAi::Writing { .. })) {
+            self.ai = None;
+        }
         // Typing jumps back to the prompt if the view was scrolled up.
         self.term.lock().scroll_display(Scroll::Bottom);
         self.term.lock().selection = None;
@@ -956,6 +991,11 @@ impl TerminalView {
 
     /// A command beginning at the cursor's line, and that line kept to find it again by.
     fn start_run(&mut self, typing: Option<&str>) {
+        // A new command: what went wrong before is behind it.
+        self.went_wrong = None;
+        if matches!(self.ai, Some(TerminalAi::Explaining { .. })) {
+            self.ai = None;
+        }
         let run = self.run_start(typing);
         if findable(&run.line) && !self.commands.contains(&run.line) {
             if self.commands.len() == 1000 {
@@ -1047,8 +1087,134 @@ impl TerminalView {
         same_start || PROMPT_SIGNS.iter().any(|sign| before.ends_with(sign))
     }
 
+    /// What's typed on the prompt's line up to the cursor (its rows, when it wraps), if the
+    /// cursor ends it.
+    fn line_typed(&self) -> Option<String> {
+        let term = self.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return None;
+        }
+        let grid = term.grid();
+        let cursor = grid.cursor.point;
+        if !row_text(grid, cursor.line).chars().skip(cursor.column.0).all(char::is_whitespace) {
+            return None;
+        }
+        let top = -(grid.history_size() as i32);
+        let wraps = |line: i32| grid[Line(line)][Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE);
+        let mut first = cursor.line.0;
+        while first > top && wraps(first - 1) {
+            first -= 1;
+        }
+        let mut text: String = (first..cursor.line.0).map(|line| row_text(grid, Line(line))).collect();
+        text.push_str(&row_text_to(grid, cursor.line, cursor.column.0));
+        Some(text)
+    }
+
+    /// Tab on a prompt's `# what you want`, with AI on: asks for the command, which takes
+    /// its place on the line when it comes (not run). False when that isn't what's typed.
+    fn write_asked(&mut self, cx: &mut Context<Self>) -> bool {
+        let ai = cx.global::<crate::settings::Settings>().ai.clone();
+        if self.running.is_some() || !ai.ready() {
+            return false;
+        }
+        let Some((erase, asked)) = self.line_typed().as_deref().and_then(crate::terminal_ai::asked_on_line) else {
+            return false;
+        };
+        let words = crate::terminal_ai::terminal_words(&self.root);
+        let prompt = crate::terminal_ai::command_prompt(&asked, &words, &self.shell_folder());
+        let task = cx.spawn(async move |this, cx| {
+            let mut events = crate::ai::stream(ai, prompt);
+            let mut answer = String::new();
+            let mut failed = None;
+            while let Some(event) = events.next().await {
+                match event {
+                    crate::ai::AiEvent::Text(chunk) => answer.push_str(&chunk),
+                    crate::ai::AiEvent::Done => break,
+                    crate::ai::AiEvent::Failed(error) => {
+                        failed = Some(error);
+                        break;
+                    }
+                }
+            }
+            this.update(cx, |this, cx| {
+                this.ai = None;
+                match (failed, crate::terminal_ai::command_in(&answer)) {
+                    (Some(error), _) => cx.emit(TerminalEvent::Notice(format!("Couldn't write the command: {error}"))),
+                    (None, None) => cx.emit(TerminalEvent::Notice("AI gave no command for that.".into())),
+                    // What was asked goes, the command takes its place, for Return to run.
+                    (None, Some(command)) => {
+                        this.term.lock().scroll_display(Scroll::Bottom);
+                        this.write(vec![0x7f; erase]);
+                        this.write(command.into_bytes());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.ai = Some(TerminalAi::Writing { _task: task });
+        cx.notify();
+        true
+    }
+
+    /// Whether the last command went wrong (as far as its output says).
+    pub fn went_wrong(&self) -> bool {
+        self.went_wrong.is_some()
+    }
+
+    /// Asks AI why the last command went wrong; the answer shows in a card as it comes.
+    pub fn explain(&mut self, cx: &mut Context<Self>) {
+        let Some(ran) = self.went_wrong.clone() else { return };
+        let ai = cx.global::<crate::settings::Settings>().ai.clone();
+        if !ai.ready() {
+            return;
+        }
+        let words = crate::terminal_ai::terminal_words(&self.root);
+        let prompt = crate::terminal_ai::explain_prompt(&ran.command, &ran.output, &words, &ran.folder);
+        let task = cx.spawn(async move |this, cx| {
+            let mut events = crate::ai::stream(ai, prompt);
+            while let Some(event) = events.next().await {
+                let ended = !matches!(event, crate::ai::AiEvent::Text(_));
+                let going = this.update(cx, |this, cx| {
+                    let Some(TerminalAi::Explaining { answer, done, .. }) = &mut this.ai else { return false };
+                    match event {
+                        crate::ai::AiEvent::Text(chunk) => answer.push_str(&chunk),
+                        crate::ai::AiEvent::Done => *done = true,
+                        crate::ai::AiEvent::Failed(error) => {
+                            *answer = format!("Couldn't ask: {error}");
+                            *done = true;
+                        }
+                    }
+                    cx.notify();
+                    true
+                });
+                if ended || !going.unwrap_or(false) {
+                    break;
+                }
+            }
+        });
+        self.ai = Some(TerminalAi::Explaining {
+            command: ran.command,
+            answer: String::new(),
+            done: false,
+            scroll: gpui::ScrollHandle::new(),
+            _task: task,
+        });
+        cx.notify();
+    }
+
+    /// Types the command an explanation gave on the prompt's line, for Return to run.
+    fn put_on_line(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.ai = None;
+        self.went_wrong = None;
+        self.term.lock().scroll_display(Scroll::Bottom);
+        self.write(command.to_string().into_bytes());
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
     /// Tells what a finished command printed (unless nothing was typed: a bare Return).
-    fn report_run(&self, program: Option<String>, run: RunStart, cx: &mut Context<Self>) {
+    fn report_run(&mut self, program: Option<String>, run: RunStart, cx: &mut Context<Self>) {
         let output = self.output_since(&run);
         // (Cleared since: the first line is some output, the command was on `line`.)
         let line = if run.cleared { run.line.as_str() } else { output.lines().next().unwrap_or("") };
@@ -1058,7 +1224,9 @@ impl TerminalView {
         if name.is_empty() {
             return;
         }
-        cx.emit(TerminalEvent::Ran(Ran { name, command, folder: run.folder, output }));
+        let ran = Ran { name, command, folder: run.folder, output };
+        self.went_wrong = crate::terminal_ai::went_wrong(&ran.command, &ran.output).then(|| ran.clone());
+        cx.emit(TerminalEvent::Ran(ran));
     }
 
     /// The text from where `run` began to the cursor: a row wrapped onto the next joined to
@@ -1490,6 +1658,7 @@ impl Render for TerminalView {
             .relative()
             .child(TerminalElement { view: cx.entity() })
             .children(self.render_find(cx))
+            .children(self.render_ai(cx))
     }
 }
 
@@ -1530,6 +1699,136 @@ impl TerminalView {
                 .child(div().flex_none().text_color(theme.muted).child(count))
                 .into_any_element(),
         )
+    }
+}
+
+impl TerminalView {
+    /// AI in the bottom right corner, quiet: writing the line, the offer to say why the last
+    /// command went wrong, or what it says.
+    fn render_ai(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let theme = cx.global::<Theme>().clone();
+        let ready = cx.global::<crate::settings::Settings>().ai.ready();
+        let ui_font = cx.global::<Fonts>().ui.clone();
+        let chip = |id: &'static str| {
+            div()
+                .id(id)
+                .absolute()
+                .bottom(px(8.))
+                .right(px(12.))
+                .h(px(24.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(crate::ui::R_CONTROL))
+                .bg(theme.raised)
+                .border_1()
+                .border_color(theme.hairline)
+                .font_family(ui_font.clone())
+                .text_size(px(crate::ui::T_SM))
+                .text_color(theme.muted)
+                // Clicks here stay here, not starting a selection in the output below.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        };
+        match &self.ai {
+            Some(TerminalAi::Writing { .. }) => Some(
+                chip("ai-writing")
+                    .child("Writing the command…")
+                    .child(div().text_color(theme.faint).child("esc"))
+                    .into_any_element(),
+            ),
+            Some(TerminalAi::Explaining { command, answer, done, scroll, .. }) => {
+                let (text, fix) = crate::terminal_ai::explanation(answer);
+                Some(
+                    div()
+                        .id("ai-explain")
+                        .absolute()
+                        .bottom(px(8.))
+                        .right(px(12.))
+                        .w(px(460.))
+                        .max_w(relative(0.9))
+                        .p(px(12.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .rounded(px(crate::ui::R_POPOVER))
+                        .bg(theme.raised)
+                        .border_1()
+                        .border_color(theme.line_strong)
+                        .shadow_md()
+                        .font_family(ui_font.clone())
+                        .text_size(px(crate::ui::T_SM))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(theme.muted)
+                                        .child(format!("Why {command} went wrong")),
+                                )
+                                .child(
+                                    crate::ui::icon_button("ai-explain-close", "icons/x.svg", "Close", &theme)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            // (Read: not offered again for the same command.)
+                                            this.ai = None;
+                                            this.went_wrong = None;
+                                            window.focus(&this.focus_handle);
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("ai-explain-text")
+                                .max_h(px(180.))
+                                .overflow_y_scroll()
+                                .track_scroll(scroll)
+                                .text_color(if text.is_empty() { theme.faint } else { theme.foreground })
+                                .child(if text.is_empty() && !done { "Asking…".to_string() } else { text }),
+                        )
+                        .children(fix.map(|fix| {
+                            let typed = fix.clone();
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .px(px(8.))
+                                        .py(px(5.))
+                                        .rounded(px(crate::ui::R_ROW))
+                                        .bg(theme.sunken)
+                                        .code_font(cx)
+                                        .text_color(theme.foreground)
+                                        .truncate()
+                                        .child(fix),
+                                )
+                                .child(crate::ui::button("ai-put-fix", "Put on the Line", &theme).on_click(
+                                    cx.listener(move |this, _, window, cx| this.put_on_line(&typed, window, cx)),
+                                ))
+                        }))
+                        .into_any_element(),
+                )
+            }
+            None if ready && self.went_wrong.is_some() && self.running.is_none() => Some(
+                chip("ai-offer")
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(theme.foreground))
+                    .on_click(cx.listener(|this, _, _, cx| this.explain(cx)))
+                    .child("Explain what went wrong")
+                    .into_any_element(),
+            ),
+            None => None,
+        }
     }
 }
 

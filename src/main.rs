@@ -85,6 +85,7 @@ mod svg_image;
 mod system_clipboard;
 mod tasks;
 mod terminal;
+mod terminal_ai;
 mod terminal_links;
 mod terminal_watch;
 mod test_at;

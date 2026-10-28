@@ -38,6 +38,13 @@ def answer(system: str, user: str) -> str:
         return changed.rstrip("\n") + f"\n{indent}// checked\n"
     if "programming assistant" in system:
         return f"This line adds `a` and `b` and prints the sum. {NOTE}"
+    if "into one command for the terminal" in system:
+        return "find . -type f -size +1k"
+    if "command run in a terminal went wrong" in system:
+        return (
+            "The shell found no program called pyhton: it looks like a typo for python3. "
+            f"Run it again with the name spelled right. {NOTE}\nFIX: python3 --version"
+        )
     if "commit messages" in system:
         return "Grow the numbers the sum is made of"
     if "code completion" in system:

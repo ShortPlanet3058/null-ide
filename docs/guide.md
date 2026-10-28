@@ -278,6 +278,10 @@ numbers can show everywhere, only in code, or nowhere.
   line at the bottom says what finished and how long it took. While the terminal is hidden
   and something runs in it, the status bar says what (`cargo running`; a click shows it), and
   a terminal's tab gets a dot while it's busy behind another.
+  With AI on: type `# what you want` at the prompt and press **Tab**, and the command for it
+  takes its place on the line, for you to read and run with Return (never run for you). When
+  what a command printed says it went wrong, **Explain what went wrong** shows in the corner
+  (also in ⌘K): what happened, and the command that puts it right, to put on the line.
 - **F5** debugs (lldb-dap: with Xcode on the Mac, LLVM on Windows, LLDB on Linux): breakpoints with **F9**, conditions with a
   right-click, values shown faintly beside the code and in a panel. Under the variables,
   type an expression to watch (`letters * 2`): its value shows at every stop.
