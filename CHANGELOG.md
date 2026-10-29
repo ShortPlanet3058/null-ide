@@ -1,15 +1,31 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
-- Windows: Ctrl+- makes text smaller again on keyboards with their own - key (a French
-  AZERTY's), where it went to tab 6.
-- Security audit of 0.2.2, with fixes:
-  - Folders you trust: one Null hasn't seen before opens in Safe mode, its language
-    servers off (they run a project's own code: its `.venv`'s programs, its TypeScript,
-    Rust build scripts), its `.venv` not activated in the terminal, its settings file only
-    setting how text is edited. Trust Folder in the status bar turns it all on. The folders
-    you'd opened before are trusted.
+Null opens a folder it hasn't seen in Safe mode, is black all the way round, writes and
+explains terminal commands with AI, has a High Contrast theme, and fixes what a security
+audit and the rest of the outside audit found.
+
+- Folders you trust: a folder Null hasn't seen before opens in Safe mode, its language
+  servers off (they run a project's own code: its `.venv`'s programs, its TypeScript,
+  Rust build scripts), its `.venv` not activated in the terminal, its settings file only
+  setting how text is edited. Trust Folder in the status bar turns it all on, once. The
+  folders you'd opened before are trusted.
+- Null's own theme is black all the way round: the tab bar, sidebar, title and status bars
+  are as black as the code, set apart by thin lines, so an OLED screen keeps those pixels off.
+- The terminal, with AI on: `# what you want` then Tab writes the command for it on the line
+  (not run); after a command that went wrong, "Explain what went wrong" in the corner says
+  why, with the command that puts it right to put on the line.
+- A new High Contrast theme: black, white text, comments you can read and edges that stand
+  out (⌘K, Settings, or the Theme menu).
+- A click on who last changed the line (at its end, with Show Who Changed the Line on)
+  opens that commit.
+- Settings → AI with Ollama lists the models it has installed, first, to pick with a click.
+- Files that hold secrets (`.env`, private keys, `.npmrc`…) are never sent to AI: ⌘I says so
+  there, suggestions stay quiet, and Review and commit drafts leave them out.
+- Debugging: a variable or watch whose value changed since the last stop shows in amber.
+- Expand and Shrink Selection (⌥↑ ⌥↓) work on every cursor, each by its own syntax.
+- Fixes from a security audit:
   - A project's `.null/settings.json` can't choose your AI (where your code and API key
     go), your shortcuts or updates.
   - git run by Null never runs the command a repository's own config names for `status`
@@ -33,21 +49,6 @@
   - Also: a click on who changed the line finds the commit in the file's own repository;
     changed values in the debugger are compared stop to stop, not when another call is
     looked at; a notebook keeps its unedited cells exactly as written.
-
-- Null's own theme is black all the way round: the tab bar, sidebar, title and status bars
-  are as black as the code, set apart by thin lines, so an OLED screen keeps those pixels off.
-- The terminal, with AI on: `# what you want` then Tab writes the command for it on the line
-  (not run); after a command that went wrong, "Explain what went wrong" in the corner says
-  why, with the command that puts it right to put on the line.
-- A new High Contrast theme: black, white text, comments you can read and edges that stand
-  out (⌘K, Settings, or the Theme menu).
-- A click on who last changed the line (at its end, with Show Who Changed the Line on)
-  opens that commit.
-- Settings → AI with Ollama lists the models it has installed, first, to pick with a click.
-- Files that hold secrets (`.env`, private keys, `.npmrc`…) are never sent to AI: ⌘I says so
-  there, suggestions stay quiet, and Review and commit drafts leave them out.
-- Debugging: a variable or watch whose value changed since the last stop shows in amber.
-- Expand and Shrink Selection (⌥↑ ⌥↓) work on every cursor, each by its own syntax.
 - More from the outside audit:
   - The commit message's body field takes several lines and keeps them (Undo Last Commit
     gave back a body flattened onto one line).
@@ -66,6 +67,8 @@
   - Switching branch with changes that can't be put back on the other says they're set
     aside (Bring Back Changes); Revert on a server keeps the file's history.
   - Linux's install.sh writes the menu entry right for a home folder with a space or `&`.
+- Windows: Ctrl+- makes text smaller again on keyboards with their own - key (a French
+  AZERTY's), where it went to tab 6.
 
 ## 0.2.1
 
