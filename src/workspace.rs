@@ -1125,6 +1125,7 @@ impl Workspace {
                     }
                 }
             }),
+            cx.observe_global::<crate::trust::Changed>(|this, cx| this.trust_changed(cx)),
             cx.observe_global_in::<Settings>(window, |this, window, cx| {
                 this.apply_settings(cx);
                 this.ask_where_suggestions_come_from(window, cx);
@@ -8015,7 +8016,7 @@ impl Workspace {
         for folder in &folders {
             crate::trust::trust(folder);
         }
-        self.trust_changed(cx);
+        crate::trust::changed(cx);
         if let [folder] = folders.as_slice() {
             let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             self.show_notice(format!("Trusted {name}: its language servers start now"), cx);
@@ -8027,10 +8028,11 @@ impl Workspace {
         for root in self.roots.all().to_vec() {
             crate::trust::distrust(&root);
         }
-        self.trust_changed(cx);
+        crate::trust::changed(cx);
         self.show_notice("Safe mode: this folder's code doesn't run until you trust it again".into(), cx);
     }
 
+    /// The folders trusted changed (here, in another window or in Settings).
     fn trust_changed(&mut self, cx: &mut Context<Self>) {
         crate::settings::use_project(self.root(cx), cx);
         self.lsp.update(cx, |lsp, cx| lsp.trust_changed(cx));

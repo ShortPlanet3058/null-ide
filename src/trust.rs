@@ -43,15 +43,49 @@ fn save(list: &[PathBuf]) {
 }
 
 /// The first time (no list kept yet): the projects you'd opened before, trusted. Called
-/// before any window opens, so the folder this launch opens isn't one of them.
+/// before any window opens, so the folder this launch opens isn't one of them. Later: the
+/// folders deleted since are let go (see `gone`).
 pub fn start() {
     let Some(file) = file() else { return };
     if file.exists() {
+        with(|trusted| {
+            let before = trusted.len();
+            trusted.retain(|folder| !gone(folder));
+            if trusted.len() != before {
+                save(trusted);
+            }
+        });
         return;
     }
     let list = seeded(crate::session::recent_projects(), crate::tools::home_dir().as_deref());
     save(&list);
     with(|trusted| *trusted = list);
+}
+
+/// Whether a folder trusted is no more: deleted, its own folder still there. (One on a
+/// disk not plugged in, or a server's, a WSL's, stays.)
+fn gone(folder: &Path) -> bool {
+    if crate::remote::is_remote(folder) || crate::wsl::is_wsl(folder) {
+        return false;
+    }
+    !folder.exists() && folder.parent().is_some_and(|parent| parent.is_dir())
+}
+
+/// The folders trusted, as kept.
+pub fn folders() -> Vec<PathBuf> {
+    with(|trusted| trusted.clone())
+}
+
+/// Told when the folders trusted change: every window looks again (its language servers,
+/// its project settings).
+#[derive(Default)]
+pub struct Changed(pub u64);
+
+impl gpui::Global for Changed {}
+
+pub fn changed(cx: &mut gpui::App) {
+    let next = cx.try_global::<Changed>().map_or(0, |c| c.0) + 1;
+    cx.set_global(Changed(next));
 }
 
 /// The recent projects trusted the first time: not your home folder or a disk's root (a
@@ -111,5 +145,16 @@ mod tests {
         let trusted = seeded(recent, Some(&home));
         assert_eq!(trusted, [kept_form(&home.join("app")), PathBuf::from("/ssh:box:/srv/app")]);
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_folder_deleted_is_let_go_but_not_one_on_a_disk_away() {
+        let dir = crate::tools::test_dir("trust-gone");
+        std::fs::create_dir_all(dir.join("kept")).unwrap();
+        assert!(!gone(&dir.join("kept")));
+        assert!(gone(&dir.join("deleted")));
+        assert!(!gone(&dir.join("unplugged").join("project")));
+        assert!(!gone(Path::new("/ssh:box:/srv/gone")));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
