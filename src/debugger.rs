@@ -293,12 +293,22 @@ pub enum DebuggerEvent {
 
 impl EventEmitter<DebuggerEvent> for Debugger {}
 
+/// Why the watches are worked out again (see `Debugger::evaluate_watches`).
+#[derive(Clone, Copy)]
+enum Looked {
+    Stop,
+    Frame,
+    Added,
+}
+
 /// An expression watched while paused, and what it came to at the last stop.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Watch {
     pub expression: String,
     /// Its value, or why it has none (not in scope here); None until worked out.
     pub value: Option<Result<String, String>>,
+    /// Its value isn't the one it had at the last stop (shown so).
+    pub changed: bool,
 }
 
 pub struct Debugger {
@@ -397,6 +407,11 @@ impl Debugger {
         let adapter = Arc::new(adapter);
         self.adapter = Some(adapter.clone());
         self.state = DebugState::Starting;
+        // (A new run: what the watches were in the last one isn't what changes compare to.)
+        for watch in &mut self.watches {
+            watch.value = None;
+            watch.changed = false;
+        }
         cx.notify();
 
         // Its events: stops, output, the end.
@@ -612,7 +627,7 @@ impl Debugger {
                 // (Unfolded while this was being looked at: asked for now.)
                 this.fetch_missing(cx);
                 cx.emit(DebuggerEvent::Stopped(stop));
-                this.evaluate_watches(cx);
+                this.evaluate_watches(Looked::Stop, cx);
                 cx.notify();
             })
             .ok();
@@ -758,7 +773,7 @@ impl Debugger {
                     let stop = stop.clone();
                     this.fetch_missing(cx);
                     cx.emit(DebuggerEvent::Stopped(stop));
-                    this.evaluate_watches(cx);
+                    this.evaluate_watches(Looked::Frame, cx);
                     cx.notify();
                 }
             })
@@ -772,8 +787,8 @@ impl Debugger {
         if expression.is_empty() || self.watches.iter().any(|w| w.expression == expression) {
             return;
         }
-        self.watches.push(Watch { expression: expression.to_string(), value: None });
-        self.evaluate_watches(cx);
+        self.watches.push(Watch { expression: expression.to_string(), value: None, changed: false });
+        self.evaluate_watches(Looked::Added, cx);
         cx.notify();
     }
 
@@ -784,8 +799,10 @@ impl Debugger {
         }
     }
 
-    /// Works out every watch in the call looked at, while paused.
-    fn evaluate_watches(&mut self, cx: &mut Context<Self>) {
+    /// Works out every watch in the call looked at, while paused. At a new stop, those whose
+    /// value differs from the last stop's are marked changed; another call looked at marks
+    /// none; a watch added leaves the others' marks as they were.
+    fn evaluate_watches(&mut self, looked: Looked, cx: &mut Context<Self>) {
         let (Some(adapter), DebugState::Stopped(stop)) = (self.adapter.clone(), &self.state) else { return };
         let Some(frame) = stop.frames.get(stop.frame).map(|f| f.id) else { return };
         let expressions: Vec<String> = self.watches.iter().map(|w| w.expression.clone()).collect();
@@ -809,6 +826,13 @@ impl Debugger {
             this.update(cx, |this, cx| {
                 for (expression, value) in values {
                     if let Some(watch) = this.watches.iter_mut().find(|w| w.expression == expression) {
+                        match looked {
+                            Looked::Stop => {
+                                watch.changed = matches!((&watch.value, &value), (Some(Ok(was)), Ok(now)) if was != now)
+                            }
+                            Looked::Frame => watch.changed = false,
+                            Looked::Added => {}
+                        }
                         watch.value = Some(value);
                     }
                 }
@@ -829,6 +853,8 @@ impl Debugger {
     pub fn resume(&mut self, command: &str, cx: &mut Context<Self>) {
         let (Some(adapter), Some(thread)) = (&self.adapter, self.thread()) else { return };
         drop(adapter.request(command, json!({ "threadId": thread })));
+        // (What was being read of the last stop: not shown over the running program.)
+        self.stop_task = None;
         self.state = DebugState::Running;
         cx.emit(DebuggerEvent::Resumed);
         cx.notify();
@@ -843,8 +869,17 @@ impl Debugger {
 
     /// Ends the session, and the program with it.
     pub fn stop(&mut self, cx: &mut Context<Self>) {
-        if let Some(adapter) = &self.adapter {
-            drop(adapter.request("disconnect", json!({ "terminateDebuggee": true })));
+        // Asked to end the program, then given a moment to (a second at most) before the
+        // adapter's stopped: killed at once, it couldn't end the program it started.
+        if let Some(adapter) = self.adapter.take() {
+            let answer = adapter.request("disconnect", json!({ "terminateDebuggee": true }));
+            let timer = cx.background_executor().timer(std::time::Duration::from_secs(1));
+            cx.background_executor()
+                .spawn(async move {
+                    futures::future::select(Box::pin(answer), timer).await;
+                    drop(adapter);
+                })
+                .detach();
         }
         self.ended(cx);
     }
@@ -860,6 +895,9 @@ impl Debugger {
         }
         self.adapter = None;
         self.state = DebugState::Idle;
+        // (Work for a stop still under way would mark it stopped again, with nothing to debug.)
+        self.stop_task = None;
+        self.watch_task = None;
         cx.emit(DebuggerEvent::Ended);
         cx.notify();
     }

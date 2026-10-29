@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -252,14 +253,36 @@ fn running(pid: u32) -> bool {
 }
 
 /// Keeps `backups` as this Null's unsaved work in the project; none removes its file.
-pub fn save_backups(root: &Path, backups: &[Backup]) {
-    hold_own_lock();
-    let Some(file) = own_backups_file(root) else { return };
-    if backups.is_empty() {
-        std::fs::remove_file(&file).ok();
-        return;
+/// A turn for a backup's write, taken when its text is (see `save_backups_in_turn`).
+pub fn backup_turn() -> u64 {
+    static TURNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    TURNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// `save_backups`, unless a later turn's are kept already: a write that started earlier
+/// (in the background) and ends later doesn't put older text over newer.
+pub fn save_backups_in_turn(root: &Path, backups: &[Backup], turn: u64) -> bool {
+    static KEPT: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
+    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if kept.iter().any(|(r, t)| r == root && *t > turn) {
+        return true;
     }
-    let Ok(text) = serde_json::to_string(backups) else { return };
+    let saved = save_backups(root, backups);
+    if saved {
+        kept.retain(|(r, _)| r != root);
+        kept.push((root.to_path_buf(), turn));
+    }
+    saved
+}
+
+/// Whether they're kept (or, none, whether there's nothing left of them).
+pub fn save_backups(root: &Path, backups: &[Backup]) -> bool {
+    hold_own_lock();
+    let Some(file) = own_backups_file(root) else { return false };
+    if backups.is_empty() {
+        return std::fs::remove_file(&file).is_ok() || !file.exists();
+    }
+    let Ok(text) = serde_json::to_string(backups) else { return false };
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).ok();
     }
@@ -268,9 +291,7 @@ pub fn save_backups(root: &Path, backups: &[Backup]) {
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temp = file.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
-    if std::fs::write(&temp, text).is_ok() {
-        std::fs::rename(&temp, &file).ok();
-    }
+    std::fs::write(&temp, text).is_ok() && std::fs::rename(&temp, &file).is_ok()
 }
 
 /// The unsaved work left from last time (a crash, or a forced quit): this Null's, and
@@ -297,8 +318,9 @@ pub fn load_backups(root: &Path) -> Vec<Backup> {
         }
     }
     let own_file = own_backups_file(root);
-    if files.iter().any(|f| Some(f) != own_file.as_ref()) {
-        save_backups(root, &backups);
+    // (Theirs removed only once they're kept in this one's: a write that failed leaves
+    // them to be brought back next time.)
+    if files.iter().any(|f| Some(f) != own_file.as_ref()) && save_backups(root, &backups) {
         for file in files.iter().filter(|f| Some(*f) != own_file.as_ref()) {
             std::fs::remove_file(file).ok();
         }
@@ -448,6 +470,20 @@ mod tests {
         save_backups(&root, &[]);
         assert!(running.exists() && load_backups(&root).is_empty());
         std::fs::remove_file(&running).ok();
+    }
+
+    /// A backup written later but taken earlier (a background write ending after the next
+    /// one) doesn't put older text over newer.
+    #[test]
+    fn an_older_backup_never_replaces_a_newer_one() {
+        let root = crate::tools::test_dir("backups-turns").join("project");
+        let backup = |text: &str| Backup { path: Some(root.join("a.txt")), text: text.into(), disk: None };
+        let (older, newer) = (backup_turn(), backup_turn());
+        assert!(save_backups_in_turn(&root, &[backup("newer")], newer));
+        assert!(save_backups_in_turn(&root, &[backup("older")], older));
+        let kept: Vec<String> = load_backups(&root).into_iter().map(|b| b.text).collect();
+        assert_eq!(kept, ["newer"]);
+        save_backups(&root, &[]);
     }
 
     /// A Null runs while it holds its lock: a process given a gone Null's number since

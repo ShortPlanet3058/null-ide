@@ -12,13 +12,22 @@ pub enum ThemeName {
     Ash,
     Midnight,
     Moss,
+    /// Black with bright text and borders that read.
+    Contrast,
     Paper,
     Dune,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 6] =
-        [ThemeName::Null, ThemeName::Ash, ThemeName::Midnight, ThemeName::Moss, ThemeName::Paper, ThemeName::Dune];
+    pub const ALL: [ThemeName; 7] = [
+        ThemeName::Null,
+        ThemeName::Ash,
+        ThemeName::Midnight,
+        ThemeName::Moss,
+        ThemeName::Contrast,
+        ThemeName::Paper,
+        ThemeName::Dune,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -26,6 +35,7 @@ impl ThemeName {
             ThemeName::Ash => "Ash",
             ThemeName::Midnight => "Midnight",
             ThemeName::Moss => "Moss",
+            ThemeName::Contrast => "High Contrast",
             ThemeName::Paper => "Paper",
             ThemeName::Dune => "Dune",
         }
@@ -43,6 +53,7 @@ impl ThemeName {
             ThemeName::Ash => "Soft charcoal for long sessions",
             ThemeName::Midnight => "Deep blue, cool accents",
             ThemeName::Moss => "Dark green-grey, calm and warm",
+            ThemeName::Contrast => "Black, bright text, clear edges",
             ThemeName::Paper => "Light, for bright rooms",
             ThemeName::Dune => "Warm sand, terracotta cursor",
         }
@@ -121,26 +132,28 @@ impl Theme {
             ThemeName::Ash => Self::graphite(),
             ThemeName::Midnight => Self::midnight(),
             ThemeName::Moss => Self::moss(),
+            ThemeName::Contrast => Self::contrast(),
             ThemeName::Paper => Self::paper(),
             ThemeName::Dune => Self::dune(),
         }
     }
 
-    /// The default theme: true black, so OLED pixels stay switched off.
+    /// The default theme: true black everywhere, chrome included, so OLED pixels stay switched
+    /// off; hairlines do the separating.
     pub fn oled() -> Self {
         Self {
             background: rgb(0x000000).into(),
-            surface: rgb(0x08080a).into(),
+            surface: rgb(0x000000).into(),
             hairline: rgb(0x1d1d22).into(),
             foreground: rgb(0xebe8e2).into(),
             muted: rgb(0x8b8a92).into(),
             faint: rgb(0x46464e).into(),
             caret: rgb(0xf2b35b).into(),
             accent_soft: rgba(0xf2b35b1f).into(),
-            raised: rgb(0x141418).into(),
+            raised: rgb(0x0f0f12).into(),
             line_strong: rgb(0x2c2c33).into(),
             on_accent: rgb(0x1b1206).into(),
-            sunken: rgb(0x0b0b0d).into(),
+            sunken: rgb(0x000000).into(),
             scrim: rgba(0x00000073).into(),
             selection: rgba(0xf2b35b38).into(),
             find_match: rgba(0xffffff1f).into(),
@@ -167,7 +180,7 @@ impl Theme {
                 rgb(0x9ae0d7).into(),
                 rgb(0xf4f2ed).into(),
             ],
-            current_line: rgb(0x0b0b0e).into(),
+            current_line: rgb(0x070708).into(),
             keyword: rgb(0xc6a6f6).into(),
             ty: rgb(0x87c7e1).into(),
             function: rgb(0xf1d9a9).into(),
@@ -233,6 +246,61 @@ impl Theme {
             punctuation: rgb(0x91909a).into(),
             attribute: rgb(0x9ca7b8).into(),
             property: rgb(0xd6d4cf).into(),
+        }
+    }
+
+    /// Black with bright text, readable comments and borders that stand out.
+    pub fn contrast() -> Self {
+        Self {
+            background: rgb(0x000000).into(),
+            surface: rgb(0x000000).into(),
+            hairline: rgb(0x5a5a64).into(),
+            foreground: rgb(0xffffff).into(),
+            muted: rgb(0xc8c8d0).into(),
+            faint: rgb(0x8e8e98).into(),
+            caret: rgb(0xffbe55).into(),
+            accent_soft: rgba(0xffbe5533).into(),
+            raised: rgb(0x0c0c0f).into(),
+            line_strong: rgb(0xa0a0aa).into(),
+            on_accent: rgb(0x000000).into(),
+            sunken: rgb(0x000000).into(),
+            scrim: rgba(0x000000a6).into(),
+            selection: rgba(0xffbe5559).into(),
+            find_match: rgba(0xffffff3d).into(),
+            error: rgb(0xff8f8f).into(),
+            warning: rgb(0xffe066).into(),
+            git_added: rgb(0x5fe08a).into(),
+            git_modified: rgb(0x80b6ff).into(),
+            git_deleted: rgb(0xff8f8f).into(),
+            ansi: [
+                rgb(0x34343c).into(),
+                rgb(0xff8f8f).into(),
+                rgb(0x8ef0ae).into(),
+                rgb(0xffe066).into(),
+                rgb(0x80b6ff).into(),
+                rgb(0xd8bcff).into(),
+                rgb(0x80ece0).into(),
+                rgb(0xe8e8ee).into(),
+                rgb(0x8e8e98).into(),
+                rgb(0xffabab).into(),
+                rgb(0xb0f6c6).into(),
+                rgb(0xffeb99).into(),
+                rgb(0xa8ccff).into(),
+                rgb(0xe6d2ff).into(),
+                rgb(0xa8f4ec).into(),
+                rgb(0xffffff).into(),
+            ],
+            current_line: rgb(0x111116).into(),
+            keyword: rgb(0xd8bcff).into(),
+            ty: rgb(0x8edcff).into(),
+            function: rgb(0xffe2a8).into(),
+            macro_: rgb(0x80ece0).into(),
+            string: rgb(0xb4f09f).into(),
+            number: rgb(0xffad85).into(),
+            comment: rgb(0xa8acba).into(),
+            punctuation: rgb(0xd0d0d8).into(),
+            attribute: rgb(0xbcc8dc).into(),
+            property: rgb(0xf4f2ee).into(),
         }
     }
 
@@ -459,9 +527,14 @@ mod name_tests {
         assert_eq!(name("\"graphite\""), ThemeName::Ash);
         assert_eq!(name("\"null\""), ThemeName::Null);
         assert_eq!(serde_json::to_string(&ThemeName::Null).unwrap(), "\"null\"");
-        // Every theme builds, with its own background.
-        let backgrounds: std::collections::HashSet<String> =
-            ThemeName::ALL.iter().map(|n| format!("{:?}", Theme::named(*n).background)).collect();
+        // Every theme builds, and no two look alike (Null and High Contrast share their black).
+        let backgrounds: std::collections::HashSet<String> = ThemeName::ALL
+            .iter()
+            .map(|n| {
+                let theme = Theme::named(*n);
+                format!("{:?} {:?}", theme.background, theme.foreground)
+            })
+            .collect();
         assert_eq!(backgrounds.len(), ThemeName::ALL.len());
     }
 }

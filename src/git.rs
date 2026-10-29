@@ -21,6 +21,10 @@ pub fn not_a_repository() -> &'static str {
     }
 }
 
+/// Given to every git Null runs: a repository's own config can name a command for git to
+/// run on `status` (core.fsmonitor), so opening a folder someone sent would run it.
+pub const SAFE: [&str; 2] = ["-c", "core.fsmonitor=false"];
+
 /// git, run in `dir`. Paths given to it are names, never patterns: discarding `app/[id].tsx`
 /// mustn't touch `app/d.tsx`.
 fn command(dir: &Path) -> Command {
@@ -31,7 +35,7 @@ fn command(dir: &Path) -> Command {
             &wsl.distro,
             Some(&wsl.linux),
             "env",
-            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git"],
+            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git", SAFE[0], SAFE[1]],
         );
     }
     // A folder on a server: its git, run there, the same way.
@@ -40,7 +44,7 @@ fn command(dir: &Path) -> Command {
             &remote.host,
             Some(&remote.path),
             "env",
-            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git"],
+            &["GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "git", SAFE[0], SAFE[1]],
         );
     }
     let mut command = crate::tools::command("git");
@@ -48,7 +52,36 @@ fn command(dir: &Path) -> Command {
     // Asking (status) never writes git's index: that write was seen as a change, and set
     // every open file's committed version to be read again.
     command.env("GIT_OPTIONAL_LOCKS", "0");
+    if !crate::trust::is_trusted(dir) {
+        command.args(drivers_off(dir));
+    }
     command
+}
+
+/// For a folder not trusted (see `trust`): the filters its repository's own config names
+/// (commands git runs on files as `status` reads them), set to run nothing. One of yours
+/// (git-lfs's, in your own config) is left as it is.
+/// (Asked each time: only folders not trusted pay for it.)
+fn drivers_off(dir: &Path) -> Vec<String> {
+    let listed = crate::tools::command("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let mut off = Vec::new();
+    for line in listed.lines() {
+        let Some((scope, rest)) = line.split_once('\t') else { continue };
+        let key = rest.split_once(' ').map_or(rest, |(key, _)| key);
+        if matches!(scope, "local" | "worktree" | "command") {
+            off.extend(["-c".to_string(), format!("{key}=")]);
+            if let Some(name) = key.strip_prefix("filter.").and_then(|k| k.rsplit_once('.')).map(|(name, _)| name) {
+                off.extend(["-c".to_string(), format!("filter.{name}.required=false")]);
+            }
+        }
+    }
+    off
 }
 
 /// A path git printed (`--show-toplevel`, `--absolute-git-dir`) as Null reaches it: inside
@@ -114,7 +147,7 @@ fn output_given(
         script.push_str(&format!(" {key}={}", crate::remote::quote(value)));
     }
     script.push_str(" git");
-    for arg in args {
+    for arg in SAFE.iter().chain(args) {
         script.push(' ');
         script.push_str(&crate::remote::quote(arg));
     }
@@ -461,6 +494,23 @@ pub fn log(root: &Path, max: usize) -> Vec<LogCommit> {
         .collect()
 }
 
+/// One commit by its id, as the history lists it (None: not a commit here).
+pub fn log_commit(root: &Path, id: &str) -> Option<LogCommit> {
+    let format = "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%s%x1f%D";
+    let out = git(root, &["log", "-n1", format, id, "--"])?;
+    let fields: Vec<&str> = out.trim_end_matches('\n').split('\x1f').collect();
+    let [id, short, parents, author, time, subject, refs] = fields.as_slice() else { return None };
+    Some(LogCommit {
+        id: id.to_string(),
+        short: short.to_string(),
+        parents: parents.split_whitespace().map(str::to_string).collect(),
+        author: author.to_string(),
+        time: time.parse().unwrap_or(0),
+        subject: subject.to_string(),
+        refs: refs.split(", ").filter(|r| !r.is_empty()).map(str::to_string).collect(),
+    })
+}
+
 /// A commit's whole message.
 pub fn message_of(root: &Path, id: &str) -> String {
     git(root, &["log", "-n1", "--format=%B", id]).unwrap_or_default().trim_end().to_string()
@@ -690,8 +740,10 @@ pub fn revert(root: &Path, path: &Path, status: FileStatus) -> Result<(), String
         return Ok(());
     }
     // What's thrown away is kept in the file's history first (git writes it, not Null).
-    // (Not a server's: its history isn't kept here.)
-    if !crate::remote::is_remote(path) && path.is_file() {
+    // (A server's: from what Null last read of it, as its saves are kept.)
+    if crate::remote::is_remote(path) {
+        crate::local_history::keep_before_writing(path, &[]);
+    } else if path.is_file() {
         let real = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         crate::local_history::keep_before_writing(&real, &[]);
     }
@@ -830,7 +882,14 @@ pub fn switch_carrying_changes(root: &Path, branch: &Branch) -> Result<Vec<PathB
         Err(error) => {
             let conflicted: Vec<PathBuf> =
                 status(root).into_iter().filter(|(_, s)| *s == FileStatus::Conflicted).map(|(p, _)| p).collect();
-            if conflicted.is_empty() { Err(error) } else { Ok(conflicted) }
+            if !conflicted.is_empty() {
+                return Ok(conflicted);
+            }
+            // (Not lost: still set aside, where git's message alone wouldn't say.)
+            Err(format!(
+                "On {} now, but your changes couldn't be put back here: they're set aside (Bring Back Changes in ⌘K returns them). {error}",
+                branch.name
+            ))
         }
     }
 }
@@ -1236,6 +1295,8 @@ fn explain_switch_error(error: &str) -> String {
 /// Who last changed a line, and when.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineBlame {
+    /// The commit that last changed it.
+    pub id: String,
     /// "You" for the person committing here.
     pub author: String,
     /// Seconds since 1970.
@@ -1250,7 +1311,7 @@ pub fn blame_line(path: &Path, text: &str, line: usize) -> Option<LineBlame> {
     let dir = path.parent()?;
     let name = path.file_name()?.to_str()?;
     let range = format!("{},{}", line + 1, line + 1);
-    let args = ["blame", "--porcelain", "-L", &range, "--contents", "-", "--", name];
+    let args = ["blame", "--porcelain", "--no-textconv", "-L", &range, "--contents", "-", "--", name];
     let output = output_given(dir, &args, &[], Some(text.as_bytes())).ok()?;
     if !output.status.success() {
         return None;
@@ -1265,6 +1326,7 @@ pub fn blame_line(path: &Path, text: &str, line: usize) -> Option<LineBlame> {
     let author = field("author ")?;
     let me = git(dir, &["config", "user.name"]).map(|n| n.trim().to_string());
     Some(LineBlame {
+        id: commit.to_string(),
         author: if me.as_deref() == Some(author.as_str()) { "You".into() } else { author },
         time: field("author-time ")?.parse().ok()?,
         summary: field("summary ").unwrap_or_default(),
@@ -1629,6 +1691,50 @@ mod tests {
         drop_set_aside(&repo, 0, &sets[0].id).unwrap();
         assert!(set_aside_list(&repo).is_empty());
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A repository's config naming a command for git to run doesn't get it run by Null
+    /// looking at the repository.
+    #[test]
+    #[cfg(unix)]
+    fn a_repository_s_config_runs_nothing() {
+        let Some(repo) = scratch_repo("git-fsmonitor") else { return };
+        let ran = repo.join("ran");
+        git(&repo, &["config", "core.fsmonitor", &format!("touch '{}'; false", ran.display())]).unwrap();
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        assert_eq!(status(&repo).len(), 1);
+        assert!(!ran.exists(), "core.fsmonitor ran");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A repository in a folder not trusted: the filters its own config names don't run as
+    /// Null reads it.
+    #[test]
+    #[cfg(unix)]
+    fn a_repository_s_filters_run_nothing_until_trusted() {
+        let dir = crate::tools::test_dir("git-filters");
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("untrusted");
+        std::fs::create_dir_all(&repo).unwrap();
+        if git(&repo, &["init", "-q"]).is_none() {
+            return;
+        }
+        std::fs::write(repo.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]).unwrap();
+        let ran = dir.join("ran");
+        for part in ["clean", "smudge"] {
+            git(&repo, &["config", &format!("filter.evil.{part}"), &format!("touch '{}'; cat", ran.display())])
+                .unwrap();
+        }
+        // (Read again, as after unzipping: what's on disk is hashed through the filter.)
+        std::fs::write(repo.join("a.txt"), "b\n").unwrap();
+        std::fs::remove_file(repo.join(".git/index")).unwrap();
+        git(&repo, &["reset", "-q"]).unwrap();
+        assert!(!status(&repo).is_empty());
+        assert!(!ran.exists(), "a filter ran");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn scratch_repo(name: &str) -> Option<PathBuf> {
@@ -2172,6 +2278,10 @@ mod tests {
         // A line typed above (not saved): the next line is still the committed "one".
         let blame = blame_line(&file, "new\none\ntwo\n", 1).unwrap();
         assert_eq!((blame.author.as_str(), blame.summary.as_str()), ("You", "First lines"));
+        // Its commit, as the history lists it (a click on the blame opens it).
+        let commit = log_commit(&repo, &blame.id).unwrap();
+        assert_eq!((commit.id.as_str(), commit.subject.as_str()), (blame.id.as_str(), "First lines"));
+        assert!(log_commit(&repo, "0123456789abcdef0123456789abcdef01234567").is_none());
         assert!(blame_line(&file, "new\none\ntwo\n", 0).is_none());
         assert!(blame_line(&repo.join("untracked.txt"), "x\n", 0).is_none());
         std::fs::remove_dir_all(&repo).ok();

@@ -300,12 +300,18 @@ fn superscript(n: usize) -> String {
     n.to_string().chars().map(|d| "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(d.to_digit(10).unwrap_or(0) as usize).unwrap_or(d)).collect()
 }
 
+/// Blocks inside another (a quote's, a list item's).
 fn parse_lines(lines: &[&str]) -> Vec<Block> {
+    let Some(_deeper) = Deeper::new() else {
+        return vec![Block::Paragraph(vec![Inline::Text(lines.join("\n"))])];
+    };
     parse_lines_at(lines).0
 }
 
 /// The blocks of `lines`, and the line each starts on.
 fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
+    // The last line a `$$` formula could close on (asked at each `$$`, it was read again).
+    let last_close = lines.iter().rposition(|l| l.trim_end().ends_with("$$"));
     let mut blocks = Vec::new();
     let mut starts = Vec::new();
     let mut begin = 0;
@@ -331,7 +337,7 @@ fn parse_lines_at(lines: &[&str]) -> (Vec<Block>, Vec<usize>) {
         }
         // A formula on lines of its own: `$$ … $$`, as a ```math block (when it closes:
         // a `$$` left open is text).
-        let closes_later = || lines[i + 1..].iter().any(|l| l.trim_end().ends_with("$$"));
+        let closes_later = || last_close.is_some_and(|last| last > i);
         if let Some(rest) = trimmed.strip_prefix("$$")
             && (rest.trim_end().strip_suffix("$$").is_some() || closes_later())
         {
@@ -954,7 +960,34 @@ fn align_of(cell: &str) -> Align {
 
 // ---------- inlines ----------
 
+/// How far ahead a link, a tag or a web address is looked for: one written longer is text.
+const SCANNED: usize = 4096;
+
+/// How deep quotes, lists and links go inside each other: deeper is shown as text (a line
+/// of 50,000 `>` would use up the stack, and Null with it).
+const DEEPEST: usize = 32;
+
+thread_local! {
+    static DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One level deeper while it's held; None past `DEEPEST`.
+struct Deeper;
+
+impl Deeper {
+    fn new() -> Option<Self> {
+        DEPTH.with(|d| (d.get() < DEEPEST).then(|| d.set(d.get() + 1))).map(|()| Deeper)
+    }
+}
+
+impl Drop for Deeper {
+    fn drop(&mut self) {
+        DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 pub fn inlines(text: &str) -> Vec<Inline> {
+    let Some(_deeper) = Deeper::new() else { return vec![Inline::Text(text.to_string())] };
     let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     let mut plain = String::new();
@@ -966,7 +999,14 @@ pub fn inlines(text: &str) -> Vec<Inline> {
     };
     while i < chars.len() {
         let c = chars[i];
-        let rest: String = chars[i..].iter().collect();
+        // (What follows, read only where a link or a tag can start, and only so far: read
+        // whole at every letter, a long paragraph took seconds.)
+        let starts = |s: &str| chars[i..].iter().copied().take(s.chars().count()).eq(s.chars());
+        let rest: String = if starts("![") || starts("<http") || starts("<br") || starts("http") {
+            chars[i..].iter().take(SCANNED).collect()
+        } else {
+            String::new()
+        };
         match c {
             '\\' if chars.get(i + 1).is_some_and(|n| n.is_ascii_punctuation()) => {
                 plain.push(chars[i + 1]);
@@ -1151,6 +1191,8 @@ fn closing(chars: &[char], from: usize, marker: &str) -> Option<usize> {
 fn bracketed(chars: &[char], start: usize) -> Option<(String, String, usize)> {
     let mut depth = 0;
     let mut close = None;
+    // (Looked for so far only: `[[[[…` with no end would be read to the end for each.)
+    let chars = &chars[..chars.len().min(start + SCANNED)];
     for (n, &c) in chars.iter().enumerate().skip(start) {
         match c {
             '[' => depth += 1,
@@ -1914,6 +1956,24 @@ mod tests {
     /// quote stays a quote.
     /// Formulas: on lines of their own (`$$`), as a math block; in a line (`$…$`), as the
     /// characters they read as, in italics. Money isn't a formula.
+    /// Written to break it: nesting deep enough to use up the stack, a paragraph long
+    /// enough to take seconds a letter at a time. Read in no time, as text past a depth.
+    #[test]
+    fn crafted_markdown_is_read_quickly_and_whole() {
+        let started = std::time::Instant::now();
+        for source in [
+            format!("{} deep", ">".repeat(100_000)),
+            format!("{}deep", "- ".repeat(50_000)),
+            format!("{}x{}", "[".repeat(50_000), "](u)".repeat(50_000)),
+            "word h<ttp ![ ".repeat(40_000),
+            "$$\n".repeat(20_000),
+        ] {
+            let blocks = parse(&source);
+            assert!(!blocks.is_empty());
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    }
+
     #[test]
     fn formulas() {
         let blocks = parse(

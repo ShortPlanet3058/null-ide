@@ -19,17 +19,56 @@ static FONTS: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
 /// What an SVG drawn is: the image, and its size in points.
 pub type Drawn = (Arc<RenderImage>, (f32, f32));
 
+/// The most an SVG (or an image it names) is read to, unpacked: more is someone's trick.
+const MAX_BYTES: u64 = 32 << 20;
+
 /// `svg` drawn `scale` times (2 on a Retina screen), and its size in points; files it names
-/// are found from `dir` (its folder). None when it isn't an SVG that draws.
+/// are found from `dir` (its folder), and only there. None when it isn't an SVG that draws.
 pub fn draw(svg: &[u8], scale: f32, dir: Option<&std::path::Path>) -> Option<Drawn> {
-    let options =
-        usvg::Options { fontdb: FONTS.clone(), resources_dir: dir.map(|d| d.to_path_buf()), ..Default::default() };
-    let tree = usvg::Tree::from_data(svg, &options).ok()?;
+    // Packed (`.svgz`): unpacked here, to a limit (a small file can unpack to gigabytes).
+    let unpacked;
+    let svg = if svg.starts_with(&[0x1f, 0x8b]) {
+        use std::io::Read;
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(svg).take(MAX_BYTES + 1).read_to_end(&mut out).ok()?;
+        if out.len() as u64 > MAX_BYTES {
+            return None;
+        }
+        unpacked = out;
+        &unpacked[..]
+    } else {
+        svg
+    };
+    let options = usvg::Options {
+        fontdb: FONTS.clone(),
+        resources_dir: dir.map(|d| d.to_path_buf()),
+        image_href_resolver: usvg::ImageHrefResolver { resolve_string: Box::new(named_image), ..Default::default() },
+        ..Default::default()
+    };
+    let tree = usvg::Tree::from_str(std::str::from_utf8(svg).ok()?, &options).ok()?;
     let (width, height) = (tree.size().width(), tree.size().height());
     let scale = scale.min(MAX_PIXELS / width.max(height).max(1.));
     let mut pixmap = tiny_skia::Pixmap::new((width * scale).ceil() as u32, (height * scale).ceil() as u32)?;
     resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
     Some((Arc::new(RenderImage::new(vec![image::Frame::new(bgra(&pixmap)?)])), (width, height)))
+}
+
+/// An image an SVG names (`<image href="logo.png">`): a file in the SVG's folder (or in
+/// one inside it), not too big. Not `/dev/zero`, not a file elsewhere on the computer.
+fn named_image(href: &str, options: &usvg::Options) -> Option<usvg::ImageKind> {
+    let dir = dunce::canonicalize(options.resources_dir.as_ref()?).ok()?;
+    let href = std::path::Path::new(href);
+    if href.is_absolute() {
+        return None;
+    }
+    let path = dunce::canonicalize(dir.join(href)).ok()?;
+    let meta = std::fs::metadata(&path).ok()?;
+    if !path.starts_with(&dir) || !meta.is_file() || meta.len() > MAX_BYTES {
+        return None;
+    }
+    let data = std::fs::read(&path).ok()?;
+    // (What kind of image it is, from its first bytes, as usvg does for one written inline.)
+    (usvg::ImageHrefResolver::default_data_resolver())("text/plain", Arc::new(data), options)
 }
 
 /// SVG files drawn lately (or found not to draw), by path, with the time they were changed.
@@ -45,6 +84,9 @@ pub fn image(path: &std::path::Path) -> gpui::Img {
     // (Its size too: Windows' clock can give two quick writes one time.)
     let changed = std::fs::metadata(path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
     let (true, Some(changed)) = (svg, changed) else { return gpui::img(path.to_path_buf()) };
+    if changed.1 > MAX_BYTES {
+        return gpui::img(std::path::PathBuf::new());
+    }
     let found = DRAWN
         .lock()
         .ok()
@@ -68,7 +110,8 @@ pub fn image(path: &std::path::Path) -> gpui::Img {
         Some((image, (width, height))) => {
             gpui::img(gpui::ImageSource::Render(image)).w(gpui::px(width)).h(gpui::px(height))
         }
-        None => gpui::img(path.to_path_buf()),
+        // (Not given to gpui to try: it would read the files it names wherever they are.)
+        None => gpui::img(std::path::PathBuf::new()),
     }
 }
 
@@ -189,6 +232,30 @@ mod tests {
         let (image, _) = draw(beside, 1., Some(&dir)).expect("drawn");
         let pixels = image.as_bytes(0).unwrap();
         assert!(red(&pixels[(2 * 4 + 2) * 4..][..4]), "the JPEG: {:?}", &pixels[..4]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What an SVG names elsewhere isn't read (`/dev/zero` would be read forever), and a
+    /// packed one that unpacks to too much isn't drawn.
+    #[test]
+    fn an_svg_reads_nothing_outside_its_folder() {
+        use std::io::Write;
+        let dir = crate::tools::test_dir("svg-outside");
+        std::fs::create_dir_all(dir.join("inside")).unwrap();
+        std::fs::write(dir.join("secret.svg"), r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#)
+            .unwrap();
+        let options = usvg::Options { resources_dir: Some(dir.join("inside")), ..Default::default() };
+        for href in ["/dev/zero", "../secret.svg", "/etc/hosts"] {
+            assert!(named_image(href, &options).is_none(), "{href}");
+        }
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><image width="4" height="4" href="/dev/zero"/></svg>"#;
+        assert!(draw(svg, 1., Some(&dir.join("inside"))).is_some(), "drawn without it");
+        let mut packed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let zeros = vec![b' '; 1 << 20];
+        for _ in 0..(MAX_BYTES >> 20) + 1 {
+            packed.write_all(&zeros).unwrap();
+        }
+        assert!(draw(&packed.finish().unwrap(), 1., None).is_none(), "unpacks to too much");
         std::fs::remove_dir_all(&dir).ok();
     }
 

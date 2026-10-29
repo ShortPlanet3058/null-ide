@@ -8,6 +8,8 @@
 # PROJECT can be a folder on a server (`ssh://me@box:2222/home/me/app`): opened there as
 # it is (no copy), with your ssh (a connection already open, or your keys or agent).
 # NULL_QA_SETTINGS='"keymap": "vim", "word_wrap": true' adds settings to its own.
+# NULL_QA_THEMES=<folder> puts the theme files in it (`<name>.json`) in its themes folder.
+# NULL_QA_UNTRUSTED=1 opens PROJECT as a folder not trusted yet (Safe mode).
 # NULL_QA_FAKE_AI=1 gives it an AI: a stand-in on this Mac (fake_ai.py) with set answers.
 # NULL_QA_FILE=app.rs:4:2 opens that file (at that place) instead of the project, as
 # `null app.rs:4:2` does; NULL_QA_WAIT=1 starts it with --wait (as git's editor).
@@ -92,7 +94,17 @@ case "$settings" in
     *'"welcomed"'*) printf '{ %s }\n' "$settings" ;;
     *) printf '{ "welcomed": true%s }\n' "${settings:+, $settings}" ;;
 esac > "$home/.config/null/settings.json"
+if [ -n "${NULL_QA_THEMES:-}" ]; then
+    mkdir -p "$home/.config/null/themes"
+    cp "$NULL_QA_THEMES"/*.json "$home/.config/null/themes/"
+fi
 log="$home/qa.log"
+# Its project trusted (see src/trust.rs), unless NULL_QA_UNTRUSTED=1 (to see Safe mode).
+mkdir -p "$home/data"
+if [ -z "$remote" ] && [ "${NULL_QA_UNTRUSTED:-}" != 1 ]; then
+    python3 -I -c 'import json, sys; print(json.dumps([sys.argv[1]]))' "$(cd "$project" && pwd -P)" \
+        > "$home/data/trusted-folders.json"
+fi
 
 # The window's number, or the log and why not.
 window_of() {

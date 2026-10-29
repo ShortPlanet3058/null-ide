@@ -34,6 +34,9 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let resolved = located(program.as_ref());
     #[allow(unused_mut)]
     let mut command = std::process::Command::new(resolved.as_deref().map_or(program.as_ref(), |p| p.as_os_str()));
+    if program.as_ref() == "git" {
+        command.args(crate::git::SAFE);
+    }
     // Tests' repositories keep their files as written: no CRLF from Windows' git
     // (core.autocrlf, set there by default), whatever the machine's settings.
     #[cfg(test)]
@@ -50,6 +53,19 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+/// Stops `child` and what it started (an AI tool's own processes: `codex.cmd` is cmd.exe,
+/// running node), then waits for it. On Unix that's its process group: started in its own
+/// (`process_group(0)`).
+pub fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id().to_string();
+    #[cfg(windows)]
+    let _ = command("taskkill").args(["/T", "/F", "/PID", &pid]).output();
+    #[cfg(unix)]
+    let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).output();
+    child.kill().ok();
+    child.wait().ok();
 }
 
 /// Where a bare program name is installed, looked up once (`git` runs often).

@@ -126,10 +126,10 @@ fn by_line(text: &str, style: impl Fn(&[String]) -> String) -> String {
 /// Selections grown by [`ExpandSelection`], to shrink back through.
 #[derive(Default)]
 pub(super) struct Expansions {
-    /// The selection before each step, last step last.
-    before: Vec<Selection>,
-    /// Where the last step left the selection: if it moved since, the steps are forgotten.
-    at: Option<Selection>,
+    /// Every cursor's selection before each step (the main one first), last step last.
+    before: Vec<Vec<Selection>>,
+    /// Where the last step left them: if they moved since, the steps are forgotten.
+    at: Option<Vec<Selection>>,
 }
 
 /// The smallest range in `ranges` (innermost first) that holds `selection` and is larger.
@@ -140,28 +140,48 @@ fn next_larger(selection: &Range<usize>, ranges: impl Iterator<Item = Range<usiz
 }
 
 impl Editor {
+    /// The cursors as `all` has them (the main one first), overlapping ones merged.
+    fn set_all_selections(&mut self, all: &[Selection]) {
+        let cursors = all.iter().enumerate().map(|(i, s)| (super::cursors::Cursor::new(*s), i == 0)).collect();
+        self.set_cursors(cursors);
+    }
+
+    /// ⌥↑: each cursor's selection grows to the piece of syntax around it (with no syntax
+    /// tree: the word, the line, everything). One that can't grow stays as it is.
     pub(super) fn expand_selection(&mut self, _: &ExpandSelection, _: &mut Window, cx: &mut Context<Self>) {
-        self.single_cursor();
-        let current = self.selection;
-        let range = current.range();
-        let Some(larger) = self.syntax_parent(&range).or_else(|| self.plain_parent(&range)) else { return };
-        if self.expansions.at != Some(current) {
+        let current = self.all_selections();
+        let larger: Vec<Selection> = current
+            .iter()
+            .map(|s| {
+                let range = s.range();
+                match self.syntax_parent(&range).or_else(|| self.plain_parent(&range)) {
+                    Some(r) => Selection { anchor: r.start, head: r.end },
+                    None => *s,
+                }
+            })
+            .collect();
+        if larger == current {
+            return;
+        }
+        if self.expansions.at.as_ref() != Some(&current) {
             self.expansions.before.clear();
         }
         self.expansions.before.push(current);
-        self.selection = Selection { anchor: larger.start, head: larger.end };
-        self.expansions.at = Some(self.selection);
+        // (Two grown into the same piece: one.)
+        self.set_all_selections(&larger);
+        self.expansions.at = Some(self.all_selections());
         self.goal_column = None;
         self.touch(cx);
     }
 
     pub(super) fn shrink_selection(&mut self, _: &ShrinkSelection, _: &mut Window, cx: &mut Context<Self>) {
-        if self.expansions.at != Some(self.selection) {
+        if self.expansions.at.as_ref() != Some(&self.all_selections()) {
             self.expansions.before.clear();
             return;
         }
         let Some(previous) = self.expansions.before.pop() else { return };
-        self.selection = previous;
+        // (As many cursors as there were: merged ones come back.)
+        self.set_all_selections(&previous);
         self.expansions.at = (!self.expansions.before.is_empty()).then_some(previous);
         self.goal_column = None;
         self.touch(cx);
@@ -813,6 +833,17 @@ mod tests {
             e.selection = Selection::caret(0);
             e.shrink_selection(&ShrinkSelection, window, cx);
             assert_eq!(e.selection, Selection::caret(0));
+
+            // With several cursors: each grows by its own syntax, and shrinks back.
+            e.selection = Selection::caret(e.buffer.offset(1, 17));
+            e.extra = vec![super::super::cursors::Cursor::new(Selection::caret(e.buffer.offset(1, 8)))];
+            e.expand_selection(&ExpandSelection, window, cx);
+            let texts: Vec<String> = e.all_selections().iter().map(|s| e.buffer.slice(s.range())).collect();
+            assert_eq!(texts, ["10", "x"]);
+            e.expand_selection(&ExpandSelection, window, cx);
+            e.shrink_selection(&ShrinkSelection, window, cx);
+            let texts: Vec<String> = e.all_selections().iter().map(|s| e.buffer.slice(s.range())).collect();
+            assert_eq!(texts, ["10", "x"]);
         });
     }
 

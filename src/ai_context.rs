@@ -53,6 +53,46 @@ pub fn conventions(root: &Path) -> Option<(&'static str, String)> {
     kept
 }
 
+/// Whether a file looks like it holds secrets (`.env`, a private key, a token's file): its
+/// text is never sent to AI, whatever's asked. (`.env.example` and the like hold none.)
+pub fn holds_secrets(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return false };
+    let name = name.to_lowercase();
+    let example = [".example", ".sample", ".template", ".dist"].iter().any(|e| name.ends_with(e));
+    if name == ".env" || ((name.starts_with(".env.") || name.ends_with(".env")) && !example) {
+        return true;
+    }
+    let keys = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".p8", ".keytab", ".tfvars", ".gpg"];
+    if keys.iter().any(|k| name.ends_with(k)) {
+        return true;
+    }
+    let private_keys = ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk"];
+    if private_keys.iter().any(|k| name == *k || (name.starts_with(&format!("{k}.")) && !name.ends_with(".pub"))) {
+        return true;
+    }
+    [
+        ".netrc",
+        "_netrc",
+        ".npmrc",
+        ".pypirc",
+        ".pgpass",
+        "credentials",
+        "credentials.json",
+        ".git-credentials",
+        "secrets.json",
+        "secrets.yaml",
+        "secrets.yml",
+        ".envrc",
+        ".vault-token",
+        ".dockercfg",
+        "kubeconfig",
+        ".htpasswd",
+        "terraform.tfstate",
+        "terraform.tfstate.backup",
+    ]
+    .contains(&name.as_str())
+}
+
 /// What to send with a request about `lines` of `text` (the file at `path`).
 pub fn for_request(
     path: Option<&Path>,
@@ -151,6 +191,19 @@ fn used_definitions<'a>(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn files_holding_secrets_are_told() {
+        for name in
+            [".env", ".env.local", "prod.env", "server.pem", "id_ed25519", "id_rsa.old", ".npmrc", "credentials"]
+        {
+            assert!(holds_secrets(Path::new(name)), "{name}");
+        }
+        for name in [".env.example", ".env.template", "id_ed25519.pub", "main.rs", "environment.ts", "keys.md"] {
+            assert!(!holds_secrets(Path::new(name)), "{name}");
+        }
+    }
+
     use super::*;
 
     fn definition(path: &str, row: usize, name: &str, line: &str) -> Definition {

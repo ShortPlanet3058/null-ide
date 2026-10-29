@@ -140,10 +140,11 @@
 
   // ---------- the themes, live ----------
   const THEMES = {
-    Null: { bg: "#000000", surface: "#08080a", fg: "#ebe8e2", muted: "#8b8a92", faint: "#46464e", line: "#1d1d22", raised: "#141418", caret: "#f2b35b", kw: "#c6a6f6", ty: "#87c7e1", fn: "#f1d9a9", st: "#a9d59c", nu: "#f3a37e", co: "#5f626e", pu: "#8d8c96" },
+    Null: { bg: "#000000", surface: "#000000", fg: "#ebe8e2", muted: "#8b8a92", faint: "#46464e", line: "#1d1d22", raised: "#0f0f12", caret: "#f2b35b", kw: "#c6a6f6", ty: "#87c7e1", fn: "#f1d9a9", st: "#a9d59c", nu: "#f3a37e", co: "#5f626e", pu: "#8d8c96" },
     Ash: { bg: "#131417", surface: "#18191d", fg: "#e4e3e0", muted: "#8f8f98", faint: "#4d4e56", line: "#26272d", raised: "#212227", caret: "#efb565", kw: "#c4a8f0", ty: "#8ac6dd", fn: "#eed9b0", st: "#acd3a0", nu: "#f0a685", co: "#676a75", pu: "#91909a" },
     Midnight: { bg: "#0b0e14", surface: "#0f131b", fg: "#dfe4ee", muted: "#8590a6", faint: "#414b60", line: "#1c2230", raised: "#151a24", caret: "#7cc4e8", kw: "#b7a3f2", ty: "#8bd0e6", fn: "#e9d7a8", st: "#a4d4a3", nu: "#f0a682", co: "#58627a", pu: "#8890a3" },
     Moss: { bg: "#101311", surface: "#141815", fg: "#e2e5dd", muted: "#8c9488", faint: "#474f47", line: "#222823", raised: "#1a1f1b", caret: "#b5cf85", kw: "#d0a6d8", ty: "#8ec9c0", fn: "#e8d39c", st: "#b7d48f", nu: "#eba37c", co: "#606b5f", pu: "#8f968b" },
+    "High Contrast": { bg: "#000000", surface: "#000000", fg: "#ffffff", muted: "#c8c8d0", faint: "#8e8e98", line: "#5a5a64", raised: "#0c0c0f", caret: "#ffbe55", kw: "#d8bcff", ty: "#8edcff", fn: "#ffe2a8", st: "#b4f09f", nu: "#ffad85", co: "#a8acba", pu: "#d0d0d8" },
     Paper: { bg: "#fcfcfb", surface: "#f4f4f2", fg: "#1d1e22", muted: "#6a6b72", faint: "#b0b1b7", line: "#e6e5e1", raised: "#ffffff", caret: "#b4620c", kw: "#7a3ec8", ty: "#1e6c92", fn: "#8c4a00", st: "#3a7a2e", nu: "#b4461e", co: "#9a9ca3", pu: "#6f7077" },
     Dune: { bg: "#f6f1e7", surface: "#efe8da", fg: "#2b2620", muted: "#75695a", faint: "#b6aa97", line: "#e2d9c7", raised: "#fbf8f1", caret: "#b5532d", kw: "#8a3f8f", ty: "#2c6e7f", fn: "#8f4a10", st: "#527a26", nu: "#b5532d", co: "#a2967f", pu: "#7a6e5e" },
   };

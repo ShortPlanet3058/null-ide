@@ -20,7 +20,12 @@ install -Dm755 "$bin" "$HOME/.local/bin/null"
 install -Dm644 "$icon" "$data/icons/hicolor/scalable/apps/null.svg"
 # (Exec names it whole: ~/.local/bin isn't on every desktop session's PATH.)
 mkdir -p "$data/applications"
-sed "s|^Exec=null |Exec=$HOME/.local/bin/null |" "$desktop" > "$data/applications/null.desktop"
+# (Quoted as a .desktop file wants it, then made safe for sed: a home named with a space,
+# a `&`, a `|`, a `%` or a `\` stays as it is. A `\` is escaped twice: in the quotes, and
+# in the file's text.)
+exe=$(printf '%s' "$HOME/.local/bin/null" | sed -e 's/\\/\\\\\\\\/g' -e 's/["`$]/\\\\&/g' -e 's/%/%%/g')
+exe=$(printf '"%s"' "$exe" | sed 's/[|&\\]/\\&/g')
+sed "s|^Exec=null |Exec=$exe |" "$desktop" > "$data/applications/null.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database "$data/applications" || true
 # (Kept where it outlives the download: removing Null is one command.)
 install -Dm755 "$here/uninstall.sh" "$data/null/uninstall.sh"

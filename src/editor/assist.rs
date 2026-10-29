@@ -206,6 +206,10 @@ impl Editor {
         if !cx.global::<Settings>().ai.ready() {
             return;
         }
+        if self.path.as_deref().is_some_and(crate::ai_context::holds_secrets) {
+            let at = self.selection.head;
+            return self.show_notice(at, "This file looks like it holds secrets: it isn't sent to AI.".into(), cx);
+        }
         if let Some(prompt) = &self.prompt {
             let keys = if prompt.writing { self.writing_focus.clone() } else { prompt.input.focus_handle(cx) };
             return window.focus(&keys);
@@ -618,7 +622,7 @@ impl Editor {
     /// A failed test explained: the test (the item at `line`) asked about with what its run
     /// said, in a note under it.
     pub fn explain_failure(&mut self, line: usize, output: String, window: &mut Window, cx: &mut Context<Self>) {
-        if !cx.global::<Settings>().ai.ready() {
+        if !cx.global::<Settings>().ai.ready() || self.path.as_deref().is_some_and(crate::ai_context::holds_secrets) {
             return;
         }
         self.set_caret_point((line.min(self.buffer.len_lines().saturating_sub(1)), 0), cx);

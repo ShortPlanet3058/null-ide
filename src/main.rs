@@ -85,6 +85,7 @@ mod svg_image;
 mod system_clipboard;
 mod tasks;
 mod terminal;
+mod terminal_ai;
 mod terminal_links;
 mod terminal_watch;
 mod test_at;
@@ -93,6 +94,7 @@ mod theme;
 mod tools;
 mod trace;
 mod trash_prompt;
+mod trust;
 mod ui;
 mod updates;
 mod user_keys;
@@ -525,6 +527,7 @@ fn main() {
     trace::mark("main");
     tools::keep_data_private();
     crash::record();
+    trust::start();
     // The colouring rules of the usual languages, made ready meanwhile (each took 25 ms of
     // opening its first file).
     std::thread::spawn(|| {

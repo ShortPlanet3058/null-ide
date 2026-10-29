@@ -1030,8 +1030,10 @@ pub fn install_hint(id: ProviderId) -> Option<&'static str> {
     }
 }
 
+/// Run from Null's own folder: from a project's, a CLI would take that project's settings
+/// (its hooks, its environment) for a question that only needs an answer.
 fn spawn_cli(program: &str, args: &[String], input: &str) -> Result<std::process::Child, String> {
-    spawn_cli_in(program, args, input, None)
+    spawn_cli_in(program, args, input, crate::tools::data_dir().filter(|d| d.is_dir()).as_deref())
 }
 
 fn spawn_cli_in(
@@ -1050,6 +1052,9 @@ fn spawn_cli_in(
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
+    // (A group of its own: stopped, what it started stops with it; see `tools::kill_tree`.)
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     // Claude Code bills an ANTHROPIC_API_KEY over the person's plan when one is set: this
     // provider is about the plan.
     if id == ProviderId::ClaudeCode {
@@ -1233,6 +1238,11 @@ pub fn run_task(
             }
             if !matches!(effort, Effort::Auto | Effort::Off) {
                 args.extend(["--effort".into(), effort.key().into()]);
+            }
+            // A folder not trusted (see `trust`): its `.claude` settings (hooks, environment)
+            // aren't taken, only yours.
+            if !crate::trust::is_trusted(root) {
+                args.extend(["--setting-sources".into(), "user".into()]);
             }
             ("claude", args, task.to_string())
         }

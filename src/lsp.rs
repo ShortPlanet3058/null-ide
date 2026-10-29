@@ -297,7 +297,12 @@ impl LanguageServer {
 
 impl Drop for LanguageServer {
     fn drop(&mut self) {
-        let _ = self.child.lock().unwrap().kill();
+        // Stopped, then waited for (killed, it ends at once): no process left behind as a
+        // zombie each time one's started again.
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        if child.kill().is_ok() {
+            let _ = child.wait();
+        }
     }
 }
 

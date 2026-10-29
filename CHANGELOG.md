@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.2.2
+
+Null opens a folder it hasn't seen in Safe mode, is black all the way round, writes and
+explains terminal commands with AI, has a High Contrast theme, and fixes what a security
+audit and the rest of the outside audit found.
+
+- Folders you trust: a folder Null hasn't seen before opens in Safe mode, its language
+  servers off (they run a project's own code: its `.venv`'s programs, its TypeScript,
+  Rust build scripts), its `.venv` not activated in the terminal, its settings file only
+  setting how text is edited. Trust Folder in the status bar turns it all on, once. The
+  folders you'd opened before are trusted.
+- Null's own theme is black all the way round: the tab bar, sidebar, title and status bars
+  are as black as the code, set apart by thin lines, so an OLED screen keeps those pixels off.
+- The terminal, with AI on: `# what you want` then Tab writes the command for it on the line
+  (not run); after a command that went wrong, "Explain what went wrong" in the corner says
+  why, with the command that puts it right to put on the line.
+- A new High Contrast theme: black, white text, comments you can read and edges that stand
+  out (⌘K, Settings, or the Theme menu).
+- A click on who last changed the line (at its end, with Show Who Changed the Line on)
+  opens that commit.
+- Settings → AI with Ollama lists the models it has installed, first, to pick with a click.
+- Files that hold secrets (`.env`, private keys, `.npmrc`…) are never sent to AI: ⌘I says so
+  there, suggestions stay quiet, and Review and commit drafts leave them out.
+- Debugging: a variable or watch whose value changed since the last stop shows in amber.
+- Expand and Shrink Selection (⌥↑ ⌥↓) work on every cursor, each by its own syntax.
+- Fixes from a security audit:
+  - A project's `.null/settings.json` can't choose your AI (where your code and API key
+    go), your shortcuts or updates.
+  - git run by Null never runs the command a repository's own config names for `status`
+    (`core.fsmonitor`): opening a folder someone sent ran it. In Safe mode, its filters
+    don't run either.
+  - AI tasks don't read files that hold secrets, and don't write into `.git`, `.null`,
+    `.claude`, `.cargo`, `.venv` or `node_modules`.
+  - The terminal: a file whose name holds control characters, dropped in, can't press
+    keys (its name is written as codes); pasted text keeps only tabs and line breaks; a
+    program setting the clipboard (OSC 52) is said.
+  - SVGs read the images they name only from their own folder, and a packed one only to a
+    size; Markdown and pasted HTML nested thousands deep, or a huge paragraph, no longer
+    crash or freeze Null; Export as HTML keeps out `javascript:` links however written.
+  - SSH: a password typed for one server is never given to another asking the same words.
+  - Linux: a `.deb` update is checked again as it's installed, as root; Null takes its
+    lock before handing files to an older one's address.
+  - Stopping an AI task stops what its CLI started too (Codex's node on Windows).
+  - Terminal AI: the command isn't written if the line changed meanwhile (a paste); it's
+    told which PowerShell it writes for; a reasoning model's thinking is left out.
+  - TLS libraries updated (rustls, webpki) for their advisories.
+  - Also: a click on who changed the line finds the commit in the file's own repository;
+    changed values in the debugger are compared stop to stop, not when another call is
+    looked at; a notebook keeps its unedited cells exactly as written.
+- More from the outside audit:
+  - The commit message's body field takes several lines and keeps them (Undo Last Commit
+    gave back a body flattened onto one line).
+  - ⌘K: typing a group's name (`git`) lists its commands before others whose name only has
+    its letters strewn across it ("Go to Last Edit").
+  - SSH: a mistyped password is asked again, not tried three times over (a server can lock
+    you out for that); a new file on a server is made only if none has that name by then.
+  - An AI task's review takes in a file that grew past 1 MB or became ignored while it ran.
+  - The debugger ends a program it started before letting go of the adapter, and pressing
+    Stop while it read where the program stopped no longer leaves it "stopped" with nothing.
+  - Language servers, debuggers and AI tasks stopped are waited for (no leftover
+    processes); closing a window saves its session as it is and stops its servers.
+  - Notebooks: a Markdown cell ending in a line break shows no extra empty line.
+  - Unsaved work kept for after a crash: an older background write can't replace a newer
+    one, and the last run's backups are removed only once kept in this run's.
+  - Switching branch with changes that can't be put back on the other says they're set
+    aside (Bring Back Changes); Revert on a server keeps the file's history.
+  - Linux's install.sh writes the menu entry right for a home folder with a space or `&`.
+- Windows: Ctrl+- makes text smaller again on keyboards with their own - key (a French
+  AZERTY's), where it went to tab 6.
+
 ## 0.2.1
 
 Null tells you what's new after it updates itself, picks what ⌘I changes from the code's

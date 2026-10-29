@@ -152,6 +152,7 @@ actions!(
         UseAshTheme,
         UseMidnightTheme,
         UseMossTheme,
+        UseContrastTheme,
         UsePaperTheme,
         UseDuneTheme,
         SearchProject,
@@ -208,6 +209,10 @@ actions!(
         ShowNotes,
         /// The failed test at the cursor (or the first one that failed) explained by AI.
         ExplainTestFailure,
+        /// Why the terminal's last command went wrong, from AI.
+        ExplainTerminalError,
+        TrustFolder,
+        StopTrustingFolder,
         /// Asks now whether a newer Null is out.
         CheckForUpdates,
         /// What changed in this version (since the one before, after an update).
@@ -941,6 +946,14 @@ pub struct Workspace {
     debug_show_output: bool,
     /// The paused call's variables the code shows, with values worth showing.
     debug_locals: Vec<crate::debugger::Variable>,
+    /// The variables' values at the stop before (by name): one that's changed shows so.
+    debug_before: std::collections::HashMap<String, String>,
+    /// The variables where it stopped (the top call's), whichever call is looked at: what
+    /// the next stop's are compared with.
+    debug_top: std::collections::HashMap<String, String>,
+    /// The call looked at while paused (0: where it stopped): only its variables are told
+    /// changed.
+    debug_frame: usize,
     /// Renames asked for and waiting their turn (see `queue_rename`), and whether one is
     /// under way.
     renames: std::collections::VecDeque<(PathBuf, PathBuf)>,
@@ -1277,6 +1290,9 @@ impl Workspace {
             debug_output_scroll: gpui::ScrollHandle::new(),
             debug_show_output: false,
             debug_locals: Vec::new(),
+            debug_before: std::collections::HashMap::new(),
+            debug_top: std::collections::HashMap::new(),
+            debug_frame: 0,
             debug_watch: cx.new(|cx| crate::text_input::TextInput::new("Watch an expression", cx)),
             debug_console: cx.new(|cx| crate::text_input::TextInput::new("An expression, or an lldb command", cx)),
             terminal_rename: None,
@@ -2442,8 +2458,10 @@ impl Workspace {
             let diff = cx
                 .background_executor()
                 .spawn(async move {
+                    // (A file that holds secrets isn't sent: `.env`, a key.)
                     let changes: Vec<(String, Option<String>, Option<String>)> = files
                         .iter()
+                        .filter(|path| !crate::ai_context::holds_secrets(path))
                         .map(|path| {
                             let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
                             let name = path.strip_prefix(&root).unwrap_or(path).display().to_string();
@@ -3663,6 +3681,17 @@ impl Workspace {
                     this.confirm_unsaved(CloseAction::CloseTabs(vec![editor.clone()]), window, cx);
                 }
                 EditorEvent::RunCommand(command) => this.run_in_terminal(command.clone(), None, window, cx),
+                EditorEvent::ShowCommit(id) => {
+                    // (Shown as the history's are: in the repository the Git view shows, else
+                    // in the file's own, a submodule's or another folder's of the window.)
+                    let folder = editor.read(cx).path().and_then(Path::parent).map(Path::to_path_buf);
+                    let commit = crate::git::log_commit(&this.git_root, id)
+                        .or_else(|| folder.and_then(|folder| crate::git::log_commit(&folder, id)));
+                    match commit {
+                        Some(commit) => this.show_commit(commit, window, cx),
+                        None => this.show_notice("That commit isn't in this repository's history.".into(), cx),
+                    }
+                }
                 EditorEvent::Reviewed => this.file_reviewed(editor, cx),
                 // (Only a pull request's page shows threads: it hears this itself.)
                 EditorEvent::ReplyAsked(_) => {}
@@ -3970,7 +3999,7 @@ impl Workspace {
         if let Some(run) = self.ai_task.take() {
             run.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                child.kill().ok();
+                std::thread::spawn(move || crate::tools::kill_tree(&mut child));
             }
         }
         // Another project's tests: looked for again, if they show.
@@ -4345,7 +4374,8 @@ impl Workspace {
             && self.waiting_for.is_none()
         {
             let root = self.roots.primary().to_path_buf();
-            crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
+            let turn = crate::session::backup_turn();
+            crate::session::save_backups_in_turn(&root, &Self::backups_of(self.unsaved_files(cx)), turn);
             self.keeping_unsaved = true;
             self.finish_close(action, window, cx);
             return true;
@@ -4434,7 +4464,8 @@ impl Workspace {
         if !matches!(action, CloseAction::CloseTabs(_)) {
             self.backup_task = None;
             if !std::mem::take(&mut self.keeping_unsaved) {
-                crate::session::save_backups(self.roots.primary(), &[]);
+                let turn = crate::session::backup_turn();
+                crate::session::save_backups_in_turn(self.roots.primary(), &[], turn);
             }
         }
         match action {
@@ -4449,7 +4480,13 @@ impl Workspace {
                 }
                 self.switch_project(path, window, cx);
             }
-            CloseAction::CloseWindow => window.remove_window(),
+            CloseAction::CloseWindow => {
+                // (Its session as it is now, not as the last save 800 ms ago had it; its
+                // language servers told to stop, not left running.)
+                self.save_session(cx);
+                self.lsp.update(cx, |lsp, _| lsp.shutdown());
+                window.remove_window();
+            }
             CloseAction::CloseTabs(editors) => {
                 for editor in editors {
                     if let Some(ix) = self.tabs.iter().position(|t| t.editor == editor) {
@@ -4512,8 +4549,9 @@ impl Workspace {
         }
         let root = self.roots.primary().to_path_buf();
         let unsaved = self.unsaved_files(cx);
+        let turn = crate::session::backup_turn();
         cx.background_executor()
-            .spawn(async move { crate::session::save_backups(&root, &Self::backups_of(unsaved)) })
+            .spawn(async move { crate::session::save_backups_in_turn(&root, &Self::backups_of(unsaved), turn) })
             .detach();
     }
 
@@ -4524,7 +4562,8 @@ impl Workspace {
             return;
         }
         let root = self.roots.primary().to_path_buf();
-        crate::session::save_backups(&root, &Self::backups_of(self.unsaved_files(cx)));
+        let turn = crate::session::backup_turn();
+        crate::session::save_backups_in_turn(&root, &Self::backups_of(self.unsaved_files(cx)), turn);
     }
 
     /// ⌘⇧N: another window, on a folder chosen for it.
@@ -5374,6 +5413,7 @@ impl Workspace {
             (Appearance, theme_label(ThemeName::Ash), theme_action(ThemeName::Ash)),
             (Appearance, theme_label(ThemeName::Midnight), theme_action(ThemeName::Midnight)),
             (Appearance, theme_label(ThemeName::Moss), theme_action(ThemeName::Moss)),
+            (Appearance, theme_label(ThemeName::Contrast), theme_action(ThemeName::Contrast)),
             (Appearance, theme_label(ThemeName::Paper), theme_action(ThemeName::Paper)),
             (Appearance, theme_label(ThemeName::Dune), theme_action(ThemeName::Dune)),
             (Appearance, "New Theme of Your Own…".into(), Box::new(NewOwnTheme)),
@@ -5631,10 +5671,20 @@ impl Workspace {
                 (Ai, "Set API Key…".into(), Box::new(SetApiKey)),
             ]);
         }
+        if self.untrusted_folders(cx).is_empty() {
+            if !crate::session::is_scratch(self.root(cx)) {
+                commands.push((File, "Stop Trusting This Folder".into(), Box::new(StopTrustingFolder)));
+            }
+        } else {
+            commands.push((File, "Trust This Folder".into(), Box::new(TrustFolder)));
+        }
         if settings.ai.ready() {
             commands.push((Ai, "Ask About This File…".into(), Box::new(AskAi)));
             if self.test_status.values().any(|s| *s == TestStatus::Failed) {
                 commands.push((Ai, "Explain Test Failure".into(), Box::new(ExplainTestFailure)));
+            }
+            if self.terminal().is_some_and(|t| t.read(cx).went_wrong()) {
+                commands.push((Ai, "Explain What Went Wrong in the Terminal".into(), Box::new(ExplainTerminalError)));
             }
             commands.push((Ai, "AI Usage".into(), Box::new(ShowAiUsage)));
             if self.active.is_some() {
@@ -6304,7 +6354,8 @@ impl Workspace {
         if let Some(run) = &self.ai_task {
             run.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(mut child) = run.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                child.kill().ok();
+                // (Waited for off the window's thread: a CLI can take a moment to end.)
+                std::thread::spawn(move || crate::tools::kill_tree(&mut child));
             }
         }
         cx.notify();
@@ -7842,8 +7893,10 @@ impl Workspace {
             let diff = cx
                 .background_executor()
                 .spawn(async move {
+                    // (A file that holds secrets isn't sent: `.env`, a key.)
                     let changes: Vec<(String, Option<String>, Option<String>)> = review_files
                         .iter()
+                        .filter(|path| !crate::ai_context::holds_secrets(path))
                         .map(|path| {
                             let encoding = crate::encoding::read(path).map(|(_, e)| e).unwrap_or_default();
                             let name = path.strip_prefix(&diff_root).unwrap_or(path).display().to_string();
@@ -7930,8 +7983,60 @@ impl Workspace {
         .detach();
     }
 
-    /// The failed test at the cursor, else the first that failed: opened, and explained by AI
-    /// in a note under it, from what its run said.
+    /// The terminal's last command that went wrong, explained by AI in a card over it.
+    fn explain_terminal_error(&mut self, _: &ExplainTerminalError, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal().cloned() else { return };
+        if !self.terminal_open.on {
+            self.terminal_open.set(true, TERMINAL_SLIDE, TERMINAL_SLIDE);
+        }
+        window.focus(&terminal.focus_handle(cx));
+        terminal.update(cx, |terminal, cx| terminal.explain(cx));
+        cx.notify();
+    }
+
+    /// The window's folders not trusted to run their code (see `trust`), and the open file's
+    /// when it's in none of them.
+    fn untrusted_folders(&self, cx: &App) -> Vec<PathBuf> {
+        let mut folders: Vec<PathBuf> = self.roots.all().to_vec();
+        if let Some(path) = self.active_editor().and_then(|e| e.read(cx).path().map(Path::to_path_buf))
+            && !folders.iter().any(|root| path.starts_with(root))
+            && let Some(folder) = path.parent()
+        {
+            folders.push(folder.to_path_buf());
+        }
+        folders.retain(|folder| !crate::trust::is_trusted(folder));
+        folders
+    }
+
+    /// Trusts the window's folders to run their own code: language servers start, a new
+    /// terminal activates the folder's environment, all of its `.null/settings.json` counts.
+    fn trust_folder(&mut self, _: &TrustFolder, _: &mut Window, cx: &mut Context<Self>) {
+        let folders = self.untrusted_folders(cx);
+        for folder in &folders {
+            crate::trust::trust(folder);
+        }
+        self.trust_changed(cx);
+        if let [folder] = folders.as_slice() {
+            let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.show_notice(format!("Trusted {name}: its language servers start now"), cx);
+        }
+    }
+
+    /// Back to Safe mode for the window's folders.
+    fn stop_trusting_folder(&mut self, _: &StopTrustingFolder, _: &mut Window, cx: &mut Context<Self>) {
+        for root in self.roots.all().to_vec() {
+            crate::trust::distrust(&root);
+        }
+        self.trust_changed(cx);
+        self.show_notice("Safe mode: this folder's code doesn't run until you trust it again".into(), cx);
+    }
+
+    fn trust_changed(&mut self, cx: &mut Context<Self>) {
+        crate::settings::use_project(self.root(cx), cx);
+        self.lsp.update(cx, |lsp, cx| lsp.trust_changed(cx));
+        cx.notify();
+    }
+
     fn explain_test_failure(&mut self, _: &ExplainTestFailure, window: &mut Window, cx: &mut Context<Self>) {
         let failed: Vec<(PathBuf, String, usize)> = self
             .tests
@@ -8710,11 +8815,30 @@ impl Workspace {
                 }
             });
         }
+        // What the variables were at the last stop, to show which changed since; none once
+        // the run's over.
+        self.debug_before = match event {
+            // (Going on from a stop: its values where it stopped, kept for the next. Not those
+            // of another call looked at.)
+            DebuggerEvent::Resumed if !self.debug_top.is_empty() => std::mem::take(&mut self.debug_top),
+            DebuggerEvent::Resumed | DebuggerEvent::Stopped(_) => std::mem::take(&mut self.debug_before),
+            _ => std::collections::HashMap::new(),
+        };
         // Unless the paused call's code is open, every variable with a value worth showing.
         self.debug_locals = match event {
             DebuggerEvent::Stopped(stop) => crate::debugger::panel_variables(None, &stop.variables),
             _ => Vec::new(),
         };
+        match event {
+            DebuggerEvent::Stopped(stop) => {
+                self.debug_frame = stop.frame;
+                if stop.frame == 0 {
+                    self.debug_top = self.debug_locals.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
+                }
+            }
+            DebuggerEvent::Ended => self.debug_top.clear(),
+            DebuggerEvent::Resumed => {}
+        }
         if let DebuggerEvent::Stopped(stop) = event
             && let Some((path, line)) = stop.place.clone()
         {
@@ -8890,7 +9014,21 @@ impl Workspace {
                         .whitespace_nowrap()
                         .child(marker)
                         .child(div().flex_none().text_color(theme.foreground).child(row.variable.name.clone()))
-                        .child(div().pl(px(4.)).min_w_0().truncate().text_color(theme.muted).child(value))
+                        // (Changed since the last stop: in the caret's colour.)
+                        .child({
+                            let changed = row.depth == 0
+                                && self.debug_frame == 0
+                                && self
+                                    .debug_before
+                                    .get(&row.variable.name)
+                                    .is_some_and(|was| *was != row.variable.value);
+                            div()
+                                .pl(px(4.))
+                                .min_w_0()
+                                .truncate()
+                                .text_color(if changed { theme.caret } else { theme.muted })
+                                .child(value)
+                        })
                         .when(reference > 0, |d| {
                             d.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 let path = path.clone();
@@ -8921,7 +9059,11 @@ impl Workspace {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_color(if failed { theme.faint } else { theme.muted })
+                                    .text_color(match (failed, watch.changed) {
+                                        (true, _) => theme.faint,
+                                        (false, true) => theme.caret,
+                                        (false, false) => theme.muted,
+                                    })
                                     .child(value),
                             )
                             .child(
@@ -9250,8 +9392,11 @@ impl Workspace {
         // In a Python project with its own environment: made the shell's, as activating does.
         let root = self.roots.root_for(&dir).to_path_buf();
         let linux = crate::wsl::is_wsl(&dir) || crate::remote::is_remote(&dir);
-        let activate =
-            self.roots.contains(&dir).then(|| crate::python_env::find_for(&root, &dir)).flatten().and_then(|env| {
+        // (Not in a folder not trusted: its `activate` would run in your shell.)
+        let activate = (self.roots.contains(&dir) && crate::trust::is_trusted(&dir))
+            .then(|| crate::python_env::find_for(&root, &dir))
+            .flatten()
+            .and_then(|env| {
                 // (Inside WSL or on a server: a POSIX shell there, whichever it is.)
                 let shell = if linux {
                     "sh".to_string()
@@ -9289,6 +9434,7 @@ impl Workspace {
         });
         let subscription = cx.subscribe_in(&terminal, window, |this, terminal, event, window, cx| match event {
             TerminalEvent::TitleChanged => cx.notify(),
+            TerminalEvent::Notice(message) => this.show_notice(message.clone(), cx),
             TerminalEvent::Menu(position) => {
                 let items = terminal_menu_items(terminal.read(cx).has_selection());
                 this.text_menu =
@@ -10297,6 +10443,23 @@ impl Workspace {
                 )
             }
             Readiness::Installing { server } => Some(item(theme.muted, format!("Installing {}…", server.name))),
+            // A folder not trusted yet: its code doesn't run until it is (see `trust`).
+            Readiness::Untrusted => Some(
+                div()
+                    .id("trust-folder")
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .child(div().text_color(theme.faint).child("Safe mode"))
+                    .child(div().text_color(theme.caret).child("Trust Folder"))
+                    .active(|s| s.opacity(0.7))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.trust_folder(&TrustFolder, window, cx)),
+                    )
+                    .into_any_element(),
+            ),
             Readiness::Unavailable { program } => {
                 Some(div().text_color(theme.faint).child(format!("{program} didn't start")).into_any_element())
             }
@@ -10961,6 +11124,7 @@ pub fn theme_action(theme: ThemeName) -> Box<dyn Action> {
         ThemeName::Ash => Box::new(UseAshTheme),
         ThemeName::Midnight => Box::new(UseMidnightTheme),
         ThemeName::Moss => Box::new(UseMossTheme),
+        ThemeName::Contrast => Box::new(UseContrastTheme),
         ThemeName::Paper => Box::new(UsePaperTheme),
         ThemeName::Dune => Box::new(UseDuneTheme),
     }
@@ -12573,6 +12737,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_ai_usage))
             .on_action(cx.listener(Self::show_notes))
             .on_action(cx.listener(Self::explain_test_failure))
+            .on_action(cx.listener(Self::explain_terminal_error))
+            .on_action(cx.listener(Self::trust_folder))
+            .on_action(cx.listener(Self::stop_trusting_folder))
             .on_action(cx.listener(Self::check_for_updates))
             .on_action(
                 cx.listener(|this, _: &crate::file_tree::NewFile, window, cx| this.new_in_project(false, window, cx)),
@@ -12610,6 +12777,11 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|_, _: &UseMossTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Moss))),
+            )
+            .on_action(
+                cx.listener(|_, _: &UseContrastTheme, _, cx| {
+                    settings::update(cx, |s| s.pick_theme(ThemeName::Contrast))
+                }),
             )
             .on_action(
                 cx.listener(|_, _: &UsePaperTheme, _, cx| settings::update(cx, |s| s.pick_theme(ThemeName::Paper))),

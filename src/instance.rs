@@ -55,13 +55,15 @@ pub fn launch(request: &Request, wait: bool) -> Launch {
     if wait || !hands_over() {
         return Launch::First(None);
     }
+    // The lock first: free, no Null runs, and the address left by one that crashed may be
+    // another program's port by now (it would be sent the files asked for).
+    if take_lock() {
+        return Launch::First(listen());
+    }
     let started = std::time::Instant::now();
     loop {
         if hand_over(request) {
             return Launch::HandedOver;
-        }
-        if take_lock() {
-            return Launch::First(listen());
         }
         // (The one with the lock not listening in time: on alone rather than not at all.)
         if started.elapsed() > Duration::from_secs(3) {

@@ -123,6 +123,10 @@ pub struct SettingsPanel {
     suggestions_for: ProviderId,
     /// Whether that one's key is set, when it isn't the provider above.
     suggestions_key: Option<bool>,
+    /// The models installed in Ollama (asked when it's the provider or where suggestions
+    /// come from): offered first under the model fields.
+    ollama_models: Vec<String>,
+    _ollama_task: Option<gpui::Task<()>>,
     /// Waiting for new keys for shortcut `ix` (Keyboard): the next keystroke, caught before
     /// anything else sees it, becomes its shortcut.
     recording: Option<(usize, [Subscription; 2])>,
@@ -211,6 +215,8 @@ impl SettingsPanel {
             has_key: None,
             suggestions_for: ProviderId::Off,
             suggestions_key: None,
+            ollama_models: Vec::new(),
+            _ollama_task: None,
             _subscriptions: subscriptions,
         };
         panel.fill_provider_fields(cx);
@@ -220,6 +226,18 @@ impl SettingsPanel {
     /// Shows the current provider's model and address in the fields.
     fn fill_provider_fields(&mut self, cx: &mut Context<Self>) {
         let ai = cx.global::<Settings>().ai.clone();
+        // Ollama's own models, asked of it once more (one pulled since shows).
+        if ai.provider == ProviderId::Ollama || ai.suggestion_provider() == ProviderId::Ollama {
+            let base = ai.base_url(ProviderId::Ollama).unwrap_or_default();
+            self._ollama_task = Some(cx.spawn(async move |this, cx| {
+                let models = cx.background_executor().spawn(async move { crate::ollama::installed(&base) }).await;
+                this.update(cx, |this, cx| {
+                    this.ollama_models = models;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
         let provider = ai.provider;
         self.fields_for = provider;
         let saved = ai.providers.get(provider.key()).cloned().unwrap_or_default();
@@ -981,9 +999,23 @@ impl SettingsPanel {
     }
 
     /// Recommended models as chips under a model field; a click fills the field.
+    /// The models to offer for `provider`: Ollama's installed ones first, then those
+    /// recommended (not already there).
+    fn chips_for(&self, provider: ProviderId, recommended: &'static [ai::Recommended]) -> Vec<(String, String)> {
+        let installed: &[String] = if provider == ProviderId::Ollama { &self.ollama_models } else { &[] };
+        let mut chips: Vec<(String, String)> = installed.iter().map(|m| (m.clone(), "installed".into())).collect();
+        chips.extend(
+            recommended
+                .iter()
+                .filter(|r| !installed.iter().any(|m| m == r.model))
+                .map(|r| (r.model.to_string(), r.note.to_string())),
+        );
+        chips
+    }
+
     fn model_chips(
         id: &'static str,
-        recommended: &'static [ai::Recommended],
+        chips: Vec<(String, String)>,
         current: Option<String>,
         input: &Entity<TextInput>,
         theme: &Theme,
@@ -992,8 +1024,8 @@ impl SettingsPanel {
             .flex()
             .flex_wrap()
             .gap(px(6.))
-            .children(recommended.iter().enumerate().map(|(i, r)| {
-                let active = current.as_deref() == Some(r.model);
+            .children(chips.into_iter().enumerate().map(|(i, (model, note))| {
+                let active = current.as_deref() == Some(model.as_str());
                 let input = input.clone();
                 div()
                     .id((id, i))
@@ -1012,10 +1044,10 @@ impl SettingsPanel {
                             .text_color(theme.muted)
                             .hover(|d| d.text_color(theme.foreground).bg(ui::hover_on_raised(theme)))
                     })
-                    .child(r.model)
-                    .child(div().text_size(px(ui::T_XS)).text_color(theme.muted).child(r.note))
+                    .child(model.clone())
+                    .child(div().text_size(px(ui::T_XS)).text_color(theme.muted).child(note))
                     .active(|s| s.opacity(0.7))
-                    .on_click(move |_, _, cx| input.update(cx, |input, cx| input.set_text(r.model, cx)))
+                    .on_click(move |_, _, cx| input.update(cx, |input, cx| input.set_text(&model, cx)))
             }))
             .into_any_element()
     }
@@ -1230,7 +1262,7 @@ impl SettingsPanel {
             }),
             div().flex().flex_col().gap(px(8.)).child(Self::wide_field(&self.model, &theme)).child(Self::model_chips(
                 "model",
-                current.recommended(),
+                self.chips_for(current, current.recommended()),
                 model,
                 &self.model,
                 &theme,
@@ -1338,7 +1370,7 @@ impl SettingsPanel {
                     div().flex().flex_col().gap(px(8.)).child(Self::wide_field(&self.completion_model, &theme)).child(
                         Self::model_chips(
                             "suggestion-model",
-                            source.recommended_for_suggestions(),
+                            self.chips_for(source, source.recommended_for_suggestions()),
                             s.ai.completion_model(source),
                             &self.completion_model,
                             &theme,
