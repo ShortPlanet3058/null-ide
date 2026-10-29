@@ -61,17 +61,18 @@ fn seeded(recent: Vec<PathBuf>, home: Option<&Path>) -> Vec<PathBuf> {
     recent.iter().map(|p| kept_form(p)).filter(|p| p.parent().is_some() && Some(p) != home.as_ref()).collect()
 }
 
-/// Whether `path` (a folder, or a file) is in a folder you trust. Null's own folder for
-/// when none is open is.
+/// Whether `path` (a folder, or a file) is in a folder you trust. Null's own folders are:
+/// its data (the Scratch folder for when none is open, What's New) and your settings'.
 pub fn is_trusted(path: &Path) -> bool {
     // (Tests' folders are trusted, but for those meant not to be.)
     if cfg!(test) {
         return !path.components().any(|c| c.as_os_str() == "untrusted");
     }
-    if crate::session::is_scratch(path) {
+    let path = kept_form(path);
+    let settings = crate::settings::Settings::path().and_then(|p| p.parent().map(Path::to_path_buf));
+    if [crate::tools::data_dir(), settings].iter().flatten().any(|own| path.starts_with(kept_form(own))) {
         return true;
     }
-    let path = kept_form(path);
     with(|trusted| trusted.iter().any(|folder| path.starts_with(folder)))
 }
 
