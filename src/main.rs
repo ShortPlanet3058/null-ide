@@ -443,8 +443,9 @@ fn answered_in_the_terminal() -> bool {
         }
     };
     // (On Windows Null has no console of its own: the one it was started from, if any. Joined,
-    // a windowed program can still have no handle to write to it with: the console's own
-    // output is opened then. Output sent to a file or a pipe is left as it is.)
+    // a windowed program has no handle to write to it with (none, or cmd's own, not valid
+    // here): the console's own output is opened then. Output sent to a file or a pipe is
+    // left as it is.)
     #[cfg(windows)]
     {
         const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
@@ -454,6 +455,7 @@ fn answered_in_the_terminal() -> bool {
         unsafe extern "system" {
             fn AttachConsole(process: u32) -> i32;
             fn GetStdHandle(which: u32) -> isize;
+            fn GetFileType(handle: isize) -> u32;
             fn SetStdHandle(which: u32, handle: isize) -> i32;
             fn CreateFileW(
                 name: *const u16,
@@ -468,8 +470,11 @@ fn answered_in_the_terminal() -> bool {
         // SAFETY: plain Win32 calls; the only pointer is a NUL-terminated name that lives
         // through the call. Each fails harmlessly when there's no console.
         unsafe {
+            const FILE_TYPE_DISK: u32 = 1;
+            const FILE_TYPE_PIPE: u32 = 3;
             let had = GetStdHandle(STD_OUTPUT_HANDLE);
-            if AttachConsole(u32::MAX) != 0 && (had == 0 || had == -1) {
+            let redirected = had != 0 && had != -1 && matches!(GetFileType(had), FILE_TYPE_DISK | FILE_TYPE_PIPE);
+            if AttachConsole(u32::MAX) != 0 && !redirected {
                 let name: Vec<u16> = "CONOUT$".encode_utf16().chain([0]).collect();
                 let out =
                     CreateFileW(name.as_ptr(), GENERIC_WRITE, FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, 0, 0);

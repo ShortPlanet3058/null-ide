@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Settings → Folders you trust lists the folders whose code runs (their language servers,
+  Python environments, project settings), each with Stop Trusting; every window opened on
+  one goes back to Safe mode at once. A trusted folder since deleted is let go.
+- What's New, the Scratch folder's files and your settings' folder never open in Safe mode.
+- Git's Changes tab with thousands of changed files: they show in seconds (the last
+  commit's side of each read by one git, not one each), and only the rows in sight are
+  drawn; "Show more" is gone.
+- SSH: a terminal on a server whose login shell is fish opens (it was given a line only sh
+  and its like read).
+- Windows: `null --version` and `null --help` print in a Command Prompt.
+- Updates are read only over HTTPS (or, to try one out, from this computer).
+
 ## 0.2.2
 
 Null opens a folder it hasn't seen in Safe mode, is black all the way round, writes and
