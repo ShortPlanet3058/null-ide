@@ -218,8 +218,9 @@ pub fn register(keymap: Keymap, cx: &mut App) {
 /// Shortcuts on digits and symbols, where the keyboard has them. They're written as on
 /// an American keyboard; elsewhere a symbol can be on another key, behind Shift or AltGr,
 /// or nowhere (a French AZERTY has no ` key, its digits need Shift). The Mac's own
-/// shortcuts already follow the keyboard; on Windows they go to the same place as on an
-/// American keyboard, as Windows' own apps have them (Ctrl+ù for the terminal on an
+/// shortcuts already follow the keyboard; on Windows a symbol the keyboard types without
+/// Shift keeps its key (Ctrl+- on an AZERTY's own -), the others go to the same place as
+/// on an American keyboard, as Windows' own apps have them (Ctrl+ù for the terminal on an
 /// AZERTY), and on Linux the AZERTY digit row works without Shift.
 fn localize(cx: &mut App) {
     if cfg!(target_os = "macos") {
@@ -229,7 +230,7 @@ fn localize(cx: &mut App) {
     let layout = cx.keyboard_layout().name().to_string();
     let mapper = cx.keyboard_mapper().clone();
     let local = if cfg!(windows) {
-        bindings.iter().map(|b| in_place(b, mapper.as_ref())).filter(|b| !takes_altgr(b)).collect()
+        placed_all(bindings, mapper.as_ref(), &typed_plainly).into_iter().filter(|b| !takes_altgr(b)).collect()
     } else {
         with_digit_row(bindings, &layout)
     };
@@ -287,13 +288,59 @@ fn types_with_altgr(_: &str, _: bool) -> bool {
     false
 }
 
+/// Whether the keyboard types `key` (one character) with a key of its own, without Shift
+/// or AltGr: an AZERTY's -, not its 6 (Shift) or its ` (AltGr). (Not the number pad's.)
+#[cfg(windows)]
+fn typed_plainly(key: &str) -> bool {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn VkKeyScanW(ch: u16) -> i16;
+    }
+    let mut chars = key.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else { return false };
+    let mut unit = [0u16; 2];
+    let [unit] = c.encode_utf16(&mut unit) else { return false };
+    // SAFETY: no pointers.
+    let scanned = unsafe { VkKeyScanW(*unit) };
+    let (key, held) = (scanned as u16 & 0xff, (scanned as u16) >> 8);
+    scanned != -1 && held == 0 && !(0x60..=0x6f).contains(&key)
+}
+
+#[cfg(not(windows))]
+fn typed_plainly(_: &str) -> bool {
+    false
+}
+
+/// Windows: the bindings with their keys where the keyboard has them (see `placed`). One
+/// moved onto a key that's already a shortcut as it's written doesn't take it (on an
+/// AZERTY Ctrl+6 lands on the - key: Ctrl+- stays smaller text).
+fn placed_all(
+    bindings: Vec<KeyBinding>,
+    mapper: &dyn gpui::PlatformKeyboardMapper,
+    plain: &dyn Fn(&str) -> bool,
+) -> Vec<KeyBinding> {
+    let placed: Vec<(bool, KeyBinding)> = bindings
+        .iter()
+        .map(|b| {
+            let moved = placed(b, mapper, plain);
+            (source(&moved) != source(b), moved)
+        })
+        .collect();
+    let kept: std::collections::HashSet<String> = placed
+        .iter()
+        .filter(|(moved, b)| !moved && b.keystrokes().iter().any(|k| on_layout(&k.inner().key)))
+        .map(|(_, b)| source(b))
+        .collect();
+    placed.into_iter().filter(|(moved, b)| !moved || !kept.contains(&source(b))).map(|(_, b)| b).collect()
+}
+
 /// `keys` as a preset's binding of them reads once localized (Windows moves symbols).
 pub fn as_bound(keys: &str, cx: &App) -> String {
     let Ok(binding) = KeyBinding::load(keys, Box::new(gpui::NoAction), None, false, None, &gpui::DummyKeyboardMapper)
     else {
         return keys.to_string();
     };
-    let binding = if cfg!(windows) { in_place(&binding, cx.keyboard_mapper().as_ref()) } else { binding };
+    let binding = if cfg!(windows) { placed(&binding, cx.keyboard_mapper().as_ref(), &typed_plainly) } else { binding };
     binding.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>().join(" ")
 }
 
@@ -307,9 +354,14 @@ fn source(binding: &KeyBinding) -> String {
     binding.keystrokes().iter().map(|k| k.inner().unparse()).collect::<Vec<_>>().join(" ")
 }
 
-/// `binding` on the keys at an American keyboard's places (Windows' keyboard mapper).
-fn in_place(binding: &KeyBinding, mapper: &dyn gpui::PlatformKeyboardMapper) -> KeyBinding {
-    if !binding.keystrokes().iter().any(|k| on_layout(&k.inner().key)) {
+/// `binding` on the keys at an American keyboard's places (Windows' keyboard mapper), but
+/// for one whose symbols this keyboard types plainly (`plain`): those keep their keys.
+fn placed(binding: &KeyBinding, mapper: &dyn gpui::PlatformKeyboardMapper, plain: &dyn Fn(&str) -> bool) -> KeyBinding {
+    let moves = |k: &gpui::KeybindingKeystroke| {
+        let k = k.inner();
+        on_layout(&k.key) && (k.modifiers.shift || !plain(&k.key))
+    };
+    if !binding.keystrokes().iter().any(moves) {
         return binding.clone();
     }
     let action = binding.action().boxed_clone();
@@ -500,7 +552,8 @@ mod tests {
     }
 
     /// Windows: a digit or symbol goes to the key in its American place on the keyboard
-    /// at hand (here an AZERTY's); letters and named keys stay as they are.
+    /// at hand (here an AZERTY's), but for one it types plainly; letters and named keys
+    /// stay as they are.
     #[test]
     fn symbols_go_where_an_american_keyboard_has_them() {
         struct Azerty;
@@ -513,6 +566,8 @@ mod tests {
                 if use_key_equivalents {
                     let place = match keystroke.key.as_str() {
                         "1" => "&",
+                        "6" => "-",
+                        "-" => ")",
                         "`" => "ù",
                         "/" => ":",
                         other => other,
@@ -525,15 +580,33 @@ mod tests {
                 None
             }
         }
-        let placed = |keys: &str| {
+        // (What an AZERTY types without Shift or AltGr.)
+        let plain = |key: &str| ["-", "=", ",", ";", ":", "!"].contains(&key);
+        let put = |keys: &str| {
             let binding = KeyBinding::new(keys, ToggleTerminal, Some("Workspace"));
-            source(&in_place(&binding, &Azerty))
+            source(&placed(&binding, &Azerty, &plain))
         };
-        assert_eq!(placed("ctrl-`"), "ctrl-ù");
-        assert_eq!(placed("ctrl-1"), "ctrl-&");
-        assert_eq!(placed("ctrl-k ctrl-/"), "ctrl-k ctrl-:");
-        assert_eq!(placed("ctrl-j"), "ctrl-j");
-        assert_eq!(placed("ctrl-shift-pageup"), "ctrl-shift-pageup");
+        assert_eq!(put("ctrl-`"), "ctrl-ù");
+        assert_eq!(put("ctrl-1"), "ctrl-&");
+        assert_eq!(put("ctrl-k ctrl-/"), "ctrl-k ctrl-:");
+        assert_eq!(put("ctrl-j"), "ctrl-j");
+        assert_eq!(put("ctrl-shift-pageup"), "ctrl-shift-pageup");
+        // Its own - and =: as written (Ctrl+- smaller, Ctrl+= bigger).
+        assert_eq!(put("ctrl--"), "ctrl--");
+        assert_eq!(put("ctrl-="), "ctrl-=");
         assert!(on_layout("1") && on_layout("`") && !on_layout("a") && !on_layout("f1"));
+        // Ctrl+6 moved onto the - key doesn't take Ctrl+- from smaller text.
+        use crate::workspace::{DecreaseFontSize, GoToTab};
+        let all = placed_all(
+            vec![
+                KeyBinding::new("ctrl--", DecreaseFontSize, Some("Workspace")),
+                KeyBinding::new("ctrl-6", GoToTab(6), Some("Workspace")),
+                KeyBinding::new("ctrl-1", GoToTab(1), Some("Workspace")),
+            ],
+            &Azerty,
+            &plain,
+        );
+        let all: Vec<_> = all.iter().map(|b| (source(b), b.action().name())).collect();
+        assert_eq!(all, [("ctrl--".into(), DecreaseFontSize.name()), ("ctrl-&".into(), GoToTab(1).name())]);
     }
 }
