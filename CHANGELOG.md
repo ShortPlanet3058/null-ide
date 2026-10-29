@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Windows: Ctrl+- makes text smaller again on keyboards with their own - key (a French
+  AZERTY's), where it went to tab 6.
 - Security audit of 0.2.2, with fixes:
   - Folders you trust: one Null hasn't seen before opens in Safe mode, its language
     servers off (they run a project's own code: its `.venv`'s programs, its TypeScript,
