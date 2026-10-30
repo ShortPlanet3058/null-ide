@@ -3299,6 +3299,11 @@ impl Workspace {
         let Some(ix) = self.tabs.iter().position(|t| t.editor == stand_in) else { return };
         let lsp = self.lsp.clone();
         let editor = cx.new(|cx| Editor::from_read(read, began, Some(lsp), cx));
+        // Unsaved text from last time (kept after a crash, or by keep_unsaved), then where
+        // it was: on the file as read.
+        if let Some(text) = stand_in.read(cx).unsaved_asked() {
+            editor.update(cx, |e, cx| e.restore_unsaved(&text, cx));
+        }
         if let Some((line, column, top)) = stand_in.read(cx).view_asked() {
             editor.update(cx, |e, cx| match top {
                 Some(top) => e.restore_view(line, column, top, cx),
@@ -15835,6 +15840,48 @@ esac
             assert!(!editor.is_opening());
             assert_eq!(editor.buffer.len_chars(), text.len());
             assert_eq!(editor.caret_point(), (1000, 4), "where it was asked to show");
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Unsaved text kept from last time, brought back into a very big file (or a server's)
+    /// while its stand-in is there: on the file once it's read, not gone with the stand-in.
+    #[gpui::test]
+    fn unsaved_text_brought_back_outlives_the_stand_in(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("unsaved-into-stand-in");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = "2026-10-12 INFO request served\n";
+        let path = dir.join("big.log");
+        std::fs::write(&path, line.repeat((2 << 20) / line.len())).unwrap();
+        let unsaved = format!("{}an edit not saved\n", line.repeat(10));
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(path.clone(), window, cx);
+            let stand_in = w.active_editor().unwrap().clone();
+            stand_in.update(cx, |e, cx| {
+                assert!(e.is_opening());
+                e.restore_unsaved(&unsaved, cx);
+            });
+        });
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if workspace.read_with(cx, |w, cx| w.active_editor().is_some_and(|e| !e.read(cx).is_opening())) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        workspace.read_with(cx, |w, cx| {
+            let editor = w.active_editor().unwrap().read(cx);
+            assert!(!editor.is_opening());
+            assert_eq!(editor.buffer.to_string(), unsaved, "the unsaved text, not the file's");
         });
         std::fs::remove_dir_all(&dir).ok();
     }

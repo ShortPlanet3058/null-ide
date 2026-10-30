@@ -20,6 +20,8 @@
     window back before its first frame: it's set up beside it.
   - The message saying Null can't draw doesn't keep a Null running behind it (later
     launches handed it their folders, and nothing opened).
+- Unsaved work brought back after a crash (or kept on quitting) into a very big file, or
+  any file in a folder on a server, is no longer lost as the file finishes loading.
 - The Mac and Windows first-run steps are said right: macOS 15's Open Anyway in Privacy &
   Security, Windows' More info → Run anyway.
 - Settings → Folders you trust lists the folders whose code runs (their language servers,
