@@ -96,19 +96,24 @@ jobs:
   linux:
     needs: version
     if: needs.version.outputs.release == 'true' || inputs.platform == 'linux' || inputs.platform == 'all'
-    # The oldest Ubuntu GitHub still has: a binary needs the C library it was built
-    # against or newer (one built on the latest didn't start on 24.04).
-    runs-on: ubuntu-22.04
+    # Built on an old Ubuntu (20.04, in a container: GitHub's oldest is 22.04): a binary
+    # needs the C library it was built against or newer, and this one's, glibc 2.31, is
+    # older than Debian 11's, RHEL 9's and Ubuntu 20.04's (22.04's, 2.35, kept them out).
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - name: Linux libraries
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
             libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-dev libx11-xcb-dev libxcb1-dev libwayland-dev libvulkan-dev \
             libasound2-dev libudev-dev libdbus-1-dev libssl-dev zlib1g-dev
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - run: packaging/linux/package.sh
       - uses: actions/upload-artifact@v4
         with:
