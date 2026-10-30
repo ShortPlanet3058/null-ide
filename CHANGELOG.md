@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3
 
 - Linux: Null opens on a computer whose graphics card won't draw through Vulkan (an NVIDIA
   driver installed without its Vulkan part, or too old) instead of stopping with "Unable
