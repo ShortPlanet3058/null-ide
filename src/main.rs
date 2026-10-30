@@ -157,6 +157,13 @@ struct Asked {
 
 /// The arguments read (Err: an option Null doesn't have, said as the terminal shows it).
 /// After `--`, everything is a path (a file named `-x`).
+/// The command line's arguments (not the program's name), as text. (`std::env::args`
+/// panics on one that isn't UTF-8: a Latin-1 file name opened from the desktop's files
+/// would keep Null from starting at all; here its odd bytes are replaced.)
+fn arguments() -> Vec<String> {
+    std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect()
+}
+
 fn parse_args(args: &[String]) -> Result<Asked, String> {
     let mut asked = Asked::default();
     let mut options = true;
@@ -193,7 +200,7 @@ fn with_place(path: PathBuf) -> (PathBuf, Option<(u32, u32)>) {
 }
 
 fn resolve_args() -> Opening {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = arguments();
     // (An unknown option was said and Null didn't start: see `answered_in_the_terminal`.)
     let Asked { wait, paths, .. } = parse_args(&args).unwrap_or_default();
     // `--wait` is for a file (git's message); its project, the repository it's in (or its
@@ -405,8 +412,8 @@ const HELP: &str = "Null, a calm, fast code editor.
 /// `--version` and `--help`, answered in the terminal (Null not started); and on Linux, no
 /// display to open a window on said, not waited on forever.
 fn answered_in_the_terminal() -> bool {
-    let first = std::env::args().nth(1);
-    let asked = match parse_args(&std::env::args().skip(1).collect::<Vec<_>>()) {
+    let first = arguments().into_iter().next();
+    let asked = match parse_args(&arguments()) {
         Ok(asked) => asked,
         // (An uninstaller's own, first: below.)
         Err(_) if first.as_deref() == Some("--forget-keys") => Asked::default(),
@@ -519,8 +526,8 @@ fn main() {
     }
     // Started by Null as it quit, to install an update (see `updates`).
     #[cfg(windows)]
-    if std::env::args().nth(1).as_deref() == Some("--finish-update") {
-        std::process::exit(updates::finish(&std::env::args().skip(2).collect::<Vec<_>>()));
+    if arguments().first().map(String::as_str) == Some("--finish-update") {
+        std::process::exit(updates::finish(&arguments()[1..]));
     }
     // (ssh started from here asks nothing in the window: see `remote::asking`.)
     remote::note_main_thread();
@@ -543,10 +550,10 @@ fn main() {
     });
     // Started by the Mac with nothing to open (the Dock, the Finder, or `null a b` through
     // `open -a`, whose paths come a moment later as "open these").
-    let by_the_system = cfg!(target_os = "macos") && std::env::args().len() <= 1;
+    let by_the_system = cfg!(target_os = "macos") && std::env::args_os().len() <= 1;
     let Opening { mut root, mut others, file, place, more, wait } = resolve_args();
     // Restarted after an update: its windows again (the first one here, the rest once it's open).
-    let mut reopen = if std::env::args().len() <= 1 { updates::windows_to_reopen() } else { Vec::new() };
+    let mut reopen = if std::env::args_os().len() <= 1 { updates::windows_to_reopen() } else { Vec::new() };
     if !reopen.is_empty() {
         let mut first = reopen.remove(0).into_iter();
         root = first.next().unwrap_or(root);
@@ -928,7 +935,10 @@ fn open_waiting_window(root: PathBuf, file: Option<PathBuf>, place: Option<(u32,
             workspace
         })
     });
-    if opened.is_err() {
+    if let Err(error) = opened {
+        if cx.windows().is_empty() {
+            drawing::window_failed(&format!("{error:#}"));
+        }
         cx.quit();
     }
 }
@@ -1002,9 +1012,10 @@ fn open_project_window_now(
         }
         Err(error) => {
             eprintln!("null: couldn't open a window: {error}");
-            // Nothing open, nothing would ever close: don't stay running out of sight.
+            // Nothing open, nothing would ever close: said where it's seen (or drawn without
+            // the card, on Linux), not left running out of sight.
             if cx.windows().is_empty() {
-                cx.quit();
+                drawing::window_failed(&format!("{error:#}"));
             }
         }
     }

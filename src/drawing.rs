@@ -4,7 +4,12 @@
 //! machine without any Vulkan. Then Null starts again drawn by Mesa's software Vulkan
 //! (lavapipe), slower, and says why once its window is open; with no software one either,
 //! it says what's wrong and how to put it right (in the terminal, and in a dialog when it
-//! was started from the desktop), not a panic.
+//! was started from the desktop), not a panic. The same when the first window can't be
+//! made (its surface, its renderer), on every system: said where it's seen.
+//!
+//! Linux's display too: `WAYLAND_DISPLAY` naming a socket that's gone (a terminal kept from
+//! another session) while X is there is let go (GPUI takes Wayland whenever it's named, and
+//! panics connecting); a compositor GPUI can't use is tried once more through X (XWayland).
 
 use gpui::Application;
 
@@ -18,6 +23,35 @@ pub fn application() -> Application {
     return linux::application();
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     Application::new()
+}
+
+/// The first window couldn't be made (`error`): on Linux tried again drawn without the
+/// card, as when the app couldn't be made; else said, in a dialog, and Null ends (nothing
+/// open, it would only run out of sight).
+pub fn window_failed(error: &str) -> ! {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    linux::window_failed(error);
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(window: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        }
+        let text: Vec<u16> =
+            format!("Null couldn't open its window: {error}\n\nUpdating the graphics card's driver may put it right.")
+                .encode_utf16()
+                .chain([0])
+                .collect();
+        let caption: Vec<u16> = "Null".encode_utf16().chain([0]).collect();
+        const MB_ICONERROR: u32 = 0x10;
+        // SAFETY: two NUL-terminated strings that live through the call.
+        unsafe { MessageBoxW(0, text.as_ptr(), caption.as_ptr(), MB_ICONERROR) };
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        eprintln!("Null couldn't open its window: {error}");
+        std::process::exit(1)
+    }
 }
 
 /// Why this Null draws without the graphics card, to say in its window: once a run.
@@ -38,7 +72,11 @@ pub fn without_card() -> Option<String> {
 mod linux {
     use super::WITHOUT_CARD;
     use gpui::Application;
+    use std::ffi::OsStr;
     use std::path::PathBuf;
+
+    /// Set on a Null started again through X after Wayland didn't do.
+    const THROUGH_X: &str = "NULL_TRIED_X11";
     use std::sync::{Mutex, OnceLock};
 
     pub const REMEDY: &str = "For an NVIDIA card: Software & Updates → Additional Drivers, the NVIDIA driver \
@@ -70,6 +108,11 @@ mod linux {
 
     pub fn application() -> Application {
         let started_again = std::env::var(WITHOUT_CARD).ok().filter(|w| !w.is_empty());
+        let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
+        if set("WAYLAND_DISPLAY") && set("DISPLAY") && wayland_gone() {
+            // SAFETY: read by nothing else yet (the only other thread reads no variables).
+            unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+        }
         static LISTENING: Listening = Listening;
         let listening = log::set_logger(&LISTENING).is_ok();
         if listening {
@@ -113,28 +156,66 @@ mod linux {
             .unwrap_or_default();
         let said = SAID.lock().map(|s| s.clone()).unwrap_or_default();
         if !message.contains("GPU") {
-            // Not the card (no display to reach): as GPUI says it.
+            // Not the card: the display. A Wayland compositor GPUI can't use: through X, once.
+            if set("WAYLAND_DISPLAY") && set("DISPLAY") && !set(THROUGH_X) {
+                start_again(&[(THROUGH_X, OsStr::new("1"))], &["WAYLAND_DISPLAY"]);
+            }
             end(&format!("Null couldn't open a window: {message}"));
         }
-        let why = why(&message, &said);
-        if started_again.is_none()
-            && let Some(software) = software_vulkan()
-        {
-            use std::os::unix::process::CommandExt;
-            let error = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "null".into()))
-                .args(std::env::args_os().skip(1))
-                .env("VK_DRIVER_FILES", &software)
-                .env("VK_ICD_FILENAMES", &software)
-                .env(WITHOUT_CARD, &why)
-                .exec();
-            eprintln!("Null couldn't start again without the graphics card: {error}");
+        without_card(&why(&message, &said), started_again.is_some())
+    }
+
+    /// The first window couldn't be made: drawn without the card, if that isn't already
+    /// tried; else said.
+    pub fn window_failed(error: &str) -> ! {
+        let started_again = std::env::var_os(WITHOUT_CARD).is_some_and(|w| !w.is_empty());
+        without_card(&format!("the graphics card couldn't draw the window ({error})"), started_again)
+    }
+
+    /// Started again drawn by Mesa's software Vulkan, saying `why`; or, with none (or it
+    /// already tried), what's wrong said, and the end.
+    fn without_card(why: &str, tried: bool) -> ! {
+        if !tried && let Some(software) = software_vulkan() {
+            start_again(
+                &[
+                    ("VK_DRIVER_FILES", software.as_os_str()),
+                    ("VK_ICD_FILENAMES", software.as_os_str()),
+                    (WITHOUT_CARD, OsStr::new(why)),
+                ],
+                &[],
+            );
         }
-        let software = if started_again.is_some() {
+        let software = if tried {
             "Mesa's software Vulkan didn't draw either."
         } else {
             "To draw without the card meanwhile (slower): sudo apt install mesa-vulkan-drivers."
         };
         end(&format!("Null can't draw its window: {why}.\n\n{REMEDY}.\n{software}"))
+    }
+
+    /// This Null in place of this one (the same arguments), with `set` set and `unset` not.
+    /// Returns only when it couldn't be started.
+    fn start_again(set: &[(&str, &OsStr)], unset: &[&str]) {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "null".into()));
+        command.args(std::env::args_os().skip(1)).envs(set.iter().copied());
+        for name in unset {
+            command.env_remove(name);
+        }
+        let error = command.exec();
+        eprintln!("Null couldn't start again: {error}");
+    }
+
+    /// `WAYLAND_DISPLAY` names a socket that isn't there.
+    fn wayland_gone() -> bool {
+        let Some(name) = std::env::var_os("WAYLAND_DISPLAY") else { return false };
+        let name = PathBuf::from(name);
+        let socket = if name.is_absolute() {
+            name
+        } else {
+            PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_default()).join(name)
+        };
+        !socket.exists()
     }
 
     /// Why no card drew, plainly, from GPUI's panic and what Vulkan said.
@@ -175,6 +256,8 @@ mod linux {
     }
 
     /// Says `message` (in a dialog too when there's no terminal to read it in) and ends.
+    /// (The dialog isn't waited for: a Null staying meanwhile would be handed the next
+    /// launches' folders, and open none.)
     fn end(message: &str) -> ! {
         use std::io::IsTerminal;
         eprintln!("{message}");
@@ -185,10 +268,10 @@ mod linux {
                 } else {
                     vec!["--title", "Null", "--error", message]
                 };
-                std::process::Command::new(program).args(args).status().is_ok()
+                std::process::Command::new(program).args(args).spawn().is_ok()
             });
             if !shown {
-                std::process::Command::new("notify-send").args(["Null", message]).status().ok();
+                std::process::Command::new("notify-send").args(["Null", message]).spawn().ok();
             }
         }
         std::process::exit(1)

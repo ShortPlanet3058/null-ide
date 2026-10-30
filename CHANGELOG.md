@@ -7,6 +7,21 @@
   to init GPU context": it draws with Mesa's software Vulkan, slower, and says why and how
   to put it right; with no software Vulkan either, it says so, in a dialog when started
   from the desktop.
+- More that kept Null from opening, fixed:
+  - Linux packages run on Ubuntu 20.04, Debian 11, RHEL 9 and newer (glibc 2.30; they needed
+    2.35, Ubuntu 22.04's, and stopped at "GLIBC_2.35 not found").
+  - A first window that can't be made (the graphics card's surface, its renderer) is said
+    in a dialog, or on Linux drawn without the card, not a Null that quits unseen.
+  - Linux: a `WAYLAND_DISPLAY` left from another session, its socket gone, no longer
+    stops Null where X is there; a Wayland compositor Null can't use is tried through X.
+  - A file whose name isn't UTF-8 (opened from the desktop's files) no longer stops Null
+    before it starts.
+  - Watching a huge folder for changes (a home folder, a link to `/`) no longer holds the
+    window back before its first frame: it's set up beside it.
+  - The message saying Null can't draw doesn't keep a Null running behind it (later
+    launches handed it their folders, and nothing opened).
+- The Mac and Windows first-run steps are said right: macOS 15's Open Anyway in Privacy &
+  Security, Windows' More info → Run anyway.
 - Settings → Folders you trust lists the folders whose code runs (their language servers,
   Python environments, project settings), each with Stop Trusting; every window opened on
   one goes back to Safe mode at once. A trusted folder since deleted is let go.
