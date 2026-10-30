@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Linux: Null opens on a computer whose graphics card won't draw through Vulkan (an NVIDIA
+  driver installed without its Vulkan part, or too old) instead of stopping with "Unable
+  to init GPU context": it draws with Mesa's software Vulkan, slower, and says why and how
+  to put it right; with no software Vulkan either, it says so, in a dialog when started
+  from the desktop.
 - Settings → Folders you trust lists the folders whose code runs (their language servers,
   Python environments, project settings), each with Stop Trusting; every window opened on
   one goes back to Safe mode at once. A trusted folder since deleted is let go.

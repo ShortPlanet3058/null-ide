@@ -1402,6 +1402,10 @@ impl Workspace {
         {
             workspace.show_notice(said, cx);
         }
+        // Drawn without the graphics card (Linux, its Vulkan driver not there): said once.
+        if let Some(why) = crate::drawing::without_card() {
+            workspace.show_notice(why, cx);
+        }
         // settings.json couldn't be read at launch: said, not left to pass for the defaults.
         if let Some(why) = Settings::unreadable() {
             workspace.show_notice(

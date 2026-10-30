@@ -22,6 +22,7 @@ mod crash;
 mod dap;
 mod debugger;
 mod download;
+mod drawing;
 mod editor;
 mod element;
 mod emmet;
@@ -107,9 +108,7 @@ mod workspace;
 mod wrap;
 mod wsl;
 
-use gpui::{
-    App, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size,
-};
+use gpui::{App, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size};
 use menus::Quit;
 use std::path::{Path, PathBuf};
 use workspace::Workspace;
@@ -570,7 +569,7 @@ fn main() {
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
     // or by the `null` command while Null runs: opened in the window.
-    let app = Application::new().with_assets(assets::Assets);
+    let app = drawing::application().with_assets(assets::Assets);
     trace::mark("app made");
     let (opened, mut to_open) = futures::channel::mpsc::unbounded::<Vec<String>>();
     let handed_paths = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
