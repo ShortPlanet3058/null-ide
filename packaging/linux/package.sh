@@ -33,6 +33,8 @@ install -Dm644 packaging/null.svg "$deb/usr/share/icons/hicolor/scalable/apps/nu
 install -Dm644 LICENSE "$deb/usr/share/doc/null-editor/copyright"
 size=$(du -sk "$deb/usr" | cut -f1)
 mkdir -p "$deb/DEBIAN"
+# The C library it needs: the newest version among those it was built against.
+glibc="$(objdump -T target/release/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)"
 # What it links to (libc, xcb, xkbcommon) and loads (Vulkan); a Vulkan driver and the
 # desktop's file dialogs are there on a desktop, suggested elsewhere.
 cat > "$deb/DEBIAN/control" <<CONTROL
@@ -42,7 +44,7 @@ Section: editors
 Priority: optional
 Architecture: amd64
 Installed-Size: $size
-Depends: libc6 (>= 2.35), libgcc-s1, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libvulkan1
+Depends: libc6 (>= $glibc), libgcc-s1, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libvulkan1
 Recommends: mesa-vulkan-drivers | vulkan-icd, xdg-desktop-portal, git
 Maintainer: ShortPlanet3058 <118638156+ShortPlanet3058@users.noreply.github.com>
 Homepage: https://null-ide.com/

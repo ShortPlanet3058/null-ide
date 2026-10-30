@@ -22,6 +22,7 @@ mod crash;
 mod dap;
 mod debugger;
 mod download;
+mod drawing;
 mod editor;
 mod element;
 mod emmet;
@@ -107,9 +108,7 @@ mod workspace;
 mod wrap;
 mod wsl;
 
-use gpui::{
-    App, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size,
-};
+use gpui::{App, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size};
 use menus::Quit;
 use std::path::{Path, PathBuf};
 use workspace::Workspace;
@@ -153,16 +152,35 @@ struct Asked {
     wait: bool,
     help: bool,
     version: bool,
-    paths: Vec<String>,
+    /// As the system gave them (a name that isn't UTF-8 kept as it is: it's the file's).
+    paths: Vec<std::ffi::OsString>,
 }
 
 /// The arguments read (Err: an option Null doesn't have, said as the terminal shows it).
 /// After `--`, everything is a path (a file named `-x`).
-fn parse_args(args: &[String]) -> Result<Asked, String> {
+/// The command line's arguments (not the program's name), as the system gives them.
+/// (`std::env::args` panics on one that isn't UTF-8: a Latin-1 file name opened from the
+/// desktop's files kept Null from starting at all.)
+fn arguments() -> Vec<std::ffi::OsString> {
+    std::env::args_os().skip(1).collect()
+}
+
+/// The arguments as text, a name that isn't UTF-8 with its odd bytes replaced (for what
+/// reads them as words: the updater's).
+fn arguments_text() -> Vec<String> {
+    arguments().into_iter().map(|a| a.to_string_lossy().into_owned()).collect()
+}
+
+fn parse_args(args: &[std::ffi::OsString]) -> Result<Asked, String> {
     let mut asked = Asked::default();
     let mut options = true;
     for arg in args {
-        match arg.as_str() {
+        // (A name that isn't UTF-8 isn't an option: a path.)
+        let Some(text) = arg.to_str() else {
+            asked.paths.push(arg.clone());
+            continue;
+        };
+        match text {
             "--" if options => options = false,
             "--wait" | "-w" if options => asked.wait = true,
             "--help" | "-h" if options => asked.help = true,
@@ -174,7 +192,7 @@ fn parse_args(args: &[String]) -> Result<Asked, String> {
                     "null: unknown option {other} (null --help lists them; -- before a file named so)"
                 ));
             }
-            path => asked.paths.push(path.to_string()),
+            _ => asked.paths.push(arg.clone()),
         }
     }
     Ok(asked)
@@ -194,7 +212,7 @@ fn with_place(path: PathBuf) -> (PathBuf, Option<(u32, u32)>) {
 }
 
 fn resolve_args() -> Opening {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = arguments();
     // (An unknown option was said and Null didn't start: see `answered_in_the_terminal`.)
     let Asked { wait, paths, .. } = parse_args(&args).unwrap_or_default();
     // `--wait` is for a file (git's message); its project, the repository it's in (or its
@@ -222,7 +240,7 @@ fn resolve_args() -> Opening {
     let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
     let (mut folders, mut files) = (Vec::new(), Vec::new());
     for arg in &paths {
-        match server_folder(arg) {
+        match arg.to_str().and_then(server_folder) {
             Some(server) => folders.push(server),
             None => {
                 let path = absolute(&cwd.join(arg));
@@ -277,7 +295,7 @@ fn repository_of(file: &std::path::Path) -> PathBuf {
 /// `null` opens the current folder, `null <folder>` opens that folder, and
 /// `null <file>` opens the file inside the current folder (or its own folder
 /// when it lives elsewhere).
-fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
+fn resolve_path(arg: Option<std::ffi::OsString>) -> (PathBuf, Option<PathBuf>) {
     let cwd = std::env::current_dir().map(|d| absolute(&d)).unwrap_or_else(|_| PathBuf::from("."));
     let Some(arg) = arg else {
         // Opened from the Finder (or the Dock), there's no folder to go by: the last project.
@@ -306,7 +324,7 @@ fn resolve_path(arg: Option<String>) -> (PathBuf, Option<PathBuf>) {
     };
     // A folder on a server: `ssh://me@box:2222/home/me/app`, or as Null writes it
     // (`/ssh:me@box:/home/me/app`).
-    if let Some(server) = server_folder(&arg) {
+    if let Some(server) = arg.to_str().and_then(server_folder) {
         return (server, None);
     }
     // `null .` and `null` are the same project, with the same session: no `/.` at the end.
@@ -406,8 +424,8 @@ const HELP: &str = "Null, a calm, fast code editor.
 /// `--version` and `--help`, answered in the terminal (Null not started); and on Linux, no
 /// display to open a window on said, not waited on forever.
 fn answered_in_the_terminal() -> bool {
-    let first = std::env::args().nth(1);
-    let asked = match parse_args(&std::env::args().skip(1).collect::<Vec<_>>()) {
+    let first = arguments_text().into_iter().next();
+    let asked = match parse_args(&arguments()) {
         Ok(asked) => asked,
         // (An uninstaller's own, first: below.)
         Err(_) if first.as_deref() == Some("--forget-keys") => Asked::default(),
@@ -443,8 +461,9 @@ fn answered_in_the_terminal() -> bool {
         }
     };
     // (On Windows Null has no console of its own: the one it was started from, if any. Joined,
-    // a windowed program can still have no handle to write to it with: the console's own
-    // output is opened then. Output sent to a file or a pipe is left as it is.)
+    // a windowed program has no handle to write to it with (none, or cmd's own, not valid
+    // here): the console's own output is opened then. Output sent to a file or a pipe is
+    // left as it is.)
     #[cfg(windows)]
     {
         const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
@@ -454,6 +473,7 @@ fn answered_in_the_terminal() -> bool {
         unsafe extern "system" {
             fn AttachConsole(process: u32) -> i32;
             fn GetStdHandle(which: u32) -> isize;
+            fn GetFileType(handle: isize) -> u32;
             fn SetStdHandle(which: u32, handle: isize) -> i32;
             fn CreateFileW(
                 name: *const u16,
@@ -468,8 +488,11 @@ fn answered_in_the_terminal() -> bool {
         // SAFETY: plain Win32 calls; the only pointer is a NUL-terminated name that lives
         // through the call. Each fails harmlessly when there's no console.
         unsafe {
+            const FILE_TYPE_DISK: u32 = 1;
+            const FILE_TYPE_PIPE: u32 = 3;
             let had = GetStdHandle(STD_OUTPUT_HANDLE);
-            if AttachConsole(u32::MAX) != 0 && (had == 0 || had == -1) {
+            let redirected = had != 0 && had != -1 && matches!(GetFileType(had), FILE_TYPE_DISK | FILE_TYPE_PIPE);
+            if AttachConsole(u32::MAX) != 0 && !redirected {
                 let name: Vec<u16> = "CONOUT$".encode_utf16().chain([0]).collect();
                 let out =
                     CreateFileW(name.as_ptr(), GENERIC_WRITE, FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, 0, 0);
@@ -515,8 +538,8 @@ fn main() {
     }
     // Started by Null as it quit, to install an update (see `updates`).
     #[cfg(windows)]
-    if std::env::args().nth(1).as_deref() == Some("--finish-update") {
-        std::process::exit(updates::finish(&std::env::args().skip(2).collect::<Vec<_>>()));
+    if arguments_text().first().map(String::as_str) == Some("--finish-update") {
+        std::process::exit(updates::finish(&arguments_text()[1..]));
     }
     // (ssh started from here asks nothing in the window: see `remote::asking`.)
     remote::note_main_thread();
@@ -539,10 +562,10 @@ fn main() {
     });
     // Started by the Mac with nothing to open (the Dock, the Finder, or `null a b` through
     // `open -a`, whose paths come a moment later as "open these").
-    let by_the_system = cfg!(target_os = "macos") && std::env::args().len() <= 1;
+    let by_the_system = cfg!(target_os = "macos") && std::env::args_os().len() <= 1;
     let Opening { mut root, mut others, file, place, more, wait } = resolve_args();
     // Restarted after an update: its windows again (the first one here, the rest once it's open).
-    let mut reopen = if std::env::args().len() <= 1 { updates::windows_to_reopen() } else { Vec::new() };
+    let mut reopen = if std::env::args_os().len() <= 1 { updates::windows_to_reopen() } else { Vec::new() };
     if !reopen.is_empty() {
         let mut first = reopen.remove(0).into_iter();
         root = first.next().unwrap_or(root);
@@ -565,7 +588,7 @@ fn main() {
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
     // or by the `null` command while Null runs: opened in the window.
-    let app = Application::new().with_assets(assets::Assets);
+    let app = drawing::application().with_assets(assets::Assets);
     trace::mark("app made");
     let (opened, mut to_open) = futures::channel::mpsc::unbounded::<Vec<String>>();
     let handed_paths = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -924,7 +947,10 @@ fn open_waiting_window(root: PathBuf, file: Option<PathBuf>, place: Option<(u32,
             workspace
         })
     });
-    if opened.is_err() {
+    if let Err(error) = opened {
+        if cx.windows().is_empty() {
+            drawing::window_failed(&format!("{error:#}"));
+        }
         cx.quit();
     }
 }
@@ -998,9 +1024,10 @@ fn open_project_window_now(
         }
         Err(error) => {
             eprintln!("null: couldn't open a window: {error}");
-            // Nothing open, nothing would ever close: don't stay running out of sight.
+            // Nothing open, nothing would ever close: said where it's seen (or drawn without
+            // the card, on Linux), not left running out of sight.
             if cx.windows().is_empty() {
-                cx.quit();
+                drawing::window_failed(&format!("{error:#}"));
             }
         }
     }
@@ -1064,7 +1091,7 @@ mod url_tests {
 
     #[test]
     fn options_anywhere_and_unknown_ones_refused() {
-        let args = |list: &[&str]| parse_args(&list.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        let args = |list: &[&str]| parse_args(&list.iter().map(std::ffi::OsString::from).collect::<Vec<_>>());
         let asked = args(&["a.rs", "--wait"]).unwrap();
         assert!(asked.wait);
         assert_eq!(asked.paths, ["a.rs"]);
@@ -1073,6 +1100,17 @@ mod url_tests {
         // After `--`, a file named like an option.
         assert_eq!(args(&["--", "-notes.md", "--wait"]).unwrap().paths, ["-notes.md", "--wait"]);
         assert_eq!(args(&["-"]).unwrap().paths, ["-"]);
+    }
+
+    /// A file name that isn't UTF-8 (Latin-1's `café`) is a path, kept byte for byte.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_kept_as_it_is() {
+        use std::os::unix::ffi::OsStringExt;
+        let name = std::ffi::OsString::from_vec(b"caf\xe9.txt".to_vec());
+        let asked = parse_args(&[name.clone(), "--wait".into()]).unwrap();
+        assert!(asked.wait);
+        assert_eq!(asked.paths, [name]);
     }
 
     /// A file given from a terminal in a folder: that folder as the project, unless it's too

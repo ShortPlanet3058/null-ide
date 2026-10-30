@@ -898,7 +898,9 @@ pub struct Workspace {
     /// Actions run from the palette lately, most recent first.
     recent_commands: Vec<&'static str>,
     /// Watches the project folder so the tree and open files follow changes made elsewhere.
-    _watcher: Option<Box<dyn notify::Watcher>>,
+    _watcher: Option<Box<dyn notify::Watcher + Send>>,
+    /// The watcher being made, off the window's thread (see `watch_here`).
+    _watcher_made: Option<Task<()>>,
     watch_task: Option<Task<()>>,
     index_task: Option<Task<()>>,
     session_task: Option<Task<()>>,
@@ -1125,6 +1127,7 @@ impl Workspace {
                     }
                 }
             }),
+            cx.observe_global::<crate::trust::Changed>(|this, cx| this.trust_changed(cx)),
             cx.observe_global_in::<Settings>(window, |this, window, cx| {
                 this.apply_settings(cx);
                 this.ask_where_suggestions_come_from(window, cx);
@@ -1259,6 +1262,7 @@ impl Workspace {
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
             _watcher: None,
+            _watcher_made: None,
             watch_task: None,
             index_task: None,
             session_task: None,
@@ -1400,6 +1404,10 @@ impl Workspace {
             && let Some(said) = crate::crash::untold()
         {
             workspace.show_notice(said, cx);
+        }
+        // Drawn without the graphics card (Linux, its Vulkan driver not there): said once.
+        if let Some(why) = crate::drawing::without_card() {
+            workspace.show_notice(why, cx);
         }
         // settings.json couldn't be read at launch: said, not left to pass for the defaults.
         if let Some(why) = Settings::unreadable() {
@@ -1671,7 +1679,7 @@ impl Workspace {
             self._watcher = None;
             self.watch_server(server.host, tx);
         } else {
-            self.watch_here(root, tx);
+            self.watch_here(root, tx, cx);
         }
         self.watch_task = Some(cx.spawn(async move |this, cx| {
             use futures::StreamExt;
@@ -1728,7 +1736,41 @@ impl Workspace {
     }
 
     /// The window's folders on this computer: the system tells of changes.
-    fn watch_here(&mut self, root: PathBuf, tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>) {
+    /// The window's folders here, watched. Made on a thread of its own: watching a folder
+    /// goes through all of it first on Linux (a home folder, a link to `/`: minutes), and
+    /// the window was waiting on it before its first frame. Given to the window once made,
+    /// unless the window watches something else by then.
+    fn watch_here(
+        &mut self,
+        root: PathBuf,
+        tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>,
+        cx: &mut Context<Self>,
+    ) {
+        self._watcher = None;
+        // (The window's other folders, on the same watcher; a server's aren't its to watch.)
+        let others: Vec<PathBuf> =
+            self.roots.all().iter().filter(|r| **r != root && !crate::remote::is_remote(r)).cloned().collect();
+        let (made, watcher) = futures::channel::oneshot::channel();
+        std::thread::Builder::new()
+            .name("watching".into())
+            .spawn(move || {
+                if let Some(watcher) = Self::watcher(&root, &others, tx) {
+                    made.send(watcher).ok();
+                }
+            })
+            .ok();
+        self._watcher_made = Some(cx.spawn(async move |this, cx| {
+            if let Ok(watcher) = watcher.await {
+                this.update(cx, |this, _| this._watcher = Some(watcher)).ok();
+            }
+        }));
+    }
+
+    fn watcher(
+        root: &Path,
+        others: &[PathBuf],
+        tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>,
+    ) -> Option<Box<dyn notify::Watcher + Send>> {
         let handler = move |result: notify::Result<notify::Event>| {
             if let Ok(event) = result
                 && !matches!(event.kind, notify::EventKind::Access(_))
@@ -1738,21 +1780,18 @@ impl Workspace {
         };
         // A folder inside WSL: Windows isn't told of changes there, so they're looked for
         // every couple of seconds instead.
-        let watcher: notify::Result<Box<dyn notify::Watcher>> = if crate::wsl::is_wsl(&root) {
+        let watcher: notify::Result<Box<dyn notify::Watcher + Send>> = if crate::wsl::is_wsl(root) {
             let config = notify::Config::default().with_poll_interval(Duration::from_secs(2));
-            notify::PollWatcher::new(handler, config).map(|w| Box::new(w) as Box<dyn notify::Watcher>)
+            notify::PollWatcher::new(handler, config).map(|w| Box::new(w) as Box<dyn notify::Watcher + Send>)
         } else {
-            notify::recommended_watcher(handler).map(|w| Box::new(w) as Box<dyn notify::Watcher>)
+            notify::recommended_watcher(handler).map(|w| Box::new(w) as Box<dyn notify::Watcher + Send>)
         };
-        let Ok(mut watcher) = watcher else { return };
-        if watcher.watch(&root, notify::RecursiveMode::Recursive).is_err() {
-            return;
-        }
-        // (The window's other folders, on the same watcher; a server's aren't its to watch.)
-        for other in self.roots.all().iter().filter(|r| **r != root && !crate::remote::is_remote(r)) {
+        let mut watcher = watcher.ok()?;
+        watcher.watch(root, notify::RecursiveMode::Recursive).ok()?;
+        for other in others {
             watcher.watch(other, notify::RecursiveMode::Recursive).ok();
         }
-        self._watcher = Some(watcher);
+        Some(watcher)
     }
 
     fn files_changed(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -3260,6 +3299,11 @@ impl Workspace {
         let Some(ix) = self.tabs.iter().position(|t| t.editor == stand_in) else { return };
         let lsp = self.lsp.clone();
         let editor = cx.new(|cx| Editor::from_read(read, began, Some(lsp), cx));
+        // Unsaved text from last time (kept after a crash, or by keep_unsaved), then where
+        // it was: on the file as read.
+        if let Some(text) = stand_in.read(cx).unsaved_asked() {
+            editor.update(cx, |e, cx| e.restore_unsaved(&text, cx));
+        }
         if let Some((line, column, top)) = stand_in.read(cx).view_asked() {
             editor.update(cx, |e, cx| match top {
                 Some(top) => e.restore_view(line, column, top, cx),
@@ -8015,7 +8059,7 @@ impl Workspace {
         for folder in &folders {
             crate::trust::trust(folder);
         }
-        self.trust_changed(cx);
+        crate::trust::changed(cx);
         if let [folder] = folders.as_slice() {
             let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             self.show_notice(format!("Trusted {name}: its language servers start now"), cx);
@@ -8027,10 +8071,11 @@ impl Workspace {
         for root in self.roots.all().to_vec() {
             crate::trust::distrust(&root);
         }
-        self.trust_changed(cx);
+        crate::trust::changed(cx);
         self.show_notice("Safe mode: this folder's code doesn't run until you trust it again".into(), cx);
     }
 
+    /// The folders trusted changed (here, in another window or in Settings).
     fn trust_changed(&mut self, cx: &mut Context<Self>) {
         crate::settings::use_project(self.root(cx), cx);
         self.lsp.update(cx, |lsp, cx| lsp.trust_changed(cx));
@@ -15795,6 +15840,48 @@ esac
             assert!(!editor.is_opening());
             assert_eq!(editor.buffer.len_chars(), text.len());
             assert_eq!(editor.caret_point(), (1000, 4), "where it was asked to show");
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Unsaved text kept from last time, brought back into a very big file (or a server's)
+    /// while its stand-in is there: on the file once it's read, not gone with the stand-in.
+    #[gpui::test]
+    fn unsaved_text_brought_back_outlives_the_stand_in(cx: &mut gpui::TestAppContext) {
+        let dir = crate::tools::test_dir("unsaved-into-stand-in");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = "2026-10-12 INFO request served\n";
+        let path = dir.join("big.log");
+        std::fs::write(&path, line.repeat((2 << 20) / line.len())).unwrap();
+        let unsaved = format!("{}an edit not saved\n", line.repeat(10));
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            cx.set_global(Theme::oled());
+            cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
+            crate::keymap::register(crate::keymap::Keymap::Null, cx);
+        });
+        let root = dir.clone();
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(root, window, cx));
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_file(path.clone(), window, cx);
+            let stand_in = w.active_editor().unwrap().clone();
+            stand_in.update(cx, |e, cx| {
+                assert!(e.is_opening());
+                e.restore_unsaved(&unsaved, cx);
+            });
+        });
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if workspace.read_with(cx, |w, cx| w.active_editor().is_some_and(|e| !e.read(cx).is_opening())) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        workspace.read_with(cx, |w, cx| {
+            let editor = w.active_editor().unwrap().read(cx);
+            assert!(!editor.is_opening());
+            assert_eq!(editor.buffer.to_string(), unsaved, "the unsaved text, not the file's");
         });
         std::fs::remove_dir_all(&dir).ok();
     }
