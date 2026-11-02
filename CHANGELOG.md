@@ -22,6 +22,11 @@
     seconds at most, or beside the window.
 - What's New and your settings' file have their language support in Null's own folder: in
   a window on a folder not trusted yet they showed "Safe mode".
+- Windows: `null` in a Command Prompt or PowerShell waits for what it says (`null.com`,
+  beside `null.exe`): `null --version` came after the next prompt, an option it didn't
+  know said nothing, and `null --wait` returned at once.
+- Spelling: a line in a language the system has no dictionary for (English on a French
+  Windows with only French's) is no longer underlined word by word.
 
 ## 0.2.3
 
