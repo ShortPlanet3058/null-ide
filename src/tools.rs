@@ -2,7 +2,7 @@
 //! on the PATH, then where their installers usually put them, since an app opened
 //! from the Finder doesn't get the terminal's PATH.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A folder for tests, `name` inside one of this test run's own. All runs
 /// share one parent, where the folders of runs over an hour old are swept away, so a test
@@ -106,6 +106,20 @@ pub fn keep_data_private() {
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok();
         }
     }
+}
+
+/// The file that starts this Null: the program, or the AppImage it runs from (the program's
+/// in a folder the AppImage mounts for the run, somewhere else each time).
+pub fn own_program() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(appimage_of(&exe, std::env::var_os("APPIMAGE"), std::env::var_os("APPDIR")).unwrap_or(exe))
+}
+
+/// The AppImage `exe` runs from, as its runtime says (`APPIMAGE`, mounted at `APPDIR`): not
+/// one a program started from it was told of (a Null started from another's terminal).
+fn appimage_of(exe: &Path, image: Option<std::ffi::OsString>, mounted: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let (image, mounted) = (PathBuf::from(image?), PathBuf::from(mounted?));
+    (exe.starts_with(&mounted) && image.is_file()).then_some(image)
 }
 
 /// Whether each of `paths` is a folder, as far as its disk answers within `limit` (all
@@ -228,6 +242,22 @@ pub fn find(name: &str) -> Option<PathBuf> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Null from an AppImage is that file (its program's in a folder mounted for the run);
+    /// a Null started by it, from its terminal, isn't.
+    #[test]
+    fn null_from_an_appimage_is_that_file() {
+        let dir = test_dir("appimage-of");
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("Null.AppImage");
+        std::fs::write(&image, "").unwrap();
+        let mounted = Path::new("/tmp/.mount_NullAb12");
+        let of = |exe: &str| appimage_of(Path::new(exe), Some(image.clone().into()), Some(mounted.into()));
+        assert_eq!(of("/tmp/.mount_NullAb12/usr/bin/null"), Some(image.clone()));
+        assert_eq!(of("/home/me/.local/bin/null"), None);
+        assert_eq!(appimage_of(Path::new("/tmp/.mount_NullAb12/usr/bin/null"), None, None), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Folders and not, said at once; nothing to ask, nothing waited for.
     #[test]

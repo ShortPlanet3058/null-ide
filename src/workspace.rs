@@ -3910,7 +3910,7 @@ impl Workspace {
     }
 
     fn install_shell_command(&mut self, _: &InstallShellCommand, _: &mut Window, cx: &mut Context<Self>) {
-        let Ok(exe) = std::env::current_exe() else { return };
+        let Some(exe) = crate::tools::own_program() else { return };
         let (dir, target, result) = if cfg!(windows) {
             let Some(dir) = crate::tools::data_dir().map(|d| d.join("bin")) else { return };
             let target = dir.join("null.cmd");

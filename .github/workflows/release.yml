@@ -114,6 +114,17 @@ jobs:
             libasound2-dev libudev-dev libdbus-1-dev libssl-dev zlib1g-dev
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # What makes the AppImage: appimagetool and the runtime it puts in front of Null,
+      # each a release of theirs checked against its SHA-256.
+      - name: AppImage tools
+        run: |
+          get() { curl -fsSL -o "$RUNNER_TEMP/$1" "$2" && echo "$3  $RUNNER_TEMP/$1" | sha256sum -c - && chmod +x "$RUNNER_TEMP/$1"; }
+          get appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage \
+            ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+          get runtime https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64 \
+            2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+          echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
+          echo "APPIMAGE_RUNTIME=$RUNNER_TEMP/runtime" >> "$GITHUB_ENV"
       - run: packaging/linux/package.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -121,6 +132,7 @@ jobs:
           path: |
             target/release/null-*.tar.gz
             target/release/null-*.deb
+            target/release/null-*.AppImage
 
   release:
     needs: [version, macos, windows, linux]
@@ -152,6 +164,7 @@ jobs:
           mv "dist/null-$version-windows-x86_64-setup.exe" dist/null-windows-x86_64-setup.exe
           mv "dist/null-$version-linux-x86_64.tar.gz" dist/null-linux-x86_64.tar.gz
           mv "dist/null-$version-amd64.deb" dist/null-linux-amd64.deb
+          mv "dist/null-$version-x86_64.AppImage" dist/null-linux-x86_64.AppImage
       # What Null's Update reads: the version and each package's SHA-256, signed with the
       # release key (its public half is in src/updates.rs). No key, no release.
       - name: Signed update details
