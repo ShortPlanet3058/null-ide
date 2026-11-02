@@ -68,6 +68,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\..\target\release\null.exe"; DestDir: "{app}"; Flags: ignoreversion
+; `null` in a Command Prompt or PowerShell (found before null.exe): waits for what it says.
+Source: "..\..\target\release\null-console.exe"; DestDir: "{app}"; DestName: "null.com"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 

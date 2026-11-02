@@ -11421,6 +11421,7 @@ fn cmd_script(exe: &Path) -> String {
          set \"wait=\"\r\n\
          if \"%~1\"==\"--version\" (\"{exe}\" --version & exit /b)\r\n\
          if \"%~1\"==\"--help\" (\"{exe}\" --help & exit /b)\r\n\
+         if \"%~1\"==\"--report\" (\"{exe}\" --report & exit /b)\r\n\
          if \"%~1\"==\"--wait\" set \"wait=1\"\r\n\
          if defined wait shift\r\n\
          if \"%~1\"==\"\" (start \"\" \"{exe}\" \"%CD%\\.\" & exit /b)\r\n\

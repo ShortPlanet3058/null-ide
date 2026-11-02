@@ -508,6 +508,33 @@ fn answered_in_the_terminal() -> bool {
     true
 }
 
+/// On Windows, a Null opening its window lets go of the pipes it was started with: `null .`
+/// in a Command Prompt (through null.com, which passes on what Null says until they close,
+/// see src/bin/null-console.rs) is done, as is a script's `null . | more`.
+#[cfg(windows)]
+fn let_go_of_pipes() {
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const FILE_TYPE_PIPE: u32 = 3;
+    unsafe extern "system" {
+        fn GetStdHandle(which: u32) -> isize;
+        fn GetFileType(handle: isize) -> u32;
+        fn SetStdHandle(which: u32, handle: isize) -> i32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    // SAFETY: plain Win32 calls on Null's own standard handles; what's written to one let go
+    // of is dropped (Rust's standard output takes no handle as nowhere to write).
+    unsafe {
+        for which in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let handle = GetStdHandle(which);
+            if handle != 0 && handle != -1 && GetFileType(handle) == FILE_TYPE_PIPE {
+                SetStdHandle(which, 0);
+                CloseHandle(handle);
+            }
+        }
+    }
+}
+
 /// The display named isn't there: neither Wayland's socket nor (for a local X display,
 /// `:0`) X's. A display elsewhere (`localhost:10.0`, ssh -X) is left to try.
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -587,6 +614,10 @@ fn main() {
         instance::Launch::HandedOver => return,
         instance::Launch::First(handed) => handed,
     };
+    #[cfg(windows)]
+    if !wait {
+        let_go_of_pipes();
+    }
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
     // or by the `null` command while Null runs: opened in the window.

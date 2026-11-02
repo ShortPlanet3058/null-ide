@@ -11,6 +11,11 @@ repository = "https://github.com/ShortPlanet3058/null-ide"
 name = "null"
 path = "src/main.rs"
 
+# Windows: `null` in a Command Prompt, installed as null.com beside null.exe.
+[[bin]]
+name = "null-console"
+path = "src/bin/null-console.rs"
+
 [dependencies]
 alacritty_terminal = "0.26.0"
 futures = "0.3"
