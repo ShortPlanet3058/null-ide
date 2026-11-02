@@ -217,6 +217,8 @@ actions!(
         CheckForUpdates,
         /// What changed in this version (since the one before, after an update).
         WhatsNew,
+        /// What to send when something's wrong (see `report`), copied.
+        CopyProblemReport,
         /// The newer Null out: downloaded, checked and installed; once it's ready, Null
         /// restarts with it.
         UpdateNull,
@@ -5560,6 +5562,7 @@ impl Workspace {
             (App, "About Null".into(), Box::new(AboutNull)),
             (App, "Check for Updates".into(), Box::new(CheckForUpdates)),
             (App, "What's New".into(), Box::new(WhatsNew)),
+            (App, "Copy Problem Report".into(), Box::new(CopyProblemReport)),
             (App, "Update Null".into(), Box::new(UpdateNull)),
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
@@ -8180,6 +8183,15 @@ impl Workspace {
 
     /// What's New: the changes since the version before (this one's, if it's not known),
     /// read in the preview of a Markdown file of Null's own, which can't be changed.
+    fn copy_problem_report(&mut self, _: &CopyProblemReport, _: &mut Window, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(crate::report::text()));
+        self.show_notice(
+            "Problem report copied: paste it into an issue (github.com/ShortPlanet3058/null-ide/issues), with what went wrong."
+                .into(),
+            cx,
+        );
+    }
+
     fn whats_new(&mut self, _: &WhatsNew, window: &mut Window, cx: &mut Context<Self>) {
         let since = crate::whats_new::since().flatten();
         let Some(path) = crate::tools::data_dir().map(|d| d.join("What's New.md")) else { return };
@@ -12806,6 +12818,7 @@ impl Render for Workspace {
                 cx.listener(|this, _: &crate::file_tree::NewFolder, window, cx| this.new_in_project(true, window, cx)),
             )
             .on_action(cx.listener(Self::whats_new))
+            .on_action(cx.listener(Self::copy_problem_report))
             .on_action(cx.listener(Self::update_null))
             .on_action(cx.listener(Self::open_wsl_folder))
             .on_action(cx.listener(Self::open_ssh_folder))

@@ -38,7 +38,7 @@ pub fn window_failed(error: &str) -> ! {
             fn MessageBoxW(window: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
         }
         let text: Vec<u16> =
-            format!("Null couldn't open its window: {error}\n\nUpdating the graphics card's driver may put it right.")
+            format!("Null couldn't open its window: {error}\n\nUpdating the graphics card's driver may put it right. {REPORT}")
                 .encode_utf16()
                 .chain([0])
                 .collect();
@@ -49,9 +49,20 @@ pub fn window_failed(error: &str) -> ! {
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
-        eprintln!("Null couldn't open its window: {error}");
+        eprintln!("Null couldn't open its window: {error}\n\n{REPORT}");
         std::process::exit(1)
     }
+}
+
+/// Said when Null can't open: how to tell what's wrong to whoever can help.
+const REPORT: &str = "To report it, `null --report` in a terminal says what to send.";
+
+/// Why this Null draws without the graphics card (None: it draws with it).
+pub fn drawn_without_card() -> Option<String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return linux::WHY.get().cloned();
+    #[allow(unreachable_code)]
+    None
 }
 
 /// Why this Null draws without the graphics card, to say in its window: once a run.
@@ -260,6 +271,7 @@ mod linux {
     /// launches' folders, and open none.)
     fn end(message: &str) -> ! {
         use std::io::IsTerminal;
+        let message = &format!("{message}\n\n{}", super::REPORT);
         eprintln!("{message}");
         if !std::io::stderr().is_terminal() {
             let shown = ["zenity", "kdialog"].iter().any(|program| {
