@@ -116,7 +116,8 @@ pub fn wrong_in(line: &str) -> Vec<Range<usize>> {
 }
 
 /// The misspelled words of `line`: its `words` (those `keep` says are checked) that the
-/// checker finds wrong.
+/// checker finds wrong. Most of them wrong, the line is in a language the system has no
+/// dictionary for (English on a French Windows with only French's): none marked.
 pub fn misspelled_words(line: &str, keep: impl Fn(&Range<usize>) -> bool) -> Vec<Range<usize>> {
     if line.len() > LONGEST || !READY.load(Ordering::Relaxed) {
         return Vec::new();
@@ -126,7 +127,12 @@ pub fn misspelled_words(line: &str, keep: impl Fn(&Range<usize>) -> bool) -> Vec
         return Vec::new();
     }
     let wrong = wrong_in(line);
-    checked.into_iter().filter(|r| wrong.iter().any(|w| w.start < r.end && r.start < w.end)).collect()
+    let marked: Vec<Range<usize>> =
+        checked.iter().filter(|r| wrong.iter().any(|w| w.start < r.end && r.start < w.end)).cloned().collect();
+    if checked.len() >= 2 && marked.len() * 2 > checked.len() {
+        return Vec::new();
+    }
+    marked
 }
 
 /// UTF-16 units (as the Mac and Windows count) of `text` to its bytes.
@@ -559,11 +565,13 @@ mod tests {
 
     #[test]
     fn misspelled_words_and_their_guesses() {
-        let text = "teh `teh` recieve";
+        let text = "teh cat `teh` will recieve it";
         let wrong: Vec<&str> = misspelled_words(text, |_| true).into_iter().map(|r| &text[r]).collect();
         assert_eq!(wrong, ["teh", "recieve"]);
         let wrong = misspelled_words(text, |r| r.start > 3);
         assert_eq!(wrong.iter().map(|r| &text[r.clone()]).collect::<Vec<_>>(), ["recieve"]);
+        // Most words wrong: a language with no dictionary here, nothing marked.
+        assert!(misspelled_words("teh recieve speling cat", |_| true).is_empty());
         assert_eq!(guesses("teh")[0], "the");
         // The Mac counts in UTF-16: "été 😀 teh" → bytes.
         let text = "été 😀 teh";

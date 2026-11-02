@@ -2,7 +2,7 @@
 //! on the PATH, then where their installers usually put them, since an app opened
 //! from the Finder doesn't get the terminal's PATH.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A folder for tests, `name` inside one of this test run's own. All runs
 /// share one parent, where the folders of runs over an hour old are swept away, so a test
@@ -108,6 +108,68 @@ pub fn keep_data_private() {
     }
 }
 
+/// The file that starts this Null: the program, or the AppImage it runs from (the program's
+/// in a folder the AppImage mounts for the run, somewhere else each time).
+pub fn own_program() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(appimage_of(&exe, std::env::var_os("APPIMAGE"), std::env::var_os("APPDIR")).unwrap_or(exe))
+}
+
+/// The AppImage `exe` runs from, as its runtime says (`APPIMAGE`, mounted at `APPDIR`): not
+/// one a program started from it was told of (a Null started from another's terminal).
+fn appimage_of(exe: &Path, image: Option<std::ffi::OsString>, mounted: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let (image, mounted) = (PathBuf::from(image?), PathBuf::from(mounted?));
+    (exe.starts_with(&mounted) && image.is_file()).then_some(image)
+}
+
+/// Run from an AppImage: the files Null was started with stay its own, not handed on to
+/// what it starts. (Its runtime leaves it a pipe that keeps the AppImage mounted until every
+/// program holding it has ended: Null's terminals and language servers, and the Null started
+/// again after an update, kept the old one mounted for as long as they ran.)
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn keep_started_with_files_own() {
+    if own_program().is_none_or(|own| std::env::current_exe().is_ok_and(|exe| exe == own)) {
+        return;
+    }
+    let fds: Vec<i32> = std::fs::read_dir("/proc/self/fd")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter(|&fd| fd > 2)
+        .collect();
+    for fd in fds {
+        // SAFETY: flags read and set on a number; one that isn't open (read_dir's own, closed
+        // since) fails harmlessly.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
+}
+
+/// Whether each of `paths` is a folder, as far as its disk answers within `limit` (all
+/// asked at once): None for one whose disk didn't (a network disk that's gone, a WSL that
+/// doesn't start), not waited for longer.
+pub fn are_dirs_within(paths: &[PathBuf], limit: std::time::Duration) -> Vec<Option<bool>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (i, path) in paths.iter().enumerate() {
+        let (tx, path) = (tx.clone(), path.clone());
+        if std::thread::Builder::new().name("is-dir".into()).spawn(move || tx.send((i, path.is_dir())).ok()).is_err() {
+            return paths.iter().map(|p| Some(p.is_dir())).collect();
+        }
+    }
+    drop(tx);
+    let mut answers = vec![None; paths.len()];
+    let deadline = std::time::Instant::now() + limit;
+    while let Ok((i, is_dir)) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        answers[i] = Some(is_dir);
+    }
+    answers
+}
+
 /// Where Null keeps what it installs itself (language servers), never on the system:
 /// `~/Library/Application Support/Null` on macOS, `$XDG_DATA_HOME/null` (or
 /// `~/.local/share/null`) on Linux, `%LOCALAPPDATA%\Null` on Windows.
@@ -208,6 +270,35 @@ pub fn find(name: &str) -> Option<PathBuf> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Null from an AppImage is that file (its program's in a folder mounted for the run);
+    /// a Null started by it, from its terminal, isn't.
+    #[test]
+    fn null_from_an_appimage_is_that_file() {
+        let dir = test_dir("appimage-of");
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("Null.AppImage");
+        std::fs::write(&image, "").unwrap();
+        let mounted = Path::new("/tmp/.mount_NullAb12");
+        let of = |exe: &str| appimage_of(Path::new(exe), Some(image.clone().into()), Some(mounted.into()));
+        assert_eq!(of("/tmp/.mount_NullAb12/usr/bin/null"), Some(image.clone()));
+        assert_eq!(of("/home/me/.local/bin/null"), None);
+        assert_eq!(appimage_of(Path::new("/tmp/.mount_NullAb12/usr/bin/null"), None, None), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Folders and not, said at once; nothing to ask, nothing waited for.
+    #[test]
+    fn folders_are_told_from_the_rest() {
+        let dir = test_dir("are-dirs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file"), "").unwrap();
+        let paths = [dir.clone(), dir.join("file"), dir.join("missing")];
+        let answers = are_dirs_within(&paths, std::time::Duration::from_secs(5));
+        assert_eq!(answers, [Some(true), Some(false), Some(false)]);
+        assert!(are_dirs_within(&[], std::time::Duration::from_secs(5)).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn the_data_folder_is_its_owner_s() {

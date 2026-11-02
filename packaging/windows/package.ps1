@@ -1,8 +1,9 @@
 # Builds Null's Windows release in target\release:
 #  - null-<version>-windows-x86_64-setup.exe, the installer (null.iss: Start menu, `null` on
 #    the PATH, "Open with Null"), when Inno Setup 6 is here;
-#  - null-<version>-windows-x86_64.zip: null.exe (its icon and version built in) and the
-#    licence. Unzipped anywhere, it runs; "Install Shell Command" in Null adds `null`.
+#  - null-<version>-windows-x86_64.zip: null.exe (its icon and version built in), null.com
+#    (`null` in a Command Prompt: src/bin/null-console.rs) and the licence. Unzipped
+#    anywhere, it runs; "Install Shell Command" in Null adds `null`.
 #
 #     powershell -File packaging\windows\package.ps1
 $ErrorActionPreference = 'Stop'
@@ -15,6 +16,7 @@ $stage = "target\release\$name"
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $stage | Out-Null
 Copy-Item target\release\null.exe, README.md, LICENSE $stage
+Copy-Item target\release\null-console.exe "$stage\null.com"
 Compress-Archive -Path $stage -DestinationPath "target\release\$name.zip" -Force
 Remove-Item -Recurse -Force $stage
 Write-Output "Built target\release\$name.zip"

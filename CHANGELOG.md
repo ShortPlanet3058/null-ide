@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- Linux: an AppImage, `null-linux-x86_64.AppImage`: one file to make executable and open,
+  for distributions without .deb. It updates itself like the others, a second launch
+  opens in the Null running, and Install Shell Command points at it.
+- `null --report` prints what to send when something's wrong (Null's version and how it's
+  installed, the system; on Linux the session, the graphics cards, their drivers and
+  Vulkan's), with the last crash: it works when Null can't open a window at all, and
+  that message now says so. Copy Problem Report (⌘K) copies the same. Nothing of yours
+  is in it (no files, settings or keys; your home folder is `~`).
+- Never left waiting:
+  - A server that answers but whose shell never starts (a login file waiting for
+    something, a home folder on a disk that doesn't answer) is given up on after 30
+    seconds, saying so, instead of being waited for forever. Time spent answering a
+    password question doesn't count.
+  - `null ssh://box/~/app` opens the window at once and reaches the server beside it (the
+    home folder was asked first, before any window).
+  - A project, or a folder you trust, on a disk that doesn't answer (a network disk that's
+    gone, a WSL that doesn't start) no longer holds Null's start: it's looked at for three
+    seconds at most, or beside the window.
+- What's New and your settings' file have their language support in Null's own folder: in
+  a window on a folder not trusted yet they showed "Safe mode".
+- Windows: `null` in a Command Prompt or PowerShell waits for what it says (`null.com`,
+  beside `null.exe`): `null --version` came after the next prompt, an option it didn't
+  know said nothing, and `null --wait` returned at once.
+- Spelling: a line in a language the system has no dictionary for (English on a French
+  Windows with only French's) is no longer underlined word by word.
+
 ## 0.2.3
 
 - Linux: Null opens on a computer whose graphics card won't draw through Vulkan (an NVIDIA
