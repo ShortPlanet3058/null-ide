@@ -44,17 +44,24 @@ fn save(list: &[PathBuf]) {
 
 /// The first time (no list kept yet): the projects you'd opened before, trusted. Called
 /// before any window opens, so the folder this launch opens isn't one of them. Later: the
-/// folders deleted since are let go (see `gone`).
+/// folders deleted since are let go (see `gone`), looked at beside the window (one on a
+/// network disk that doesn't answer would hold it back).
 pub fn start() {
     let Some(file) = file() else { return };
     if file.exists() {
-        with(|trusted| {
-            let before = trusted.len();
-            trusted.retain(|folder| !gone(folder));
-            if trusted.len() != before {
-                save(trusted);
-            }
-        });
+        let trusted = folders();
+        std::thread::Builder::new()
+            .name("trusted-folders".into())
+            .spawn(move || {
+                let gone: Vec<PathBuf> = trusted.into_iter().filter(|folder| gone(folder)).collect();
+                if !gone.is_empty() {
+                    with(|trusted| {
+                        trusted.retain(|folder| !gone.contains(folder));
+                        save(trusted);
+                    });
+                }
+            })
+            .ok();
         return;
     }
     let list = seeded(crate::session::recent_projects(), crate::tools::home_dir().as_deref());

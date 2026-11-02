@@ -414,18 +414,28 @@ fn forget_in(file: &Path, root: &Path) {
     }
 }
 
+/// How long a disk may take to say whether a project's still there before it's taken as
+/// it was (a network disk that's gone, a WSL that doesn't start: not waited on).
+const DISK_ANSWERS_WITHIN: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Projects opened lately, most recent first, that are still there (a server's are kept:
-/// it's asked when one is opened).
+/// it's asked when one is opened; so is one whose disk doesn't answer at once).
 pub fn recent_projects() -> Vec<PathBuf> {
     let Some(file) = recent_projects_file() else { return Vec::new() };
-    read_recent(&file).into_iter().filter(|p| crate::remote::is_remote(p) || p.is_dir()).collect()
+    let recent = read_recent(&file);
+    let local: Vec<PathBuf> = recent.iter().filter(|p| !crate::remote::is_remote(p)).cloned().collect();
+    let there = crate::tools::are_dirs_within(&local, DISK_ANSWERS_WITHIN);
+    let gone: Vec<&PathBuf> = local.iter().zip(&there).filter(|(_, there)| **there == Some(false)).map(|(p, _)| p).collect();
+    recent.iter().filter(|p| !gone.contains(p)).cloned().collect()
 }
 
 /// The project open when Null last closed, if it's still there. Not one on a server: Null
-/// would wait on the network to start (it's in Open Recent).
+/// would wait on the network to start (it's in Open Recent); nor one whose disk doesn't
+/// answer at once (Null opens without it).
 pub fn last_project() -> Option<PathBuf> {
     let path = PathBuf::from(std::fs::read_to_string(last_project_file()?).ok()?.trim());
-    path.is_dir().then_some(path)
+    let there = crate::tools::are_dirs_within(std::slice::from_ref(&path), DISK_ANSWERS_WITHIN);
+    (there[0] == Some(true)).then_some(path)
 }
 
 /// The project open when Null last closed, when it was a server's folder: reopened once

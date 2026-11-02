@@ -108,6 +108,26 @@ pub fn keep_data_private() {
     }
 }
 
+/// Whether each of `paths` is a folder, as far as its disk answers within `limit` (all
+/// asked at once): None for one whose disk didn't (a network disk that's gone, a WSL that
+/// doesn't start), not waited for longer.
+pub fn are_dirs_within(paths: &[PathBuf], limit: std::time::Duration) -> Vec<Option<bool>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (i, path) in paths.iter().enumerate() {
+        let (tx, path) = (tx.clone(), path.clone());
+        if std::thread::Builder::new().name("is-dir".into()).spawn(move || tx.send((i, path.is_dir())).ok()).is_err() {
+            return paths.iter().map(|p| Some(p.is_dir())).collect();
+        }
+    }
+    drop(tx);
+    let mut answers = vec![None; paths.len()];
+    let deadline = std::time::Instant::now() + limit;
+    while let Ok((i, is_dir)) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        answers[i] = Some(is_dir);
+    }
+    answers
+}
+
 /// Where Null keeps what it installs itself (language servers), never on the system:
 /// `~/Library/Application Support/Null` on macOS, `$XDG_DATA_HOME/null` (or
 /// `~/.local/share/null`) on Linux, `%LOCALAPPDATA%\Null` on Windows.
@@ -208,6 +228,19 @@ pub fn find(name: &str) -> Option<PathBuf> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Folders and not, said at once; nothing to ask, nothing waited for.
+    #[test]
+    fn folders_are_told_from_the_rest() {
+        let dir = test_dir("are-dirs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file"), "").unwrap();
+        let paths = [dir.clone(), dir.join("file"), dir.join("missing")];
+        let answers = are_dirs_within(&paths, std::time::Duration::from_secs(5));
+        assert_eq!(answers, [Some(true), Some(false), Some(false)]);
+        assert!(are_dirs_within(&[], std::time::Duration::from_secs(5)).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn the_data_folder_is_its_owner_s() {
