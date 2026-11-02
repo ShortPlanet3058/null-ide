@@ -108,7 +108,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential pkg-config \
+            ca-certificates curl git build-essential pkg-config file \
             libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-dev libx11-xcb-dev libxcb1-dev libwayland-dev libvulkan-dev \
             libasound2-dev libudev-dev libdbus-1-dev libssl-dev zlib1g-dev
