@@ -3992,6 +3992,19 @@ impl Workspace {
 
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let path = crate::remote::plain(path);
+        // From a server's home folder (`null ssh://box/~/app`): there, once it's known.
+        match crate::remote::in_home(&path) {
+            Some(Some(there)) => return self.open_path(there, window, cx),
+            Some(None) => {
+                let host = crate::remote::of(&path).map(|s| s.host).unwrap_or_default();
+                return self.connect_then(host, window, cx, move |this, window, cx| {
+                    if let Some(Some(there)) = crate::remote::in_home(&path) {
+                        this.open_path(there, window, cx);
+                    }
+                });
+            }
+            None => {}
+        }
         // On a server not reached yet: reached first, off the window's thread (ssh may ask
         // for a password, asked in the window, which mustn't be waiting), then opened.
         if let Some(server) = crate::remote::of(&path).filter(|s| !crate::remote::is_connected(&s.host)) {

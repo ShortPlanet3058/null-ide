@@ -353,11 +353,8 @@ fn server_folder(arg: &str) -> Option<PathBuf> {
     if host.is_empty() {
         return None;
     }
-    let path = match path.strip_prefix('~') {
-        Some(rest) => format!("{}{rest}", remote::home(&host).ok()?),
-        None => format!("/{path}"),
-    };
-    Some(remote::path(&host, &path))
+    // (From the home folder: `/~/…` until the server's reached, see `remote::in_home`.)
+    Some(remote::path(&host, &format!("/{path}")))
 }
 
 /// A `file://` URL as a path ("%20" back to a space, and so on).
@@ -1070,6 +1067,7 @@ mod url_tests {
     fn a_server_s_folder_is_given_as_an_ssh_address() {
         assert_eq!(server_folder("ssh://me@box:2222/srv/app"), Some(remote::path("me@box#2222", "/srv/app")));
         assert_eq!(server_folder("ssh://box"), Some(remote::path("box", "/")));
+        assert_eq!(server_folder("ssh://box/~/app"), Some(remote::path("box", "/~/app")));
         assert_eq!(server_folder("/ssh:box:/x"), Some(PathBuf::from("/ssh:box:/x")));
         assert_eq!(server_folder("ssh://"), None);
         assert_eq!(server_folder("src/main.rs"), None);

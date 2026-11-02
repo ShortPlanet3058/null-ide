@@ -9,6 +9,7 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -227,15 +228,38 @@ struct Session {
     said: Arc<Mutex<String>>,
 }
 
+/// How long a server's shell may take to start once ssh is running (its connecting has a
+/// limit of its own: `ConnectTimeout`).
+#[cfg(not(test))]
+const START_LIMIT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const START_LIMIT: Duration = Duration::from_secs(2);
+
+/// Ends the process `pid` (a session's ssh that never got going).
+fn kill(pid: u32) {
+    #[cfg(unix)]
+    let _ = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).output();
+    #[cfg(windows)]
+    let _ = crate::tools::command("taskkill").args(["/F", "/PID", &pid.to_string()]).output();
+}
+
 /// A program that's a server for tests: `sh` here.
 #[cfg(test)]
 pub const TEST_HOST: &str = "null-test-host";
+
+/// One that answers, but whose shell never starts.
+#[cfg(test)]
+const TEST_STUCK_HOST: &str = "null-test-stuck-host";
 
 impl Session {
     fn start(host: &str) -> io::Result<Session> {
         #[cfg(test)]
         let mut command = if host == TEST_HOST {
             std::process::Command::new("sh")
+        } else if host == TEST_STUCK_HOST {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("60");
+            command
         } else {
             let mut command = ssh(host);
             asking(&mut command, host);
@@ -272,6 +296,28 @@ impl Session {
             std::process::id(),
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
         );
+        // A server that answers but whose shell never starts (a login file waiting for
+        // something, a home folder on a disk that doesn't answer): given up on after a while,
+        // not counting the time a question of ssh's is open in the window.
+        let started = Arc::new(AtomicBool::new(false));
+        let gave_up = Arc::new(AtomicBool::new(false));
+        {
+            let (started, gave_up, pid) = (started.clone(), gave_up.clone(), child.id());
+            std::thread::Builder::new().name("ssh-start".into()).spawn(move || {
+                let mut waited = Duration::ZERO;
+                while !started.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(250));
+                    if !crate::askpass::asking() {
+                        waited += Duration::from_millis(250);
+                    }
+                    if waited >= START_LIMIT {
+                        gave_up.store(true, Ordering::SeqCst);
+                        kill(pid);
+                        return;
+                    }
+                }
+            })?;
+        }
         let mut session = Session { child, input, output, key, said };
         // Where each script's output goes before it's sent, `st` for what stat says (GNU's
         // and BusyBox's `-c`, or a Mac's `-f`), and a word that it's ready (whatever a login
@@ -287,19 +333,34 @@ impl Session {
         session.input.flush()?;
         let expected = format!("{} ready", session.key);
         let mut line = String::new();
-        loop {
+        let ended = loop {
             line.clear();
-            if session.output.read_line(&mut line)? == 0 {
-                // (Give ssh a moment to say why.)
-                let _ = session.child.wait();
-                std::thread::sleep(Duration::from_millis(50));
-                let said = session.said.lock().map(|s| s.trim().to_string()).unwrap_or_default();
-                return Err(io::Error::new(io::ErrorKind::ConnectionRefused, connect_error(host, &said)));
+            match session.output.read_line(&mut line) {
+                Ok(0) => break None,
+                Ok(_) if line.trim_end() == expected => {
+                    started.store(true, Ordering::SeqCst);
+                    return Ok(session);
+                }
+                Ok(_) => {}
+                Err(error) => break Some(error),
             }
-            if line.trim_end() == expected {
-                return Ok(session);
-            }
+        };
+        started.store(true, Ordering::SeqCst);
+        if gave_up.load(Ordering::SeqCst) {
+            let seconds = START_LIMIT.as_secs();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{host} answered, but its shell didn't start within {seconds} seconds (something in its login files may be waiting)."),
+            ));
         }
+        if let Some(error) = ended {
+            return Err(error);
+        }
+        // (Give ssh a moment to say why.)
+        let _ = session.child.wait();
+        std::thread::sleep(Duration::from_millis(50));
+        let said = session.said.lock().map(|s| s.trim().to_string()).unwrap_or_default();
+        Err(io::Error::new(io::ErrorKind::ConnectionRefused, connect_error(host, &said)))
     }
 
     fn run(&mut self, script: &str) -> io::Result<Output> {
@@ -448,7 +509,7 @@ pub fn run(host: &str, script: &str) -> io::Result<Output> {
         crate::trace::mark(&format!("ssh {host}: {error}"));
     }
     if let Err(error) = &result
-        && matches!(error.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::BrokenPipe)
+        && matches!(error.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::BrokenPipe | io::ErrorKind::TimedOut)
     {
         UNREACHABLE.lock().unwrap_or_else(|e| e.into_inner()).push((
             host.to_string(),
@@ -735,12 +796,27 @@ pub fn canonicalize(at: &RemotePath) -> io::Result<RemotePath> {
     Ok(RemotePath { host: at.host.clone(), path })
 }
 
+/// Servers' home folders, once asked.
+static HOMES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+fn known_home(host: &str) -> Option<String> {
+    HOMES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(h, _)| h == host).map(|(_, home)| home.clone())
+}
+
+/// A path given from the server's home folder (`null ssh://box/~/app`, kept as `/~/app`
+/// while the server isn't reached: Null doesn't wait on it to start): Some(the server's own
+/// path) once its home folder's known, Some(None) before. None: not such a path.
+pub fn in_home(path: &Path) -> Option<Option<PathBuf>> {
+    let remote = of(path)?;
+    let rest = remote.path.strip_prefix("/~").filter(|rest| rest.is_empty() || rest.starts_with('/'))?;
+    Some(known_home(&remote.host).map(|home| self::path(&remote.host, &format!("{home}{rest}"))))
+}
+
 /// The home folder on `host` (connecting, if it isn't yet: the first thing asked of a
 /// server); asked once.
 pub fn home(host: &str) -> io::Result<String> {
-    static HOMES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-    if let Some((_, home)) = HOMES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(h, _)| h == host) {
-        return Ok(home.clone());
+    if let Some(home) = known_home(host) {
+        return Ok(home);
     }
     let output = run_ok(host, "printf '%s' \"$HOME\"")?;
     let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -937,5 +1013,34 @@ mod tests {
         let output = run(TEST_HOST, "echo 'NULL 0 0 0'; true").unwrap();
         assert_eq!(output.stdout, b"NULL 0 0 0\n");
         assert!(run(TEST_HOST, "").unwrap().success());
+    }
+
+    /// `ssh://box/~/app` is the home folder's `app` once the home folder is known (asked when
+    /// the server's reached, not before Null starts); not a path from it, nothing to work out.
+    #[test]
+    #[cfg(unix)]
+    fn a_path_from_the_home_folder_is_worked_out_once_it_s_known() {
+        let given = path(TEST_HOST, "/~/app");
+        let home = home(TEST_HOST).unwrap();
+        assert_eq!(in_home(&given), Some(Some(path(TEST_HOST, &format!("{home}/app")))));
+        assert_eq!(in_home(&path(TEST_HOST, "/~")), Some(Some(path(TEST_HOST, &home))));
+        assert_eq!(in_home(&path(TEST_HOST, "/~app")), None);
+        assert_eq!(in_home(&path("box-never-reached", "/~/app")), Some(None));
+        assert_eq!(in_home(Path::new("/home/me/~/app")), None);
+    }
+
+    /// A server that answers but whose shell never starts is given up on, saying so, and
+    /// isn't waited for again at once.
+    #[test]
+    #[cfg(unix)]
+    fn a_shell_that_never_starts_is_given_up_on() {
+        let started = std::time::Instant::now();
+        let error = run(TEST_STUCK_HOST, "true").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(error.to_string().contains("didn't start"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let again = std::time::Instant::now();
+        assert!(run(TEST_STUCK_HOST, "true").is_err());
+        assert!(again.elapsed() < Duration::from_secs(1));
     }
 }
