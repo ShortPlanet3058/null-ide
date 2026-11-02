@@ -160,7 +160,24 @@ pub fn first_this_run() -> bool {
 /// Where the releases are read from: GitHub, or for trying an update out, a folder served
 /// elsewhere (`NULL_UPDATE_FROM=http://…`), with its own `update.json` and packages.
 fn served_from() -> Option<String> {
-    std::env::var("NULL_UPDATE_FROM").ok().filter(|f| !f.is_empty()).map(|f| f.trim_end_matches('/').to_string())
+    std::env::var("NULL_UPDATE_FROM").ok().filter(|f| may_serve(f)).map(|f| f.trim_end_matches('/').to_string())
+}
+
+/// An address updates may come from: over HTTPS, or plain HTTP from this computer only
+/// (a test server; anything else could be changed on the way, even if what it changes
+/// isn't installed).
+fn may_serve(address: &str) -> bool {
+    if address.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = address.strip_prefix("http://") else { return false };
+    let host = rest.split('/').next().unwrap_or_default();
+    // (Without its port: `[::1]` keeps its colons.)
+    let host = match host.find(']') {
+        Some(end) => &host[..=end],
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
 fn agent() -> ureq::Agent {
@@ -566,6 +583,18 @@ rm -rf "$d"
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn updates_come_over_https_or_from_this_computer() {
+        assert!(may_serve("https://example.com/null"));
+        assert!(may_serve("http://127.0.0.1:8765"));
+        assert!(may_serve("http://localhost:8765/"));
+        assert!(may_serve("http://[::1]:8765"));
+        assert!(!may_serve("http://example.com"));
+        assert!(!may_serve("http://127.0.0.1.example.com:80"));
+        assert!(!may_serve("ftp://127.0.0.1"));
+        assert!(!may_serve(""));
+    }
+
     use super::*;
 
     #[test]

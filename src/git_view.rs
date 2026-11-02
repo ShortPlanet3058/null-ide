@@ -217,7 +217,10 @@ pub struct GitView {
     /// Commit… asked for the keyboard in the message: given once the message shows.
     focus_message: bool,
     /// How many files each changes list draws (more on asking).
-    rows_shown: usize,
+    /// The Changes tab, as a list drawing only the rows in sight (thousands of changed
+    /// files, a folder of new ones not ignored, stay quick), and what's in it.
+    changes_list: gpui::ListState,
+    changes_entries: Vec<Entry>,
     reading: Option<Task<()>>,
     pub tab: Tab,
     /// Whether a remote is on GitHub (its tab shows only then): asked once per project.
@@ -256,8 +259,20 @@ impl Focusable for GitView {
     }
 }
 
-/// How many changed files a list draws at first, and how many more each ask adds.
-const ROWS_AT_ONCE: usize = 300;
+/// A row of the Changes tab.
+#[derive(Clone, Copy, PartialEq)]
+enum Entry {
+    Branch,
+    Message,
+    Nothing,
+    /// "In this commit" (true) or "Left out".
+    Heading(bool),
+    /// A changed file, its parts under it when unfolded (their number: its height).
+    File {
+        ix: usize,
+        parts: usize,
+    },
+}
 
 /// What a changed file's parts say, read off the main thread.
 struct Read {
@@ -293,14 +308,26 @@ fn read(root: &Path, ask_github: bool) -> Read {
     if branch.is_none() {
         return Read { repository: false, on_github: None, branch: None, ahead_behind: None, files: Vec::new() };
     }
-    let files = git::status(root)
+    let changed: Vec<(PathBuf, FileStatus, String, crate::encoding::Encoding)> = git::status(root)
         .into_iter()
         .map(|(path, status)| {
             let (current, encoding) = crate::encoding::read(&path).unwrap_or_default();
-            // (A new file has no committed side: no git run for each of them.)
+            (path, status, current, encoding)
+        })
+        .collect();
+    // The committed side of each, read at once. (A new file has none.)
+    let asked: Vec<(PathBuf, crate::encoding::Encoding)> = changed
+        .iter()
+        .filter(|(_, status, ..)| *status != FileStatus::Added)
+        .map(|(path, _, _, encoding)| (path.clone(), *encoding))
+        .collect();
+    let mut committed = git::committed_texts(root, &asked).into_iter();
+    let files = changed
+        .into_iter()
+        .map(|(path, status, current, _)| {
             let base = match status {
                 FileStatus::Added => String::new(),
-                _ => git::committed_text(&path, encoding).unwrap_or_default(),
+                _ => committed.next().flatten().unwrap_or_default(),
             };
             let (added, removed) = git::counts(&base, &current);
             // A new, deleted or conflicted file goes in whole.
@@ -350,7 +377,8 @@ impl GitView {
             committing: false,
             drafting: false,
             focus_message: false,
-            rows_shown: ROWS_AT_ONCE,
+            changes_list: gpui::ListState::new(0, gpui::ListAlignment::Top, gpui::px(400.)),
+            changes_entries: Vec::new(),
             draft_generation: 0,
             reading: None,
             tab: Tab::Changes,
@@ -421,7 +449,8 @@ impl GitView {
         self.picked = None;
         self.renaming = None;
         self.on_github = None;
-        self.rows_shown = ROWS_AT_ONCE;
+        self.changes_entries.clear();
+        self.changes_list.reset(0);
         // Another repository's GitHub: read again (what was asked of the last one dropped).
         let (list, closed) = (self.github.list, self.github.closed);
         self.github = GitHub { list, closed, ..GitHub::default() };
@@ -485,10 +514,11 @@ impl GitView {
         self.reading = Some(cx.spawn(async move |this, cx| {
             let read = cx.background_executor().spawn(async move { read(&root, ask_github) }).await;
             this.update(cx, |this, cx| {
-                let before = std::mem::take(&mut this.files);
+                let before: std::collections::HashMap<PathBuf, ChangedFile> =
+                    std::mem::take(&mut this.files).into_iter().map(|f| (f.path.clone(), f)).collect();
                 this.files = read.files;
                 for file in &mut this.files {
-                    if let Some(was) = before.iter().find(|f| f.path == file.path) {
+                    if let Some(was) = before.get(&file.path) {
                         file.kept = was.kept;
                         file.unfolded = was.unfolded;
                         // Its parts as they were chosen: the same lines, else the same change
@@ -869,20 +899,80 @@ impl GitView {
         if self.repository == Some(false) {
             return ui::empty_state(git::not_a_repository(), &theme).into_any_element();
         }
-        let ai = cx.global::<crate::settings::Settings>().ai.ready();
-        let kept = self.kept_count();
-        let can_commit = self.can_commit(cx);
-        let branch_row = self.branch.clone().map(|branch| {
-            let (ahead, behind) = self.ahead_behind.unwrap_or((0, 0));
-            let counts = match (ahead, behind) {
-                (0, 0) => String::new(),
-                (a, 0) => format!("↑{a}"),
-                (0, b) => format!("↓{b}"),
-                (a, b) => format!("↑{a} ↓{b}"),
-            };
-            let button = |id: &'static str, label: &'static str, event: fn() -> GitViewEvent| {
-                ui::button(id, label, &theme).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(event())))
-            };
+        let entries = self.entries_now();
+        self.list_entries(entries);
+        let view = cx.entity();
+        gpui::list(self.changes_list.clone(), move |ix, _, cx| view.update(cx, |this, cx| this.entry(ix, cx)))
+            .size_full()
+            .into_any_element()
+    }
+
+    /// What the Changes tab shows, row by row.
+    fn entries_now(&self) -> Vec<Entry> {
+        let mut entries = Vec::new();
+        if self.branch.is_some() {
+            entries.push(Entry::Branch);
+        }
+        // (Nothing to commit: no message to write either.)
+        let nothing = self.files.is_empty() && self.repository == Some(true);
+        entries.push(if nothing { Entry::Nothing } else { Entry::Message });
+        for kept in [true, false] {
+            let mut files = self.files.iter().enumerate().filter(|(_, f)| f.kept == kept).peekable();
+            if files.peek().is_some() {
+                entries.push(Entry::Heading(kept));
+            }
+            entries.extend(files.map(|(ix, f)| Entry::File {
+                ix,
+                parts: if f.unfolded && f.parts.len() > 1 { f.parts.len() } else { 0 },
+            }));
+        }
+        entries
+    }
+
+    /// The list told which rows changed (only those: where it's scrolled to stays). The
+    /// rows in sight are measured again as they're drawn, anyway.
+    fn list_entries(&mut self, entries: Vec<Entry>) {
+        let old = &self.changes_entries;
+        if *old == entries {
+            return;
+        }
+        let start = old.iter().zip(&entries).take_while(|(a, b)| a == b).count();
+        let same_end = old[start..].iter().rev().zip(entries[start..].iter().rev()).take_while(|(a, b)| a == b).count();
+        self.changes_list.splice(start..old.len() - same_end, entries.len() - same_end - start);
+        self.changes_entries = entries;
+    }
+
+    fn entry(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.global::<Theme>().clone();
+        let last = ix + 1 == self.changes_entries.len();
+        let row = match self.changes_entries.get(ix) {
+            Some(Entry::Branch) => self.branch_row(cx).unwrap_or_else(|| div().into_any_element()),
+            Some(Entry::Message) => self.message_box(cx),
+            Some(Entry::Nothing) => ui::empty_state("Nothing changed since the last commit", &theme).into_any_element(),
+            Some(Entry::Heading(true)) => ui::sidebar_heading("In this commit", &theme).into_any_element(),
+            Some(Entry::Heading(false)) => ui::sidebar_heading("Left out", &theme).into_any_element(),
+            Some(Entry::File { ix, .. }) => self.file_row(*ix, cx),
+            None => div().into_any_element(),
+        };
+        // (Each as wide as the list, as in a column; room under the last.)
+        div().w_full().when(last, |d| d.pb(px(12.))).child(row).into_any_element()
+    }
+
+    /// The branch, how far ahead and behind, Pull and Push.
+    fn branch_row(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let theme = cx.global::<Theme>().clone();
+        let branch = self.branch.clone()?;
+        let (ahead, behind) = self.ahead_behind.unwrap_or((0, 0));
+        let counts = match (ahead, behind) {
+            (0, 0) => String::new(),
+            (a, 0) => format!("↑{a}"),
+            (0, b) => format!("↓{b}"),
+            (a, b) => format!("↑{a} ↓{b}"),
+        };
+        let button = |id: &'static str, label: &'static str, event: fn() -> GitViewEvent| {
+            ui::button(id, label, &theme).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(event())))
+        };
+        Some(
             ui::card(&theme)
                 .mx(px(12.))
                 .mt(px(4.))
@@ -897,7 +987,16 @@ impl GitView {
                 .child(div().text_size(px(ui::T_SM)).text_color(theme.muted).child(counts))
                 .when(behind > 0, |d| d.child(button("git-pull", "Pull", || GitViewEvent::Pull)))
                 .when(ahead > 0 && behind == 0, |d| d.child(button("git-push", "Push", || GitViewEvent::Push)))
-        });
+                .into_any_element(),
+        )
+    }
+
+    /// The commit's message, Draft and Review, and Commit.
+    fn message_box(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.global::<Theme>().clone();
+        let ai = cx.global::<crate::settings::Settings>().ai.ready();
+        let kept = self.kept_count();
+        let can_commit = self.can_commit(cx);
         let commit_label = if self.committing {
             "Committing…".to_string()
         } else if kept == 1 {
@@ -905,7 +1004,7 @@ impl GitView {
         } else {
             format!("Commit {kept} files {}", ui::keys(&CommitChanges, "⌘↵", cx))
         };
-        let message_box = ui::card(&theme)
+        ui::card(&theme)
             .key_context("GitMessage")
             .on_action(cx.listener(Self::ask_commit))
             .mx(px(12.))
@@ -942,164 +1041,119 @@ impl GitView {
                     .child(ui::primary_button("git-commit", commit_label, can_commit, &theme).when(can_commit, |b| {
                         b.on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::CommitAsked)))
                     })),
-            );
-        let root = self.root.clone();
-        let file_row = |ix: usize, file: &ChangedFile, cx: &mut Context<Self>| -> gpui::AnyElement {
-            let name = file.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let folder = file
-                .path
-                .parent()
-                .and_then(|p| p.strip_prefix(&root).ok())
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            let (name_color, note) = match file.status {
-                FileStatus::Added => (theme.git_added, " · new"),
-                FileStatus::Deleted => (theme.git_deleted, " · deleted"),
-                FileStatus::Conflicted => (theme.error, " · to resolve"),
-                FileStatus::Modified => (theme.foreground, ""),
-            };
-            let path = file.path.clone();
-            let many = file.parts.len() > 1;
-            let unfolded = file.unfolded;
-            let partly = file.partly();
-            let row =
+            )
+            .into_any_element()
+    }
+
+    /// Changed file `ix`'s row: kept or not, its name and folder, its parts to unfold.
+    fn file_row(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.global::<Theme>().clone();
+        let Some(file) = self.files.get(ix) else { return div().into_any_element() };
+        let name = file.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let folder = file
+            .path
+            .parent()
+            .and_then(|p| p.strip_prefix(&self.root).ok())
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let (name_color, note) = match file.status {
+            FileStatus::Added => (theme.git_added, " · new"),
+            FileStatus::Deleted => (theme.git_deleted, " · deleted"),
+            FileStatus::Conflicted => (theme.error, " · to resolve"),
+            FileStatus::Modified => (theme.foreground, ""),
+        };
+        let path = file.path.clone();
+        let many = file.parts.len() > 1;
+        let unfolded = file.unfolded;
+        let partly = file.partly();
+        let row = div()
+            .id(("git-file", ix))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(10.))
+            .h(px(ui::ROW))
+            .rounded(px(ui::R_ROW))
+            .hover(|s| s.bg(ui::hover(&theme)))
+            .child(
+                ui::checkbox(file.kept, partly, &theme)
+                    .cursor_pointer()
+                    .id(("git-keep", ix))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_file(ix, cx))),
+            )
+            .child(
                 div()
-                    .id(("git-file", ix))
+                    .id(("git-name", ix))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(6.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .text_color(if file.kept { name_color } else { theme.muted })
+                    .child(div().flex_none().child(name))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.muted)
+                            .text_size(px(ui::T_SM))
+                            .child(format!("{folder}{note}")),
+                    )
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::Open(path.clone())))),
+            )
+            .when(many, |r| {
+                r.child(
+                    div()
+                        .id(("git-unfold", ix))
+                        .cursor_pointer()
+                        .child(
+                            svg()
+                                .path("icons/chevron-right.svg")
+                                .size(px(10.))
+                                .text_color(theme.faint)
+                                .with_transformation(gpui::Transformation::rotate(gpui::radians(if unfolded {
+                                    std::f32::consts::FRAC_PI_2
+                                } else {
+                                    0.
+                                }))),
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if let Some(f) = this.files.get_mut(ix) {
+                                f.unfolded = !f.unfolded;
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(counts(file.added, file.removed, &theme, cx));
+        let parts = (many && unfolded).then(|| {
+            div().flex().flex_col().pl(px(34.)).children(file.parts.iter().enumerate().map(|(p, part)| {
+                let lines = if part.lines.is_empty() {
+                    format!("At line {}", part.lines.start + 1)
+                } else if part.lines.len() == 1 {
+                    format!("Line {}", part.lines.start + 1)
+                } else {
+                    format!("Lines {}–{}", part.lines.start + 1, part.lines.end)
+                };
+                div()
+                    .id(gpui::SharedString::from(format!("git-part-{ix}-{p}")))
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .px(px(10.))
-                    .h(px(ui::ROW))
-                    .rounded(px(ui::R_ROW))
-                    .hover(|s| s.bg(ui::hover(&theme)))
-                    .child(
-                        ui::checkbox(file.kept, partly, &theme)
-                            .cursor_pointer()
-                            .id(("git-keep", ix))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_file(ix, cx))),
-                    )
-                    .child(
-                        div()
-                            .id(("git-name", ix))
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_baseline()
-                            .gap(px(6.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .cursor_pointer()
-                            .text_color(if file.kept { name_color } else { theme.muted })
-                            .child(div().flex_none().child(name))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(theme.muted)
-                                    .text_size(px(ui::T_SM))
-                                    .child(format!("{folder}{note}")),
-                            )
-                            .on_click(
-                                cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(GitViewEvent::Open(path.clone()))),
-                            ),
-                    )
-                    .when(many, |r| {
-                        r.child(
-                            div()
-                                .id(("git-unfold", ix))
-                                .cursor_pointer()
-                                .child(
-                                    svg()
-                                        .path("icons/chevron-right.svg")
-                                        .size(px(10.))
-                                        .text_color(theme.faint)
-                                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                            if unfolded { std::f32::consts::FRAC_PI_2 } else { 0. },
-                                        ))),
-                                )
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    if let Some(f) = this.files.get_mut(ix) {
-                                        f.unfolded = !f.unfolded;
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .child(counts(file.added, file.removed, &theme, cx));
-            let parts = (many && unfolded).then(|| {
-                div().flex().flex_col().pl(px(34.)).children(file.parts.iter().enumerate().map(|(p, part)| {
-                    let lines = if part.lines.is_empty() {
-                        format!("At line {}", part.lines.start + 1)
-                    } else if part.lines.len() == 1 {
-                        format!("Line {}", part.lines.start + 1)
-                    } else {
-                        format!("Lines {}–{}", part.lines.start + 1, part.lines.end)
-                    };
-                    div()
-                        .id(gpui::SharedString::from(format!("git-part-{ix}-{p}")))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .h(px(ui::ROW_SM))
-                        .text_size(px(ui::T_SM))
-                        .text_color(theme.muted)
-                        .cursor_pointer()
-                        .child(ui::checkbox(part.kept, false, &theme))
-                        .child(div().flex_none().child(lines))
-                        .child(
-                            div().min_w_0().truncate().text_color(theme.muted).code_font(cx).child(part.label.clone()),
-                        )
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_part(ix, p, cx)))
-                }))
-            });
-            div().flex().flex_col().child(row).children(parts).into_any_element()
-        };
-        // Thousands of changed files (a folder of new ones not ignored): the first of each
-        // list drawn, the rest a click away, so the sidebar stays quick.
-        let (mut kept_rows, mut out_rows) = (Vec::new(), Vec::new());
-        let (mut kept_more, mut out_more) = (0, 0);
-        for (ix, file) in self.files.iter().enumerate() {
-            let (rows, more) =
-                if file.kept { (&mut kept_rows, &mut kept_more) } else { (&mut out_rows, &mut out_more) };
-            if rows.len() < self.rows_shown {
-                rows.push(file_row(ix, file, cx));
-            } else {
-                *more += 1;
-            }
-        }
-        let more = |id: &'static str, more: usize, cx: &mut Context<Self>| {
-            (more > 0).then(|| {
-                div().px(px(ui::INSET)).pt(px(6.)).text_size(px(ui::T_SM)).child(
-                    ui::link(id, format!("Show {} more", more.min(ROWS_AT_ONCE)), &theme).on_click(cx.listener(
-                        |this, _: &ClickEvent, _, cx| {
-                            this.rows_shown += ROWS_AT_ONCE;
-                            cx.notify();
-                        },
-                    )),
-                )
-            })
-        };
-        let kept_more = more("git-kept-more", kept_more, cx);
-        let out_more = more("git-out-more", out_more, cx);
-        let nothing = self.files.is_empty() && self.repository == Some(true);
-        div()
-            .id("git-changes")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .pb(px(12.))
-            .children(branch_row)
-            // (Nothing to commit: no message to write either.)
-            .when(!nothing, |d| d.child(message_box))
-            .when(nothing, |d| d.child(ui::empty_state("Nothing changed since the last commit", &theme)))
-            .when(!kept_rows.is_empty(), |d| d.child(ui::sidebar_heading("In this commit", &theme)))
-            .child(div().px(px(6.)).flex().flex_col().children(kept_rows))
-            .children(kept_more)
-            .when(!out_rows.is_empty(), |d| d.child(ui::sidebar_heading("Left out", &theme)))
-            .child(div().px(px(6.)).flex().flex_col().children(out_rows))
-            .children(out_more)
-            .into_any_element()
+                    .h(px(ui::ROW_SM))
+                    .text_size(px(ui::T_SM))
+                    .text_color(theme.muted)
+                    .cursor_pointer()
+                    .child(ui::checkbox(part.kept, false, &theme))
+                    .child(div().flex_none().child(lines))
+                    .child(div().min_w_0().truncate().text_color(theme.muted).code_font(cx).child(part.label.clone()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_part(ix, p, cx)))
+            }))
+        });
+        div().px(px(6.)).flex().flex_col().child(row).children(parts).into_any_element()
     }
 }
 

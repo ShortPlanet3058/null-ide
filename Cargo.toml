@@ -1,6 +1,6 @@
 [package]
 name = "null-ide"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license-file = "LICENSE"
 description = "A calm, fast code editor where nothing gets in your way."
@@ -96,6 +96,8 @@ libc = "0.2"
 # Null's icon and version built into null.exe (see build.rs). Already in the build.
 # (Already there, under keyring: to make the desktop's keyring when it has none.)
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# What GPUI's Vulkan says as it turns a graphics card down (drawing.rs). Already in the build.
+log = "0.4"
 secret-service = { version = "5", features = ["crypto-rust"] }
 # Linux's Hunspell dictionaries read for spelling (spell.rs), in Rust.
 spellbook = "0.4.2"

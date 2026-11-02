@@ -3813,7 +3813,7 @@ dependencies = [
 
 [[package]]
 name = "null-ide"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
@@ -3828,6 +3828,7 @@ dependencies = [
  "image",
  "keyring",
  "libc",
+ "log",
  "lsp-types",
  "memchr",
  "mermaid-rs-renderer",

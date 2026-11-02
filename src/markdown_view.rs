@@ -1971,7 +1971,9 @@ mod tests {
             let blocks = parse(&source);
             assert!(!blocks.is_empty());
         }
-        assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+        // (Seconds in a debug build beside the other tests; reading these a letter at a time
+        // took minutes.)
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "{:?}", started.elapsed());
     }
 
     #[test]
