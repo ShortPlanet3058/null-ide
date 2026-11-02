@@ -122,6 +122,34 @@ fn appimage_of(exe: &Path, image: Option<std::ffi::OsString>, mounted: Option<st
     (exe.starts_with(&mounted) && image.is_file()).then_some(image)
 }
 
+/// Run from an AppImage: the files Null was started with stay its own, not handed on to
+/// what it starts. (Its runtime leaves it a pipe that keeps the AppImage mounted until every
+/// program holding it has ended: Null's terminals and language servers, and the Null started
+/// again after an update, kept the old one mounted for as long as they ran.)
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn keep_started_with_files_own() {
+    if own_program().is_none_or(|own| std::env::current_exe().is_ok_and(|exe| exe == own)) {
+        return;
+    }
+    let fds: Vec<i32> = std::fs::read_dir("/proc/self/fd")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter(|&fd| fd > 2)
+        .collect();
+    for fd in fds {
+        // SAFETY: flags read and set on a number; one that isn't open (read_dir's own, closed
+        // since) fails harmlessly.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
+}
+
 /// Whether each of `paths` is a folder, as far as its disk answers within `limit` (all
 /// asked at once): None for one whose disk didn't (a network disk that's gone, a WSL that
 /// doesn't start), not waited for longer.

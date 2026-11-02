@@ -570,6 +570,8 @@ fn main() {
     if arguments_text().first().map(String::as_str) == Some("--finish-update") {
         std::process::exit(updates::finish(&arguments_text()[1..]));
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    tools::keep_started_with_files_own();
     // (ssh started from here asks nothing in the window: see `remote::asking`.)
     remote::note_main_thread();
     if answered_in_the_terminal() {
