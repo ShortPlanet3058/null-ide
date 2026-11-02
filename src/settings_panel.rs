@@ -13,6 +13,7 @@ use gpui::{
     Action, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
     SharedString, Subscription, Window, actions, div, prelude::*,
 };
+use std::path::{Path, PathBuf};
 
 actions!(settings_panel, [CloseSettings]);
 
@@ -718,6 +719,55 @@ impl SettingsPanel {
                 &theme,
             ),
         ]
+        .into_iter()
+        .chain(self.trusted_folders(&theme, cx))
+        .collect()
+    }
+
+    /// The folders trusted to run their own code, each to stop trusting.
+    fn trusted_folders(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut rows = vec![
+            Self::heading("Folders you trust", theme),
+            div()
+                .pt(px(6.))
+                .text_size(px(ui::T_SM))
+                .text_color(theme.muted)
+                .child("Their language servers, Python environments and project settings run. A folder opened for the first time opens in Safe mode until you trust it from the status bar.")
+                .into_any_element(),
+        ];
+        let folders = crate::trust::folders();
+        // (Found searching for "trust" or "safe mode" too, not only by their names.)
+        let words = "folders you trust, safe mode";
+        if folders.is_empty() {
+            rows.push(shown_row("No folder trusted yet", Some(words), || {
+                Self::row_now("No folder trusted yet", None, div(), theme)
+            }));
+        }
+        // (Kept with links followed: the home folder too, to find it at their start.)
+        let homes: Vec<PathBuf> = crate::tools::home_dir()
+            .into_iter()
+            .flat_map(|h| [dunce::canonicalize(&h).ok(), Some(h)])
+            .flatten()
+            .collect();
+        for (i, folder) in folders.into_iter().enumerate() {
+            let name =
+                folder.file_name().map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into_owned());
+            let shown = match homes.iter().find_map(|home| folder.strip_prefix(home).ok()) {
+                Some(rest) => Path::new("~").join(rest).display().to_string(),
+                None => folder.display().to_string(),
+            };
+            let control = Self::button(("distrust", i), "Stop Trusting", theme).active(|s| s.opacity(0.7)).on_click(
+                cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    crate::trust::distrust(&folder);
+                    crate::trust::changed(cx);
+                    cx.notify();
+                }),
+            );
+            rows.push(shown_row(&name, Some(&format!("{shown} {words}")), || {
+                Self::row_now(&name, Some(&shown), control, theme)
+            }));
+        }
+        rows
     }
 
     fn editor(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {

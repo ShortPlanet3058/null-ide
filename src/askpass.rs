@@ -200,7 +200,7 @@ pub fn environment(host: &str) -> Option<Vec<(&'static str, String)>> {
 /// True when it was (and has answered); the exit code says whether there was an answer.
 pub fn answered_for_ssh() -> Option<i32> {
     let address = std::env::var(ENV).ok()?;
-    let prompt = std::env::args().nth(1).unwrap_or_default();
+    let prompt = std::env::args_os().nth(1).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let (port, secret) = address.split_once(' ')?;
     let port: u16 = port.parse().ok()?;
     let known_only = std::env::var_os(KNOWN_ONLY).is_some();

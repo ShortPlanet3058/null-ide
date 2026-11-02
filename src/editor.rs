@@ -926,11 +926,13 @@ pub struct ReadFile {
     read_only: bool,
 }
 
-/// A stand-in's file (see `Editor::stand_in`): its size, and where it was asked to show
-/// (line, column, and the line at the top when a session says).
+/// A stand-in's file (see `Editor::stand_in`): its size, where it was asked to show
+/// (line, column, and the line at the top when a session says), and unsaved text kept
+/// from last time, to bring back once it's read.
 pub struct Opening {
     pub bytes: u64,
     pub view: Option<(usize, usize, Option<usize>)>,
+    pub unsaved: Option<String>,
 }
 
 /// Colours for a file, unless it's too big to colour as you type: a minified bundle's one
@@ -1325,7 +1327,7 @@ impl Editor {
     pub fn stand_in(path: PathBuf, bytes: u64, cx: &mut Context<Self>) -> Self {
         let mut editor = Self::new(Buffer::new(), Some(path), cx);
         editor.view_only = true;
-        editor.opening = Some(Opening { bytes, view: None });
+        editor.opening = Some(Opening { bytes, view: None, unsaved: None });
         editor
     }
 
@@ -1337,6 +1339,11 @@ impl Editor {
     /// Where a stand-in was asked to show, for the editor taking its place.
     pub fn view_asked(&self) -> Option<(usize, usize, Option<usize>)> {
         self.opening.as_ref().and_then(|o| o.view)
+    }
+
+    /// The unsaved text a stand-in was given, to bring back once its file is read.
+    pub fn unsaved_asked(&self) -> Option<String> {
+        self.opening.as_ref().and_then(|o| o.unsaved.clone())
     }
 
     /// Picks up a change made to the file outside Null. Unsaved edits are never
@@ -1552,6 +1559,11 @@ impl Editor {
     /// Brings back unsaved text kept from last time: the whole text replaced, as one edit
     /// that can be undone, and the file unsaved.
     pub fn restore_unsaved(&mut self, text: &str, cx: &mut Context<Self>) {
+        // (A stand-in: once the file's read. Put in the stand-in, it went with it.)
+        if let Some(opening) = &mut self.opening {
+            opening.unsaved = Some(text.to_string());
+            return;
+        }
         if self.buffer.to_string() == text {
             return;
         }

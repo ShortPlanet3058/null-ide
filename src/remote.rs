@@ -173,8 +173,15 @@ pub fn terminal(host: &str, folder: &str) -> (PathBuf, Vec<String>, Vec<(&'stati
     let program = PathBuf::from(command.get_program());
     let mut args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     args.extend(["-t".into(), "--".into(), destination(host).0.into()]);
-    args.push(format!("cd {} 2>/dev/null; exec \"${{SHELL:-sh}}\" -l", quote(folder)));
+    args.push(terminal_line(folder));
     (program, args, crate::askpass::environment(host).unwrap_or_default())
+}
+
+/// What the server's shell is given for a terminal: run by `sh`, as the person's login
+/// shell there can be one that isn't (fish has no `${SHELL:-sh}` and reads `;` its own way).
+fn terminal_line(folder: &str) -> String {
+    let script = format!("cd {} 2>/dev/null; exec \"${{SHELL:-sh}}\" -l", quote(folder));
+    format!("exec sh -c {}", quote(&script))
 }
 
 /// What a script on a server printed, and how it ended.
@@ -788,6 +795,29 @@ mod tests {
         assert_eq!(plain(PathBuf::from(r"/ssh:box:/home/me\proj")), proj);
         assert_eq!(destination("box#2222"), ("box", Some("2222")));
         assert_eq!(destination("me@box"), ("me@box", None));
+    }
+
+    /// The line a server's shell runs for a terminal: into the folder, then the person's
+    /// own shell, whatever shell reads the line (here sh and zsh; fish reads it alike).
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_on_a_server_starts_in_its_folder_whatever_the_shell() {
+        let dir = crate::tools::test_dir("remote-terminal").join("it's here");
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = terminal_line(&dir.to_string_lossy());
+        // (The "login shell" here prints where it starts.)
+        let shell = dir.parent().unwrap().join("shell");
+        std::fs::write(&shell, "#!/bin/sh\npwd -P\n").unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        for reader in ["sh", "zsh"] {
+            if std::process::Command::new(reader).args(["-c", "true"]).status().is_err() {
+                continue;
+            }
+            let out = std::process::Command::new(reader).args(["-c", &line]).env("SHELL", &shell).output().unwrap();
+            let started = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert_eq!(Path::new(&started), dunce::canonicalize(&dir).unwrap(), "{reader}: {line}");
+        }
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 
     #[test]

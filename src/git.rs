@@ -131,10 +131,17 @@ fn output_given(
         command.envs(env.iter().copied()).args(args);
         let Some(input) = input else { return command.output() };
         let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(input)?;
+        // (Written beside the reading: git answering as it reads, a lot of each, would
+        // otherwise wait for its output to be read while this waits for it to read.)
+        let writing = child.stdin.take().map(|mut stdin| {
+            let input = input.to_vec();
+            std::thread::spawn(move || stdin.write_all(&input))
+        });
+        let output = child.wait_with_output()?;
+        if let Some(writing) = writing {
+            writing.join().map_err(|_| std::io::Error::other("writing to git failed"))??;
         }
-        return child.wait_with_output();
+        return Ok(output);
     };
     // (What git reads, given in the script: decoded on the way in.)
     let mut script = if input.is_some() { "base64 -d <<'NULL_END' | (".to_string() } else { "(".to_string() };
@@ -188,6 +195,54 @@ pub fn committed_text(path: &Path, encoding: crate::encoding::Encoding) -> Optio
     let output = output(path.parent()?, &["show", &format!("HEAD:./{name}")]).ok()?;
     // In the file's own encoding, so a Windows-1252 file compares with its accents.
     output.status.success().then(|| crate::encoding::decode_as(output.stdout, encoding)).flatten()
+}
+
+/// The last commit's text of each of `paths` (files in `dir`, a folder of the repository),
+/// read by one git, not one each (thousands of changed files): None for one it doesn't
+/// have, as `committed_text`.
+pub fn committed_texts(dir: &Path, paths: &[(PathBuf, crate::encoding::Encoding)]) -> Vec<Option<String>> {
+    // `HEAD:./path` from `dir`, one a line (a name with a line break in it: asked alone).
+    let asked: Vec<Option<String>> = paths
+        .iter()
+        .map(|(path, _)| {
+            let inside = path.strip_prefix(dir).ok()?.to_str()?.replace('\\', "/");
+            (!inside.contains('\n') && !inside.is_empty()).then(|| format!("HEAD:./{inside}\n"))
+        })
+        .collect();
+    let input: String = asked.iter().flatten().map(String::as_str).collect();
+    let mut answers = match output_given(dir, &["cat-file", "--batch"], &[], Some(input.as_bytes())) {
+        Ok(output) if output.status.success() => batch_answers(&output.stdout).into_iter(),
+        _ => Vec::new().into_iter(),
+    };
+    paths
+        .iter()
+        .zip(&asked)
+        .map(|((path, encoding), asked)| match asked {
+            Some(_) => answers.next().flatten().and_then(|bytes| crate::encoding::decode_as(bytes, *encoding)),
+            None => committed_text(path, *encoding),
+        })
+        .collect()
+}
+
+/// `git cat-file --batch`'s answers, in order: each object's bytes, None for one missing.
+fn batch_answers(mut out: &[u8]) -> Vec<Option<Vec<u8>>> {
+    let mut answers = Vec::new();
+    while let Some(end) = out.iter().position(|&b| b == b'\n') {
+        let header = String::from_utf8_lossy(&out[..end]).into_owned();
+        out = &out[end + 1..];
+        let size = header.split(' ').nth(2).filter(|_| header.split(' ').nth(1) == Some("blob"));
+        match size.and_then(|s| s.parse::<usize>().ok()) {
+            Some(size) if size <= out.len() => {
+                answers.push(Some(out[..size].to_vec()));
+                // (Each object ends with a line break of its own.)
+                out = &out[(size + 1).min(out.len())..];
+            }
+            Some(_) => break,
+            // `… missing`, `… ambiguous`, or not a file.
+            None => answers.push(None),
+        }
+    }
+    answers
 }
 
 /// Whether a change inside `.git` can mean a new commit or branch: HEAD itself, the
@@ -1695,6 +1750,31 @@ mod tests {
 
     /// A repository's config naming a command for git to run doesn't get it run by Null
     /// looking at the repository.
+    /// The committed text of many files at once: each its own, in order, None for a file
+    /// the commit doesn't have; from a folder inside the repository too.
+    #[test]
+    fn committed_texts_are_read_at_once() {
+        let Some(repo) = scratch_repo("git-batch") else { return };
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("a.txt"), "first\n").unwrap();
+        std::fs::write(repo.join("sub").join("b c.txt"), "second\nlines\n").unwrap();
+        std::fs::write(repo.join("empty.txt"), "").unwrap();
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]).unwrap();
+        let utf8 = crate::encoding::Encoding::default();
+        let files =
+            [repo.join("a.txt"), repo.join("new.txt"), repo.join("empty.txt"), repo.join("sub").join("b c.txt")];
+        let asked: Vec<_> = files.iter().map(|f| (f.clone(), utf8)).collect();
+        let texts = committed_texts(&repo, &asked);
+        assert_eq!(
+            texts,
+            [Some("first\n".to_string()), None, Some(String::new()), Some("second\nlines\n".to_string())]
+        );
+        let inside = committed_texts(&repo.join("sub"), &[(repo.join("sub").join("b c.txt"), utf8)]);
+        assert_eq!(inside, [Some("second\nlines\n".to_string())]);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_repository_s_config_runs_nothing() {
