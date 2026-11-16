@@ -130,13 +130,11 @@ fn starts_a_tag(tree: &Tree, byte: usize, flavor: Flavor) -> bool {
         }
         ancestor = n.parent();
     }
-    if flavor == Flavor::Jsx
+    !(flavor == Flavor::Jsx
         && node.kind() == "<"
-        && node.parent().is_some_and(|p| matches!(p.kind(), "binary_expression" | "type_arguments" | "type_parameters"))
-    {
-        return false;
-    }
-    true
+        && node
+            .parent()
+            .is_some_and(|p| matches!(p.kind(), "binary_expression" | "type_arguments" | "type_parameters")))
 }
 
 /// The closing tag to add after `before`, which ends with the `>` just typed. `start` is
