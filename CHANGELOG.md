@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.4
 
 - Linux: an AppImage, `null-linux-x86_64.AppImage`: one file to make executable and open,
   for distributions without .deb. It updates itself like the others, a second launch
