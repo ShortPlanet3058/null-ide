@@ -3,7 +3,10 @@
 #  - null-<version>-linux-x86_64.tar.gz: the binary, its icon, its menu entry, install.sh
 #    (which puts them in your home folder) and uninstall.sh;
 #  - null-<version>-amd64.deb, for Ubuntu and Debian (`sudo apt install ./null-…deb`): `null`
-#    in /usr/bin for every terminal at once, the menu entry and the icon (needs dpkg-deb).
+#    in /usr/bin for every terminal at once, the menu entry and the icon (needs dpkg-deb);
+#  - null-<version>-x86_64.AppImage: one file, run as it is, where APPIMAGETOOL and
+#    APPIMAGE_RUNTIME name appimagetool and the runtime it puts in front (the release
+#    workflow fetches both).
 #
 #     packaging/linux/package.sh
 set -eu
@@ -20,6 +23,20 @@ cp target/release/null packaging/linux/null.desktop packaging/linux/install.sh p
 tar -C target/release -czf "target/release/$name.tar.gz" "$name"
 rm -rf "$stage"
 echo "Built target/release/$name.tar.gz"
+
+if [ -n "${APPIMAGETOOL:-}" ] && [ -n "${APPIMAGE_RUNTIME:-}" ]; then
+    app="target/release/Null.AppDir"
+    rm -rf "$app"
+    install -Dm755 target/release/null "$app/usr/bin/null"
+    install -Dm644 packaging/linux/null.desktop "$app/null.desktop"
+    install -Dm644 packaging/null.svg "$app/null.svg"
+    ln -s usr/bin/null "$app/AppRun"
+    # (Unpacked to run: no FUSE in a container.)
+    ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" --no-appstream --runtime-file "$APPIMAGE_RUNTIME" \
+        "$app" "target/release/null-$version-x86_64.AppImage" >/dev/null
+    rm -rf "$app"
+    echo "Built target/release/null-$version-x86_64.AppImage"
+fi
 
 if ! command -v dpkg-deb >/dev/null; then
     echo "(No dpkg-deb here: no .deb.)"

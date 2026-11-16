@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -156,11 +157,23 @@ pub fn forget() {
     ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
+/// Questions open in the window now.
+static OPEN: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a question of ssh's is open in the window (the person's answering: no time
+/// limit on reaching a server runs meanwhile).
+pub fn asking() -> bool {
+    OPEN.load(Ordering::SeqCst) > 0
+}
+
 /// The question, to the window (waiting for the answer).
 fn ask(prompt: &str) -> Option<String> {
     let (tx, rx) = futures::channel::oneshot::channel();
     ASKS.lock().ok()?.as_ref()?.unbounded_send(Ask { prompt: prompt.to_string(), answer: tx }).ok()?;
-    futures::executor::block_on(rx).ok().flatten()
+    OPEN.fetch_add(1, Ordering::SeqCst);
+    let answer = futures::executor::block_on(rx).ok().flatten();
+    OPEN.fetch_sub(1, Ordering::SeqCst);
+    answer
 }
 
 /// Where the app takes ssh's questions from.

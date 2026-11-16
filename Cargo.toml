@@ -1,6 +1,6 @@
 [package]
 name = "null-ide"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 license-file = "LICENSE"
 description = "A calm, fast code editor where nothing gets in your way."
@@ -10,6 +10,11 @@ repository = "https://github.com/ShortPlanet3058/null-ide"
 [[bin]]
 name = "null"
 path = "src/main.rs"
+
+# Windows: `null` in a Command Prompt, installed as null.com beside null.exe.
+[[bin]]
+name = "null-console"
+path = "src/bin/null-console.rs"
 
 [dependencies]
 alacritty_terminal = "0.26.0"

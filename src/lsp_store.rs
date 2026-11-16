@@ -281,7 +281,9 @@ impl LspStore {
         let gone: Vec<ServerKey> = self
             .servers
             .keys()
-            .filter(|(_, folder)| !self.roots.iter().any(|r| folder.starts_with(r)))
+            .filter(|(_, folder)| {
+                !self.roots.iter().any(|r| folder.starts_with(r)) && crate::trust::own_folder(folder).is_none()
+            })
             .cloned()
             .collect();
         for key in gone {
@@ -292,14 +294,14 @@ impl LspStore {
         }
     }
 
-    /// The folder `path` is in (the innermost), else the primary one: its servers serve it.
+    /// The folder `path` is in (the innermost), else Null's own it's in (What's New, your
+    /// settings: served there, not by a folder that may not be trusted), else the primary
+    /// one: its servers serve it (a library's file reached by Go to Definition).
     fn root_for(&self, path: &Path) -> PathBuf {
-        self.roots
-            .iter()
-            .filter(|r| path.starts_with(r))
-            .max_by_key(|r| r.as_os_str().len())
-            .unwrap_or(&self.roots[0])
-            .clone()
+        if let Some(root) = self.roots.iter().filter(|r| path.starts_with(r)).max_by_key(|r| r.as_os_str().len()) {
+            return root.clone();
+        }
+        crate::trust::own_folder(path).unwrap_or_else(|| self.roots[0].clone())
     }
 
     /// When `path`'s own diagnostics last changed (0: never).
@@ -1566,6 +1568,22 @@ mod tests {
         assert_eq!(store.read_with(cx, |s, _| s.servers.len()), 2);
         store.update(cx, |s, _| s.shutdown());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// What's New (in Null's own folder) is served there, not by the window's folder (which
+    /// may not be trusted: it showed Safe mode); a library's file, by the window's folder.
+    #[test]
+    fn null_s_own_files_are_served_in_its_own_folder() {
+        let project = crate::tools::test_dir("lsp-own-files");
+        let store = LspStore::new(project.clone());
+        let own = crate::tools::data_dir().unwrap();
+        std::fs::create_dir_all(&own).unwrap();
+        let whats_new = own.join("What's New.md");
+        std::fs::write(&whats_new, "# new\n").unwrap();
+        assert!(crate::trust::own_folder(&whats_new).is_some());
+        assert_eq!(store.root_for(&whats_new), own);
+        assert_eq!(store.root_for(Path::new("/elsewhere/lib/src/lib.rs")), project);
+        assert_eq!(store.root_for(&project.join("src/main.rs")), project);
     }
 
     /// TypeScript's server is told the TypeScript beside it, unless the project has its own.

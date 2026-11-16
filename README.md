@@ -69,7 +69,7 @@ Get the latest version from the [releases page](https://github.com/ShortPlanet30
 |---|---|
 | **macOS** 11 or later, Intel and Apple silicon | Open the `.dmg` and drag Null to Applications. The first time, macOS stops it (Null isn't notarized by Apple yet): open **System Settings → Privacy & Security** and click **Open Anyway**. |
 | **Windows** 10 and 11 | Run the installer (`…-setup.exe`, no administrator needed): Null in the Start menu, `null` in your terminals, "Open with Null" on folders. Or unzip the `.zip` anywhere and run `null.exe`. If Windows says it protected your PC, click **More info → Run anyway** (Null isn't signed yet; with Smart App Control on, Windows doesn't offer that). |
-| **Linux** x86-64, X11 or Wayland; Ubuntu 20.04, Debian 11, Fedora 32, RHEL 9 or newer (glibc 2.30) | Ubuntu and Debian: `sudo apt install ./null-linux-amd64.deb`. Elsewhere, unpack the `.tar.gz` and run `./install.sh` (Null in `~/.local/bin` and your applications menu). |
+| **Linux** x86-64, X11 or Wayland; Ubuntu 20.04, Debian 11, Fedora 32, RHEL 9 or newer (glibc 2.30) | Ubuntu and Debian: `sudo apt install ./null-linux-amd64.deb`. Elsewhere, the `.AppImage` (one file: make it executable and open it), or unpack the `.tar.gz` and run `./install.sh` (Null in `~/.local/bin` and your applications menu). |
 
 From a terminal, `null .` opens the folder you're in, `null src/main.rs:42` a file at a line,
 and `null --wait` makes Null git's editor (on the Mac, and with the `.zip`, **Install Shell

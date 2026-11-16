@@ -79,6 +79,8 @@ pub enum Install {
     Binary(PathBuf),
     /// Linux's .deb: installed again, the system asking for the password.
     Deb(PathBuf),
+    /// Linux's AppImage: the file replaced.
+    AppImage(PathBuf),
 }
 
 impl Install {
@@ -89,6 +91,7 @@ impl Install {
             Install::App(_) => "Null-macos.dmg",
             Install::Binary(_) => "null-linux-x86_64.tar.gz",
             Install::Deb(_) => "null-linux-amd64.deb",
+            Install::AppImage(_) => "null-linux-x86_64.AppImage",
         }
     }
 }
@@ -261,7 +264,12 @@ pub fn how() -> Option<Install> {
     if !cfg!(target_arch = "x86_64") && !cfg!(target_os = "macos") {
         return None;
     }
-    how_for(&std::env::current_exe().ok()?, std::env::consts::OS)
+    let exe = std::env::current_exe().ok()?;
+    let own = crate::tools::own_program()?;
+    if own != exe {
+        return writable(own.parent()?).then_some(Install::AppImage(own));
+    }
+    how_for(&exe, std::env::consts::OS)
 }
 
 fn how_for(exe: &Path, os: &str) -> Option<Install> {
@@ -562,6 +570,11 @@ rm -rf "$d"
 "#,
             bin,
         ),
+        Install::AppImage(image) => (
+            r#"cp "$3" "$4.new" && chmod 755 "$4.new" && mv -f "$4.new" "$4" && ok=1
+"#,
+            image,
+        ),
         Install::Setup(_) => return Err(std::io::Error::other("not Windows")),
     };
     // (Linux's started again here, the Mac's by `open` above.)
@@ -719,6 +732,16 @@ mod tests {
         let told = dir.join(NOT_INSTALLED);
         assert!(waited(&|| std::fs::read_to_string(&told).is_ok_and(|v| v.trim() == "9.9.9")), "told");
         assert_eq!(std::fs::read_to_string(&bin).unwrap(), "old");
+        // An AppImage: the file itself, replaced by the new one, runnable.
+        let image = dir.join("Null.AppImage");
+        std::fs::write(&image, "old").unwrap();
+        std::fs::write(dir.join("new.AppImage"), "new").unwrap();
+        start_installing(&Install::AppImage(image.clone()), &dir.join("new.AppImage"), &pid, "0", "9.9.9", "").unwrap();
+        assert!(waited(&|| std::fs::read_to_string(&image).is_ok_and(|b| b == "new")), "AppImage replaced");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&image).unwrap().permissions().mode() & 0o777, 0o755);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
