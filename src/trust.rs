@@ -44,17 +44,24 @@ fn save(list: &[PathBuf]) {
 
 /// The first time (no list kept yet): the projects you'd opened before, trusted. Called
 /// before any window opens, so the folder this launch opens isn't one of them. Later: the
-/// folders deleted since are let go (see `gone`).
+/// folders deleted since are let go (see `gone`), looked at beside the window (one on a
+/// network disk that doesn't answer would hold it back).
 pub fn start() {
     let Some(file) = file() else { return };
     if file.exists() {
-        with(|trusted| {
-            let before = trusted.len();
-            trusted.retain(|folder| !gone(folder));
-            if trusted.len() != before {
-                save(trusted);
-            }
-        });
+        let trusted = folders();
+        std::thread::Builder::new()
+            .name("trusted-folders".into())
+            .spawn(move || {
+                let gone: Vec<PathBuf> = trusted.into_iter().filter(|folder| gone(folder)).collect();
+                if !gone.is_empty() {
+                    with(|trusted| {
+                        trusted.retain(|folder| !gone.contains(folder));
+                        save(trusted);
+                    });
+                }
+            })
+            .ok();
         return;
     }
     let list = seeded(crate::session::recent_projects(), crate::tools::home_dir().as_deref());
@@ -102,12 +109,19 @@ pub fn is_trusted(path: &Path) -> bool {
     if cfg!(test) {
         return !path.components().any(|c| c.as_os_str() == "untrusted");
     }
-    let path = kept_form(path);
-    let settings = crate::settings::Settings::path().and_then(|p| p.parent().map(Path::to_path_buf));
-    if [crate::tools::data_dir(), settings].iter().flatten().any(|own| path.starts_with(kept_form(own))) {
+    if own_folder(path).is_some() {
         return true;
     }
+    let path = kept_form(path);
     with(|trusted| trusted.iter().any(|folder| path.starts_with(folder)))
+}
+
+/// Null's own folder `path` is in: its data (the Scratch folder, What's New) or your
+/// settings'. Their files have servers of their own, there, in whatever window shows them.
+pub fn own_folder(path: &Path) -> Option<PathBuf> {
+    let path = kept_form(path);
+    let settings = crate::settings::Settings::path().and_then(|p| p.parent().map(Path::to_path_buf));
+    [crate::tools::data_dir(), settings].into_iter().flatten().find(|own| path.starts_with(kept_form(own)))
 }
 
 /// Trusts `folder` from now on.

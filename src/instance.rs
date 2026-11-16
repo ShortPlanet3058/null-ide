@@ -35,7 +35,7 @@ struct Message {
 /// Null installed, nor the other way round.
 fn address_file() -> Option<PathBuf> {
     use sha2::Digest;
-    let exe = std::env::current_exe().ok()?;
+    let exe = crate::tools::own_program()?;
     let digest = sha2::Sha256::digest(exe.to_string_lossy().as_bytes());
     let id: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
     Some(crate::tools::data_dir()?.join(format!("instance-{id}")))

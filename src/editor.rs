@@ -6421,7 +6421,8 @@ mod tests {
     #[gpui::test]
     fn typewriter_keeps_the_line_in_the_middle(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            cx.set_global(Settings { typewriter: true, ..Settings::default() });
+            // (Smooth motion off: the glide goes by the real clock, which a test outruns.)
+            cx.set_global(Settings { typewriter: true, smooth_motion: false, ..Settings::default() });
             cx.set_global(Theme::oled());
             cx.set_global(Fonts { code: "Menlo".into(), ui: "Helvetica".into() });
         });
@@ -6429,9 +6430,8 @@ mod tests {
         let (e, cx) = cx.add_window_view(|_, cx| Editor::new(Buffer::from_text(&text), Some("notes.txt".into()), cx));
         cx.run_until_parked();
         e.update(cx, |e, cx| e.go_to_line(100, cx));
-        // Let the scroll glide to where it's going.
-        for _ in 0..60 {
-            cx.executor().advance_clock(std::time::Duration::from_millis(16));
+        // Drawn twice: the scroll set while drawing, then the caret where it lands.
+        for _ in 0..2 {
             cx.run_until_parked();
             e.update(cx, |_, cx| cx.notify());
         }

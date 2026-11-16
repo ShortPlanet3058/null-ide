@@ -71,6 +71,7 @@ mod python_env;
 #[cfg(debug_assertions)]
 mod qa;
 mod remote;
+mod report;
 mod roots;
 mod search;
 mod server_log;
@@ -152,6 +153,7 @@ struct Asked {
     wait: bool,
     help: bool,
     version: bool,
+    report: bool,
     /// As the system gave them (a name that isn't UTF-8 kept as it is: it's the file's).
     paths: Vec<std::ffi::OsString>,
 }
@@ -185,6 +187,7 @@ fn parse_args(args: &[std::ffi::OsString]) -> Result<Asked, String> {
             "--wait" | "-w" if options => asked.wait = true,
             "--help" | "-h" if options => asked.help = true,
             "--version" | "-V" if options => asked.version = true,
+            "--report" if options => asked.report = true,
             // (What the Mac's Finder once passed: not an option of ours.)
             other if options && other.starts_with("-psn_") => {}
             other if options && other.starts_with('-') && other.len() > 1 => {
@@ -353,11 +356,8 @@ fn server_folder(arg: &str) -> Option<PathBuf> {
     if host.is_empty() {
         return None;
     }
-    let path = match path.strip_prefix('~') {
-        Some(rest) => format!("{}{rest}", remote::home(&host).ok()?),
-        None => format!("/{path}"),
-    };
-    Some(remote::path(&host, &path))
+    // (From the home folder: `/~/…` until the server's reached, see `remote::in_home`.)
+    Some(remote::path(&host, &format!("/{path}")))
 }
 
 /// A `file://` URL as a path ("%20" back to a space, and so on).
@@ -417,6 +417,7 @@ const HELP: &str = "Null, a calm, fast code editor.
   null A B ...          several folders in one window, files opened in it
   null --wait FILE      returns once the file's tab is closed (git's editor; -w)
   null --version        Null's version (-V)
+  null --report         what to send when something's wrong (Null doesn't start)
   null --help           this (-h)
   null -- -FILE         a file whose name starts with -
 ";
@@ -437,6 +438,7 @@ fn answered_in_the_terminal() -> bool {
     let answer = match first.as_deref() {
         _ if asked.version => format!("Null {}", env!("CARGO_PKG_VERSION")),
         _ if asked.help => HELP.trim_end().to_string(),
+        _ if asked.report => report::text(),
         // (For the uninstallers, when asked to delete everything: not in --help.)
         Some("--forget-keys") => match ai::forget_api_keys() {
             1 => "Deleted 1 saved API key.".to_string(),
@@ -506,6 +508,33 @@ fn answered_in_the_terminal() -> bool {
     true
 }
 
+/// On Windows, a Null opening its window lets go of the pipes it was started with: `null .`
+/// in a Command Prompt (through null.com, which passes on what Null says until they close,
+/// see src/bin/null-console.rs) is done, as is a script's `null . | more`.
+#[cfg(windows)]
+fn let_go_of_pipes() {
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const FILE_TYPE_PIPE: u32 = 3;
+    unsafe extern "system" {
+        fn GetStdHandle(which: u32) -> isize;
+        fn GetFileType(handle: isize) -> u32;
+        fn SetStdHandle(which: u32, handle: isize) -> i32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    // SAFETY: plain Win32 calls on Null's own standard handles; what's written to one let go
+    // of is dropped (Rust's standard output takes no handle as nowhere to write).
+    unsafe {
+        for which in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let handle = GetStdHandle(which);
+            if handle != 0 && handle != -1 && GetFileType(handle) == FILE_TYPE_PIPE {
+                SetStdHandle(which, 0);
+                CloseHandle(handle);
+            }
+        }
+    }
+}
+
 /// The display named isn't there: neither Wayland's socket nor (for a local X display,
 /// `:0`) X's. A display elsewhere (`localhost:10.0`, ssh -X) is left to try.
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -541,6 +570,8 @@ fn main() {
     if arguments_text().first().map(String::as_str) == Some("--finish-update") {
         std::process::exit(updates::finish(&arguments_text()[1..]));
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    tools::keep_started_with_files_own();
     // (ssh started from here asks nothing in the window: see `remote::asking`.)
     remote::note_main_thread();
     if answered_in_the_terminal() {
@@ -585,6 +616,10 @@ fn main() {
         instance::Launch::HandedOver => return,
         instance::Launch::First(handed) => handed,
     };
+    #[cfg(windows)]
+    if !wait {
+        let_go_of_pipes();
+    }
 
     // Files and folders handed over by the Finder ("Open With", a drop on the Dock icon)
     // or by the `null` command while Null runs: opened in the window.
@@ -1070,6 +1105,7 @@ mod url_tests {
     fn a_server_s_folder_is_given_as_an_ssh_address() {
         assert_eq!(server_folder("ssh://me@box:2222/srv/app"), Some(remote::path("me@box#2222", "/srv/app")));
         assert_eq!(server_folder("ssh://box"), Some(remote::path("box", "/")));
+        assert_eq!(server_folder("ssh://box/~/app"), Some(remote::path("box", "/~/app")));
         assert_eq!(server_folder("/ssh:box:/x"), Some(PathBuf::from("/ssh:box:/x")));
         assert_eq!(server_folder("ssh://"), None);
         assert_eq!(server_folder("src/main.rs"), None);

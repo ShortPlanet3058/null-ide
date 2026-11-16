@@ -217,6 +217,8 @@ actions!(
         CheckForUpdates,
         /// What changed in this version (since the one before, after an update).
         WhatsNew,
+        /// What to send when something's wrong (see `report`), copied.
+        CopyProblemReport,
         /// The newer Null out: downloaded, checked and installed; once it's ready, Null
         /// restarts with it.
         UpdateNull,
@@ -3910,7 +3912,7 @@ impl Workspace {
     }
 
     fn install_shell_command(&mut self, _: &InstallShellCommand, _: &mut Window, cx: &mut Context<Self>) {
-        let Ok(exe) = std::env::current_exe() else { return };
+        let Some(exe) = crate::tools::own_program() else { return };
         let (dir, target, result) = if cfg!(windows) {
             let Some(dir) = crate::tools::data_dir().map(|d| d.join("bin")) else { return };
             let target = dir.join("null.cmd");
@@ -3992,6 +3994,19 @@ impl Workspace {
 
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let path = crate::remote::plain(path);
+        // From a server's home folder (`null ssh://box/~/app`): there, once it's known.
+        match crate::remote::in_home(&path) {
+            Some(Some(there)) => return self.open_path(there, window, cx),
+            Some(None) => {
+                let host = crate::remote::of(&path).map(|s| s.host).unwrap_or_default();
+                return self.connect_then(host, window, cx, move |this, window, cx| {
+                    if let Some(Some(there)) = crate::remote::in_home(&path) {
+                        this.open_path(there, window, cx);
+                    }
+                });
+            }
+            None => {}
+        }
         // On a server not reached yet: reached first, off the window's thread (ssh may ask
         // for a password, asked in the window, which mustn't be waiting), then opened.
         if let Some(server) = crate::remote::of(&path).filter(|s| !crate::remote::is_connected(&s.host)) {
@@ -5547,6 +5562,7 @@ impl Workspace {
             (App, "About Null".into(), Box::new(AboutNull)),
             (App, "Check for Updates".into(), Box::new(CheckForUpdates)),
             (App, "What's New".into(), Box::new(WhatsNew)),
+            (App, "Copy Problem Report".into(), Box::new(CopyProblemReport)),
             (App, "Update Null".into(), Box::new(UpdateNull)),
             (App, "Recent Notices…".into(), Box::new(RecentNotices)),
             (App, "Edit Settings for This Project".into(), Box::new(OpenProjectSettings)),
@@ -8167,6 +8183,15 @@ impl Workspace {
 
     /// What's New: the changes since the version before (this one's, if it's not known),
     /// read in the preview of a Markdown file of Null's own, which can't be changed.
+    fn copy_problem_report(&mut self, _: &CopyProblemReport, _: &mut Window, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(crate::report::text()));
+        self.show_notice(
+            "Problem report copied: paste it into an issue (github.com/ShortPlanet3058/null-ide/issues), with what went wrong."
+                .into(),
+            cx,
+        );
+    }
+
     fn whats_new(&mut self, _: &WhatsNew, window: &mut Window, cx: &mut Context<Self>) {
         let since = crate::whats_new::since().flatten();
         let Some(path) = crate::tools::data_dir().map(|d| d.join("What's New.md")) else { return };
@@ -11396,6 +11421,7 @@ fn cmd_script(exe: &Path) -> String {
          set \"wait=\"\r\n\
          if \"%~1\"==\"--version\" (\"{exe}\" --version & exit /b)\r\n\
          if \"%~1\"==\"--help\" (\"{exe}\" --help & exit /b)\r\n\
+         if \"%~1\"==\"--report\" (\"{exe}\" --report & exit /b)\r\n\
          if \"%~1\"==\"--wait\" set \"wait=1\"\r\n\
          if defined wait shift\r\n\
          if \"%~1\"==\"\" (start \"\" \"{exe}\" \"%CD%\\.\" & exit /b)\r\n\
@@ -12793,6 +12819,7 @@ impl Render for Workspace {
                 cx.listener(|this, _: &crate::file_tree::NewFolder, window, cx| this.new_in_project(true, window, cx)),
             )
             .on_action(cx.listener(Self::whats_new))
+            .on_action(cx.listener(Self::copy_problem_report))
             .on_action(cx.listener(Self::update_null))
             .on_action(cx.listener(Self::open_wsl_folder))
             .on_action(cx.listener(Self::open_ssh_folder))
