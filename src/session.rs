@@ -425,7 +425,8 @@ pub fn recent_projects() -> Vec<PathBuf> {
     let recent = read_recent(&file);
     let local: Vec<PathBuf> = recent.iter().filter(|p| !crate::remote::is_remote(p)).cloned().collect();
     let there = crate::tools::are_dirs_within(&local, DISK_ANSWERS_WITHIN);
-    let gone: Vec<&PathBuf> = local.iter().zip(&there).filter(|(_, there)| **there == Some(false)).map(|(p, _)| p).collect();
+    let gone: Vec<&PathBuf> =
+        local.iter().zip(&there).filter(|(_, there)| **there == Some(false)).map(|(p, _)| p).collect();
     recent.iter().filter(|p| !gone.contains(p)).cloned().collect()
 }
 

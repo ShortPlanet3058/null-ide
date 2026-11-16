@@ -47,9 +47,7 @@ fn system() -> String {
         return said("cmd", &["/c", "ver"]).unwrap_or_else(|| "Windows".into());
     }
     let name = std::fs::read_to_string("/etc/os-release").ok().and_then(|text| {
-        text.lines()
-            .find_map(|l| l.strip_prefix("PRETTY_NAME="))
-            .map(|v| v.trim_matches('"').to_string())
+        text.lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")).map(|v| v.trim_matches('"').to_string())
     });
     let kernel = said("uname", &["-r"]).map(|k| format!(" · Linux {k}")).unwrap_or_default();
     format!("{}{kernel}", name.unwrap_or_else(|| "Linux".into()))

@@ -350,7 +350,9 @@ impl Session {
             let seconds = START_LIMIT.as_secs();
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!("{host} answered, but its shell didn't start within {seconds} seconds (something in its login files may be waiting)."),
+                format!(
+                    "{host} answered, but its shell didn't start within {seconds} seconds (something in its login files may be waiting)."
+                ),
             ));
         }
         if let Some(error) = ended {
@@ -509,7 +511,10 @@ pub fn run(host: &str, script: &str) -> io::Result<Output> {
         crate::trace::mark(&format!("ssh {host}: {error}"));
     }
     if let Err(error) = &result
-        && matches!(error.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::BrokenPipe | io::ErrorKind::TimedOut)
+        && matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::BrokenPipe | io::ErrorKind::TimedOut
+        )
     {
         UNREACHABLE.lock().unwrap_or_else(|e| e.into_inner()).push((
             host.to_string(),

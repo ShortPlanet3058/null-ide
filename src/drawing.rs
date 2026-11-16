@@ -37,11 +37,12 @@ pub fn window_failed(error: &str) -> ! {
         unsafe extern "system" {
             fn MessageBoxW(window: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
         }
-        let text: Vec<u16> =
-            format!("Null couldn't open its window: {error}\n\nUpdating the graphics card's driver may put it right. {REPORT}")
-                .encode_utf16()
-                .chain([0])
-                .collect();
+        let text: Vec<u16> = format!(
+            "Null couldn't open its window: {error}\n\nUpdating the graphics card's driver may put it right. {REPORT}"
+        )
+        .encode_utf16()
+        .chain([0])
+        .collect();
         let caption: Vec<u16> = "Null".encode_utf16().chain([0]).collect();
         const MB_ICONERROR: u32 = 0x10;
         // SAFETY: two NUL-terminated strings that live through the call.
